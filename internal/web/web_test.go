@@ -21,7 +21,7 @@ func TestApplicationShellExposesCompleteAccessibleWorkspaces(t *testing.T) {
 		for _, required := range []string{
 			`href="#workspace"`, `id="workspace"`, `id="live-status"`,
 			`id="drive-view"`, `id="trash-view"`, `id="settings-view"`, `id="admin-view"`,
-			`id="upload-input"`, `webkitdirectory`, `role="dialog"`,
+			`id="upload-input"`, `webkitdirectory`, `id="share-list"`, `role="dialog"`,
 		} {
 			if !strings.Contains(body, required) {
 				t.Errorf("GET %s shell is missing %q", path, required)

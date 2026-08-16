@@ -109,9 +109,25 @@ The Milestone 5 checkpoint implements specification section 13’s core Drive wo
 
 The browser source creates every untrusted filename and display name through text nodes, keeps bearer material in short-lived closures, removes capability-bearing preview DOM on close, extracts invite/recovery tokens before the first request, and records no sensitive client-side storage.
 
-## Remaining milestones
+## Sharing and administration browser workflows — complete
 
-- Complete browser matrices for invite/recovery, passkey/account settings, share management, and administrator workflows.
+The Milestone 6 checkpoint completes the browser workflow inventory in specification section 18.2 and the remaining user-facing portions of checklist sections 22.3, 22.4, 22.7, and 22.9:
+
+| Requirement | Automated evidence |
+|---|---|
+| Admin creates a one-use invite and a second virtual authenticator registers without a separate identity field | `TestE2EInviteSettingsAdminRecoveryAndShareRevocation` |
+| Profile rename, light/dark preference, add-passkey, passkey listing, and non-final removal work in the embedded settings view | `TestE2EInviteSettingsAdminRecoveryAndShareRevocation`; `TestApplicationShellExposesCompleteAccessibleWorkspaces` |
+| Keyboard-driven create, same-folder copy with generated-name conflict resolution, move, and nested browsing work | browser workflow plus provider-contract `same-path renamed Copy` regression |
+| Owner share listing exposes safe metadata and supports confirmed revocation | `TestE2EInviteSettingsAdminRecoveryAndShareRevocation`; settings shell assertions |
+| Administrator user listing and disable/enable actions immediately gate the owner's public share | `TestE2EInviteSettingsAdminRecoveryAndShareRevocation` |
+| Administrator recovery adds a passkey to the same account, revokes the prior session, and supports a fresh usernameless sign-in | `TestE2EInviteSettingsAdminRecoveryAndShareRevocation` |
+| Public access remains generically unavailable after share revocation | `TestE2EInviteSettingsAdminRecoveryAndShareRevocation` |
+| Both built-in appearance paths execute complete functional browser workflows without external requests | two Chromium workflows, one exercising the light/system path and one selecting dark; request-origin assertions; `nix run .#test-e2e -- -count=2` |
+
+Browser network diagnostics retain only request methods and paths: credential ceremony bodies, bearer values, provider capability query strings, and authorization fields are deliberately excluded.
+
+## Remaining milestone
+
 - Complete adversarial matrices, coverage thresholds, threat-model review, operations/backup proof, and final release evidence.
 
 Until every remaining section is implemented and every section 21 criterion and section 22 item has evidence, the repository MUST continue to identify itself as under construction rather than v1 complete.

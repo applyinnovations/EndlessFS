@@ -3,7 +3,7 @@
 EndlessFS is an open-source, provider-neutral, security-first private cloud drive. Its Go control plane authorizes file operations while browser file bytes travel directly to and from the configured object-storage provider through short-lived provider-native capabilities.
 
 > [!IMPORTANT]
-> This repository is at **Milestone 5**. The accessible embedded Drive now exercises real passkey bootstrap/sign-in, direct resumable upload, download initiation, sharing, trash restore, responsive layout, and theme delivery through Go-controlled Chromium. Administration and account-recovery browser hardening plus final operational/release proof remain. Do not deploy this implementation or describe it as v1 complete or production-ready.
+> This repository is at **Milestone 6**. The complete embedded product workflow now exercises passkey bootstrap/sign-in, invite registration, account and passkey settings, direct file operations, public sharing, administration, account recovery, responsive layout, and theme delivery through Go-controlled Chromium. Final adversarial, coverage, operational, and release proof remains. Do not deploy this implementation or describe it as v1 complete or production-ready.
 
 The normative implementation contract is [docs/v1-specification.md](./docs/v1-specification.md). A feature-complete mock-backed v1 will prove the full product locally, but it will not prove Google Cloud Storage interoperability or provide a production storage adapter.
 
@@ -182,8 +182,8 @@ The policy requires one approval, resolved review threads, linear history, and t
 - **Milestone 3 — complete:** browse and file operations, direct resumable transfers, idempotency, trash, previews, and sharing control plane.
 - **Milestone 4 — complete:** closed Theme API, safe media validation, complete light/dark bundles, inheritance, fallback, preferences, and Nix tooling.
 - **Milestone 5 — complete:** accessible browser drive, confirmed-offset transfers, previews, trash, theme UX, and real Chromium coverage.
-- **Milestone 6 — next:** sharing, settings, passkey, recovery, and administration UI hardening and browser matrices.
-- **Milestone 7:** cross-user/adversarial matrices, full fuzz/race/coverage gates, browser accessibility, OCI inspection, and release evidence.
+- **Milestone 6 — complete:** public-share management, invite onboarding, profile/passkey settings, account administration, disable/enable behavior, recovery, and a second full Chromium journey.
+- **Milestone 7 — next:** cross-user/adversarial matrices, full fuzz/race/coverage gates, browser accessibility, OCI inspection, and release evidence.
 
 v1 is done only when every acceptance criterion in section 21 is evidenced, the section 22 checklist is complete, and a clean, network-denied `nix flake check` passes.
 

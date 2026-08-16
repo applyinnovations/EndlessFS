@@ -261,6 +261,18 @@ func Run(t *testing.T, factory Factory) {
 		if _, err := harness.Storage.Copy(context.Background(), live, other, domain.CopyRequest{Source: domain.MustParseUserPath("/tree"), Destination: domain.MustParseUserPath("/stolen")}); !errors.Is(err, domain.ErrUnauthorized) {
 			t.Fatalf("cross-user Copy() error = %v", err)
 		}
+		samePathCopy, err := harness.Storage.Copy(context.Background(), live, live, domain.CopyRequest{
+			Source:         domain.MustParseUserPath("/tree/file.txt"),
+			Destination:    domain.MustParseUserPath("/tree/file.txt"),
+			Conflict:       domain.ConflictRename,
+			IdempotencyKey: "copy-same-path-rename",
+		})
+		if err != nil || samePathCopy.State != domain.OperationSucceeded {
+			t.Fatalf("same-path renamed Copy() = %+v, %v", samePathCopy, err)
+		}
+		if _, err := harness.Storage.Stat(context.Background(), live, domain.MustParseUserPath("/tree/file (1).txt")); err != nil {
+			t.Fatalf("same-path renamed copy missing: %v", err)
+		}
 		moved, err := harness.Storage.Move(context.Background(), live, trash, domain.MoveRequest{
 			Source: domain.MustParseUserPath("/copy"), Destination: domain.MustParseUserPath("/trashed"), IdempotencyKey: "trash-1",
 		})

@@ -270,7 +270,7 @@
   function setRoute(route, push = true) {
     if (!state.user) return;
     const paths = { drive: "/", trash: "/trash", settings: "/settings", admin: "/admin" };
-    if (route === "admin" && !state.user.roles.includes("admin")) route = "drive";
+    if (route === "admin" && !(state.user.roles || []).includes("admin")) route = "drive";
     if (push && location.pathname !== paths[route]) history.pushState({ route }, "", paths[route]);
     for (const name of Object.keys(paths)) byID(`${name}-view`).hidden = name !== route;
     document.querySelectorAll("[data-route]").forEach((link) => {
@@ -715,8 +715,8 @@
     byID("profile-name").value = state.user.displayName;
     try {
       const dark = matchMedia("(prefers-color-scheme: dark)").matches;
-      const [catalog, preference, passkeys] = await Promise.all([
-        api("/api/v1/themes"), api(`/api/v1/me/preferences/theme?dark=${dark}`), api("/api/v1/me/passkeys"),
+      const [catalog, preference, passkeys, shares] = await Promise.all([
+        api("/api/v1/themes"), api(`/api/v1/me/preferences/theme?dark=${dark}`), api("/api/v1/me/passkeys"), api("/api/v1/shares"),
       ]);
       state.themes = catalog.themes || [];
       const select = byID("theme-select"); select.replaceChildren();
@@ -726,6 +726,7 @@
       applyTheme(preference);
       byID("theme-note").textContent = preference.fallback ? "The selected theme was unavailable, so a built-in theme is active." : `Using ${preference.resolved.name}.`;
       renderPasskeys(passkeys.passkeys || []);
+      renderShares(shares.shares || []);
     } catch (error) { announce(friendlyError(error, "Settings could not be loaded."), true); }
   }
 
@@ -744,6 +745,27 @@
       const details = document.createElement("div"); details.append(text("strong", passkey.label || "Passkey"), text("p", `Added ${formatDate(passkey.createdAt)} · Last used ${formatDate(passkey.lastUsedAt)}`, "field-help"));
       main.append(details, button("Remove", () => removePasskey(passkey), "danger-quiet")); item.append(main); list.append(item);
     }
+  }
+
+  function renderShares(shares) {
+    const list = byID("share-list"); list.replaceChildren();
+    for (const share of shares) {
+      const item = document.createElement("li"); const main = document.createElement("div"); main.className = "record-main";
+      const details = document.createElement("div");
+      const status = share.revokedAt ? "Revoked" : share.expiresAt && new Date(share.expiresAt) <= new Date() ? "Expired" : "Active";
+      details.append(text("strong", `${share.rootPath} · ${status}`), text("p", `${share.kind} share created ${formatDate(share.createdAt)}${share.expiresAt ? ` · Expires ${formatDate(share.expiresAt)}` : ""}`, "field-help"));
+      main.append(details);
+      if (status === "Active") main.append(button("Revoke", () => revokeShare(share), "danger-quiet"));
+      item.append(main); list.append(item);
+    }
+    if (!shares.length) list.append(text("li", "No public shares."));
+  }
+
+  async function revokeShare(share) {
+    const confirmed = await ask({ title: `Revoke share for ${share.rootPath}?`, description: "Anyone using the existing link will immediately see the same generic unavailable state.", confirm: "Revoke share", danger: true });
+    if (!confirmed) return;
+    try { await api(`/api/v1/shares/${encodeURIComponent(share.shareID)}`, { method: "DELETE", body: {} }); announce(`Share for ${share.rootPath} revoked.`); await loadSettings(); }
+    catch (error) { announce(friendlyError(error), true); }
   }
 
   async function removePasskey(passkey) {
@@ -915,6 +937,7 @@
     byID("profile-form").addEventListener("submit", async (event) => { event.preventDefault(); try { const profile = await api("/api/v1/me", { method: "PATCH", body: { displayName: byID("profile-name").value } }); state.user.displayName = profile.displayName; byID("account-name").textContent = profile.displayName; announce("Display name saved."); } catch (error) { announce(friendlyError(error), true); } });
     byID("theme-form").addEventListener("submit", async (event) => { event.preventDefault(); try { const dark = matchMedia("(prefers-color-scheme: dark)").matches; const selection = byID("safe-theme").checked ? await api(`/api/v1/me/preferences/theme?dark=${dark}&safe-theme=1`) : await api("/api/v1/me/preferences/theme", { method: "PUT", body: { themeID: byID("theme-select").value, dark } }); applyTheme(selection); byID("theme-note").textContent = `Using ${selection.resolved.name}.`; announce("Theme applied."); } catch (error) { announce(friendlyError(error), true); } });
     byID("safe-theme").addEventListener("change", () => byID("theme-form").requestSubmit());
+    byID("refresh-shares").addEventListener("click", loadSettings);
     byID("add-passkey").addEventListener("click", async () => { const result = await ask({ title: "Add a passkey", description: "Give this passkey an optional device label.", confirm: "Create passkey", fields: [{ id: "passkey-label", label: "Label (optional)", maxLength: 100 }] }); if (!result) return; try { await register("add", "", "", result["passkey-label"]); announce("Passkey added and session renewed."); await loadSettings(); } catch (error) { announce(friendlyError(error), true); } });
     byID("create-invite").addEventListener("click", async () => { const result = await ask({ title: "Create an invite", description: "The link can create one account. Optionally set an expiry.", confirm: "Create invite", fields: [{ id: "invite-expires", label: "Expiry (optional)", type: "datetime-local" }] }); if (!result) return; try { const body = {}; if (result["invite-expires"]) body.expiresAt = new Date(result["invite-expires"]).toISOString(); const created = await api("/api/v1/admin/invites", { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body }); await revealLink("Invite link", created.link); announce("Invite created."); await loadAdmin(); } catch (error) { announce(friendlyError(error), true); } });
     byID("copy-invite").addEventListener("click", () => copyText(byID("invite-link").textContent));
@@ -946,7 +969,7 @@
 
   function enterApplication() {
     showOnly("authenticated-view"); byID("account-actions").hidden = false; byID("account-name").textContent = state.user.displayName;
-    const admin = state.user.roles.includes("admin"); byID("admin-nav").hidden = !admin;
+    const admin = (state.user.roles || []).includes("admin"); byID("admin-nav").hidden = !admin;
     byID("connection-status").textContent = navigator.onLine ? "Online" : "Offline";
     setRoute(routeFromPath(), false);
     const dark = matchMedia("(prefers-color-scheme: dark)").matches;

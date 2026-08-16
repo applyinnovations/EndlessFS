@@ -62,6 +62,7 @@
             <form id="profile-form" class="panel"><h2>Account</h2><label for="profile-name">Display name</label><input id="profile-name" type="text" maxlength="100" required><button class="primary" type="submit">Save name</button></form>
             <form id="theme-form" class="panel"><h2>Theme</h2><label for="theme-select">Appearance</label><select id="theme-select"></select><label class="checkbox-label"><input id="safe-theme" type="checkbox"> Temporarily use the built-in safe theme</label><button class="primary" type="submit">Apply theme</button><p id="theme-note" class="field-help"></p></form>
             <div class="panel settings-wide"><div class="panel-heading"><div><h2>Passkeys</h2><p class="muted">Keep at least one passkey on your account.</p></div><button id="add-passkey" class="secondary" type="button">Add passkey</button></div><ul id="passkey-list" class="record-list"></ul></div>
+            <div class="panel settings-wide"><div class="panel-heading"><div><h2>Public shares</h2><p class="muted">Links stop working when revoked, expired, moved, or sent to trash.</p></div><button id="refresh-shares" class="secondary" type="button">Refresh shares</button></div><ul id="share-list" class="record-list"></ul></div>
             <div class="panel danger-zone settings-wide"><h2>Session</h2><p>Signing out removes this browser session.</p><button id="settings-logout" class="danger" type="button">Sign out</button></div>
           </div></section>
 

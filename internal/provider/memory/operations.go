@@ -31,15 +31,15 @@ func (p *Provider) copyOrMove(ctx context.Context, operationName string, move bo
 	if !request.Source.Valid() || request.Source.IsRoot() || !request.Destination.Valid() || request.Destination.IsRoot() {
 		return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "source and destination paths are required")
 	}
-	if from == to && request.Source == request.Destination {
+	conflict, err := domain.NormalizeConflictMode(request.Conflict)
+	if err != nil {
+		return domain.Operation{}, err
+	}
+	if from == to && request.Source == request.Destination && conflict != domain.ConflictRename {
 		return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "source and destination are identical")
 	}
 	if from == to && request.Destination.IsDescendantOf(request.Source) {
 		return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "destination cannot be inside the source tree")
-	}
-	conflict, err := domain.NormalizeConflictMode(request.Conflict)
-	if err != nil {
-		return domain.Operation{}, err
 	}
 	if err := validateIdempotencyKey(request.IdempotencyKey); err != nil {
 		return domain.Operation{}, err

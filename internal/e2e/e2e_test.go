@@ -265,6 +265,348 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 }
 
+func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
+	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
+		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
+	}
+	harness := newHarness(t)
+	admin := newTestBrowser(t)
+	bootstrapBrowser(t, admin.ctx, harness)
+
+	if err := chromedp.Run(admin.ctx,
+		chromedp.Click("a[data-route='admin']", chromedp.ByQuery),
+		chromedp.WaitVisible("#admin-view", chromedp.ByQuery),
+		chromedp.Focus("#create-invite", chromedp.ByQuery),
+		chromedp.KeyEvent(kb.Enter),
+		chromedp.WaitVisible("#action-dialog", chromedp.ByQuery),
+		chromedp.Click("#dialog-confirm", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("create invite: %v", err)
+	}
+	if err := waitFor(admin.ctx, `document.querySelector("#dialog-output") !== null`, 10*time.Second); err != nil {
+		t.Fatalf("wait for invite link: %v (%s)", err, browserStatus(admin.ctx))
+	}
+	var inviteLink string
+	if err := chromedp.Run(admin.ctx,
+		chromedp.Text("#dialog-output", &inviteLink, chromedp.ByQuery),
+		chromedp.Click("#dialog-confirm", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("read invite link: %v", err)
+	}
+	if !strings.HasPrefix(inviteLink, harness.origin+"/register/invite/") {
+		t.Fatalf("invite link = %q", inviteLink)
+	}
+
+	member := newTestBrowser(t)
+	if err := chromedp.Run(member.ctx,
+		chromedp.Navigate(inviteLink),
+		chromedp.WaitVisible("#registration-view", chromedp.ByQuery),
+		chromedp.SendKeys("#display-name", "Invited Member"+kb.Tab+kb.Enter, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("invite registration: %v", err)
+	}
+	if err := waitVisible(member.ctx, "#auth-view", 15*time.Second); err != nil {
+		t.Fatalf("finish invite registration: %v (%s)", err, browserStatus(member.ctx))
+	}
+	if err := chromedp.Run(member.ctx, chromedp.Focus("#signin-button", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+		t.Fatalf("invitee sign-in: %v", err)
+	}
+	if err := waitVisible(member.ctx, "#drive-view", 15*time.Second); err != nil {
+		t.Fatalf("finish invitee sign-in: %v (%s)", err, browserStatus(member.ctx))
+	}
+
+	if err := chromedp.Run(member.ctx,
+		chromedp.Click("a[data-route='settings']", chromedp.ByQuery),
+		chromedp.WaitVisible("#settings-view", chromedp.ByQuery),
+		chromedp.SetValue("#profile-name", "Renamed Member", chromedp.ByQuery),
+		chromedp.Evaluate(`document.querySelector("#profile-form").requestSubmit()`, nil),
+	); err != nil {
+		t.Fatalf("update profile: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelector("#account-name").textContent === "Renamed Member"`, 10*time.Second); err != nil {
+		t.Fatalf("wait for renamed profile: %v", err)
+	}
+	if err := chromedp.Run(member.ctx,
+		chromedp.Evaluate(`document.querySelector("#theme-select").value = "endlessfs-dark"; document.querySelector("#theme-form").requestSubmit()`, nil),
+	); err != nil {
+		t.Fatalf("select dark theme: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.documentElement.dataset.theme === "endlessfs-dark"`, 10*time.Second); err != nil {
+		t.Fatalf("wait for dark theme: %v (%s)", err, browserStatus(member.ctx))
+	}
+
+	if err := chromedp.Run(member.ctx,
+		chromedp.Focus("#add-passkey", chromedp.ByQuery),
+		chromedp.KeyEvent(kb.Enter),
+		chromedp.WaitVisible("#action-dialog", chromedp.ByQuery),
+		chromedp.SetValue("#passkey-label", "Second device", chromedp.ByQuery),
+		chromedp.Click("#dialog-confirm", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("add second passkey: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelector("#passkey-list").children.length === 2`, 15*time.Second); err != nil {
+		t.Fatalf("wait for second passkey: %v (%s)", err, browserStatus(member.ctx))
+	}
+	if err := chromedp.Run(member.ctx,
+		chromedp.Focus("#passkey-list button", chromedp.ByQuery),
+		chromedp.KeyEvent(kb.Enter),
+		chromedp.WaitVisible("#action-dialog", chromedp.ByQuery),
+		chromedp.Click("#dialog-confirm", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("remove one passkey: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelector("#passkey-list").children.length === 1`, 10*time.Second); err != nil {
+		t.Fatalf("wait for passkey removal: %v", err)
+	}
+
+	uploadPath := filepath.Join(t.TempDir(), "member-file.txt")
+	if err := os.WriteFile(uploadPath, []byte("member share proof\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := chromedp.Run(member.ctx,
+		chromedp.Click("a[data-route='drive']", chromedp.ByQuery),
+		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
+		chromedp.SetUploadFiles("#upload-input", []string{uploadPath}, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("member upload: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelectorAll("#file-rows tr").length === 1`, 15*time.Second); err != nil {
+		t.Fatalf("wait for member upload: %v (%s)", err, browserStatus(member.ctx))
+	}
+
+	if err := chromedp.Run(member.ctx,
+		chromedp.Focus("#new-folder-button", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter),
+		chromedp.WaitVisible("#action-dialog", chromedp.ByQuery),
+		chromedp.SetValue("#folder-name", "moved", chromedp.ByQuery),
+		chromedp.Click("#dialog-confirm", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("create move destination: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelectorAll("#file-rows tr").length === 2`, 10*time.Second); err != nil {
+		t.Fatalf("wait for destination folder: %v", err)
+	}
+	if err := chromedp.Run(member.ctx,
+		chromedp.Click("#file-rows input[type='checkbox']", chromedp.ByQuery),
+		chromedp.Focus("#copy-selected", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter),
+		chromedp.WaitVisible("#action-dialog", chromedp.ByQuery),
+		chromedp.Evaluate(`document.querySelector("#conflict").value = "rename"`, nil),
+		chromedp.Click("#dialog-confirm", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("copy with rename policy: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelectorAll("#file-rows tr").length === 3`, 10*time.Second); err != nil {
+		t.Fatalf("wait for copied file: %v (%s) requests=%v", err, browserStatus(member.ctx), member.requestSnapshot())
+	}
+	if err := chromedp.Run(member.ctx,
+		chromedp.Click("#file-rows input[type='checkbox']", chromedp.ByQuery),
+		chromedp.Focus("#move-selected", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter),
+		chromedp.WaitVisible("#action-dialog", chromedp.ByQuery),
+		chromedp.SetValue("#destination", "/moved", chromedp.ByQuery),
+		chromedp.Click("#dialog-confirm", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("move copied file: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelectorAll("#file-rows tr").length === 2`, 10*time.Second); err != nil {
+		t.Fatalf("wait for moved file: %v (%s)", err, browserStatus(member.ctx))
+	}
+	if err := chromedp.Run(member.ctx,
+		chromedp.Evaluate(`Array.from(document.querySelectorAll("#file-rows .file-name")).find((node) => node.textContent.includes("moved")).click()`, nil),
+	); err != nil {
+		t.Fatalf("open moved folder: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelectorAll("#file-rows tr").length === 1`, 10*time.Second); err != nil {
+		t.Fatalf("wait for moved folder: %v", err)
+	}
+
+	if err := chromedp.Run(member.ctx,
+		chromedp.Click("#file-rows input[type='checkbox']", chromedp.ByQuery),
+		chromedp.Focus("#share-selected", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter),
+		chromedp.WaitVisible("#action-dialog", chromedp.ByQuery),
+		chromedp.Click("#dialog-confirm", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("create member share: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelector("#dialog-output") !== null`, 10*time.Second); err != nil {
+		t.Fatalf("wait for member share: %v", err)
+	}
+	var shareLink string
+	if err := chromedp.Run(member.ctx, chromedp.Text("#dialog-output", &shareLink, chromedp.ByQuery), chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
+		t.Fatalf("read member share: %v", err)
+	}
+
+	if err := chromedp.Run(admin.ctx, chromedp.Navigate(harness.origin+"/admin"), chromedp.WaitVisible("#admin-view", chromedp.ByQuery)); err != nil {
+		t.Fatalf("open user administration: %v", err)
+	}
+	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list li")).some((node) => node.textContent.includes("Renamed Member"))`, 10*time.Second); err != nil {
+		t.Fatalf("wait for invited user: %v (%s)", err, browserStatus(admin.ctx))
+	}
+	if err := chromedp.Run(admin.ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll("#user-list li")).find((node) => node.textContent.includes("Renamed Member")).querySelector("button").click()`, nil), chromedp.WaitVisible("#action-dialog", chromedp.ByQuery), chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
+		t.Fatalf("disable invited user: %v", err)
+	}
+	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list li")).some((node) => node.textContent.includes("Renamed Member") && node.textContent.includes("disabled"))`, 10*time.Second); err != nil {
+		t.Fatalf("wait for disabled user: %v", err)
+	}
+	if err := chromedp.Run(admin.ctx, chromedp.Navigate(shareLink)); err != nil {
+		t.Fatalf("open disabled-owner share: %v", err)
+	}
+	if err := waitFor(admin.ctx, `document.querySelector("#public-state").textContent.includes("unavailable")`, 10*time.Second); err != nil {
+		t.Fatalf("disabled owner share was not denied: %v (%s)", err, browserStatus(admin.ctx))
+	}
+
+	if err := chromedp.Run(admin.ctx, chromedp.Navigate(harness.origin+"/admin"), chromedp.WaitVisible("#admin-view", chromedp.ByQuery)); err != nil {
+		t.Fatalf("return to administration: %v", err)
+	}
+	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list li")).some((node) => node.textContent.includes("Renamed Member"))`, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := chromedp.Run(admin.ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll("#user-list li")).find((node) => node.textContent.includes("Renamed Member")).querySelector("button").click()`, nil), chromedp.WaitVisible("#action-dialog", chromedp.ByQuery), chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
+		t.Fatalf("enable invited user: %v", err)
+	}
+	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list li")).some((node) => node.textContent.includes("Renamed Member") && node.textContent.includes("enabled"))`, 10*time.Second); err != nil {
+		t.Fatalf("wait for enabled user: %v", err)
+	}
+	if err := chromedp.Run(admin.ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll("#user-list li")).find((node) => node.textContent.includes("Renamed Member")).querySelectorAll("button")[2].click()`, nil), chromedp.WaitVisible("#action-dialog", chromedp.ByQuery), chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
+		t.Fatalf("create recovery link: %v", err)
+	}
+	if err := waitFor(admin.ctx, `document.querySelector("#dialog-output") !== null`, 10*time.Second); err != nil {
+		t.Fatalf("wait for recovery link: %v", err)
+	}
+	var recoveryLink string
+	if err := chromedp.Run(admin.ctx, chromedp.Text("#dialog-output", &recoveryLink, chromedp.ByQuery), chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
+		t.Fatalf("read recovery link: %v", err)
+	}
+	if !strings.HasPrefix(recoveryLink, harness.origin+"/recover/") {
+		t.Fatalf("recovery link = %q", recoveryLink)
+	}
+
+	if err := chromedp.Run(member.ctx,
+		chromedp.Navigate(recoveryLink),
+		chromedp.WaitVisible("#registration-view", chromedp.ByQuery),
+		chromedp.Focus("#registration-form button", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter),
+	); err != nil {
+		t.Fatalf("start recovery: %v", err)
+	}
+	if err := waitVisible(member.ctx, "#auth-view", 15*time.Second); err != nil {
+		t.Fatalf("finish recovery: %v (%s)", err, browserStatus(member.ctx))
+	}
+	if err := chromedp.Run(member.ctx, chromedp.Focus("#signin-button", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+		t.Fatalf("sign in after recovery: %v", err)
+	}
+	if err := waitVisible(member.ctx, "#drive-view", 15*time.Second); err != nil {
+		t.Fatalf("finish sign in after recovery: %v (%s)", err, browserStatus(member.ctx))
+	}
+
+	if err := chromedp.Run(member.ctx, chromedp.Click("a[data-route='settings']", chromedp.ByQuery), chromedp.WaitVisible("#settings-view", chromedp.ByQuery)); err != nil {
+		t.Fatalf("open share management: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelector("#share-list button") !== null`, 10*time.Second); err != nil {
+		t.Fatalf("wait for active share management: %v", err)
+	}
+	if err := chromedp.Run(member.ctx, chromedp.Focus("#share-list button", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter), chromedp.WaitVisible("#action-dialog", chromedp.ByQuery), chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
+		t.Fatalf("revoke share: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelector("#share-list").textContent.includes("Revoked")`, 10*time.Second); err != nil {
+		t.Fatalf("wait for share revocation: %v", err)
+	}
+	if err := chromedp.Run(admin.ctx, chromedp.Navigate(shareLink)); err != nil {
+		t.Fatalf("reopen revoked share: %v", err)
+	}
+	if err := waitFor(admin.ctx, `document.querySelector("#public-state").textContent.includes("unavailable")`, 10*time.Second); err != nil {
+		t.Fatalf("revoked share was not denied: %v (%s)", err, browserStatus(admin.ctx))
+	}
+
+	admin.assertNoExternalRequests(t, harness)
+	member.assertNoExternalRequests(t, harness)
+}
+
+type testBrowser struct {
+	ctx      context.Context
+	mu       sync.Mutex
+	origins  []string
+	requests []string
+}
+
+func newTestBrowser(t *testing.T) *testBrowser {
+	t.Helper()
+	profile := t.TempDir()
+	options := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(chromiumPath(t)), chromedp.UserDataDir(profile),
+		chromedp.Flag("disable-background-networking", true), chromedp.Flag("disable-default-apps", true),
+		chromedp.Flag("disable-sync", true), chromedp.Flag("no-first-run", true), chromedp.Flag("no-default-browser-check", true),
+	)
+	allocator, cancelAllocator := chromedp.NewExecAllocator(context.Background(), options...)
+	ctx, cancelBrowser := chromedp.NewContext(allocator)
+	ctx, cancelTimeout := context.WithTimeout(ctx, 90*time.Second)
+	client := &testBrowser{ctx: ctx}
+	t.Cleanup(func() {
+		_ = chromedp.Cancel(ctx)
+		cancelTimeout()
+		cancelBrowser()
+		cancelAllocator()
+	})
+	chromedp.ListenTarget(ctx, func(event any) {
+		if request, ok := event.(*network.EventRequestWillBeSent); ok {
+			parsed, err := url.Parse(request.Request.URL)
+			if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
+				client.mu.Lock()
+				client.origins = append(client.origins, parsed.Scheme+"://"+parsed.Host)
+				client.requests = append(client.requests, request.Request.Method+" "+parsed.Path)
+				client.mu.Unlock()
+			}
+		}
+	})
+	if err := chromedp.Run(ctx,
+		network.Enable(), runtime.Enable(), chromedp.Navigate("about:blank"), cdpwebauthn.Enable(),
+		chromedp.ActionFunc(func(actionContext context.Context) error {
+			_, err := cdpwebauthn.AddVirtualAuthenticator(&cdpwebauthn.VirtualAuthenticatorOptions{
+				Protocol: cdpwebauthn.AuthenticatorProtocolCtap2, Ctap2version: cdpwebauthn.Ctap2versionCtap21,
+				Transport: cdpwebauthn.AuthenticatorTransportInternal, HasResidentKey: true,
+				HasUserVerification: true, AutomaticPresenceSimulation: true, IsUserVerified: true,
+			}).Do(actionContext)
+			return err
+		}),
+	); err != nil {
+		t.Fatalf("prepare Chromium: %v", err)
+	}
+	return client
+}
+
+func (browserClient *testBrowser) requestSnapshot() []string {
+	browserClient.mu.Lock()
+	defer browserClient.mu.Unlock()
+	return append([]string(nil), browserClient.requests...)
+}
+
+func (browserClient *testBrowser) assertNoExternalRequests(t *testing.T, harness harness) {
+	t.Helper()
+	browserClient.mu.Lock()
+	defer browserClient.mu.Unlock()
+	for _, origin := range browserClient.origins {
+		if origin != harness.origin && origin != harness.dataOrigin {
+			t.Errorf("unexpected browser request origin: %s", origin)
+		}
+	}
+}
+
+func bootstrapBrowser(t *testing.T, ctx context.Context, harness harness) {
+	t.Helper()
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(harness.origin+"/bootstrap"), chromedp.WaitVisible("#registration-view", chromedp.ByQuery),
+		chromedp.SendKeys("#display-name", "First Administrator"+kb.Tab+harness.bootstrapToken+kb.Tab+kb.Enter, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("bootstrap browser: %v", err)
+	}
+	if err := waitVisible(ctx, "#auth-view", 15*time.Second); err != nil {
+		t.Fatalf("finish browser bootstrap: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Focus("#signin-button", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+		t.Fatalf("sign in bootstrap administrator: %v", err)
+	}
+	if err := waitVisible(ctx, "#drive-view", 15*time.Second); err != nil {
+		t.Fatalf("finish administrator sign-in: %v (%s)", err, browserStatus(ctx))
+	}
+}
+
 func browserStatus(ctx context.Context) string {
 	statusContext, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
@@ -281,6 +623,11 @@ func browserStatus(ctx context.Context) string {
 
 func waitVisible(ctx context.Context, selector string, timeout time.Duration) error {
 	return runStage(ctx, timeout, chromedp.WaitVisible(selector, chromedp.ByQuery))
+}
+
+func waitFor(ctx context.Context, expression string, timeout time.Duration) error {
+	var result bool
+	return runStage(ctx, timeout, chromedp.Poll(expression, &result, chromedp.WithPollingMutation(), chromedp.WithPollingTimeout(timeout)))
 }
 
 func runStage(ctx context.Context, timeout time.Duration, actions ...chromedp.Action) error {

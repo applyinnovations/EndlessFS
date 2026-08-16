@@ -100,6 +100,17 @@ type UploadCapability struct {
 	ChunkRules *ChunkRules       `json:"chunkRules,omitempty"`
 }
 
+// UploadStatus is the safe control-plane view of provider-confirmed progress.
+// It deliberately contains no capability URL or bearer material.
+type UploadStatus struct {
+	UploadID        UploadID       `json:"uploadID"`
+	Path            UserPath       `json:"path"`
+	Protocol        UploadProtocol `json:"protocol"`
+	ConfirmedOffset int64          `json:"confirmedOffset"`
+	DeclaredSize    int64          `json:"declaredSize"`
+	ExpiresAt       time.Time      `json:"expiresAt"`
+}
+
 type DownloadCapability struct {
 	URL       string            `json:"url"`
 	Method    string            `json:"method"`
@@ -114,6 +125,7 @@ type CreateUploadRequest struct {
 	Conflict        ConflictMode
 	ExpectedVersion Version
 	Resumable       bool
+	IdempotencyKey  string
 }
 
 type CompleteUploadRequest struct {

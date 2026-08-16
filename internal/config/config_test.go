@@ -118,6 +118,41 @@ func TestParseSecureConfiguration(t *testing.T) {
 	}
 }
 
+func TestParseTransferConfiguration(t *testing.T) {
+	values := map[string]string{
+		"ENDLESSFS_MOCK_PROVIDER_URL":       "http://127.0.0.1:9090",
+		"ENDLESSFS_DOWNLOAD_CAPABILITY_TTL": "90s",
+		"ENDLESSFS_UPLOAD_INIT_TTL":         "7m",
+		"ENDLESSFS_TEXT_PREVIEW_MAX_BYTES":  "2097152",
+	}
+	cfg, err := Parse(mapLookup(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MockProviderURL != values["ENDLESSFS_MOCK_PROVIDER_URL"] || cfg.DownloadCapabilityTTL != 90*time.Second || cfg.UploadInitTTL != 7*time.Minute || cfg.TextPreviewMaxBytes != 2<<20 {
+		t.Fatalf("transfer config = %+v", cfg)
+	}
+	public := cfg.Public()
+	if public.MaximumUploadInitializations != 100 || public.DefaultTransferConcurrency != 4 || public.MaximumTransferConcurrency != 8 {
+		t.Fatalf("public limits = %+v", public)
+	}
+}
+
+func TestParseRejectsUnsafeTransferConfiguration(t *testing.T) {
+	for name, testCase := range map[string][2]string{
+		"remote mock":    {"ENDLESSFS_MOCK_PROVIDER_URL", "http://storage.example:9090"},
+		"mock path":      {"ENDLESSFS_MOCK_PROVIDER_URL", "http://127.0.0.1:9090/cap"},
+		"long download":  {"ENDLESSFS_DOWNLOAD_CAPABILITY_TTL", "11m"},
+		"text too large": {"ENDLESSFS_TEXT_PREVIEW_MAX_BYTES", "999999999"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse(mapLookup(map[string]string{testCase[0]: testCase[1]})); err == nil {
+				t.Fatal("Parse accepted unsafe transfer configuration")
+			}
+		})
+	}
+}
+
 func TestPublicContainsOnlyNonSecretPolicy(t *testing.T) {
 	t.Parallel()
 

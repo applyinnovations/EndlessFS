@@ -13,6 +13,7 @@ type Storage interface {
 	CreateDirectory(context.Context, domain.Scope, domain.CreateDirectoryRequest) (domain.Entry, error)
 
 	CreateUpload(context.Context, domain.Scope, domain.CreateUploadRequest) (domain.UploadCapability, error)
+	UploadStatus(context.Context, domain.Scope, domain.UploadID) (domain.UploadStatus, error)
 	CompleteUpload(context.Context, domain.Scope, domain.CompleteUploadRequest) (domain.Entry, error)
 	AbortUpload(context.Context, domain.Scope, domain.UploadID) error
 	CreateDownload(context.Context, domain.Scope, domain.CreateDownloadRequest) (domain.DownloadCapability, error)

@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,8 +16,10 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/auth"
 	"github.com/applyinnovations/endlessfs/internal/config"
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/httpapi"
 	"github.com/applyinnovations/endlessfs/internal/identity"
+	providermemory "github.com/applyinnovations/endlessfs/internal/provider/memory"
 	"github.com/applyinnovations/endlessfs/internal/state"
 )
 
@@ -53,10 +57,33 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	dataListenAddress := "127.0.0.1:0"
+	if cfg.MockProviderURL != "" {
+		parsed, parseErr := url.Parse(cfg.MockProviderURL)
+		if parseErr != nil {
+			return parseErr
+		}
+		dataListenAddress = parsed.Host
+	}
+	dataListener, err := net.Listen("tcp", dataListenAddress)
+	if err != nil {
+		return err
+	}
+	defer dataListener.Close()
+	dataOrigin := "http://" + dataListener.Addr().String()
+	storage := providermemory.New(providermemory.Options{Clock: clock, IDs: ids, UploadTTL: cfg.UploadInitTTL, DownloadTTL: cfg.DownloadCapabilityTTL, AllowedOrigin: cfg.AllowedOrigin})
+	if err := storage.SetDataPlaneBaseURL(dataOrigin); err != nil {
+		return err
+	}
+	driveService, err := drive.NewService(storage, store, repository, ids, clock, cfg.SessionSecret, cfg.BaseURL, dataOrigin, cfg.TextPreviewMaxBytes)
+	if err != nil {
+		return err
+	}
+	dataServer := &http.Server{Handler: storage, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           httpapi.NewApplication(cfg, version, identityService, sessions),
+		Handler:           httpapi.NewCompleteApplication(cfg, version, identityService, sessions, driveService),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -67,7 +94,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	shutdownCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
+	go func() { errCh <- dataServer.Serve(dataListener) }()
 	go func() {
 		logger.Info("server_started", "listenAddress", cfg.ListenAddr, "version", version)
 		errCh <- server.ListenAndServe()
@@ -83,6 +111,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		graceCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(graceCtx); err != nil {
+			return err
+		}
+		if err := dataServer.Shutdown(graceCtx); err != nil {
 			return err
 		}
 		logger.Info("server_stopped", "result", "graceful")

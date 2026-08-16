@@ -464,6 +464,49 @@ type Trash struct {
 	OriginalVersion domain.Version   `json:"originalVersion"`
 }
 
+// BatchOperation persists the aggregate state returned for bounded multi-item
+// control requests. Provider operation details remain provider-neutral.
+type BatchOperation struct {
+	SchemaVersion int                   `json:"schemaVersion"`
+	OwnerUserID   domain.UserID         `json:"ownerUserID"`
+	OperationID   domain.OperationID    `json:"operationID"`
+	State         domain.OperationState `json:"state"`
+	StartedAt     time.Time             `json:"startedAt"`
+	UpdatedAt     time.Time             `json:"updatedAt"`
+}
+
+type MutationOutcome struct {
+	SchemaVersion int              `json:"schemaVersion"`
+	OwnerUserID   domain.UserID    `json:"ownerUserID"`
+	KeyHash       string           `json:"keyHash"`
+	Kind          string           `json:"kind"`
+	Fingerprint   string           `json:"fingerprint"`
+	Operation     domain.Operation `json:"operation"`
+}
+
+func (r *MutationOutcome) Validate() error {
+	if err := validateSchema(r.SchemaVersion); err != nil {
+		return err
+	}
+	if !r.OwnerUserID.Valid() || !validHash(r.KeyHash) || !validHash(r.Fingerprint) || (r.Kind != "restore" && r.Kind != "permanent_delete") || r.Operation.ID == "" {
+		return domain.NewError(domain.ErrorInvalid, "invalid mutation outcome")
+	}
+	if r.Operation.State != domain.OperationSucceeded && r.Operation.State != domain.OperationFailed {
+		return domain.NewError(domain.ErrorInvalid, "mutation outcome is incomplete")
+	}
+	return validateTimes(r.Operation.StartedAt, r.Operation.UpdatedAt)
+}
+
+func (r *BatchOperation) Validate() error {
+	if err := validateSchema(r.SchemaVersion); err != nil {
+		return err
+	}
+	if !r.OwnerUserID.Valid() || r.OperationID == "" || (r.State != domain.OperationSucceeded && r.State != domain.OperationFailed && r.State != domain.OperationRunning && r.State != domain.OperationPending) {
+		return domain.NewError(domain.ErrorInvalid, "invalid batch operation")
+	}
+	return validateTimes(r.StartedAt, r.UpdatedAt)
+}
+
 func (r *Trash) Validate() error {
 	if err := validateSchema(r.SchemaVersion); err != nil {
 		return err

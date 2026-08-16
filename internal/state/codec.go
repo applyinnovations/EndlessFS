@@ -34,7 +34,13 @@ func EncodeJSON(value any) ([]byte, error) {
 }
 
 func DecodeJSON(data []byte, destination any) error {
-	if len(data) == 0 || len(data) > MaxRecordBytes {
+	return DecodeJSONWithLimit(data, destination, MaxRecordBytes)
+}
+
+// DecodeJSONWithLimit applies the same strict duplicate/unknown/trailing-data
+// rules to non-state JSON documents with an explicit bounded size.
+func DecodeJSONWithLimit(data []byte, destination any, maximumBytes int) error {
+	if maximumBytes < 1 || len(data) == 0 || len(data) > maximumBytes {
 		return domain.NewError(domain.ErrorInvalid, "invalid state record size")
 	}
 	if !utf8.Valid(data) {

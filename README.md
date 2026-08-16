@@ -3,7 +3,7 @@
 EndlessFS is an open-source, provider-neutral, security-first private cloud drive. Its Go control plane authorizes file operations while browser file bytes travel directly to and from the configured object-storage provider through short-lived provider-native capabilities.
 
 > [!IMPORTANT]
-> This repository is at **Milestone 2**. Passkey-only identity, usernameless WebAuthn, secure sessions/CSRF, bootstrap, registration policy, invites, account administration, passkey management, and recovery now join the Milestone 1 provider/state foundations. File workflows, themes, and the complete browser UI remain under construction. Do not deploy this implementation or describe it as v1 complete or production-ready.
+> This repository is at **Milestone 3**. The authenticated file control plane, direct resumable transfer capabilities, bounded batch operations, trash/restore, safe-preview policy, and hashed public shares now join the identity and provider/state foundations. Themes and the complete browser UI remain under construction. Do not deploy this implementation or describe it as v1 complete or production-ready.
 
 The normative implementation contract is [docs/v1-specification.md](./docs/v1-specification.md). A feature-complete mock-backed v1 will prove the full product locally, but it will not prove Google Cloud Storage interoperability or provide a production storage adapter.
 
@@ -49,7 +49,7 @@ export ENDLESSFS_BOOTSTRAP_TOKEN="$(nix run .#generate-secret)"
 nix run .#dev
 ```
 
-The development server listens on `http://127.0.0.1:8080` by default. The current implementation intentionally rejects non-loopback listeners until the complete deployment security contract is enforced.
+The development control server listens on `http://127.0.0.1:8080` by default. It also opens a separate ephemeral loopback data-plane listener; upload/download bytes use only that listener. Set `ENDLESSFS_MOCK_PROVIDER_URL=http://127.0.0.1:9090` to select a stable loopback data-plane port for browser testing.
 
 Build the binary or an OCI archive without Docker:
 
@@ -101,6 +101,7 @@ Only settings that have validation and tests are parsed by the current binary:
 | `ENDLESSFS_BASE_URL` | Derived in loopback development | Exact HTTP(S) origin; HTTPS is required for public listeners. |
 | `ENDLESSFS_LISTEN_ADDR` | `127.0.0.1:8080` | Loopback for HTTP development; non-loopback requires a coherent HTTPS base URL. |
 | `ENDLESSFS_STORAGE_PROVIDER` | `mock` | v1 currently accepts only the deterministic local provider. |
+| `ENDLESSFS_MOCK_PROVIDER_URL` | Ephemeral loopback origin | Optional explicit HTTP loopback origin/port for the separate capability data plane. |
 | `ALLOW_REGISTRATION` | `false` | Exact `true` or `false`; exposed as non-secret public policy. |
 | `INVITE_REGISTRATION` | `true` | Exact `true` or `false`; exposed as non-secret public policy. |
 | `ENDLESSFS_BOOTSTRAP_TOKEN` | Unset | Optional canonical 256-bit base64url token; enables only the unused first-admin bootstrap. |
@@ -108,8 +109,11 @@ Only settings that have validation and tests are parsed by the current binary:
 | `ENDLESSFS_WEBAUTHN_RP_ID` | Base URL hostname | Must exactly match the configured base URL hostname. |
 | `ENDLESSFS_WEBAUTHN_RP_NAME` | `EndlessFS` | Validated authenticator-facing relying-party name. |
 | `ENDLESSFS_SESSION_TTL` | `12h` | Positive absolute lifetime, capped at `168h`. |
+| `ENDLESSFS_DOWNLOAD_CAPABILITY_TTL` | `60s` | Exact-object download lifetime, capped at `10m`. |
+| `ENDLESSFS_UPLOAD_INIT_TTL` | `5m` | Destination-bound upload initiation lifetime, capped at `1h`. |
+| `ENDLESSFS_TEXT_PREVIEW_MAX_BYTES` | `1048576` | Maximum validated UTF-8 plain-text preview size, capped at 16 MiB. |
 
-The remaining transfer, preview, theme, and logging settings in specification section 15 will be added with the behavior they protect. Secrets are never accepted as command-line arguments or exposed through the public configuration endpoint. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after the initial administrator has been created.
+The remaining theme and logging settings in specification section 15 will be added with the behavior they protect. Secrets are never accepted as command-line arguments or exposed through the public configuration endpoint. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after the initial administrator has been created. The current HTTP contract is documented in [docs/http-api.md](./docs/http-api.md).
 
 ## Repository map
 
@@ -124,6 +128,7 @@ internal/state/          state contract, strict codec, and concurrency-safe memo
 internal/secret/         redacted bearer-token hashing and validation
 internal/httpapi/        router and transport security headers
 internal/identity/       bootstrap, registration, accounts, passkeys, invites, roles, and recovery
+internal/drive/          authenticated files, transfers, operations, trash, previews, and shares
 internal/web/            embedded HTML, CSS, and vanilla JavaScript
 tools/check-source/      forbidden dependency/source policy check
 tools/generate-secret/   operator-directed 256-bit environment-secret generator
@@ -159,8 +164,8 @@ The policy requires one approval, resolved review threads, linear history, and t
 - **Milestone 0 — complete:** reproducible skeleton, binary, embedded shell, Nix checks, OCI, CI and repository policy.
 - **Milestone 1 — complete:** typed domain, strict paths, state CAS, provider contracts, capability-aware local data plane, and deterministic faults.
 - **Milestone 2 — complete:** WebAuthn, sessions, CSRF/origin policy, bootstrap, registration matrix, invites, roles, and recovery.
-- **Milestone 3 — next:** browse and file operations, direct resumable transfers, idempotency, trash, previews, and sharing control plane.
-- **Milestone 4:** closed Theme API, safe media validation, complete light/dark bundles, inheritance and fallback.
+- **Milestone 3 — complete:** browse and file operations, direct resumable transfers, idempotency, trash, previews, and sharing control plane.
+- **Milestone 4 — next:** closed Theme API, safe media validation, complete light/dark bundles, inheritance and fallback.
 - **Milestones 5–6:** accessible browser drive, transfers, themes, shares, settings, and administration UI.
 - **Milestone 7:** cross-user/adversarial matrices, full fuzz/race/coverage gates, browser accessibility, OCI inspection, and release evidence.
 

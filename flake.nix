@@ -134,7 +134,7 @@
                   printf 'flake-lock=%s\n' "$lock_hash"
                   printf 'target-system=%s\n' '${system}'
                   printf 'storage-provider=%s\n' 'deterministic-local-mock'
-                  printf 'implementation-status=%s\n' 'milestone-2-v1-in-progress'
+                  printf 'implementation-status=%s\n' 'milestone-3-v1-in-progress'
                   printf 'live-gcs-validation=%s\n' 'not-performed'
                   printf 'build-and-test-external-services-used=%s\n' 'none'
                 } > "$out/RELEASE-INVENTORY.txt"

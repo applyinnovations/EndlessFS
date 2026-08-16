@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,33 +14,45 @@ import (
 )
 
 const (
-	defaultListenAddr = "127.0.0.1:8080"
-	defaultSessionTTL = 12 * time.Hour
-	maximumSessionTTL = 7 * 24 * time.Hour
+	defaultListenAddr           = "127.0.0.1:8080"
+	defaultSessionTTL           = 12 * time.Hour
+	maximumSessionTTL           = 7 * 24 * time.Hour
+	defaultDownloadTTL          = time.Minute
+	maximumDownloadTTL          = 10 * time.Minute
+	defaultUploadTTL            = 5 * time.Minute
+	maximumUploadTTL            = time.Hour
+	defaultTextPreviewMax int64 = 1 << 20
 )
 
 // Config is the validated process configuration. Secret fields use a redacting
 // value type and are never included in PublicConfig.
 type Config struct {
-	ListenAddr         string
-	BaseURL            string
-	AllowedOrigin      string
-	Secure             bool
-	StorageProvider    string
-	AllowRegistration  bool
-	InviteRegistration bool
-	BootstrapToken     secret.Value
-	SessionSecret      secret.Value
-	WebAuthnRPID       string
-	WebAuthnRPName     string
-	SessionTTL         time.Duration
+	ListenAddr            string
+	BaseURL               string
+	AllowedOrigin         string
+	Secure                bool
+	StorageProvider       string
+	MockProviderURL       string
+	AllowRegistration     bool
+	InviteRegistration    bool
+	BootstrapToken        secret.Value
+	SessionSecret         secret.Value
+	WebAuthnRPID          string
+	WebAuthnRPName        string
+	SessionTTL            time.Duration
+	DownloadCapabilityTTL time.Duration
+	UploadInitTTL         time.Duration
+	TextPreviewMaxBytes   int64
 }
 
 // PublicConfig contains the non-secret settings safe to expose to browsers.
 type PublicConfig struct {
-	AllowRegistration  bool `json:"allowRegistration"`
-	InviteRegistration bool `json:"inviteRegistration"`
-	PasskeysAvailable  bool `json:"passkeysAvailable"`
+	AllowRegistration            bool `json:"allowRegistration"`
+	InviteRegistration           bool `json:"inviteRegistration"`
+	PasskeysAvailable            bool `json:"passkeysAvailable"`
+	MaximumUploadInitializations int  `json:"maximumUploadInitializations"`
+	DefaultTransferConcurrency   int  `json:"defaultTransferConcurrency"`
+	MaximumTransferConcurrency   int  `json:"maximumTransferConcurrency"`
 }
 
 // Load reads configuration from the process environment.
@@ -92,6 +105,14 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if storageProvider != "mock" {
 		return Config{}, fmt.Errorf("ENDLESSFS_STORAGE_PROVIDER: v1 supports exactly mock")
 	}
+	mockProviderURL := ""
+	if value, ok := lookup("ENDLESSFS_MOCK_PROVIDER_URL"); ok {
+		parsed, parseErr := parseMockProviderURL(strings.TrimSpace(value))
+		if parseErr != nil {
+			return Config{}, fmt.Errorf("ENDLESSFS_MOCK_PROVIDER_URL: %w", parseErr)
+		}
+		mockProviderURL = strings.TrimSuffix(parsed.String(), "/")
+	}
 
 	bootstrapToken, err := parseOptionalBearer(lookup, "ENDLESSFS_BOOTSTRAP_TOKEN")
 	if err != nil {
@@ -122,30 +143,60 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	downloadTTL, err := parseDuration(lookup, "ENDLESSFS_DOWNLOAD_CAPABILITY_TTL", defaultDownloadTTL, maximumDownloadTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	uploadTTL, err := parseDuration(lookup, "ENDLESSFS_UPLOAD_INIT_TTL", defaultUploadTTL, maximumUploadTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	textPreviewMax, err := parsePositiveInt64(lookup, "ENDLESSFS_TEXT_PREVIEW_MAX_BYTES", defaultTextPreviewMax, 16<<20)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
-		ListenAddr:         listenAddr,
-		BaseURL:            strings.TrimSuffix(baseURL.String(), "/"),
-		AllowedOrigin:      strings.TrimSuffix(baseURL.String(), "/"),
-		Secure:             secure,
-		StorageProvider:    storageProvider,
-		AllowRegistration:  allowRegistration,
-		InviteRegistration: inviteRegistration,
-		BootstrapToken:     bootstrapToken,
-		SessionSecret:      sessionSecret,
-		WebAuthnRPID:       strings.ToLower(rpID),
-		WebAuthnRPName:     rpName,
-		SessionTTL:         sessionTTL,
+		ListenAddr:            listenAddr,
+		BaseURL:               strings.TrimSuffix(baseURL.String(), "/"),
+		AllowedOrigin:         strings.TrimSuffix(baseURL.String(), "/"),
+		Secure:                secure,
+		StorageProvider:       storageProvider,
+		MockProviderURL:       mockProviderURL,
+		AllowRegistration:     allowRegistration,
+		InviteRegistration:    inviteRegistration,
+		BootstrapToken:        bootstrapToken,
+		SessionSecret:         sessionSecret,
+		WebAuthnRPID:          strings.ToLower(rpID),
+		WebAuthnRPName:        rpName,
+		SessionTTL:            sessionTTL,
+		DownloadCapabilityTTL: downloadTTL,
+		UploadInitTTL:         uploadTTL,
+		TextPreviewMaxBytes:   textPreviewMax,
 	}, nil
 }
 
 // Public returns a copy containing no secrets.
 func (c Config) Public() PublicConfig {
 	return PublicConfig{
-		AllowRegistration:  c.AllowRegistration,
-		InviteRegistration: c.InviteRegistration,
-		PasskeysAvailable:  true,
+		AllowRegistration:            c.AllowRegistration,
+		InviteRegistration:           c.InviteRegistration,
+		PasskeysAvailable:            true,
+		MaximumUploadInitializations: 100,
+		DefaultTransferConcurrency:   4,
+		MaximumTransferConcurrency:   8,
 	}
+}
+
+func parseMockProviderURL(value string) (*url.URL, error) {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "http" || parsed.Host == "" || parsed.Port() == "" || !isLoopbackHost(parsed.Hostname()) {
+		return nil, fmt.Errorf("expected an HTTP loopback origin with an explicit port")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return nil, fmt.Errorf("must be an origin without credentials, path, query, or fragment")
+	}
+	return parsed, nil
 }
 
 func parseBaseURL(value string) (*url.URL, error) {
@@ -212,6 +263,18 @@ func parseDuration(lookup func(string) (string, bool), name string, fallback, ma
 		return 0, fmt.Errorf("%s: expected duration greater than zero and at most %s", name, maximum)
 	}
 	return duration, nil
+}
+
+func parsePositiveInt64(lookup func(string) (string, bool), name string, fallback, maximum int64) (int64, error) {
+	value, ok := lookup(name)
+	if !ok {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 1 || parsed > maximum {
+		return 0, fmt.Errorf("%s: expected an integer from 1 through %d", name, maximum)
+	}
+	return parsed, nil
 }
 
 func parseBool(lookup func(string) (string, bool), name string, fallback bool) (bool, error) {

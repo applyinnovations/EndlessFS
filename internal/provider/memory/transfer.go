@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 )
@@ -30,9 +31,22 @@ func (p *Provider) CreateUpload(ctx context.Context, scope domain.Scope, request
 	if err != nil {
 		return domain.UploadCapability{}, err
 	}
+	if err := validateIdempotencyKey(request.IdempotencyKey); err != nil {
+		return domain.UploadCapability{}, err
+	}
+	fingerprint := operationFingerprint(scope.UserID().String(), request.Path.String(), strconv.FormatInt(request.Size, 10), mediaType, string(conflict), string(request.ExpectedVersion), strconv.FormatBool(request.Resumable))
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if request.IdempotencyKey != "" {
+		key := idempotencyKey(scope.UserID(), OperationCreateUpload, request.IdempotencyKey)
+		if prior, found := p.uploadIdempotency[key]; found {
+			if prior.fingerprint != fingerprint {
+				return domain.UploadCapability{}, domain.NewError(domain.ErrorConflict, "idempotency key was used for a different request")
+			}
+			return prior.capability, nil
+		}
+	}
 	if err := p.beforeLocked(OperationCreateUpload); err != nil {
 		return domain.UploadCapability{}, err
 	}
@@ -95,9 +109,32 @@ func (p *Provider) CreateUpload(ctx context.Context, scope domain.Scope, request
 	if request.Resumable {
 		headers["Upload-Offset"] = "0"
 	}
-	return domain.UploadCapability{
+	capability := domain.UploadCapability{
 		UploadID: uploadID, Protocol: protocol, URL: p.baseURL + "/cap/upload/" + token,
 		Method: method, Headers: headers, ExpiresAt: expiresAt, ChunkRules: chunkRules,
+	}
+	if request.IdempotencyKey != "" {
+		p.uploadIdempotency[idempotencyKey(scope.UserID(), OperationCreateUpload, request.IdempotencyKey)] = idempotentUpload{fingerprint: fingerprint, capability: capability}
+	}
+	return capability, nil
+}
+
+func (p *Provider) UploadStatus(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) (domain.UploadStatus, error) {
+	if err := validateContextScope(ctx, scope); err != nil {
+		return domain.UploadStatus{}, err
+	}
+	if uploadID == "" {
+		return domain.UploadStatus{}, domain.NewError(domain.ErrorInvalid, "upload ID is required")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	session, found := p.uploads[uploadID]
+	if !found || session.scope != scope || session.aborted {
+		return domain.UploadStatus{}, domain.NewError(domain.ErrorNotFound, "upload not found")
+	}
+	return domain.UploadStatus{
+		UploadID: uploadID, Path: session.requestedPath, Protocol: session.protocol,
+		ConfirmedOffset: session.offset, DeclaredSize: session.size, ExpiresAt: session.expiresAt,
 	}, nil
 }
 
@@ -143,12 +180,30 @@ func (p *Provider) CompleteUpload(ctx context.Context, scope domain.Scope, reque
 	} else if exists {
 		return domain.Entry{}, domain.NewError(domain.ErrorConflict, "upload destination appeared during transfer")
 	}
-	entry := p.newEntryLocked(session.path, domain.EntryFile, session.size, session.mediaType)
 	data := append([]byte(nil), session.data...)
+	storedMediaType := trustedMediaType(session.mediaType, data, session.materialized)
+	entry := p.newEntryLocked(session.path, domain.EntryFile, session.size, storedMediaType)
 	p.scopeObjectsLocked(scope)[session.path.String()] = object{entry: entry, data: data, materialized: session.materialized}
 	delete(p.uploadTokens, session.capabilityHash)
 	delete(p.uploads, request.UploadID)
 	return entry, nil
+}
+
+func trustedMediaType(declared string, data []byte, materialized bool) string {
+	switch declared {
+	case "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain":
+		if !materialized {
+			return "application/octet-stream"
+		}
+		detected, _, err := mime.ParseMediaType(http.DetectContentType(data))
+		if err != nil || detected != declared {
+			return "application/octet-stream"
+		}
+		if declared == "text/plain" && !utf8.Valid(data) {
+			return "application/octet-stream"
+		}
+	}
+	return declared
 }
 
 func (p *Provider) AbortUpload(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) error {
@@ -257,9 +312,26 @@ func (p *Provider) ServeHTTP(writer http.ResponseWriter, request *http.Request) 
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("Referrer-Policy", "no-referrer")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	writer.Header().Set("Content-Security-Policy", "default-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; sandbox")
 	parts := strings.Split(strings.TrimPrefix(request.URL.Path, "/"), "/")
 	if len(parts) != 3 || parts[0] != "cap" || parts[2] == "" {
 		http.NotFound(writer, request)
+		return
+	}
+	if origin := request.Header.Get("Origin"); origin != "" {
+		if p.allowedOrigin == "" || origin != p.allowedOrigin {
+			http.Error(writer, "origin is not allowed", http.StatusForbidden)
+			return
+		}
+		writer.Header().Set("Access-Control-Allow-Origin", p.allowedOrigin)
+		writer.Header().Set("Vary", "Origin")
+		writer.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Content-Disposition, Upload-Offset")
+	}
+	if request.Method == http.MethodOptions {
+		writer.Header().Set("Access-Control-Allow-Methods", "GET, PUT, PATCH, OPTIONS")
+		writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range, Upload-Offset")
+		writer.Header().Set("Access-Control-Max-Age", "300")
+		writer.WriteHeader(http.StatusNoContent)
 		return
 	}
 	switch parts[1] {

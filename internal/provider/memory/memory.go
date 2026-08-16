@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -55,6 +57,7 @@ type Options struct {
 	DownloadTTL          time.Duration
 	MaxMaterializedBytes int64
 	ChunkRules           domain.ChunkRules
+	AllowedOrigin        string
 }
 
 type Instrumentation struct {
@@ -113,6 +116,11 @@ type idempotentResult struct {
 	operation   domain.Operation
 }
 
+type idempotentUpload struct {
+	fingerprint string
+	capability  domain.UploadCapability
+}
+
 type Provider struct {
 	mu sync.Mutex
 
@@ -123,17 +131,19 @@ type Provider struct {
 	maxMaterializedBytes int64
 	chunkRules           domain.ChunkRules
 	baseURL              string
+	allowedOrigin        string
 
-	objects       map[domain.Scope]map[string]object
-	uploads       map[domain.UploadID]*upload
-	uploadTokens  map[[sha256.Size]byte]domain.UploadID
-	downloads     map[[sha256.Size]byte]download
-	listSnapshots map[string]*listSnapshot
-	operations    map[string]domain.Operation
-	idempotency   map[string]idempotentResult
-	faults        map[string][]Fault
-	metrics       Instrumentation
-	versions      uint64
+	objects           map[domain.Scope]map[string]object
+	uploads           map[domain.UploadID]*upload
+	uploadTokens      map[[sha256.Size]byte]domain.UploadID
+	downloads         map[[sha256.Size]byte]download
+	listSnapshots     map[string]*listSnapshot
+	operations        map[string]domain.Operation
+	idempotency       map[string]idempotentResult
+	uploadIdempotency map[string]idempotentUpload
+	faults            map[string][]Fault
+	metrics           Instrumentation
+	versions          uint64
 }
 
 func New(options Options) *Provider {
@@ -162,6 +172,7 @@ func New(options Options) *Provider {
 		downloadTTL:          options.DownloadTTL,
 		maxMaterializedBytes: options.MaxMaterializedBytes,
 		chunkRules:           options.ChunkRules,
+		allowedOrigin:        options.AllowedOrigin,
 		objects:              make(map[domain.Scope]map[string]object),
 		uploads:              make(map[domain.UploadID]*upload),
 		uploadTokens:         make(map[[sha256.Size]byte]domain.UploadID),
@@ -169,13 +180,16 @@ func New(options Options) *Provider {
 		listSnapshots:        make(map[string]*listSnapshot),
 		operations:           make(map[string]domain.Operation),
 		idempotency:          make(map[string]idempotentResult),
+		uploadIdempotency:    make(map[string]idempotentUpload),
 		faults:               make(map[string][]Fault),
 		metrics:              Instrumentation{ProviderCalls: make(map[string]uint64)},
 	}
 }
 
 func (p *Provider) SetDataPlaneBaseURL(baseURL string) error {
-	if !strings.HasPrefix(baseURL, "http://127.0.0.1:") && !strings.HasPrefix(baseURL, "http://[::1]:") {
+	parsed, err := url.Parse(baseURL)
+	ip := net.ParseIP(parsed.Hostname())
+	if err != nil || parsed.Scheme != "http" || parsed.Port() == "" || ip == nil || !ip.IsLoopback() || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return domain.NewError(domain.ErrorInvalid, "mock data plane must use a loopback URL")
 	}
 	p.mu.Lock()

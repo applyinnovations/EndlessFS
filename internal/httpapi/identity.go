@@ -15,6 +15,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/auth"
 	"github.com/applyinnovations/endlessfs/internal/config"
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/identity"
 	"github.com/applyinnovations/endlessfs/internal/model"
 	"github.com/applyinnovations/endlessfs/internal/secret"
@@ -25,12 +26,14 @@ const (
 	secureCeremonyCookie = "__Host-endlessfs_ceremony"
 	devCeremonyCookie    = "endlessfs_ceremony_dev"
 	csrfHeader           = "X-EndlessFS-CSRF"
+	maxControlBodyBytes  = 1 << 20
 )
 
 type identityAPI struct {
 	config   config.Config
 	identity *identity.Service
 	sessions *auth.SessionManager
+	drive    *drive.Service
 }
 
 func (api *identityAPI) routes(mux *http.ServeMux) {
@@ -58,6 +61,9 @@ func (api *identityAPI) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/admin/users/{userID}/recoveries", api.createRecovery)
 	mux.HandleFunc("POST /api/v1/recovery/options", api.recoveryOptions)
 	mux.HandleFunc("POST /api/v1/recovery/verify", api.registrationVerify)
+	if api.drive != nil {
+		api.driveRoutes(mux)
+	}
 }
 
 func (api *identityAPI) bootstrapOptions(w http.ResponseWriter, r *http.Request) {
@@ -523,9 +529,9 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) bool {
 		writeProblem(w, r, domain.NewError(domain.ErrorInvalid, "Content-Type must be application/json"))
 		return false
 	}
-	reader := http.MaxBytesReader(w, r.Body, state.MaxRecordBytes)
+	reader := http.MaxBytesReader(w, r.Body, maxControlBodyBytes)
 	data, err := io.ReadAll(reader)
-	if err != nil || state.DecodeJSON(data, destination) != nil {
+	if err != nil || state.DecodeJSONWithLimit(data, destination, maxControlBodyBytes) != nil {
 		writeProblem(w, r, domain.NewError(domain.ErrorInvalid, "invalid JSON request"))
 		return false
 	}

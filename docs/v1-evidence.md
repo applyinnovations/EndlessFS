@@ -53,7 +53,26 @@ The selected WebAuthn and virtual-authenticator modules are pinned in `go.mod`, 
 
 ## Remaining milestones
 
-- File/trash/share control-plane use cases and HTTP API.
+## File, transfer, trash, preview, and share control plane — complete
+
+The Milestone 3 checkpoint implements specification sections 11, 12.5, and 12.6 plus checklist sections 22.5–22.7:
+
+| Requirement | Automated evidence |
+|---|---|
+| Root/nested browse, deterministic pagination/sorting, scoped cursors, stat, and empty directories | reusable `providercontract.Run`; `TestIntegrationDirectTransfersAndIsolation`; `TestIntegrationFileHTTPDirectDataPathTrashAndShare` |
+| Exact session-derived scope and cross-user denial for paths, uploads, cursors, operations, trash IDs, and shares | `TestIntegrationDirectTransfersAndIsolation`, `TestIntegrationCopyMoveTrashRestoreAndDelete`, `TestFileHTTPRejectsProviderFieldsBodiesAndTraversalBeforeProvider` |
+| Direct single/resumable upload, provider-confirmed offsets, retry, checksum, cancellation, expiry, faults, and >1 TiB simulation | reusable `providercontract.Run`; `TestIntegrationDirectTransfersAndIsolation` |
+| Control-plane byte exclusion, separate loopback data listener, exact-origin CORS, range reads, and safe disposition | `TestIntegrationFileHTTPDirectDataPathTrashAndShare`; provider contract `single upload direct download and range` |
+| File/tree copy and move, deterministic conflict modes, bounded batch results, durable aggregate polling, and idempotency | `TestIntegrationCopyMoveTrashRestoreAndDelete`; provider contract `recursive operations idempotency and faults` |
+| Isolated trash, list, restore with generated-name conflict, permanent delete, empty-trash bounds, and replay-safe mutations | `TestIntegrationCopyMoveTrashRestoreAndDelete`; `TestIntegrationFileHTTPDirectDataPathTrashAndShare` |
+| Hashed 256-bit file/folder shares, relative subtree confinement, expiry, revocation, disabled owners, and moved/trashed root invalidation | `TestIntegrationSharesPreviewAndRevocation`; `TestIntegrationFileHTTPDirectDataPathTrashAndShare` |
+| Provider-validated PNG/JPEG/GIF/WebP, bounded UTF-8 text, and PDF inline policy; spoofed or active formats remain attachments | `TestSafePreviewAllowlistUsesProviderValidatedMedia`; `TestIntegrationSharesPreviewAndRevocation` |
+| Strict 1 MiB control documents, provider-field rejection before access, no-store capability responses, no-referrer public responses, and exact data-origin CSP | `TestFileHTTPRejectsProviderFieldsBodiesAndTraversalBeforeProvider`; `TestIntegrationFileHTTPDirectDataPathTrashAndShare` |
+
+The public API accepts virtual paths only. Storage scopes are constructed from authenticated session owners, trash resides in a separate provider area, and share listings translate all paths relative to a version-bound root. The mock provider validates safe preview signatures after direct upload completion so a client-supplied media type alone cannot enable inline rendering.
+
+## Remaining milestones
+
 - Closed theme compiler and immutable fallback bundles.
 - Complete accessible browser workflows and browser-level tests.
 - Adversarial matrices, coverage thresholds, threat-model review, and final release evidence.

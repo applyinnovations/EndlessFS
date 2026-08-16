@@ -2,9 +2,17 @@
   description = "EndlessFS — a private, provider-neutral cloud drive";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.vulndb = {
+    url = "https://vuln.go.dev/vulndb.zip";
+    flake = false;
+  };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      vulndb,
+    }:
     let
       systems = [
         "aarch64-darwin"
@@ -12,6 +20,29 @@
         "x86_64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
+      goFor =
+        pkgs:
+        pkgs.go_1_26.overrideAttrs (_old: {
+          version = "1.26.6";
+          src = pkgs.fetchurl {
+            url = "https://go.dev/dl/go1.26.6.src.tar.gz";
+            hash = "sha256-oHIcVMaIkBRI13rZs+x+p8R0cwdV/4kTgukuy5P/LLE=";
+          };
+        });
+      dependencyPolicyCommand = ''
+        dependency_inventory="$(mktemp -t endlessfs-dependencies.XXXXXX)"
+        trap 'rm -f "$dependency_inventory"' EXIT
+        awk '/^# / && $2 != "=>" { print $2, $3 }' vendor/modules.txt | LC_ALL=C sort -u > "$dependency_inventory"
+        test -s "$dependency_inventory"
+        while read -r module _version; do
+          module_root="vendor/$module"
+          if ! find "$module_root" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) -print -quit | grep -q .; then
+            echo "vendored module lacks a root license file: $module" >&2
+            exit 1
+          fi
+        done < "$dependency_inventory"
+        echo "dependency policy: $(wc -l < "$dependency_inventory" | tr -d ' ') locked modules with licenses"
+      '';
     in
     {
       packages = forAllSystems (
@@ -19,6 +50,7 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           lib = pkgs.lib;
+          go = goFor pkgs;
           version = self.shortRev or self.dirtyShortRev or "dev";
           projectSource = lib.cleanSource ./.;
           goSource = lib.cleanSourceWith {
@@ -64,6 +96,7 @@
               src = goSource;
               subPackages = [ "cmd/endlessfs" ];
               vendorHash = null;
+              inherit go;
               doCheck = false;
               env.CGO_ENABLED = 0;
               preBuild = themePreBuild themeBundles;
@@ -86,7 +119,7 @@
               pname = "endlessfs-linux-${linuxArchitecture}";
               inherit version;
               src = goSource;
-              nativeBuildInputs = [ pkgs.go ];
+              nativeBuildInputs = [ go ];
               dontConfigure = true;
               dontFixup = true;
               buildPhase = ''
@@ -144,7 +177,7 @@
           };
 
           themeInventory =
-            pkgs.runCommand "endlessfs-theme-inventory-${version}" { nativeBuildInputs = [ pkgs.go ]; }
+            pkgs.runCommand "endlessfs-theme-inventory-${version}" { nativeBuildInputs = [ go ]; }
               ''
                 cp -R ${goSource} source
                 chmod -R u+w source
@@ -159,29 +192,76 @@
               {
                 nativeBuildInputs = [
                   pkgs.coreutils
+                  pkgs.findutils
                   pkgs.gnutar
                   pkgs.gzip
+                  pkgs.gawk
+                  pkgs.jq
                 ];
               }
               ''
                 mkdir -p "$out" staging
                 cp ${endlessfs}/bin/endlessfs staging/endlessfs
+                cp ${container} "staging/endlessfs-container-${version}.tar.gz"
                 cp ${projectSource}/LICENSE staging/LICENSE
                 cp ${projectSource}/README.md staging/README.md
+                cp ${projectSource}/docs/v1-evidence.md staging/V1-EVIDENCE.md
+                cp ${projectSource}/docs/v1-release-notes.md staging/RELEASE-NOTES.md
                 cp ${themeInventory} staging/THEMES.json
-                tar --sort=name --mtime=@1 --owner=0 --group=0 --numeric-owner \
-                  -C staging -czf "$out/endlessfs-${version}-${system}.tar.gz" .
-                (cd "$out"; sha256sum "endlessfs-${version}-${system}.tar.gz" > SHA256SUMS)
+                (
+                  cd ${projectSource}
+                  awk '/^# / && $2 != "=>" { print $2, $3 }' vendor/modules.txt | LC_ALL=C sort -u
+                ) > staging/DEPENDENCIES.txt
+                (
+                  cd ${projectSource}
+                  find vendor -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) -print0 \
+                    | LC_ALL=C sort -z \
+                    | xargs -0 sha256sum
+                ) > staging/DEPENDENCY-LICENSES.sha256
+                binary_hash="$(sha256sum staging/endlessfs | cut -d ' ' -f 1)"
+                container_hash="$(sha256sum "staging/endlessfs-container-${version}.tar.gz" | cut -d ' ' -f 1)"
+                theme_hash="$(sha256sum staging/THEMES.json | cut -d ' ' -f 1)"
+                dependency_hash="$(sha256sum staging/DEPENDENCIES.txt | cut -d ' ' -f 1)"
+                license_hash="$(sha256sum staging/DEPENDENCY-LICENSES.sha256 | cut -d ' ' -f 1)"
                 lock_hash="$(sha256sum ${projectSource}/flake.lock | cut -d ' ' -f 1)"
+                vulndb_hash="$(jq -r '.nodes.vulndb.locked.narHash' ${projectSource}/flake.lock)"
                 {
                   printf 'source-revision=%s\n' '${version}'
-                  printf 'flake-lock=%s\n' "$lock_hash"
+                  printf 'flake-lock-sha256=%s\n' "$lock_hash"
+                  printf 'vulnerability-database-nar-hash=%s\n' "$vulndb_hash"
                   printf 'target-system=%s\n' '${system}'
+                  printf 'go-toolchain=%s\n' '1.26.6'
+                  printf 'binary-sha256=%s\n' "$binary_hash"
+                  printf 'oci-sha256=%s\n' "$container_hash"
+                  printf 'theme-inventory-sha256=%s\n' "$theme_hash"
+                  printf 'dependency-inventory-sha256=%s\n' "$dependency_hash"
+                  printf 'dependency-license-inventory-sha256=%s\n' "$license_hash"
+                  printf 'verification-command=%s\n' 'nix flake check --print-build-logs'
+                  printf 'coverage-command=%s\n' 'nix run .#test-coverage'
+                  printf 'repository-coverage-minimum=%s\n' '85%'
+                  printf 'security-boundary-coverage-minimum=%s\n' '95%'
                   printf 'storage-provider=%s\n' 'deterministic-local-mock'
-                  printf 'implementation-status=%s\n' 'milestone-4-v1-in-progress'
+                  printf 'implementation-status=%s\n' 'v1-feature-complete-mock-backed'
                   printf 'live-gcs-validation=%s\n' 'not-performed'
+                  printf 'deployment-validation=%s\n' 'not-performed'
+                  printf 'build-and-test-credentials-used=%s\n' 'none'
                   printf 'build-and-test-external-services-used=%s\n' 'none'
-                } > "$out/RELEASE-INVENTORY.txt"
+                } > staging/RELEASE-INVENTORY.txt
+                tar --sort=name --mtime=@1 --owner=0 --group=0 --numeric-owner \
+                  -C staging -czf "$out/endlessfs-${version}-${system}.tar.gz" .
+                cp "staging/endlessfs-container-${version}.tar.gz" "$out/"
+                cp staging/RELEASE-INVENTORY.txt "$out/"
+                cp staging/DEPENDENCIES.txt "$out/"
+                cp staging/DEPENDENCY-LICENSES.sha256 "$out/"
+                cp staging/THEMES.json "$out/"
+                (
+                  cd "$out"
+                  sha256sum \
+                    "endlessfs-${version}-${system}.tar.gz" \
+                    "endlessfs-container-${version}.tar.gz" \
+                    DEPENDENCIES.txt DEPENDENCY-LICENSES.sha256 RELEASE-INVENTORY.txt THEMES.json \
+                    > SHA256SUMS
+                )
               '';
         in
         {
@@ -195,8 +275,9 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           lib = pkgs.lib;
+          go = goFor pkgs;
           packages = self.packages.${system};
-          goTools = [ pkgs.go ];
+          goTools = [ go ];
           qualityTools = goTools ++ [
             pkgs.actionlint
             pkgs.go-tools
@@ -295,14 +376,36 @@
                 exec go test ./internal/e2e -run '^TestE2E' -count=1 "$@"
               '';
 
+          test-coverage =
+            mkTask "endlessfs-test-coverage"
+              (goTools ++ [ pkgs.gawk ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.chromium ])
+              ''
+                export ENDLESSFS_RUN_E2E=1
+                ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                  export ENDLESSFS_CHROMIUM=${pkgs.chromium}/bin/chromium
+                ''}
+                profile="''${TMPDIR:-/tmp}/endlessfs-coverage.out"
+                go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
+                gawk -f tools/coverage.awk "$profile"
+              '';
+
           test-race = goTask "endlessfs-test-race" ''
             go test -race ./...
           '';
 
           test-fuzz = goTask "endlessfs-test-fuzz" ''
-            go test ./internal/config -run '^$' -fuzz FuzzParse -fuzztime "''${ENDLESSFS_FUZZTIME:-10s}"
-            go test ./internal/domain -run '^$' -fuzz FuzzParseUserPath -fuzztime "''${ENDLESSFS_FUZZTIME:-10s}"
-            go test ./internal/theme -run '^$' -fuzz FuzzThemeBoundaries -fuzztime "''${ENDLESSFS_FUZZTIME:-10s}"
+            fuzztime="''${ENDLESSFS_FUZZTIME:-2s}"
+            go test ./internal/config -run '^$' -fuzz '^FuzzParse$' -fuzztime "$fuzztime"
+            go test ./internal/domain -run '^$' -fuzz '^FuzzParseUserPath$' -fuzztime "$fuzztime"
+            go test ./internal/domain -run '^$' -fuzz '^FuzzParseUserPathEncodingBoundary$' -fuzztime "$fuzztime"
+            go test ./internal/state -run '^$' -fuzz '^FuzzStrictJSONDecoder$' -fuzztime "$fuzztime"
+            go test ./internal/state -run '^$' -fuzz '^FuzzPaginationCursorBoundary$' -fuzztime "$fuzztime"
+            go test ./internal/model -run '^$' -fuzz '^FuzzPersistenceRecordDecoders$' -fuzztime "$fuzztime"
+            go test ./internal/auth -run '^$' -fuzz '^FuzzWebAuthnResponseBoundary$' -fuzztime "$fuzztime"
+            go test ./internal/drive -run '^$' -fuzz '^FuzzShareSubtreeResolution$' -fuzztime "$fuzztime"
+            go test ./internal/provider/memory -run '^$' -fuzz '^FuzzRangeAndContentDisposition$' -fuzztime "$fuzztime"
+            go test ./internal/logging -run '^$' -fuzz '^FuzzStructuredLogRedaction$' -fuzztime "$fuzztime"
+            go test ./internal/theme -run '^$' -fuzz '^FuzzThemeBoundaries$' -fuzztime "$fuzztime"
           '';
 
           test-theme = goTask "endlessfs-test-theme" ''
@@ -319,13 +422,35 @@
             exec go run ./tools/check-source "$@"
           '';
 
-          security = mkTask "endlessfs-security" qualityTools ''
-            actionlint .github/workflows/*.yml
-            go vet ./...
-            staticcheck ./...
-            gosec -quiet -nosec-require-justification -nosec-require-rules ./...
-            go run ./tools/check-source .
-          '';
+          security =
+            mkTask "endlessfs-security"
+              (
+                qualityTools
+                ++ [
+                  pkgs.findutils
+                  pkgs.gawk
+                  pkgs.gnugrep
+                  pkgs.govulncheck
+                  pkgs.nix
+                ]
+              )
+              ''
+                actionlint .github/workflows/*.yml
+                go vet ./...
+                staticcheck ./...
+                gosec -quiet -nosec-require-justification -nosec-require-rules ./...
+                govulncheck -db=file://${vulndb} ./...
+                go test ./internal/config -count=1
+                ${dependencyPolicyCommand}
+                go run ./tools/check-source .
+                nix build '.#checks.${system}.container-policy' --no-link --print-build-logs
+              '';
+
+          dependency-check = mkTask "endlessfs-dependency-check" [
+            pkgs.findutils
+            pkgs.gawk
+            pkgs.gnugrep
+          ] dependencyPolicyCommand;
 
           pr-check = mkTask "endlessfs-pr-check" qualityTools ''
             unformatted="$(gofmt -l .)"
@@ -376,6 +501,7 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          go = goFor pkgs;
           src = pkgs.lib.cleanSource ./.;
           sandboxedStaticcheck = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "staticcheck ./...";
           containerPolicy =
@@ -397,6 +523,7 @@
                   .created == "1970-01-01T00:00:01+00:00" and
                   .config.Entrypoint == ["/bin/endlessfs"] and
                   .config.User == "65532:65532" and
+                  ((.config.Volumes == null) or (.config.Volumes == {})) and
                   .config.ExposedPorts == {"8080/tcp": {}}
                 ' "image/$config_file" >/dev/null
                 jq -r '.[0].Layers[]' image/manifest.json | while IFS= read -r layer; do
@@ -406,6 +533,10 @@
                   echo "container includes a shell or package manager" >&2
                   exit 1
                 fi
+                if rg '(^|/)(go\.mod|go\.sum|flake\.lock|\.git)(/|$)|\.go$|credential|secret|token' image-paths.txt; then
+                  echo "container includes source or credential-shaped material" >&2
+                  exit 1
+                fi
                 rg --quiet '(^|/)bin/endlessfs$' image-paths.txt
                 touch "$out"
               '';
@@ -413,7 +544,7 @@
             name: command: tools:
             pkgs.runCommand "endlessfs-${name}"
               {
-                nativeBuildInputs = [ pkgs.go ] ++ tools;
+                nativeBuildInputs = [ go ] ++ tools;
               }
               ''
                 export GOCACHE="$TMPDIR/go-cache"
@@ -465,10 +596,33 @@
           contract = goCheck "contract" "go test ./... -run '^TestContract'" [ ];
           theme = goCheck "theme" "go test ./internal/theme ./internal/httpapi -run 'Theme'" [ ];
           race = goCheck "race" "go test -race ./..." [ ];
+          coverage =
+            if pkgs.stdenv.hostPlatform.isLinux then
+              goCheck "coverage"
+                ''
+                  export ENDLESSFS_RUN_E2E=1
+                  export ENDLESSFS_CHROMIUM=${pkgs.chromium}/bin/chromium
+                  go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$TMPDIR/coverage.out"
+                  gawk -f tools/coverage.awk "$TMPDIR/coverage.out"
+                ''
+                [
+                  pkgs.chromium
+                  pkgs.gawk
+                ]
+            else
+              goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
           fuzz = goCheck "fuzz" ''
-            go test ./internal/config -run '^$' -fuzz FuzzParse -fuzztime 1s
-            go test ./internal/domain -run '^$' -fuzz FuzzParseUserPath -fuzztime 1s
-            go test ./internal/theme -run '^$' -fuzz FuzzThemeBoundaries -fuzztime 1s
+            go test ./internal/config -run '^$' -fuzz '^FuzzParse$' -fuzztime 1s
+            go test ./internal/domain -run '^$' -fuzz '^FuzzParseUserPath$' -fuzztime 1s
+            go test ./internal/domain -run '^$' -fuzz '^FuzzParseUserPathEncodingBoundary$' -fuzztime 1s
+            go test ./internal/state -run '^$' -fuzz '^FuzzStrictJSONDecoder$' -fuzztime 1s
+            go test ./internal/state -run '^$' -fuzz '^FuzzPaginationCursorBoundary$' -fuzztime 1s
+            go test ./internal/model -run '^$' -fuzz '^FuzzPersistenceRecordDecoders$' -fuzztime 1s
+            go test ./internal/auth -run '^$' -fuzz '^FuzzWebAuthnResponseBoundary$' -fuzztime 1s
+            go test ./internal/drive -run '^$' -fuzz '^FuzzShareSubtreeResolution$' -fuzztime 1s
+            go test ./internal/provider/memory -run '^$' -fuzz '^FuzzRangeAndContentDisposition$' -fuzztime 1s
+            go test ./internal/logging -run '^$' -fuzz '^FuzzStructuredLogRedaction$' -fuzztime 1s
+            go test ./internal/theme -run '^$' -fuzz '^FuzzThemeBoundaries$' -fuzztime 1s
           '' [ ];
           offline = goCheck "offline" "go test ./..." [ ];
 
@@ -477,12 +631,24 @@
               ''
                 actionlint .github/workflows/*.yml
                 gosec -quiet -nosec-require-justification -nosec-require-rules ./...
+                govulncheck -db=file://${vulndb} ./...
+                ${dependencyPolicyCommand}
                 go run ./tools/check-source .
               ''
               [
                 pkgs.actionlint
+                pkgs.findutils
+                pkgs.gawk
+                pkgs.gnugrep
                 pkgs.gosec
+                pkgs.govulncheck
               ];
+
+          dependencies = goCheck "dependencies" dependencyPolicyCommand [
+            pkgs.findutils
+            pkgs.gawk
+            pkgs.gnugrep
+          ];
 
           repository-policy = goCheck "repository-policy" "go run ./tools/repository-policy check" [ ];
         }
@@ -492,13 +658,14 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          go = goFor pkgs;
         in
         {
           default = pkgs.mkShellNoCC {
             packages = [
               pkgs.fd
               pkgs.gh
-              pkgs.go
+              go
               pkgs.go-tools
               pkgs.gosec
               pkgs.actionlint

@@ -32,7 +32,7 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
 
       - name: Verify the image source
-        run: nix flake check --print-build-logs
+        run: nix flake check --print-build-logs --max-jobs 1
 
       - name: Build and publish immutable and edge tags
         env:

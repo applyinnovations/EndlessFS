@@ -3,7 +3,7 @@
 EndlessFS is an open-source, provider-neutral, security-first private cloud drive. Its Go control plane authorizes file operations while browser file bytes travel directly to and from the configured object-storage provider through short-lived provider-native capabilities.
 
 > [!IMPORTANT]
-> This repository is at **Milestone 4**. The closed data-only Theme API, archive/media validator, immutable light/dark bundles, inheritance/fallback, per-user selection, content-addressed delivery, and Nix theme tooling now join the file, identity, and provider/state foundations. The complete browser drive remains under construction. Do not deploy this implementation or describe it as v1 complete or production-ready.
+> This repository is at **Milestone 5**. The accessible embedded Drive now exercises real passkey bootstrap/sign-in, direct resumable upload, download initiation, sharing, trash restore, responsive layout, and theme delivery through Go-controlled Chromium. Administration and account-recovery browser hardening plus final operational/release proof remain. Do not deploy this implementation or describe it as v1 complete or production-ready.
 
 The normative implementation contract is [docs/v1-specification.md](./docs/v1-specification.md). A feature-complete mock-backed v1 will prove the full product locally, but it will not prove Google Cloud Storage interoperability or provide a production storage adapter.
 
@@ -72,7 +72,7 @@ All required builds and checks are Nix sandbox derivations, so project code cann
 
 ## Nix task interface
 
-The v1 spec reserves the following interface. Implemented commands are usable now; incomplete commands deliberately return an error so an empty placeholder cannot be mistaken for validation.
+The v1 spec defines the following interface. Implemented commands are usable now; no command reports success through an empty test selection.
 
 | Command | Current purpose |
 |---|---|
@@ -87,7 +87,7 @@ The v1 spec reserves the following interface. Implemented commands are usable no
 | `nix run .#test` / `.#test-unit` | Run the current Go suite. |
 | `nix run .#test-integration` | Run tests named as integration tests. |
 | `nix run .#test-contract` | Run reusable provider and state-store contract suites. |
-| `nix run .#test-e2e` | Reserved for Milestone 5; currently fails closed. |
+| `nix run .#test-e2e` | Run Go-controlled Chromium passkey and core Drive workflows. Nix supplies Chromium on Linux. |
 | `nix run .#test-race` | Run the suite with Go's race detector. |
 | `nix run .#test-fuzz` | Run bounded configuration, canonical-path, and theme-boundary fuzz smoke targets. |
 | `nix run .#security` | Run deterministic static and forbidden-source checks. |
@@ -143,6 +143,7 @@ internal/identity/       bootstrap, registration, accounts, passkeys, invites, r
 internal/drive/          authenticated files, transfers, operations, trash, previews, and shares
 internal/theme/          closed Theme API, compiler, media validation, registry, preferences, and built-ins
 internal/web/            embedded HTML, CSS, and vanilla JavaScript
+internal/e2e/            Go-controlled Chromium passkey, Drive, responsive, and privacy workflows
 tools/check-source/      forbidden dependency/source policy check
 tools/generate-secret/   operator-directed 256-bit environment-secret generator
 tools/theme/             theme validation, generated API inventory, build embedding, and preview fixture
@@ -180,8 +181,8 @@ The policy requires one approval, resolved review threads, linear history, and t
 - **Milestone 2 — complete:** WebAuthn, sessions, CSRF/origin policy, bootstrap, registration matrix, invites, roles, and recovery.
 - **Milestone 3 — complete:** browse and file operations, direct resumable transfers, idempotency, trash, previews, and sharing control plane.
 - **Milestone 4 — complete:** closed Theme API, safe media validation, complete light/dark bundles, inheritance, fallback, preferences, and Nix tooling.
-- **Milestone 5 — next:** accessible browser drive, transfers, previews, trash, and theme UX.
-- **Milestone 6:** sharing, settings, passkey, and administration UI.
+- **Milestone 5 — complete:** accessible browser drive, confirmed-offset transfers, previews, trash, theme UX, and real Chromium coverage.
+- **Milestone 6 — next:** sharing, settings, passkey, recovery, and administration UI hardening and browser matrices.
 - **Milestone 7:** cross-user/adversarial matrices, full fuzz/race/coverage gates, browser accessibility, OCI inspection, and release evidence.
 
 v1 is done only when every acceptance criterion in section 21 is evidenced, the section 22 checklist is complete, and a clean, network-denied `nix flake check` passes.

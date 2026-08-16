@@ -2,31 +2,41 @@
 package web
 
 import (
+	"bytes"
 	"embed"
 	"net/http"
+	"strings"
 )
 
 //go:embed static/*
 var assets embed.FS
 
-// Handler serves only the explicitly embedded application assets.
-func Handler() http.Handler {
+const themeLink = `<link id="theme-stylesheet" rel="stylesheet" disabled>`
+
+// Handler serves only the explicitly embedded application assets. An optional
+// resolver may select a validated same-origin theme stylesheet before paint.
+func Handler(themeCSSResolvers ...func(*http.Request) string) http.Handler {
 	index := mustRead("static/index.html")
 	stylesheet := mustRead("static/app.css")
 	script := mustRead("static/app.js")
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body []byte
-		switch r.URL.Path {
-		case "/":
+		switch {
+		case applicationPath(r.URL.Path):
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			body = index
-		case "/assets/app.css":
+			if len(themeCSSResolvers) != 0 {
+				if href := themeCSSResolvers[0](r); validThemeCSSURL(href) {
+					body = bytes.Replace(index, []byte(themeLink), []byte(`<link id="theme-stylesheet" rel="stylesheet" href="`+href+`">`), 1)
+				}
+			}
+		case r.URL.Path == "/assets/app.css":
 			w.Header().Set("Cache-Control", "public, max-age=3600")
 			w.Header().Set("Content-Type", "text/css; charset=utf-8")
 			body = stylesheet
-		case "/assets/app.js":
+		case r.URL.Path == "/assets/app.js":
 			w.Header().Set("Cache-Control", "public, max-age=3600")
 			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 			body = script
@@ -36,6 +46,23 @@ func Handler() http.Handler {
 		}
 		_, _ = w.Write(body)
 	})
+}
+
+func validThemeCSSURL(value string) bool {
+	return strings.HasPrefix(value, "/assets/themes/") && strings.HasSuffix(value, "/theme.css") && !strings.ContainsAny(value, "\"'<>&?#\\\r\n\x00")
+}
+
+func applicationPath(path string) bool {
+	switch path {
+	case "/", "/bootstrap", "/register", "/recover", "/trash", "/settings", "/admin":
+		return true
+	}
+	return oneSegmentAfter(path, "/register/invite/") || oneSegmentAfter(path, "/recover/")
+}
+
+func oneSegmentAfter(path, prefix string) bool {
+	value, found := strings.CutPrefix(path, prefix)
+	return found && value != "" && !strings.Contains(value, "/")
 }
 
 func mustRead(name string) []byte {

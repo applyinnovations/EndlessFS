@@ -50,6 +50,8 @@ func TestCheckSkipsBuildAndVersionControlDirectories(t *testing.T) {
 	root := t.TempDir()
 	writeFixture(t, root, ".git/generated.py")
 	writeFixture(t, root, "result-build/package.json")
+	writeFixture(t, root, "vendor/example/dependency/Makefile")
+	writeFixture(t, root, "vendor/example/dependency/generator.py")
 
 	violations, err := check(root)
 	if err != nil {

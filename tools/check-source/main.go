@@ -71,7 +71,7 @@ func check(root string) ([]string, error) {
 		}
 		name := strings.ToLower(entry.Name())
 		if entry.IsDir() {
-			if path != "." && (name == ".git" || name == ".direnv" || name == "result" || strings.HasPrefix(name, "result-")) {
+			if path != "." && (name == ".git" || name == ".direnv" || name == "vendor" || name == "result" || strings.HasPrefix(name, "result-")) {
 				return filepath.SkipDir
 			}
 			return nil

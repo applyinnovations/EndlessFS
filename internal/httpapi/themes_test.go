@@ -25,6 +25,11 @@ func TestIntegrationThemeHTTPMetadataPreferenceAssetsAndSafeFallback(t *testing.
 	if device.HttpOnly || !device.Secure || device.Value != "endlessfs-dark" {
 		t.Fatalf("device cookie = %+v", device)
 	}
+	prepaint := performRequest(t, env.handler, http.MethodGet, "/settings", "", "", []*http.Cookie{device}, nil)
+	darkSelection := env.themes.ResolveDevice(device.Value, false, false)
+	if prepaint.Code != http.StatusOK || !bytes.Contains(prepaint.Body.Bytes(), []byte(`href="`+darkSelection.CSSURL+`"`)) {
+		t.Fatalf("pre-paint theme shell = %d %s", prepaint.Code, prepaint.Body.String())
+	}
 	preference := performRequest(t, env.handler, http.MethodGet, "/api/v1/me/preferences/theme", "", "", []*http.Cookie{env.session}, nil)
 	if preference.Code != http.StatusOK || !bytes.Contains(preference.Body.Bytes(), []byte(`"preference":"endlessfs-dark"`)) {
 		t.Fatalf("theme preference = %d %s", preference.Code, preference.Body.String())

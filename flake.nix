@@ -194,6 +194,7 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          lib = pkgs.lib;
           packages = self.packages.${system};
           goTools = [ pkgs.go ];
           qualityTools = goTools ++ [
@@ -283,7 +284,16 @@
           test-contract = goTask "endlessfs-test-contract" ''
             go test ./... -run '^TestContract'
           '';
-          test-e2e = unavailable "endlessfs-test-e2e" "Milestone 5";
+          test-e2e =
+            mkTask "endlessfs-test-e2e"
+              (goTools ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.chromium ])
+              ''
+                export ENDLESSFS_RUN_E2E=1
+                ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                  export ENDLESSFS_CHROMIUM=${pkgs.chromium}/bin/chromium
+                ''}
+                exec go test ./internal/e2e -run '^TestE2E' -count=1 "$@"
+              '';
 
           test-race = goTask "endlessfs-test-race" ''
             go test -race ./...
@@ -421,6 +431,16 @@
           container = self.packages.${system}.container;
           container-policy = containerPolicy;
           release = self.packages.${system}.release;
+
+          e2e =
+            if pkgs.stdenv.hostPlatform.isLinux then
+              goCheck "e2e" ''
+                export ENDLESSFS_RUN_E2E=1
+                export ENDLESSFS_CHROMIUM=${pkgs.chromium}/bin/chromium
+                go test ./internal/e2e -run '^TestE2E' -count=1
+              '' [ pkgs.chromium ]
+            else
+              goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
 
           format = goCheck "format" ''
             unformatted="$(gofmt -l .)"

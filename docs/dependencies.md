@@ -27,3 +27,11 @@ EndlessFS keeps direct dependencies deliberately small. Every addition must docu
 - **Security posture:** This module is imported only by `_test.go` files and is absent from the application binary's runtime call graph. It generates in-memory test credentials and performs no external I/O.
 
 The WebAuthn dependency closure includes audited format/parsing support for CBOR, COSE, TPM, JWT metadata, UUIDs, and generated serialization. It is locked by `go.sum`, vendored for offline Nix builds, statically linked, and receives no network or filesystem authority from EndlessFS application code.
+
+## `github.com/chromedp/chromedp` and `github.com/chromedp/cdproto`
+
+- **Purpose:** Test-only control of pinned Chromium and its WebAuthn virtual-authenticator, network, download, viewport, and DOM accessibility surfaces.
+- **Why the standard library is insufficient:** The standard library can test HTTP handlers but does not implement the Chrome DevTools Protocol or execute the embedded browser application. The v1 contract explicitly requires a headless Chromium driver written in Go and forbids a Node-based browser toolchain.
+- **Maintenance:** The chromedp organization actively maintains both modules and tracks the evolving DevTools protocol. EndlessFS pins `chromedp` at `v0.15.1` and `cdproto` at an immutable pseudo-version; upgrades require the real-browser suite to remain green against Nix Chromium.
+- **License:** MIT. Vendored license notices are retained.
+- **Security posture:** Both modules are imported only by `_test.go` files. Browser execution is loopback-only, uses a temporary profile, disables background networking, records every HTTP(S) request origin, and fails if the UI contacts anything except its control and returned capability origins. Neither module enters the production application binary.

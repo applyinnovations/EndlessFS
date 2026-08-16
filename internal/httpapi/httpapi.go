@@ -53,7 +53,17 @@ func newHandler(cfg config.PublicConfig, version string, secure bool, dataOrigin
 	if api != nil {
 		api.routes(mux)
 	}
-	mux.Handle("GET /", webassets.Handler())
+	application := webassets.Handler()
+	if api != nil && api.themes != nil {
+		application = webassets.Handler(func(r *http.Request) string {
+			value := ""
+			if cookie, err := r.Cookie(api.themes.DeviceCookieName()); err == nil {
+				value = cookie.Value
+			}
+			return api.themes.ResolveDevice(value, false, false).CSSURL
+		})
+	}
+	mux.Handle("GET /", application)
 
 	return requestIDMiddleware(securityHeaders(mux, secure, dataOrigin))
 }
@@ -73,7 +83,7 @@ func securityHeaders(next http.Handler, secure bool, dataOrigin string) http.Han
 		if dataOrigin != "" {
 			connectSource += " " + dataOrigin
 		}
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' "+dataOrigin+"; font-src 'self'; style-src 'self'; script-src 'self'; connect-src "+connectSource)
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' "+dataOrigin+"; frame-src 'self' "+dataOrigin+"; font-src 'self'; style-src 'self'; script-src 'self'; connect-src "+connectSource)
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 		w.Header().Set("Referrer-Policy", "no-referrer")

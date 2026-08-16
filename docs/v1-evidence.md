@@ -71,8 +71,6 @@ The Milestone 3 checkpoint implements specification sections 11, 12.5, and 12.6 
 
 The public API accepts virtual paths only. Storage scopes are constructed from authenticated session owners, trash resides in a separate provider area, and share listings translate all paths relative to a version-bound root. The mock provider validates safe preview signatures after direct upload completion so a client-supplied media type alone cannot enable inline rendering.
 
-## Remaining milestones
-
 ## Data-only theme system — complete
 
 The Milestone 4 checkpoint implements specification section 14, acceptance criteria AC-056–AC-059 at the compiler/control-plane layer, and checklist 22.8 except the browser workflows that intentionally land in Milestone 5:
@@ -93,9 +91,27 @@ The Milestone 4 checkpoint implements specification section 14, acceptance crite
 
 The Nix-built production binary can be overridden with `themeBundles = [ ... ]`; each input is validated and compiled into generated Go data before the binary build. Normal runtime selection performs no archive parsing, mutable theme-directory lookup, or network installation. Release archives include `THEMES.json` with IDs, API versions, licenses, and content digests.
 
+## Browser Drive and accessibility — complete
+
+The Milestone 5 checkpoint implements specification section 13’s core Drive workflows and checklist section 22.9 at the Drive/browser boundary:
+
+| Requirement | Automated evidence |
+|---|---|
+| Embedded bootstrap, registration, sign-in, Drive, trash, settings, admin, and public-share workspaces with explicit loading/empty/error states | `TestApplicationShellExposesCompleteAccessibleWorkspaces`, `TestIntegrationPublicEndpoints` |
+| Real passkey bootstrap and usernameless login through a browser virtual authenticator | `TestE2EBrowserBootstrapLoginDriveShareAndTrash` |
+| Keyboard bootstrap/sign-in, visible focus, labeled controls, and focus-restoring native dialogs | `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; embedded source assertions |
+| Direct resumable upload with bounded 1–8 concurrency, provider-confirmed offsets, retry, cancellation, multi-file, folder fallback, and conflict policy | `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; `TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML`; provider contract fault suite |
+| Download initiation, safe preview modes, public share creation, trash and restore | `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; file/share integration suite |
+| Responsive 320 CSS-pixel layout and reduced-motion handling | Chromium viewport assertion in `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; `TestApplicationShellExposesCompleteAccessibleWorkspaces` |
+| No external runtime origin and no browser persistence of tokens or capabilities | Chromium request-origin assertion; `TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML` |
+| Selected validated theme stylesheet in the initial HTML response, with safe fallback | `TestIntegrationThemeHTTPMetadataPreferenceAssetsAndSafeFallback`, `TestThemeResolverCanOnlyInjectValidatedSameOriginStylesheet` |
+| Linux CI uses Nix-pinned Chromium; macOS contributors use the same Go driver with installed Chrome | `nix run .#test-e2e`; Linux `checks.e2e` derivation |
+
+The browser source creates every untrusted filename and display name through text nodes, keeps bearer material in short-lived closures, removes capability-bearing preview DOM on close, extracts invite/recovery tokens before the first request, and records no sensitive client-side storage.
+
 ## Remaining milestones
 
-- Complete accessible browser workflows and browser-level tests.
-- Adversarial matrices, coverage thresholds, threat-model review, and final release evidence.
+- Complete browser matrices for invite/recovery, passkey/account settings, share management, and administrator workflows.
+- Complete adversarial matrices, coverage thresholds, threat-model review, operations/backup proof, and final release evidence.
 
 Until every remaining section is implemented and every section 21 criterion and section 22 item has evidence, the repository MUST continue to identify itself as under construction rather than v1 complete.

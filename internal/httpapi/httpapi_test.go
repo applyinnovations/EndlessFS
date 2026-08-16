@@ -22,6 +22,11 @@ func TestIntegrationPublicEndpoints(t *testing.T) {
 		{path: "/healthz", contentType: "text/plain; charset=utf-8", body: "ok\n"},
 		{path: "/readyz", contentType: "text/plain; charset=utf-8", body: "ready\n"},
 		{path: "/", contentType: "text/html; charset=utf-8", body: "EndlessFS"},
+		{path: "/bootstrap", contentType: "text/html; charset=utf-8", body: "EndlessFS"},
+		{path: "/register", contentType: "text/html; charset=utf-8", body: "EndlessFS"},
+		{path: "/trash", contentType: "text/html; charset=utf-8", body: "EndlessFS"},
+		{path: "/settings", contentType: "text/html; charset=utf-8", body: "EndlessFS"},
+		{path: "/admin", contentType: "text/html; charset=utf-8", body: "EndlessFS"},
 		{path: "/assets/app.css", contentType: "text/css; charset=utf-8", body: "color-scheme"},
 		{path: "/assets/app.js", contentType: "text/javascript; charset=utf-8", body: "addEventListener"},
 	}
@@ -117,5 +122,8 @@ func assertSecurityHeaders(t *testing.T, header http.Header) {
 		if header.Get(name) == "" {
 			t.Errorf("%s is missing", name)
 		}
+	}
+	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "frame-src 'self'") {
+		t.Errorf("Content-Security-Policy does not constrain preview frames: %q", csp)
 	}
 }

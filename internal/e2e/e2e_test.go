@@ -53,6 +53,9 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		chromedp.Flag("no-first-run", true),
 		chromedp.Flag("no-default-browser-check", true),
 	)
+	if os.Getenv("ENDLESSFS_CHROMIUM_NO_SANDBOX") == "1" {
+		options = append(options, chromedp.NoSandbox)
+	}
 	allocator, cancelAllocator := chromedp.NewExecAllocator(context.Background(), options...)
 	t.Cleanup(cancelAllocator)
 	ctx, cancelBrowser := chromedp.NewContext(allocator)
@@ -534,6 +537,9 @@ func newTestBrowser(t *testing.T) *testBrowser {
 		chromedp.Flag("disable-background-networking", true), chromedp.Flag("disable-default-apps", true),
 		chromedp.Flag("disable-sync", true), chromedp.Flag("no-first-run", true), chromedp.Flag("no-default-browser-check", true),
 	)
+	if os.Getenv("ENDLESSFS_CHROMIUM_NO_SANDBOX") == "1" {
+		options = append(options, chromedp.NoSandbox)
+	}
 	allocator, cancelAllocator := chromedp.NewExecAllocator(context.Background(), options...)
 	ctx, cancelBrowser := chromedp.NewContext(allocator)
 	ctx, cancelTimeout := context.WithTimeout(ctx, 90*time.Second)

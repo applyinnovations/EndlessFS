@@ -11,8 +11,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/applyinnovations/endlessfs/internal/auth"
 	"github.com/applyinnovations/endlessfs/internal/config"
+	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/httpapi"
+	"github.com/applyinnovations/endlessfs/internal/identity"
+	"github.com/applyinnovations/endlessfs/internal/state"
 )
 
 var version = "dev"
@@ -30,10 +34,29 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	store := state.NewMemoryStore()
+	repository := identity.NewRepository(store)
+	ids := domain.SystemIDGenerator()
+	clock := domain.SystemClock{}
+	webAuthn, err := auth.NewGoWebAuthn(cfg.WebAuthnRPID, cfg.WebAuthnRPName, cfg.AllowedOrigin)
+	if err != nil {
+		return err
+	}
+	sessions, err := auth.NewSessionManager(repository, ids, clock, cfg.SessionTTL, cfg.AllowedOrigin, cfg.Secure, cfg.SessionSecret)
+	if err != nil {
+		return err
+	}
+	policy := identity.NewMutablePolicy(identity.RegistrationPolicy{
+		AllowPublic: cfg.AllowRegistration, AllowInvite: cfg.InviteRegistration,
+	})
+	identityService, err := identity.NewService(repository, webAuthn, sessions, ids, clock, policy, cfg.BootstrapToken, cfg.BaseURL)
+	if err != nil {
+		return err
+	}
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           httpapi.New(cfg.Public(), version),
+		Handler:           httpapi.NewApplication(cfg, version, identityService, sessions),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

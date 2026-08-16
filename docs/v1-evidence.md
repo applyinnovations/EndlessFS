@@ -27,9 +27,32 @@ The Milestone 1 checkpoint implements specification sections 7–9 and checklist
 
 The shared suites are independently runnable with `nix run .#test-contract`. The race gate executes every implementation and contract under Go's race detector. The in-memory provider's HTTP loopback data plane instruments transfer bytes so contract tests prove that file bodies do not pass through application use cases.
 
+## Identity and registration — complete
+
+The Milestone 2 checkpoint implements specification sections 10, 12.3, and 12.4 plus checklist sections 22.3 and 22.4:
+
+| Requirement | Automated evidence |
+|---|---|
+| Pinned established WebAuthn library, discoverable credentials, user verification, opaque user fields, and virtual-authenticator success | `TestIntegrationGoWebAuthnVirtualAuthenticatorUsernamelessFlow`; [WebAuthn threat review](./webauthn-threat-review.md) |
+| Wrong origin, RP ID/hash, challenge, user handle, signature, owner, or missing verification fails | `TestIntegrationGoWebAuthnRejectsWrongOriginRPChallengeAndVerification`, `TestIntegrationGoWebAuthnAuthenticationNegativeMatrix` |
+| Browser/type-bound, expiring, atomically consumed ceremonies and usernameless session issuance | `TestIntegrationCeremonyBindingExpiryReplayAndUsernamelessAuthentication` |
+| Secure/loopback configuration coherence and secret-free public configuration | `TestParseDefaults`, `TestParseSecureConfiguration`, `TestParseRejectsUnsafeOrMalformedValues`, `TestIntegrationPublicConfigExposesNoSecrets` |
+| One concurrent bootstrap winner and durable enabled first-admin materialization | `TestIntegrationConcurrentBootstrapCreatesExactlyOneAdmin` |
+| Independent four-way public/invite policy at start and verification | `TestIntegrationRegistrationPolicyMatrixAndVerificationRecheck` |
+| Process-local public-registration rate limit | `TestPublicRegistrationRateLimitIsLocalDeterministicAndBounded` |
+| Single-use hashed invite; concurrent use, expiry, revocation, and safe listing | `TestIntegrationInviteIsHashedSingleUseAndConcurrent` |
+| Stateful hashed sessions, secure host cookie, rotation, expiry, revocation, exact-origin CSRF, and disabled-account denial | `TestIntegrationSessionsCSRFRotationExpiryAndDisabledAccount`, `TestKeyedHashBindsProtectionKeyAndValue` |
+| Recovery adds a passkey to the same identity, retains old credentials, consumes the hashed token, and revokes sessions | `TestIntegrationRecoveryAddsPasskeyPreservesIdentityAndRevokesSessions` |
+| Multiple passkeys, labels, authentication with either credential, and concurrent final-passkey protection | `TestIntegrationRecoveryAddsPasskeyPreservesIdentityAndRevokesSessions`, `TestDisplayNameAndPasskeyLabelChangesDoNotAlterIdentityOrRoles` |
+| Display name remains presentation-only and roles remain separate | `TestDisplayNameAndPasskeyLabelChangesDoNotAlterIdentityOrRoles`, `TestProfileContainsExactlyIdentityFields` |
+| Public registration never grants admin; final enabled admin survives concurrent changes; admin cursors reject tampering | `TestIntegrationConcurrentAdminChangesPreserveEnabledAdministrator` |
+| Strict identity HTTP JSON/problems, origin, session/CSRF cookies, protected mutations, and one-time admin link responses | `TestIntegrationIdentityHTTPBootstrapLoginCSRFAndAdmin`, `TestIdentityHTTPRejectsOriginAndMalformedJSONWithStableProblem` |
+| No password-adjacent external identity concepts enter request, persistence, or embedded UI surfaces | `tools/check-source` identity-surface scan |
+
+The selected WebAuthn and virtual-authenticator modules are pinned in `go.mod`, `go.sum`, `vendor/`, and the Nix source closure. The application binary uses only the real verifier; the virtual authenticator is test-only. Invite and recovery creation use durable idempotency claims: repeating a key cannot create another resource and cannot recover the deliberately one-time raw link.
+
 ## Remaining milestones
 
-- Identity, sessions, bootstrap, registration, invites, roles, and recovery.
 - File/trash/share control-plane use cases and HTTP API.
 - Closed theme compiler and immutable fallback bundles.
 - Complete accessible browser workflows and browser-level tests.

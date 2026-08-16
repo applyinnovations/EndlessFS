@@ -2,6 +2,7 @@ package secret
 
 import (
 	"bytes"
+	"encoding/base64"
 	"log/slog"
 	"strings"
 	"testing"
@@ -22,6 +23,18 @@ func TestTokenHashUsesConstantShapeAndMatches(t *testing.T) {
 	hash := Hash(token)
 	if !MatchesHash(token, hash) || MatchesHash(token+"x", hash) || MatchesHash(token, "invalid") {
 		t.Fatal("unexpected token/hash match behavior")
+	}
+}
+
+func TestKeyedHashBindsProtectionKeyAndValue(t *testing.T) {
+	key := Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x41}, 32)))
+	otherKey := Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32)))
+	encoded := KeyedHash(key, "browser binding")
+	if !MatchesKeyedHash(key, "browser binding", encoded) {
+		t.Fatal("keyed hash did not match")
+	}
+	if MatchesKeyedHash(otherKey, "browser binding", encoded) || MatchesKeyedHash(key, "other", encoded) {
+		t.Fatal("keyed hash did not bind key and value")
 	}
 }
 

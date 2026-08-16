@@ -3,6 +3,7 @@ package model
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"regexp"
 	"sort"
 	"time"
@@ -76,6 +77,263 @@ func (r *Credential) Validate() error {
 	return validateTimes(r.CreatedAt, r.LastUsedAt)
 }
 
+type CredentialIndex struct {
+	SchemaVersion int           `json:"schemaVersion"`
+	UserID        domain.UserID `json:"userID"`
+	CredentialIDs []string      `json:"credentialIDs"`
+}
+
+func (r *CredentialIndex) Validate() error {
+	if err := validateSchema(r.SchemaVersion); err != nil {
+		return err
+	}
+	if !r.UserID.Valid() || len(r.CredentialIDs) == 0 {
+		return domain.NewError(domain.ErrorInvalid, "invalid credential index")
+	}
+	seen := make(map[string]struct{}, len(r.CredentialIDs))
+	for _, credentialID := range r.CredentialIDs {
+		if !validBase64URL(credentialID, 1) {
+			return domain.NewError(domain.ErrorInvalid, "invalid indexed credential ID")
+		}
+		if _, exists := seen[credentialID]; exists {
+			return domain.NewError(domain.ErrorInvalid, "duplicate indexed credential ID")
+		}
+		seen[credentialID] = struct{}{}
+	}
+	sort.Strings(r.CredentialIDs)
+	return nil
+}
+
+type CeremonyType string
+
+const (
+	CeremonyRegistration   CeremonyType = "registration"
+	CeremonyAuthentication CeremonyType = "authentication"
+)
+
+type CeremonyFlow string
+
+const (
+	CeremonyBootstrap          CeremonyFlow = "bootstrap"
+	CeremonyPublic             CeremonyFlow = "public"
+	CeremonyInvite             CeremonyFlow = "invite"
+	CeremonyAuthenticationFlow CeremonyFlow = "authentication"
+	CeremonyAddPasskey         CeremonyFlow = "add_passkey"
+	CeremonyRecovery           CeremonyFlow = "recovery"
+)
+
+// Ceremony stores opaque library session data server-side. BrowserBindingHash
+// binds it to the browser without storing the raw binding cookie.
+type Ceremony struct {
+	SchemaVersion      int                     `json:"schemaVersion"`
+	CeremonyID         string                  `json:"ceremonyID"`
+	Type               CeremonyType            `json:"type"`
+	Flow               CeremonyFlow            `json:"flow"`
+	BrowserBindingHash string                  `json:"browserBindingHash"`
+	UserID             *domain.UserID          `json:"userID,omitempty"`
+	DisplayName        *domain.DisplayName     `json:"displayName,omitempty"`
+	CredentialLabel    *domain.CredentialLabel `json:"credentialLabel,omitempty"`
+	BearerTokenHash    string                  `json:"bearerTokenHash,omitempty"`
+	LibrarySession     json.RawMessage         `json:"librarySession"`
+	CreatedAt          time.Time               `json:"createdAt"`
+	ExpiresAt          time.Time               `json:"expiresAt"`
+	ConsumedAt         *time.Time              `json:"consumedAt,omitempty"`
+	OperationID        string                  `json:"operationID,omitempty"`
+}
+
+func (r *Ceremony) Validate() error {
+	if err := validateSchema(r.SchemaVersion); err != nil {
+		return err
+	}
+	if !validOpaqueID(r.CeremonyID) || !validHash(r.BrowserBindingHash) || len(r.LibrarySession) == 0 {
+		return domain.NewError(domain.ErrorInvalid, "invalid ceremony")
+	}
+	if r.Type != CeremonyRegistration && r.Type != CeremonyAuthentication {
+		return domain.NewError(domain.ErrorInvalid, "invalid ceremony type")
+	}
+	if !validCeremonyFlow(r.Type, r.Flow) {
+		return domain.NewError(domain.ErrorInvalid, "invalid ceremony flow")
+	}
+	if r.UserID != nil && !r.UserID.Valid() {
+		return domain.NewError(domain.ErrorInvalid, "invalid ceremony user")
+	}
+	if r.DisplayName != nil && r.DisplayName.String() == "" {
+		return domain.NewError(domain.ErrorInvalid, "invalid ceremony display name")
+	}
+	if r.CredentialLabel != nil && r.CredentialLabel.String() == "" {
+		return domain.NewError(domain.ErrorInvalid, "invalid ceremony credential label")
+	}
+	if r.BearerTokenHash != "" && !validHash(r.BearerTokenHash) {
+		return domain.NewError(domain.ErrorInvalid, "invalid ceremony bearer hash")
+	}
+	if err := validateTimes(r.CreatedAt, r.ExpiresAt); err != nil || !r.ExpiresAt.After(r.CreatedAt) {
+		return domain.NewError(domain.ErrorInvalid, "invalid ceremony times")
+	}
+	if err := validateOptionalTimes(r.ConsumedAt); err != nil {
+		return err
+	}
+	if r.ConsumedAt == nil && r.OperationID != "" {
+		return domain.NewError(domain.ErrorInvalid, "unused ceremony has an operation")
+	}
+	return nil
+}
+
+func validCeremonyFlow(ceremonyType CeremonyType, flow CeremonyFlow) bool {
+	if ceremonyType == CeremonyAuthentication {
+		return flow == CeremonyAuthenticationFlow
+	}
+	switch flow {
+	case CeremonyBootstrap, CeremonyPublic, CeremonyInvite, CeremonyAddPasskey, CeremonyRecovery:
+		return true
+	default:
+		return false
+	}
+}
+
+type OperationStatus string
+
+const (
+	OperationClaimed   OperationStatus = "claimed"
+	OperationCommitted OperationStatus = "committed"
+)
+
+// RegistrationOperation is a durable state machine for multi-record identity
+// changes. Credential contains only verified public material.
+type RegistrationOperation struct {
+	SchemaVersion int                `json:"schemaVersion"`
+	OperationID   string             `json:"operationID"`
+	Flow          CeremonyFlow       `json:"flow"`
+	Status        OperationStatus    `json:"status"`
+	UserID        domain.UserID      `json:"userID"`
+	DisplayName   domain.DisplayName `json:"displayName"`
+	Credential    Credential         `json:"credential"`
+	CreatedAt     time.Time          `json:"createdAt"`
+	CommittedAt   *time.Time         `json:"committedAt,omitempty"`
+}
+
+func (r *RegistrationOperation) Validate() error {
+	if err := validateSchema(r.SchemaVersion); err != nil {
+		return err
+	}
+	if !validOpaqueID(r.OperationID) || !r.UserID.Valid() || r.DisplayName.String() == "" {
+		return domain.NewError(domain.ErrorInvalid, "invalid registration operation")
+	}
+	if !validCeremonyFlow(CeremonyRegistration, r.Flow) {
+		return domain.NewError(domain.ErrorInvalid, "invalid registration flow")
+	}
+	if r.Status != OperationClaimed && r.Status != OperationCommitted {
+		return domain.NewError(domain.ErrorInvalid, "invalid registration operation status")
+	}
+	if err := r.Credential.Validate(); err != nil {
+		return err
+	}
+	if err := validateUTC(r.CreatedAt); err != nil {
+		return err
+	}
+	if err := validateOptionalTimes(r.CommittedAt); err != nil {
+		return err
+	}
+	if (r.Status == OperationCommitted) != (r.CommittedAt != nil) {
+		return domain.NewError(domain.ErrorInvalid, "registration commit state mismatch")
+	}
+	return nil
+}
+
+type BootstrapState struct {
+	SchemaVersion int                   `json:"schemaVersion"`
+	Status        OperationStatus       `json:"status"`
+	Operation     RegistrationOperation `json:"operation"`
+	CompletedAt   *time.Time            `json:"completedAt,omitempty"`
+}
+
+func (r *BootstrapState) Validate() error {
+	if err := validateSchema(r.SchemaVersion); err != nil {
+		return err
+	}
+	if r.Status != OperationClaimed && r.Status != OperationCommitted {
+		return domain.NewError(domain.ErrorInvalid, "invalid bootstrap status")
+	}
+	if err := r.Operation.Validate(); err != nil {
+		return err
+	}
+	if r.Operation.Flow != CeremonyBootstrap || r.Operation.Status != r.Status {
+		return domain.NewError(domain.ErrorInvalid, "bootstrap operation mismatch")
+	}
+	if err := validateOptionalTimes(r.CompletedAt); err != nil {
+		return err
+	}
+	if (r.Status == OperationCommitted) != (r.CompletedAt != nil) {
+		return domain.NewError(domain.ErrorInvalid, "bootstrap completion mismatch")
+	}
+	return nil
+}
+
+type FirstAccountMarker struct {
+	SchemaVersion int           `json:"schemaVersion"`
+	Flow          CeremonyFlow  `json:"flow"`
+	OperationID   string        `json:"operationID"`
+	UserID        domain.UserID `json:"userID"`
+	CreatedAt     time.Time     `json:"createdAt"`
+}
+
+func (r *FirstAccountMarker) Validate() error {
+	if err := validateSchema(r.SchemaVersion); err != nil {
+		return err
+	}
+	if r.Flow != CeremonyBootstrap && r.Flow != CeremonyPublic && r.Flow != CeremonyInvite {
+		return domain.NewError(domain.ErrorInvalid, "invalid first-account flow")
+	}
+	if !validOpaqueID(r.OperationID) || !r.UserID.Valid() {
+		return domain.NewError(domain.ErrorInvalid, "invalid first-account marker")
+	}
+	return validateUTC(r.CreatedAt)
+}
+
+type IdempotencyKind string
+
+const (
+	IdempotencyInvite   IdempotencyKind = "invite"
+	IdempotencyRecovery IdempotencyKind = "recovery"
+)
+
+type IdempotencyRecord struct {
+	SchemaVersion int             `json:"schemaVersion"`
+	OwnerUserID   domain.UserID   `json:"ownerUserID"`
+	KeyHash       string          `json:"keyHash"`
+	Kind          IdempotencyKind `json:"kind"`
+	Fingerprint   string          `json:"fingerprint"`
+	ResourceID    string          `json:"resourceID"`
+	Resource      json.RawMessage `json:"resource"`
+	Status        OperationStatus `json:"status"`
+	CreatedAt     time.Time       `json:"createdAt"`
+	CommittedAt   *time.Time      `json:"committedAt,omitempty"`
+}
+
+func (r *IdempotencyRecord) Validate() error {
+	if err := validateSchema(r.SchemaVersion); err != nil {
+		return err
+	}
+	if !r.OwnerUserID.Valid() || !validHash(r.KeyHash) || !validHash(r.Fingerprint) || !validOpaqueID(r.ResourceID) || len(r.Resource) == 0 {
+		return domain.NewError(domain.ErrorInvalid, "invalid idempotency record")
+	}
+	if r.Kind != IdempotencyInvite && r.Kind != IdempotencyRecovery {
+		return domain.NewError(domain.ErrorInvalid, "invalid idempotency kind")
+	}
+	if r.Status != OperationClaimed && r.Status != OperationCommitted {
+		return domain.NewError(domain.ErrorInvalid, "invalid idempotency status")
+	}
+	if err := validateUTC(r.CreatedAt); err != nil {
+		return err
+	}
+	if err := validateOptionalTimes(r.CommittedAt); err != nil {
+		return err
+	}
+	if (r.Status == OperationCommitted) != (r.CommittedAt != nil) {
+		return domain.NewError(domain.ErrorInvalid, "idempotency commit state mismatch")
+	}
+	return nil
+}
+
 type Session struct {
 	SchemaVersion         int           `json:"schemaVersion"`
 	SessionTokenHash      string        `json:"sessionTokenHash"`
@@ -115,6 +373,7 @@ type Invite struct {
 	UsedAt          *time.Time     `json:"usedAt,omitempty"`
 	UsedByUserID    *domain.UserID `json:"usedByUserID,omitempty"`
 	RevokedAt       *time.Time     `json:"revokedAt,omitempty"`
+	OperationID     string         `json:"operationID,omitempty"`
 }
 
 func (r *Invite) Validate() error {
@@ -123,6 +382,12 @@ func (r *Invite) Validate() error {
 	}
 	if !validOpaqueID(r.InviteID) || !validHash(r.TokenHash) || !r.CreatedByUserID.Valid() || r.MaxUses != 1 || r.Uses < 0 || r.Uses > 1 {
 		return domain.NewError(domain.ErrorInvalid, "invalid invite")
+	}
+	if r.Uses == 0 && (r.UsedAt != nil || r.UsedByUserID != nil || r.OperationID != "") {
+		return domain.NewError(domain.ErrorInvalid, "unused invite has consumption state")
+	}
+	if r.Uses == 1 && (r.UsedAt == nil || r.UsedByUserID == nil || !r.UsedByUserID.Valid() || !validOpaqueID(r.OperationID)) {
+		return domain.NewError(domain.ErrorInvalid, "used invite lacks consumption state")
 	}
 	if err := validateUTC(r.CreatedAt); err != nil {
 		return err
@@ -140,6 +405,7 @@ type Recovery struct {
 	ExpiresAt       time.Time     `json:"expiresAt"`
 	UsedAt          *time.Time    `json:"usedAt,omitempty"`
 	RevokedAt       *time.Time    `json:"revokedAt,omitempty"`
+	OperationID     string        `json:"operationID,omitempty"`
 }
 
 func (r *Recovery) Validate() error {
@@ -151,6 +417,12 @@ func (r *Recovery) Validate() error {
 	}
 	if err := validateTimes(r.CreatedAt, r.ExpiresAt); err != nil || !r.ExpiresAt.After(r.CreatedAt) {
 		return domain.NewError(domain.ErrorInvalid, "invalid recovery times")
+	}
+	if r.UsedAt == nil && r.OperationID != "" {
+		return domain.NewError(domain.ErrorInvalid, "unused recovery has an operation")
+	}
+	if r.UsedAt != nil && !validOpaqueID(r.OperationID) {
+		return domain.NewError(domain.ErrorInvalid, "used recovery lacks an operation")
 	}
 	return validateOptionalTimes(r.UsedAt, r.RevokedAt)
 }

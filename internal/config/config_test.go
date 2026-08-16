@@ -1,14 +1,18 @@
 package config
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 )
+
+var testSecret = base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 
 func TestParseDefaults(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Parse(func(string) (string, bool) { return "", false })
+	cfg, err := Parse(mapLookup(nil))
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
@@ -20,6 +24,12 @@ func TestParseDefaults(t *testing.T) {
 	}
 	if !cfg.InviteRegistration {
 		t.Fatal("InviteRegistration = false, want true")
+	}
+	if cfg.BaseURL != "http://127.0.0.1:8080" || cfg.AllowedOrigin != cfg.BaseURL || cfg.Secure {
+		t.Fatalf("loopback origin configuration = %+v", cfg)
+	}
+	if cfg.WebAuthnRPID != "127.0.0.1" || cfg.WebAuthnRPName != "EndlessFS" || cfg.SessionTTL != 12*time.Hour {
+		t.Fatalf("WebAuthn/session defaults = %+v", cfg)
 	}
 }
 
@@ -62,6 +72,15 @@ func TestParseRejectsUnsafeOrMalformedValues(t *testing.T) {
 		{name: "missing port", values: map[string]string{"ENDLESSFS_LISTEN_ADDR": "localhost"}, want: "host:port"},
 		{name: "loose boolean", values: map[string]string{"ALLOW_REGISTRATION": "TRUE"}, want: "exactly true or false"},
 		{name: "numeric boolean", values: map[string]string{"INVITE_REGISTRATION": "1"}, want: "exactly true or false"},
+		{name: "missing session secret", values: map[string]string{"ENDLESSFS_SESSION_SECRET": ""}, want: "required"},
+		{name: "weak session secret", values: map[string]string{"ENDLESSFS_SESSION_SECRET": "not-random"}, want: "32 random bytes"},
+		{name: "weak bootstrap token", values: map[string]string{"ENDLESSFS_BOOTSTRAP_TOKEN": "not-random"}, want: "32 random bytes"},
+		{name: "HTTP public origin", values: map[string]string{"ENDLESSFS_BASE_URL": "http://example.com", "ENDLESSFS_LISTEN_ADDR": "0.0.0.0:8080"}, want: "HTTP is permitted only"},
+		{name: "wildcard origin", values: map[string]string{"ENDLESSFS_BASE_URL": "https://*.example.com"}, want: "wildcard"},
+		{name: "origin path", values: map[string]string{"ENDLESSFS_BASE_URL": "https://drive.example.com/path"}, want: "without credentials"},
+		{name: "RP mismatch", values: map[string]string{"ENDLESSFS_BASE_URL": "https://drive.example.com", "ENDLESSFS_WEBAUTHN_RP_ID": "example.com"}, want: "exactly match"},
+		{name: "unsupported provider", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs"}, want: "exactly mock"},
+		{name: "long session", values: map[string]string{"ENDLESSFS_SESSION_TTL": "169h"}, want: "at most"},
 	}
 
 	for _, test := range tests {
@@ -73,6 +92,29 @@ func TestParseRejectsUnsafeOrMalformedValues(t *testing.T) {
 				t.Fatalf("Parse() error = %v, want text %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestParseSecureConfiguration(t *testing.T) {
+	t.Parallel()
+	values := map[string]string{
+		"ENDLESSFS_BASE_URL":         "https://drive.example.com:8443",
+		"ENDLESSFS_LISTEN_ADDR":      "0.0.0.0:8443",
+		"ENDLESSFS_WEBAUTHN_RP_ID":   "drive.example.com",
+		"ENDLESSFS_WEBAUTHN_RP_NAME": "Private Drive",
+		"ENDLESSFS_SESSION_TTL":      "24h",
+		"ENDLESSFS_BOOTSTRAP_TOKEN":  testSecret,
+		"ENDLESSFS_STORAGE_PROVIDER": "mock",
+	}
+	cfg, err := Parse(mapLookup(values))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !cfg.Secure || cfg.AllowedOrigin != "https://drive.example.com:8443" || cfg.WebAuthnRPID != "drive.example.com" {
+		t.Fatalf("secure configuration = %+v", cfg)
+	}
+	if cfg.BootstrapToken.Reveal() != testSecret || cfg.SessionSecret.Reveal() != testSecret {
+		t.Fatal("validated secrets were not retained internally")
 	}
 }
 
@@ -104,6 +146,13 @@ func FuzzParse(f *testing.F) {
 
 func mapLookup(values map[string]string) func(string) (string, bool) {
 	return func(name string) (string, bool) {
+		if name == "ENDLESSFS_SESSION_SECRET" {
+			value, exists := values[name]
+			if exists {
+				return value, true
+			}
+			return testSecret, true
+		}
 		value, ok := values[name]
 		return value, ok
 	}

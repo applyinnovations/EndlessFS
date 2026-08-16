@@ -3,7 +3,7 @@
 EndlessFS is an open-source, provider-neutral, security-first private cloud drive. Its Go control plane authorizes file operations while browser file bytes travel directly to and from the configured object-storage provider through short-lived provider-native capabilities.
 
 > [!IMPORTANT]
-> This repository is at **Milestone 1**. The typed domain, strict paths, state CAS/codec contracts, provider abstraction, deterministic in-memory provider, and capability-aware local data plane are implemented. Authentication, application workflows, themes, and the complete browser UI remain under construction. Do not deploy this implementation or describe it as v1 complete or production-ready.
+> This repository is at **Milestone 2**. Passkey-only identity, usernameless WebAuthn, secure sessions/CSRF, bootstrap, registration policy, invites, account administration, passkey management, and recovery now join the Milestone 1 provider/state foundations. File workflows, themes, and the complete browser UI remain under construction. Do not deploy this implementation or describe it as v1 complete or production-ready.
 
 The normative implementation contract is [docs/v1-specification.md](./docs/v1-specification.md). A feature-complete mock-backed v1 will prove the full product locally, but it will not prove Google Cloud Storage interoperability or provide a production storage adapter.
 
@@ -44,6 +44,8 @@ Install [Nix with flakes enabled](https://nixos.org/download/), then run:
 ```console
 nix develop
 nix flake check
+export ENDLESSFS_SESSION_SECRET="$(nix run .#generate-secret)"
+export ENDLESSFS_BOOTSTRAP_TOKEN="$(nix run .#generate-secret)"
 nix run .#dev
 ```
 
@@ -69,6 +71,7 @@ The v1 spec reserves the following interface. Implemented commands are usable no
 | `nix build .#container` | Build a minimal, shell-free OCI archive. |
 | `nix flake check` | Run the authoritative current build, format, lint, test, fuzz, race, security, policy, offline-sandbox, and OCI hardening gates. |
 | `nix run .#dev` | Run the loopback-only development control plane. |
+| `nix run .#generate-secret` | Generate one canonical 256-bit base64url environment secret. |
 | `nix run .#fmt` / `.#fmt-check` | Apply or verify Go and Nix formatting. |
 | `nix run .#lint` | Run `actionlint`, `go vet`, and `staticcheck`. |
 | `nix run .#test` / `.#test-unit` | Run the current Go suite. |
@@ -95,25 +98,35 @@ Only settings that have validation and tests are parsed by the current binary:
 
 | Variable | Default | Behavior now |
 |---|---:|---|
-| `ENDLESSFS_LISTEN_ADDR` | `127.0.0.1:8080` | Must be a loopback `host:port`. |
+| `ENDLESSFS_BASE_URL` | Derived in loopback development | Exact HTTP(S) origin; HTTPS is required for public listeners. |
+| `ENDLESSFS_LISTEN_ADDR` | `127.0.0.1:8080` | Loopback for HTTP development; non-loopback requires a coherent HTTPS base URL. |
+| `ENDLESSFS_STORAGE_PROVIDER` | `mock` | v1 currently accepts only the deterministic local provider. |
 | `ALLOW_REGISTRATION` | `false` | Exact `true` or `false`; exposed as non-secret public policy. |
 | `INVITE_REGISTRATION` | `true` | Exact `true` or `false`; exposed as non-secret public policy. |
+| `ENDLESSFS_BOOTSTRAP_TOKEN` | Unset | Optional canonical 256-bit base64url token; enables only the unused first-admin bootstrap. |
+| `ENDLESSFS_SESSION_SECRET` | Required | Canonical 256-bit base64url process secret; never exposed publicly or accepted as an argument. |
+| `ENDLESSFS_WEBAUTHN_RP_ID` | Base URL hostname | Must exactly match the configured base URL hostname. |
+| `ENDLESSFS_WEBAUTHN_RP_NAME` | `EndlessFS` | Validated authenticator-facing relying-party name. |
+| `ENDLESSFS_SESSION_TTL` | `12h` | Positive absolute lifetime, capped at `168h`. |
 
-The remaining environment contract in specification section 15 will be added with the behavior it protects. Secrets will never be accepted as command-line arguments or exposed through the public configuration endpoint.
+The remaining transfer, preview, theme, and logging settings in specification section 15 will be added with the behavior they protect. Secrets are never accepted as command-line arguments or exposed through the public configuration endpoint. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after the initial administrator has been created.
 
 ## Repository map
 
 ```text
 cmd/endlessfs/           process entry point
 internal/config/         environment parsing and validation
+internal/auth/           established WebAuthn adapter, sessions, cookies, CSRF, and origin policy
 internal/domain/         strict paths, names, IDs, entries, operations, and capabilities
 internal/model/          strict versioned persistence records
 internal/provider/       provider contract and deterministic capability-aware memory provider
 internal/state/          state contract, strict codec, and concurrency-safe memory CAS store
 internal/secret/         redacted bearer-token hashing and validation
 internal/httpapi/        router and transport security headers
+internal/identity/       bootstrap, registration, accounts, passkeys, invites, roles, and recovery
 internal/web/            embedded HTML, CSS, and vanilla JavaScript
 tools/check-source/      forbidden dependency/source policy check
+tools/generate-secret/   operator-directed 256-bit environment-secret generator
 tools/repository-policy/ checked-in GitHub ruleset validator/applier
 .github/rulesets/        declarative default-branch and release-tag policy
 .github/workflows/       PR, CI, GHCR, release, and policy workflows
@@ -145,8 +158,8 @@ The policy requires one approval, resolved review threads, linear history, and t
 
 - **Milestone 0 — complete:** reproducible skeleton, binary, embedded shell, Nix checks, OCI, CI and repository policy.
 - **Milestone 1 — complete:** typed domain, strict paths, state CAS, provider contracts, capability-aware local data plane, and deterministic faults.
-- **Milestone 2 — next:** WebAuthn, sessions, CSRF/origin policy, bootstrap, registration matrix, invites, roles, and recovery.
-- **Milestone 3:** browse and file operations, direct resumable transfers, idempotency, trash, previews, and sharing control plane.
+- **Milestone 2 — complete:** WebAuthn, sessions, CSRF/origin policy, bootstrap, registration matrix, invites, roles, and recovery.
+- **Milestone 3 — next:** browse and file operations, direct resumable transfers, idempotency, trash, previews, and sharing control plane.
 - **Milestone 4:** closed Theme API, safe media validation, complete light/dark bundles, inheritance and fallback.
 - **Milestones 5–6:** accessible browser drive, transfers, themes, shares, settings, and administration UI.
 - **Milestone 7:** cross-user/adversarial matrices, full fuzz/race/coverage gates, browser accessibility, OCI inspection, and release evidence.

@@ -133,7 +133,8 @@
                   printf 'source-revision=%s\n' '${version}'
                   printf 'flake-lock=%s\n' "$lock_hash"
                   printf 'target-system=%s\n' '${system}'
-                  printf 'storage-provider=%s\n' 'not-implemented-at-milestone-0'
+                  printf 'storage-provider=%s\n' 'deterministic-local-mock'
+                  printf 'implementation-status=%s\n' 'milestone-2-v1-in-progress'
                   printf 'live-gcs-validation=%s\n' 'not-performed'
                   printf 'build-and-test-external-services-used=%s\n' 'none'
                 } > "$out/RELEASE-INVENTORY.txt"
@@ -183,6 +184,10 @@
 
           dev = goTask "endlessfs-dev" ''
             exec go run ./cmd/endlessfs "$@"
+          '';
+
+          generate-secret = goTask "endlessfs-generate-secret" ''
+            exec go run ./tools/generate-secret
           '';
 
           fmt =

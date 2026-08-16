@@ -84,6 +84,18 @@ func check(root string) ([]string, error) {
 		if reason, found := forbiddenExtensions[strings.ToLower(filepath.Ext(name))]; found {
 			violations = append(violations, fmt.Sprintf("%s: %s", relative, reason))
 		}
+		if identitySurface(relative) {
+			content, readErr := fs.ReadFile(rootFS.FS(), path)
+			if readErr != nil {
+				return readErr
+			}
+			lower := strings.ToLower(string(content))
+			for _, forbidden := range []string{"email", "oauth", "password"} {
+				if strings.Contains(lower, forbidden) {
+					violations = append(violations, fmt.Sprintf("%s: identity surface contains forbidden %s concept", relative, forbidden))
+				}
+			}
+		}
 
 		segments := strings.Split(relative, "/")
 		if contains(segments, "themes") {
@@ -96,6 +108,12 @@ func check(root string) ([]string, error) {
 	})
 	sort.Strings(violations)
 	return violations, err
+}
+
+func identitySurface(path string) bool {
+	return strings.HasPrefix(path, "internal/model/") ||
+		strings.HasPrefix(path, "internal/httpapi/") ||
+		strings.HasPrefix(path, "internal/web/static/")
 }
 
 func contains(values []string, target string) bool {

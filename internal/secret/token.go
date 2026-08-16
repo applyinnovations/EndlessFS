@@ -2,6 +2,7 @@
 package secret
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -27,6 +28,22 @@ func MatchesHash(token, encodedHash string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare(digest[:], expected) == 1
+}
+
+func KeyedHash(key Value, value string) string {
+	mac := hmac.New(sha256.New, []byte(key.Reveal()))
+	_, _ = mac.Write([]byte(value))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func MatchesKeyedHash(key Value, value, encodedHash string) bool {
+	expected, err := base64.RawURLEncoding.DecodeString(encodedHash)
+	if err != nil || len(expected) != sha256.Size {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(key.Reveal()))
+	_, _ = mac.Write([]byte(value))
+	return hmac.Equal(mac.Sum(nil), expected)
 }
 
 // Value can be carried internally while remaining safe if passed to slog.

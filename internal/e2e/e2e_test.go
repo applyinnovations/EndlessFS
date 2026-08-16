@@ -127,11 +127,15 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		mu.Unlock()
 		t.Fatalf("open bootstrap: %v (%s) exceptions=%v origins=%v", err, browserStatus(ctx), failureSnapshot, originSnapshot)
 	}
-	if err := chromedp.Run(ctx, chromedp.SendKeys("#display-name", "First Administrator"+kb.Tab+harness.bootstrapToken+kb.Tab+kb.Enter, chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(ctx, bootstrapKeyboardActions(harness.bootstrapToken)); err != nil {
 		t.Fatalf("submit keyboard bootstrap: %v", err)
 	}
 	if err := waitVisible(ctx, "#auth-view", 15*time.Second); err != nil {
-		t.Fatalf("keyboard bootstrap: %v (%s)", err, browserStatus(ctx))
+		mu.Lock()
+		failures := append([]string(nil), browserFailures...)
+		requests := append([]string(nil), requestedURLs...)
+		mu.Unlock()
+		t.Fatalf("keyboard bootstrap: %v (%s) exceptions=%v requests=%v", err, browserStatus(ctx), failures, requests)
 	}
 	if err := chromedp.Run(ctx,
 		chromedp.Focus("#signin-button", chromedp.ByQuery),
@@ -274,7 +278,7 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	}
 	harness := newHarness(t)
 	admin := newTestBrowser(t)
-	bootstrapBrowser(t, admin.ctx, harness)
+	bootstrapBrowser(t, admin, harness)
 
 	if err := chromedp.Run(admin.ctx,
 		chromedp.Click("a[data-route='admin']", chromedp.ByQuery),
@@ -594,22 +598,33 @@ func (browserClient *testBrowser) assertNoExternalRequests(t *testing.T, harness
 	}
 }
 
-func bootstrapBrowser(t *testing.T, ctx context.Context, harness harness) {
+func bootstrapBrowser(t *testing.T, client *testBrowser, harness harness) {
 	t.Helper()
-	if err := chromedp.Run(ctx,
+	if err := chromedp.Run(client.ctx,
 		chromedp.Navigate(harness.origin+"/bootstrap"), chromedp.WaitVisible("#registration-view", chromedp.ByQuery),
-		chromedp.SendKeys("#display-name", "First Administrator"+kb.Tab+harness.bootstrapToken+kb.Tab+kb.Enter, chromedp.ByQuery),
+		bootstrapKeyboardActions(harness.bootstrapToken),
 	); err != nil {
 		t.Fatalf("bootstrap browser: %v", err)
 	}
-	if err := waitVisible(ctx, "#auth-view", 15*time.Second); err != nil {
-		t.Fatalf("finish browser bootstrap: %v (%s)", err, browserStatus(ctx))
+	if err := waitVisible(client.ctx, "#auth-view", 15*time.Second); err != nil {
+		t.Fatalf("finish browser bootstrap: %v (%s) requests=%v", err, browserStatus(client.ctx), client.requestSnapshot())
 	}
-	if err := chromedp.Run(ctx, chromedp.Focus("#signin-button", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+	if err := chromedp.Run(client.ctx, chromedp.Focus("#signin-button", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatalf("sign in bootstrap administrator: %v", err)
 	}
-	if err := waitVisible(ctx, "#drive-view", 15*time.Second); err != nil {
-		t.Fatalf("finish administrator sign-in: %v (%s)", err, browserStatus(ctx))
+	if err := waitVisible(client.ctx, "#drive-view", 15*time.Second); err != nil {
+		t.Fatalf("finish administrator sign-in: %v (%s)", err, browserStatus(client.ctx))
+	}
+}
+
+func bootstrapKeyboardActions(token string) chromedp.Tasks {
+	return chromedp.Tasks{
+		chromedp.Focus("#display-name", chromedp.ByQuery),
+		chromedp.KeyEvent("First Administrator"),
+		chromedp.Focus("#bootstrap-token", chromedp.ByQuery),
+		chromedp.KeyEvent(token),
+		chromedp.Focus("#registration-form button[type='submit']", chromedp.ByQuery),
+		chromedp.KeyEvent(kb.Enter),
 	}
 }
 

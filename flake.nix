@@ -185,6 +185,7 @@
                 chmod -R u+w source
                 cd source
                 export GOCACHE="$TMPDIR/go-cache"
+                export CGO_ENABLED=0
                 export GOFLAGS=-mod=vendor
                 go run ./tools/theme inventory > "$out"
               '';
@@ -295,7 +296,12 @@
               }
             }/bin/${name}";
           };
-          goTask = name: text: mkTask name goTools text;
+          goTask =
+            name: text:
+            mkTask name goTools ''
+              export CGO_ENABLED=0
+              ${text}
+            '';
           unavailable =
             name: milestone:
             mkTask name [ ] ''
@@ -391,7 +397,8 @@
                 gawk -f tools/coverage.awk "$profile"
               '';
 
-          test-race = goTask "endlessfs-test-race" ''
+          test-race = mkTask "endlessfs-test-race" (goTools ++ [ pkgs.stdenv.cc ]) ''
+            export CGO_ENABLED=1
             go test -race ./...
           '';
 
@@ -552,6 +559,7 @@
                 export GOCACHE="$TMPDIR/go-cache"
                 export GOMODCACHE="$TMPDIR/go-mod-cache"
                 export XDG_CACHE_HOME="$TMPDIR/tool-cache"
+                export CGO_ENABLED=0
                 cp -R ${src} source
                 chmod -R u+w source
                 cd source
@@ -597,7 +605,7 @@
           integration = goCheck "integration" "go test ./... -run '^TestIntegration'" [ ];
           contract = goCheck "contract" "go test ./... -run '^TestContract'" [ ];
           theme = goCheck "theme" "go test ./internal/theme ./internal/httpapi -run 'Theme'" [ ];
-          race = goCheck "race" "go test -race ./..." [ ];
+          race = goCheck "race" "CGO_ENABLED=1 go test -race ./..." [ pkgs.stdenv.cc ];
           coverage =
             if pkgs.stdenv.hostPlatform.isLinux then
               goCheck "coverage"

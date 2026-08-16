@@ -380,7 +380,7 @@
                 export ENDLESSFS_RUN_E2E=1
                 ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   export ENDLESSFS_CHROMIUM=${pkgs.chromium}/bin/chromium
-                  export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
+                  export ENDLESSFS_CHROMIUM_DISABLE_SETUID_SANDBOX=1
                 ''}
                 exec go test ./internal/e2e -run '^TestE2E' -count=1 "$@"
               '';
@@ -392,7 +392,7 @@
                 export ENDLESSFS_RUN_E2E=1
                 ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   export ENDLESSFS_CHROMIUM=${pkgs.chromium}/bin/chromium
-                  export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
+                  export ENDLESSFS_CHROMIUM_DISABLE_SETUID_SANDBOX=1
                 ''}
                 profile="''${TMPDIR:-/tmp}/endlessfs-coverage.out"
                 go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
@@ -588,7 +588,7 @@
               goCheck "e2e" ''
                 export ENDLESSFS_RUN_E2E=1
                 export ENDLESSFS_CHROMIUM=${pkgs.chromium}/bin/chromium
-                export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
+                export ENDLESSFS_CHROMIUM_DISABLE_SETUID_SANDBOX=1
                 go test ./internal/e2e -run '^TestE2E' -count=1
               '' [ pkgs.chromium ]
             else
@@ -623,7 +623,7 @@
                 ''
                   export ENDLESSFS_RUN_E2E=1
                   export ENDLESSFS_CHROMIUM=${pkgs.chromium}/bin/chromium
-                  export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
+                  export ENDLESSFS_CHROMIUM_DISABLE_SETUID_SANDBOX=1
                   go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$TMPDIR/coverage.out"
                   gawk -f tools/coverage.awk "$TMPDIR/coverage.out"
                 ''

@@ -34,50 +34,82 @@
               || lib.hasPrefix "cmd/" relative
               || relative == "internal"
               || lib.hasPrefix "internal/" relative
+              || relative == "tools"
+              || relative == "tools/theme"
+              || lib.hasPrefix "tools/theme/" relative
               || relative == "vendor"
               || lib.hasPrefix "vendor/" relative;
           };
 
-          endlessfs = pkgs.buildGoModule {
-            pname = "endlessfs";
-            inherit version;
-            src = goSource;
-            subPackages = [ "cmd/endlessfs" ];
-            vendorHash = null;
-            doCheck = false;
-            env.CGO_ENABLED = 0;
-            ldflags = [
-              "-s"
-              "-w"
-              "-X=main.version=${version}"
-            ];
-          };
+          themePreBuild =
+            themeBundles:
+            lib.optionalString (themeBundles != [ ]) ''
+              go run ./tools/theme check ${
+                lib.escapeShellArgs (map (bundle: "${bundle}") themeBundles)
+              } >/dev/null
+              go run ./tools/theme compile-go ${
+                lib.escapeShellArgs (map (bundle: "${bundle}") themeBundles)
+              } > "$TMPDIR/custom_build_inputs.go"
+              mv "$TMPDIR/custom_build_inputs.go" internal/theme/custom_build_inputs.go
+              gofmt -w internal/theme/custom_build_inputs.go
+            '';
+
+          mkEndlessFS =
+            {
+              themeBundles ? [ ],
+            }:
+            pkgs.buildGoModule {
+              pname = "endlessfs";
+              inherit version;
+              src = goSource;
+              subPackages = [ "cmd/endlessfs" ];
+              vendorHash = null;
+              doCheck = false;
+              env.CGO_ENABLED = 0;
+              preBuild = themePreBuild themeBundles;
+              ldflags = [
+                "-s"
+                "-w"
+                "-X=main.version=${version}"
+              ];
+              passthru = { inherit themeBundles; };
+            };
+
+          endlessfs = lib.makeOverridable mkEndlessFS { };
 
           linuxArchitecture = if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "amd64";
-          linuxBinary = pkgs.stdenvNoCC.mkDerivation {
-            pname = "endlessfs-linux-${linuxArchitecture}";
-            inherit version;
-            src = goSource;
-            nativeBuildInputs = [ pkgs.go ];
-            dontConfigure = true;
-            dontFixup = true;
-            buildPhase = ''
-              runHook preBuild
-              export GOCACHE="$TMPDIR/go-cache"
-              export GOOS=linux
-              export GOARCH=${linuxArchitecture}
-              export CGO_ENABLED=0
-              go build -trimpath -buildvcs=false \
-                -ldflags "-s -w -buildid= -X=main.version=${version}" \
-                -o endlessfs ./cmd/endlessfs
-              runHook postBuild
-            '';
-            installPhase = ''
-              runHook preInstall
-              install -D -m 0555 endlessfs "$out/bin/endlessfs"
-              runHook postInstall
-            '';
-          };
+          mkLinuxBinary =
+            {
+              themeBundles ? [ ],
+            }:
+            pkgs.stdenvNoCC.mkDerivation {
+              pname = "endlessfs-linux-${linuxArchitecture}";
+              inherit version;
+              src = goSource;
+              nativeBuildInputs = [ pkgs.go ];
+              dontConfigure = true;
+              dontFixup = true;
+              buildPhase = ''
+                runHook preBuild
+                export GOCACHE="$TMPDIR/go-cache"
+                ${themePreBuild themeBundles}
+                export GOOS=linux
+                export GOARCH=${linuxArchitecture}
+                export CGO_ENABLED=0
+                go build -trimpath -buildvcs=false \
+                  -ldflags "-s -w -buildid= -X=main.version=${version}" \
+                  -o endlessfs ./cmd/endlessfs
+                runHook postBuild
+              '';
+              installPhase = ''
+                runHook preInstall
+                install -D -m 0555 endlessfs "$out/bin/endlessfs"
+                runHook postInstall
+              '';
+              passthru = { inherit themeBundles; };
+            };
+
+          linuxBinary = lib.makeOverridable mkLinuxBinary { };
 
           containerRoot = pkgs.runCommandLocal "endlessfs-container-root" { } ''
             mkdir -p "$out/bin" "$out/etc/ssl/certs" "$out/share"
@@ -111,6 +143,17 @@
             };
           };
 
+          themeInventory =
+            pkgs.runCommand "endlessfs-theme-inventory-${version}" { nativeBuildInputs = [ pkgs.go ]; }
+              ''
+                cp -R ${goSource} source
+                chmod -R u+w source
+                cd source
+                export GOCACHE="$TMPDIR/go-cache"
+                export GOFLAGS=-mod=vendor
+                go run ./tools/theme inventory > "$out"
+              '';
+
           release =
             pkgs.runCommand "endlessfs-release-${version}-${system}"
               {
@@ -125,6 +168,7 @@
                 cp ${endlessfs}/bin/endlessfs staging/endlessfs
                 cp ${projectSource}/LICENSE staging/LICENSE
                 cp ${projectSource}/README.md staging/README.md
+                cp ${themeInventory} staging/THEMES.json
                 tar --sort=name --mtime=@1 --owner=0 --group=0 --numeric-owner \
                   -C staging -czf "$out/endlessfs-${version}-${system}.tar.gz" .
                 (cd "$out"; sha256sum "endlessfs-${version}-${system}.tar.gz" > SHA256SUMS)
@@ -134,7 +178,7 @@
                   printf 'flake-lock=%s\n' "$lock_hash"
                   printf 'target-system=%s\n' '${system}'
                   printf 'storage-provider=%s\n' 'deterministic-local-mock'
-                  printf 'implementation-status=%s\n' 'milestone-3-v1-in-progress'
+                  printf 'implementation-status=%s\n' 'milestone-4-v1-in-progress'
                   printf 'live-gcs-validation=%s\n' 'not-performed'
                   printf 'build-and-test-external-services-used=%s\n' 'none'
                 } > "$out/RELEASE-INVENTORY.txt"
@@ -248,11 +292,18 @@
           test-fuzz = goTask "endlessfs-test-fuzz" ''
             go test ./internal/config -run '^$' -fuzz FuzzParse -fuzztime "''${ENDLESSFS_FUZZTIME:-10s}"
             go test ./internal/domain -run '^$' -fuzz FuzzParseUserPath -fuzztime "''${ENDLESSFS_FUZZTIME:-10s}"
+            go test ./internal/theme -run '^$' -fuzz FuzzThemeBoundaries -fuzztime "''${ENDLESSFS_FUZZTIME:-10s}"
           '';
 
-          test-theme = unavailable "endlessfs-test-theme" "Milestone 4";
-          theme-check = unavailable "endlessfs-theme-check" "Milestone 4";
-          theme-preview = unavailable "endlessfs-theme-preview" "Milestone 4";
+          test-theme = goTask "endlessfs-test-theme" ''
+            exec go test ./internal/theme "$@"
+          '';
+          theme-check = goTask "endlessfs-theme-check" ''
+            exec go run ./tools/theme check "$@"
+          '';
+          theme-preview = goTask "endlessfs-theme-preview" ''
+            exec go run ./tools/theme preview "$@"
+          '';
 
           forbidden-check = goTask "endlessfs-forbidden-check" ''
             exec go run ./tools/check-source "$@"
@@ -392,10 +443,12 @@
           tests = goCheck "tests" "go test ./..." [ ];
           integration = goCheck "integration" "go test ./... -run '^TestIntegration'" [ ];
           contract = goCheck "contract" "go test ./... -run '^TestContract'" [ ];
+          theme = goCheck "theme" "go test ./internal/theme ./internal/httpapi -run 'Theme'" [ ];
           race = goCheck "race" "go test -race ./..." [ ];
           fuzz = goCheck "fuzz" ''
             go test ./internal/config -run '^$' -fuzz FuzzParse -fuzztime 1s
             go test ./internal/domain -run '^$' -fuzz FuzzParseUserPath -fuzztime 1s
+            go test ./internal/theme -run '^$' -fuzz FuzzThemeBoundaries -fuzztime 1s
           '' [ ];
           offline = goCheck "offline" "go test ./..." [ ];
 

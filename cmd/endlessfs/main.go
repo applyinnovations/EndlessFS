@@ -21,6 +21,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/identity"
 	providermemory "github.com/applyinnovations/endlessfs/internal/provider/memory"
 	"github.com/applyinnovations/endlessfs/internal/state"
+	"github.com/applyinnovations/endlessfs/internal/theme"
 )
 
 var version = "dev"
@@ -79,11 +80,19 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	themeRegistry, err := theme.NewRegistry()
+	if err != nil {
+		return err
+	}
+	themeManager, err := theme.NewManager(themeRegistry, store, cfg.DefaultLightTheme, cfg.DefaultDarkTheme, cfg.Secure, clock)
+	if err != nil {
+		return err
+	}
 	dataServer := &http.Server{Handler: storage, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           httpapi.NewCompleteApplication(cfg, version, identityService, sessions, driveService),
+		Handler:           httpapi.NewCompleteApplication(cfg, version, identityService, sessions, driveService, themeManager),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

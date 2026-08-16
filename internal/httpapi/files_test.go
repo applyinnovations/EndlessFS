@@ -20,6 +20,7 @@ import (
 	providermemory "github.com/applyinnovations/endlessfs/internal/provider/memory"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
+	"github.com/applyinnovations/endlessfs/internal/theme"
 )
 
 type driveHTTPEnvironment struct {
@@ -30,6 +31,7 @@ type driveHTTPEnvironment struct {
 	csrf         *http.Cookie
 	otherSession *http.Cookie
 	otherCSRF    *http.Cookie
+	themes       *theme.Manager
 }
 
 func newDriveHTTPEnvironment(t *testing.T) driveHTTPEnvironment {
@@ -55,6 +57,14 @@ func newDriveHTTPEnvironment(t *testing.T) driveHTTPEnvironment {
 	if err != nil {
 		t.Fatal(err)
 	}
+	registry, err := theme.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	themeManager, err := theme.NewManager(registry, store, "endlessfs-light", "endlessfs-dark", true, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
 	users := []domain.UserID{httpUserID(t, 0x51), httpUserID(t, 0x61)}
 	issued := make([]auth.IssuedSession, 2)
 	for index, userID := range users {
@@ -68,7 +78,7 @@ func newDriveHTTPEnvironment(t *testing.T) driveHTTPEnvironment {
 		}
 	}
 	cfg := config.Config{BaseURL: origin, AllowedOrigin: origin, Secure: true}
-	return driveHTTPEnvironment{handler: NewCompleteApplication(cfg, "test", nil, sessions, service), data: data, storage: storage, session: sessions.Cookie(issued[0]), csrf: sessions.CSRFCookie(issued[0]), otherSession: sessions.Cookie(issued[1]), otherCSRF: sessions.CSRFCookie(issued[1])}
+	return driveHTTPEnvironment{handler: NewCompleteApplication(cfg, "test", nil, sessions, service, themeManager), data: data, storage: storage, session: sessions.Cookie(issued[0]), csrf: sessions.CSRFCookie(issued[0]), otherSession: sessions.Cookie(issued[1]), otherCSRF: sessions.CSRFCookie(issued[1]), themes: themeManager}
 }
 
 func httpUserID(t *testing.T, fill byte) domain.UserID {

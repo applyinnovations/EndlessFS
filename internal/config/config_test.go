@@ -31,6 +31,9 @@ func TestParseDefaults(t *testing.T) {
 	if cfg.WebAuthnRPID != "127.0.0.1" || cfg.WebAuthnRPName != "EndlessFS" || cfg.SessionTTL != 12*time.Hour {
 		t.Fatalf("WebAuthn/session defaults = %+v", cfg)
 	}
+	if cfg.DefaultLightTheme != "endlessfs-light" || cfg.DefaultDarkTheme != "endlessfs-dark" {
+		t.Fatalf("theme defaults = %+v", cfg)
+	}
 }
 
 func TestParseRegistrationMatrix(t *testing.T) {
@@ -140,10 +143,11 @@ func TestParseTransferConfiguration(t *testing.T) {
 
 func TestParseRejectsUnsafeTransferConfiguration(t *testing.T) {
 	for name, testCase := range map[string][2]string{
-		"remote mock":    {"ENDLESSFS_MOCK_PROVIDER_URL", "http://storage.example:9090"},
-		"mock path":      {"ENDLESSFS_MOCK_PROVIDER_URL", "http://127.0.0.1:9090/cap"},
-		"long download":  {"ENDLESSFS_DOWNLOAD_CAPABILITY_TTL", "11m"},
-		"text too large": {"ENDLESSFS_TEXT_PREVIEW_MAX_BYTES", "999999999"},
+		"remote mock":     {"ENDLESSFS_MOCK_PROVIDER_URL", "http://storage.example:9090"},
+		"mock path":       {"ENDLESSFS_MOCK_PROVIDER_URL", "http://127.0.0.1:9090/cap"},
+		"long download":   {"ENDLESSFS_DOWNLOAD_CAPABILITY_TTL", "11m"},
+		"text too large":  {"ENDLESSFS_TEXT_PREVIEW_MAX_BYTES", "999999999"},
+		"unsafe theme ID": {"ENDLESSFS_DEFAULT_LIGHT_THEME", "theme);display:none"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := Parse(mapLookup(map[string]string{testCase[0]: testCase[1]})); err == nil {

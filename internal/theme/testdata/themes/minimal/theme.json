@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "themeAPI": { "major": 1, "minor": 0 },
+  "id": "org.endlessfs.minimal",
+  "name": "Minimal Theme Fixture",
+  "version": "1.0.0",
+  "extends": "endlessfs-light",
+  "appearance": "light",
+  "author": "EndlessFS contributors",
+  "license": "Apache-2.0",
+  "tokens": { "radius.control": 12 },
+  "fonts": {},
+  "assets": {}
+}

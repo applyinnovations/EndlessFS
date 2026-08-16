@@ -43,6 +43,8 @@ type Config struct {
 	DownloadCapabilityTTL time.Duration
 	UploadInitTTL         time.Duration
 	TextPreviewMaxBytes   int64
+	DefaultLightTheme     string
+	DefaultDarkTheme      string
 }
 
 // PublicConfig contains the non-secret settings safe to expose to browsers.
@@ -155,6 +157,14 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	defaultLightTheme, err := parseThemeID(lookup, "ENDLESSFS_DEFAULT_LIGHT_THEME", "endlessfs-light")
+	if err != nil {
+		return Config{}, err
+	}
+	defaultDarkTheme, err := parseThemeID(lookup, "ENDLESSFS_DEFAULT_DARK_THEME", "endlessfs-dark")
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		ListenAddr:            listenAddr,
@@ -173,6 +183,8 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		DownloadCapabilityTTL: downloadTTL,
 		UploadInitTTL:         uploadTTL,
 		TextPreviewMaxBytes:   textPreviewMax,
+		DefaultLightTheme:     defaultLightTheme,
+		DefaultDarkTheme:      defaultDarkTheme,
 	}, nil
 }
 
@@ -275,6 +287,22 @@ func parsePositiveInt64(lookup func(string) (string, bool), name string, fallbac
 		return 0, fmt.Errorf("%s: expected an integer from 1 through %d", name, maximum)
 	}
 	return parsed, nil
+}
+
+func parseThemeID(lookup func(string) (string, bool), name, fallback string) (string, error) {
+	value, ok := lookup(name)
+	if !ok {
+		value = fallback
+	}
+	if len(value) < 1 || len(value) > 128 {
+		return "", fmt.Errorf("%s: invalid theme ID", name)
+	}
+	for _, character := range value {
+		if !((character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' || character == '.') {
+			return "", fmt.Errorf("%s: invalid theme ID", name)
+		}
+	}
+	return value, nil
 }
 
 func parseBool(lookup func(string) (string, bool), name string, fallback bool) (bool, error) {

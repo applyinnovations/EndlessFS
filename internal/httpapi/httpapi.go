@@ -9,6 +9,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/config"
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/identity"
+	"github.com/applyinnovations/endlessfs/internal/theme"
 	webassets "github.com/applyinnovations/endlessfs/internal/web"
 )
 
@@ -24,8 +25,11 @@ func NewApplication(cfg config.Config, version string, identityService *identity
 }
 
 // NewCompleteApplication includes the file/data-capability control plane.
-func NewCompleteApplication(cfg config.Config, version string, identityService *identity.Service, sessions *auth.SessionManager, driveService *drive.Service) http.Handler {
+func NewCompleteApplication(cfg config.Config, version string, identityService *identity.Service, sessions *auth.SessionManager, driveService *drive.Service, themeManagers ...*theme.Manager) http.Handler {
 	api := &identityAPI{config: cfg, identity: identityService, sessions: sessions, drive: driveService}
+	if len(themeManagers) != 0 {
+		api.themes = themeManagers[0]
+	}
 	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), api)
 }
 

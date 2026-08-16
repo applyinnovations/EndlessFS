@@ -4,7 +4,7 @@ This file applies to the entire repository. `docs/v1-specification.md` is normat
 
 ## Mission and current state
 
-Implement the complete mock-backed v1 specification in milestone order without weakening its security or reproducibility requirements. Milestones 0–3 currently provide the reproducible foundation, provider/state contracts, passkey identity, and file/trash/preview/share control plane. Themes and complete browser workflows remain unfinished, and the mock-backed runtime is not a production storage provider. Never present an unimplemented placeholder or empty test selection as v1 evidence.
+Implement the complete mock-backed v1 specification in milestone order without weakening its security or reproducibility requirements. Milestones 0–4 currently provide the reproducible foundation, provider/state contracts, passkey identity, file/trash/preview/share control plane, and closed data-only theme system. Complete browser workflows remain unfinished, and the mock-backed runtime is not a production storage provider. Never present an unimplemented placeholder or empty test selection as v1 evidence.
 
 Real GCS integration, cloud resources, credentials, deployment, and production-provider claims are outside the v1 completion boundary. Preserve that distinction in code, tests, docs, and release notes.
 

@@ -73,7 +73,28 @@ The public API accepts virtual paths only. Storage scopes are constructed from a
 
 ## Remaining milestones
 
-- Closed theme compiler and immutable fallback bundles.
+## Data-only theme system — complete
+
+The Milestone 4 checkpoint implements specification section 14, acceptance criteria AC-056–AC-059 at the compiler/control-plane layer, and checklist 22.8 except the browser workflows that intentionally land in Milestone 5:
+
+| Requirement | Automated evidence |
+|---|---|
+| Closed versioned registry with typed serializers, bounds, defaults, CSS mapping, contrast pairs, fonts, and complete semantic media slots | `TestThemeTokensAreClosedTypedBoundedAndContrastChecked`; generated `tools/theme api`; [Theme API 1.0](./theme-api.md) |
+| Immutable complete light/dark bundles through the ordinary compiler | `TestBuiltinsAndMinimalCustomUseOrdinaryCompletePipeline`; `nix run .#test-theme` |
+| Direct built-in inheritance, old-bundle compatible additions, unavailable selection, media fallback, and emergency safe theme | `TestBuiltinsAndMinimalCustomUseOrdinaryCompletePipeline`, `TestOlderCompatibleCustomInheritsSimulatedNewMediaSlot`, `TestThemeReferenceClosureAndAssetFallback`, `TestThemePreferenceIsSeparatePersistentAndSafelyResolved` |
+| Strict manifest metadata/API/license/ID validation and collision prevention | `TestThemeManifestStrictMetadataAndCompatibility`, `TestThemeDigestIsCanonicalAndIDsCannotCollide` |
+| ZIP/directory traversal, normalized duplicate, symlink, hard-link, raw-code, compression-ratio, count/size, and reference-closure defenses | `TestThemeZIPAndDirectoryDefenses`, `TestThemeReferenceClosureAndAssetFallback`, `FuzzThemeBoundaries` |
+| Signature/dimension/pixel validation for PNG/WebP/AVIF, WOFF2 declarations, and bounded raster sprites | `TestMediaSignaturesDimensionsSpritesAndFontDeclarations` |
+| Static SVG subset rejects declarations, scripts, handlers, external/data references, embedded content, raw style, and text | `TestSVGSanitizerRejectsActiveContentAndExternalReferences`, `FuzzThemeBoundaries` |
+| Separate per-user `system`/installed preference, light/dark resolution, safe override, and allowlisted non-identity device cookie | `TestThemePreferenceIsSeparatePersistentAndSafelyResolved`, `TestIntegrationThemeHTTPMetadataPreferenceAssetsAndSafeFallback` |
+| Exact content types, immutable digest URLs, `nosniff`, restrictive asset CSP, and no arbitrary filesystem lookup | `TestIntegrationThemeHTTPMetadataPreferenceAssetsAndSafeFallback` |
+| Nix validation, preview, tests, and reproducible custom build-input embedding | `nix run .#theme-check`, `.#theme-preview`, `.#test-theme`; overridden `themeBundles` build and runtime inventory smoke proof |
+| Application-owned responsive/focus/reduced-motion conformance fixture | `TestConformanceFixtureOwnsAccessibilityResponsiveAndReducedMotionRules`; loopback preview smoke proof at desktop/320 CSS rules |
+
+The Nix-built production binary can be overridden with `themeBundles = [ ... ]`; each input is validated and compiled into generated Go data before the binary build. Normal runtime selection performs no archive parsing, mutable theme-directory lookup, or network installation. Release archives include `THEMES.json` with IDs, API versions, licenses, and content digests.
+
+## Remaining milestones
+
 - Complete accessible browser workflows and browser-level tests.
 - Adversarial matrices, coverage thresholds, threat-model review, and final release evidence.
 

@@ -3,7 +3,7 @@
 EndlessFS is an open-source, provider-neutral, security-first private cloud drive. Its Go control plane authorizes file operations while browser file bytes travel directly to and from the configured object-storage provider through short-lived provider-native capabilities.
 
 > [!IMPORTANT]
-> This repository is at **Milestone 3**. The authenticated file control plane, direct resumable transfer capabilities, bounded batch operations, trash/restore, safe-preview policy, and hashed public shares now join the identity and provider/state foundations. Themes and the complete browser UI remain under construction. Do not deploy this implementation or describe it as v1 complete or production-ready.
+> This repository is at **Milestone 4**. The closed data-only Theme API, archive/media validator, immutable light/dark bundles, inheritance/fallback, per-user selection, content-addressed delivery, and Nix theme tooling now join the file, identity, and provider/state foundations. The complete browser drive remains under construction. Do not deploy this implementation or describe it as v1 complete or production-ready.
 
 The normative implementation contract is [docs/v1-specification.md](./docs/v1-specification.md). A feature-complete mock-backed v1 will prove the full product locally, but it will not prove Google Cloud Storage interoperability or provide a production storage adapter.
 
@@ -58,6 +58,16 @@ nix build
 nix build .#container
 ```
 
+Theme bundles are reproducible build inputs, never runtime directories. Downstream flakes may build an embedded custom set with:
+
+```nix
+endlessfs.packages.${system}.default.override {
+  themeBundles = [ ./branding.efstheme ];
+}
+```
+
+Every supplied archive/directory is validated before generated data is compiled into the binary. See [Theme API 1.0](./docs/theme-api.md).
+
 All required builds and checks are Nix sandbox derivations, so project code cannot quietly depend on tools installed on the host. The required test gates are designed to run without cloud credentials, GCP, databases, persistent services, a container daemon, or non-loopback network access.
 
 ## Nix task interface
@@ -79,12 +89,12 @@ The v1 spec reserves the following interface. Implemented commands are usable no
 | `nix run .#test-contract` | Run reusable provider and state-store contract suites. |
 | `nix run .#test-e2e` | Reserved for Milestone 5; currently fails closed. |
 | `nix run .#test-race` | Run the suite with Go's race detector. |
-| `nix run .#test-fuzz` | Run bounded configuration and canonical-path fuzz smoke targets. |
+| `nix run .#test-fuzz` | Run bounded configuration, canonical-path, and theme-boundary fuzz smoke targets. |
 | `nix run .#security` | Run deterministic static and forbidden-source checks. |
 | `nix run .#container` | Build the local OCI archive through Nix. |
-| `nix run .#theme-check -- PATH` | Reserved for Milestone 4; currently fails closed. |
-| `nix run .#theme-preview -- PATH` | Reserved for Milestone 4; currently fails closed. |
-| `nix run .#test-theme` | Reserved for Milestone 4; currently fails closed. |
+| `nix run .#theme-check -- PATH` | Validate and resolve a `.efstheme` archive or equivalent directory. |
+| `nix run .#theme-preview -- PATH` | Serve the application-owned responsive component/state conformance fixture on loopback. |
+| `nix run .#test-theme` | Run theme schema, compiler, inheritance, media, archive, contrast, preference, and HTTP tests. |
 
 Longer fuzz campaigns can set `ENDLESSFS_FUZZTIME`, for example:
 
@@ -112,6 +122,8 @@ Only settings that have validation and tests are parsed by the current binary:
 | `ENDLESSFS_DOWNLOAD_CAPABILITY_TTL` | `60s` | Exact-object download lifetime, capped at `10m`. |
 | `ENDLESSFS_UPLOAD_INIT_TTL` | `5m` | Destination-bound upload initiation lifetime, capped at `1h`. |
 | `ENDLESSFS_TEXT_PREVIEW_MAX_BYTES` | `1048576` | Maximum validated UTF-8 plain-text preview size, capped at 16 MiB. |
+| `ENDLESSFS_DEFAULT_LIGHT_THEME` | `endlessfs-light` | Installed light-appearance theme used by `system`; startup rejects missing/wrong-appearance values. |
+| `ENDLESSFS_DEFAULT_DARK_THEME` | `endlessfs-dark` | Installed dark-appearance theme used by `system`; startup rejects missing/wrong-appearance values. |
 
 The remaining theme and logging settings in specification section 15 will be added with the behavior they protect. Secrets are never accepted as command-line arguments or exposed through the public configuration endpoint. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after the initial administrator has been created. The current HTTP contract is documented in [docs/http-api.md](./docs/http-api.md).
 
@@ -129,9 +141,11 @@ internal/secret/         redacted bearer-token hashing and validation
 internal/httpapi/        router and transport security headers
 internal/identity/       bootstrap, registration, accounts, passkeys, invites, roles, and recovery
 internal/drive/          authenticated files, transfers, operations, trash, previews, and shares
+internal/theme/          closed Theme API, compiler, media validation, registry, preferences, and built-ins
 internal/web/            embedded HTML, CSS, and vanilla JavaScript
 tools/check-source/      forbidden dependency/source policy check
 tools/generate-secret/   operator-directed 256-bit environment-secret generator
+tools/theme/             theme validation, generated API inventory, build embedding, and preview fixture
 tools/repository-policy/ checked-in GitHub ruleset validator/applier
 .github/rulesets/        declarative default-branch and release-tag policy
 .github/workflows/       PR, CI, GHCR, release, and policy workflows
@@ -165,8 +179,9 @@ The policy requires one approval, resolved review threads, linear history, and t
 - **Milestone 1 — complete:** typed domain, strict paths, state CAS, provider contracts, capability-aware local data plane, and deterministic faults.
 - **Milestone 2 — complete:** WebAuthn, sessions, CSRF/origin policy, bootstrap, registration matrix, invites, roles, and recovery.
 - **Milestone 3 — complete:** browse and file operations, direct resumable transfers, idempotency, trash, previews, and sharing control plane.
-- **Milestone 4 — next:** closed Theme API, safe media validation, complete light/dark bundles, inheritance and fallback.
-- **Milestones 5–6:** accessible browser drive, transfers, themes, shares, settings, and administration UI.
+- **Milestone 4 — complete:** closed Theme API, safe media validation, complete light/dark bundles, inheritance, fallback, preferences, and Nix tooling.
+- **Milestone 5 — next:** accessible browser drive, transfers, previews, trash, and theme UX.
+- **Milestone 6:** sharing, settings, passkey, and administration UI.
 - **Milestone 7:** cross-user/adversarial matrices, full fuzz/race/coverage gates, browser accessibility, OCI inspection, and release evidence.
 
 v1 is done only when every acceptance criterion in section 21 is evidenced, the section 22 checklist is complete, and a clean, network-denied `nix flake check` passes.

@@ -20,6 +20,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/model"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
+	"github.com/applyinnovations/endlessfs/internal/theme"
 )
 
 const (
@@ -34,6 +35,7 @@ type identityAPI struct {
 	identity *identity.Service
 	sessions *auth.SessionManager
 	drive    *drive.Service
+	themes   *theme.Manager
 }
 
 func (api *identityAPI) routes(mux *http.ServeMux) {
@@ -63,6 +65,9 @@ func (api *identityAPI) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/recovery/verify", api.registrationVerify)
 	if api.drive != nil {
 		api.driveRoutes(mux)
+	}
+	if api.themes != nil {
+		api.themeRoutes(mux)
 	}
 }
 

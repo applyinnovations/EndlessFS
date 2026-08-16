@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -353,5 +354,354 @@ func TestSafePreviewAllowlistUsesProviderValidatedMedia(t *testing.T) {
 	}
 	if _, _, err := env.service.Download(ctx, env.owner, domain.CreateDownloadRequest{Path: hostile.Path, Version: hostile.Version}, true); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("hostile inline preview = %v", err)
+	}
+}
+
+func TestServiceBoundaryAndInvalidScopeMatrix(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	if env.service.DataOrigin() == "" {
+		t.Fatal("data origin is empty")
+	}
+	var invalidUser domain.UserID
+	path := domain.MustParseUserPath("/boundary")
+	uploadID := domain.UploadID("missing")
+	operationID := domain.OperationID("missing")
+	checks := []func() error{
+		func() error {
+			_, err := env.service.List(ctx, invalidUser, domain.ListRequest{Directory: domain.MustParseUserPath("/")})
+			return err
+		},
+		func() error { _, err := env.service.Stat(ctx, invalidUser, path); return err },
+		func() error {
+			_, err := env.service.CreateDirectory(ctx, invalidUser, domain.CreateDirectoryRequest{Path: path})
+			return err
+		},
+		func() error {
+			_, err := env.service.CreateUpload(ctx, invalidUser, domain.CreateUploadRequest{Path: path, IdempotencyKey: "valid-boundary-key-001"})
+			return err
+		},
+		func() error { _, err := env.service.UploadStatus(ctx, invalidUser, uploadID); return err },
+		func() error {
+			_, err := env.service.CompleteUpload(ctx, invalidUser, domain.CompleteUploadRequest{UploadID: uploadID, Path: path})
+			return err
+		},
+		func() error { return env.service.AbortUpload(ctx, invalidUser, uploadID) },
+		func() error {
+			_, _, err := env.service.Download(ctx, invalidUser, domain.CreateDownloadRequest{Path: path, Version: "v1"}, false)
+			return err
+		},
+		func() error {
+			_, err := env.service.Copy(ctx, invalidUser, domain.CopyRequest{Source: path, Destination: domain.MustParseUserPath("/copy"), IdempotencyKey: "valid-boundary-key-002"})
+			return err
+		},
+		func() error {
+			_, err := env.service.Move(ctx, invalidUser, domain.MoveRequest{Source: path, Destination: domain.MustParseUserPath("/move"), IdempotencyKey: "valid-boundary-key-003"})
+			return err
+		},
+		func() error {
+			_, err := env.service.Trash(ctx, invalidUser, []domain.UserPath{path}, "valid-boundary-key-004")
+			return err
+		},
+		func() error { _, err := env.service.Operation(ctx, invalidUser, operationID); return err },
+	}
+	for index, check := range checks {
+		if err := check(); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid scope check %d = %v", index, err)
+		}
+	}
+	for _, key := range []string{"", "short", strings.Repeat("x", 129), "valid-key-value\n"} {
+		if _, err := env.service.CreateUpload(ctx, env.owner, domain.CreateUploadRequest{Path: path, IdempotencyKey: key}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("idempotency key %q = %v", key, err)
+		}
+	}
+	if _, err := drive.NewService(nil, statememory.NewMemoryStore(), env.repo, nil, env.clock, "invalid", "", "", 0); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid service = %v", err)
+	}
+}
+
+func TestUploadAbortBatchMoveTrashPagingAndEmptyTrash(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	capability, err := env.service.CreateUpload(ctx, env.owner, domain.CreateUploadRequest{Path: domain.MustParseUserPath("/abort.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "abort-upload-key-0001"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.service.AbortUpload(ctx, env.owner, capability.UploadID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.service.UploadStatus(ctx, env.owner, capability.UploadID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("aborted upload status = %v", err)
+	}
+	source := upload(t, env, env.owner, "/source.txt", []byte("source"), "text/plain", "boundary-source-upload-1")
+	if _, _, err := env.service.Download(ctx, env.owner, domain.CreateDownloadRequest{Path: source.Path, Version: "stale"}, false); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("stale download = %v", err)
+	}
+	if _, mode, err := env.service.Download(ctx, env.owner, domain.CreateDownloadRequest{Path: source.Path, Version: source.Version}, false); err != nil || mode != "download" {
+		t.Fatalf("attachment download = %q, %v", mode, err)
+	}
+	batch, err := env.service.BatchCopyMove(ctx, env.owner, []domain.CopyRequest{
+		{Source: source.Path, Destination: domain.MustParseUserPath("/moved.txt")},
+		{Source: domain.MustParseUserPath("/missing.txt"), Destination: domain.MustParseUserPath("/never.txt")},
+	}, true, "boundary-move-batch-01")
+	if err != nil || len(batch.Items) != 2 || batch.Items[0].State != domain.OperationSucceeded || batch.Items[1].State != domain.OperationFailed {
+		t.Fatalf("move batch = %+v, %v", batch, err)
+	}
+	if operation, err := env.service.Operation(ctx, env.owner, batch.Items[0].OperationID); err != nil || operation.State != domain.OperationSucceeded {
+		t.Fatalf("provider operation = %+v, %v", operation, err)
+	}
+	if _, err := env.service.BatchCopyMove(ctx, env.owner, nil, false, "boundary-empty-batch-1"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty copy batch = %v", err)
+	}
+	if _, err := env.service.Trash(ctx, env.owner, nil, "boundary-empty-trash-1"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty trash batch = %v", err)
+	}
+	if _, err := env.service.Trash(ctx, env.owner, []domain.UserPath{domain.MustParseUserPath("/")}, "boundary-root-trash-01"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("root trash = %v", err)
+	}
+	duplicate := domain.MustParseUserPath("/moved.txt")
+	if _, err := env.service.Trash(ctx, env.owner, []domain.UserPath{duplicate, duplicate}, "boundary-duplicate-01"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("duplicate trash = %v", err)
+	}
+	first := upload(t, env, env.owner, "/trash-one.txt", []byte("one"), "text/plain", "trash-one-upload-key-1")
+	second := upload(t, env, env.owner, "/trash-two.txt", []byte("two"), "text/plain", "trash-two-upload-key-1")
+	trashed, err := env.service.Trash(ctx, env.owner, []domain.UserPath{first.Path, second.Path}, "boundary-trash-batch-1")
+	if err != nil || len(trashed.Items) != 2 {
+		t.Fatalf("trash batch = %+v, %v", trashed, err)
+	}
+	page, err := env.service.TrashPage(ctx, env.owner, 1, "")
+	if err != nil || len(page.Items) != 1 || page.NextCursor == "" {
+		t.Fatalf("trash page = %+v, %v", page, err)
+	}
+	page, err = env.service.TrashPage(ctx, env.owner, 1, page.NextCursor)
+	if err != nil || len(page.Items) != 1 || page.NextCursor != "" {
+		t.Fatalf("trash final page = %+v, %v", page, err)
+	}
+	if _, err := env.service.TrashPage(ctx, env.owner, -1, ""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid trash page = %v", err)
+	}
+	if _, err := env.service.EmptyTrash(ctx, env.owner, false, "boundary-empty-trash-2"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("unconfirmed empty trash = %v", err)
+	}
+	emptied, err := env.service.EmptyTrash(ctx, env.owner, true, "boundary-empty-trash-3")
+	if err != nil || len(emptied.Items) != 2 {
+		t.Fatalf("empty trash = %+v, %v", emptied, err)
+	}
+	if records, err := env.service.TrashList(ctx, env.owner); err != nil || len(records) != 0 {
+		t.Fatalf("trash after empty = %+v, %v", records, err)
+	}
+}
+
+func TestShareIdempotencyFileRootAndPublicFailureMatrix(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	entry := upload(t, env, env.owner, "/shared.txt", []byte("public"), "text/plain", "share-file-upload-key-1")
+	if _, err := env.service.CreateShare(ctx, env.owner, entry.Path, nil, "short"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("short share key = %v", err)
+	}
+	past := env.clock.Now()
+	if _, err := env.service.CreateShare(ctx, env.owner, entry.Path, &past, "share-expired-key-001"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("expired share = %v", err)
+	}
+	expiry := env.clock.Now().Add(time.Hour)
+	created, err := env.service.CreateShare(ctx, env.owner, entry.Path, &expiry, "share-file-key-00001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := env.service.CreateShare(ctx, env.owner, entry.Path, &expiry, "share-file-key-00001")
+	if err != nil || replayed.Record.ShareID != created.Record.ShareID {
+		t.Fatalf("share replay = %+v, %v", replayed, err)
+	}
+	if _, err := env.service.CreateShare(ctx, env.owner, domain.MustParseUserPath("/missing"), nil, "share-file-key-00001"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("share key conflict = %v", err)
+	}
+	shares, err := env.service.Shares(ctx, env.owner)
+	if err != nil || len(shares) != 1 {
+		t.Fatalf("shares = %+v, %v", shares, err)
+	}
+	token := strings.TrimPrefix(created.Link.Reveal(), "http://127.0.0.1:8080/s/")
+	page, err := env.service.PublicShare(ctx, token, "", 10, "")
+	if err != nil || page.Root.Path != "/" || page.Root.Kind != domain.EntryFile {
+		t.Fatalf("public file root = %+v, %v", page, err)
+	}
+	if _, err := env.service.PublicShare(ctx, token, "/child", 10, ""); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("file-root child = %v", err)
+	}
+	for _, relative := range []string{"%2e%2e", `\\escape`} {
+		if _, err := env.service.PublicShare(ctx, token, relative, 10, ""); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("public relative %q = %v", relative, err)
+		}
+	}
+	for _, test := range []struct {
+		token   string
+		version domain.Version
+	}{
+		{"bad", entry.Version},
+		{token, ""},
+		{token, "stale"},
+	} {
+		if _, _, err := env.service.PublicDownload(ctx, test.token, "", test.version, false); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("public download failure = %v", err)
+		}
+	}
+	if err := env.service.RevokeShare(ctx, env.owner, created.Record.ShareID); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.service.RevokeShare(ctx, env.owner, created.Record.ShareID); err != nil {
+		t.Fatalf("idempotent revoke = %v", err)
+	}
+}
+
+func TestDriveMutationAndProviderFaultMatrix(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	path := domain.MustParseUserPath("/fault.txt")
+	invalidKeyCalls := []func() error{
+		func() error {
+			_, err := env.service.Copy(ctx, env.owner, domain.CopyRequest{IdempotencyKey: "short"})
+			return err
+		},
+		func() error {
+			_, err := env.service.Move(ctx, env.owner, domain.MoveRequest{IdempotencyKey: "short"})
+			return err
+		},
+		func() error {
+			_, err := env.service.BatchCopyMove(ctx, env.owner, []domain.CopyRequest{{}}, false, "short")
+			return err
+		},
+		func() error {
+			_, err := env.service.Trash(ctx, env.owner, []domain.UserPath{path}, "short")
+			return err
+		},
+		func() error {
+			_, err := env.service.Restore(ctx, env.owner, "missing", domain.ConflictFail, "short")
+			return err
+		},
+		func() error { _, err := env.service.PermanentDelete(ctx, env.owner, "missing", "short"); return err },
+		func() error { _, err := env.service.EmptyTrash(ctx, env.owner, true, "short"); return err },
+	}
+	for index, call := range invalidKeyCalls {
+		if err := call(); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid mutation key %d = %v", index, err)
+		}
+	}
+	missingBatch, err := env.service.Trash(ctx, env.owner, []domain.UserPath{domain.MustParseUserPath("/missing.txt")}, "trash-missing-item-001")
+	if err != nil || len(missingBatch.Items) != 1 || missingBatch.Items[0].State != domain.OperationFailed {
+		t.Fatalf("missing trash item = %+v, %v", missingBatch, err)
+	}
+	replayEntry := upload(t, env, env.owner, "/replay.txt", []byte("replay"), "text/plain", "trash-replay-upload-01")
+	first, err := env.service.Trash(ctx, env.owner, []domain.UserPath{replayEntry.Path}, "trash-replay-key-0001")
+	if err != nil || first.Items[0].TrashID == "" {
+		t.Fatalf("first replay trash = %+v, %v", first, err)
+	}
+	replay, err := env.service.Trash(ctx, env.owner, []domain.UserPath{replayEntry.Path}, "trash-replay-key-0001")
+	if err != nil || replay.Items[0].TrashID != first.Items[0].TrashID {
+		t.Fatalf("trash replay = %+v, %v", replay, err)
+	}
+	conflict, err := env.service.Trash(ctx, env.owner, []domain.UserPath{domain.MustParseUserPath("/different.txt")}, "trash-replay-key-0001")
+	if err != nil || conflict.Items[0].State != domain.OperationFailed || conflict.Items[0].ErrorKind != domain.ErrorConflict {
+		t.Fatalf("trash replay conflict = %+v, %v", conflict, err)
+	}
+	if _, err := env.service.Restore(ctx, env.owner, first.Items[0].TrashID, domain.ConflictFail, "restore-fault-key-0001"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.service.Restore(ctx, env.owner, first.Items[0].TrashID, domain.ConflictRename, "restore-fault-key-0001"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("restore replay conflict = %v", err)
+	}
+
+	statEntry := upload(t, env, env.owner, "/restore-stat.txt", []byte("x"), "text/plain", "restore-stat-upload-01")
+	statTrash, err := env.service.Trash(ctx, env.owner, []domain.UserPath{statEntry.Path}, "restore-stat-trash-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.storage.InjectFault(providermemory.OperationStat, providermemory.FaultUnavailable)
+	if _, err := env.service.Restore(ctx, env.owner, statTrash.Items[0].TrashID, domain.ConflictFail, "restore-stat-fault-01"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("restore stat fault = %v", err)
+	}
+	env.storage.InjectFault(providermemory.OperationMove, providermemory.FaultUnavailable)
+	if _, err := env.service.Restore(ctx, env.owner, statTrash.Items[0].TrashID, domain.ConflictFail, "restore-move-fault-01"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("restore move fault = %v", err)
+	}
+	deleteEntry := upload(t, env, env.owner, "/delete-fault.txt", []byte("x"), "text/plain", "delete-fault-upload-01")
+	deleteTrash, err := env.service.Trash(ctx, env.owner, []domain.UserPath{deleteEntry.Path}, "delete-fault-trash-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.storage.InjectFault(providermemory.OperationStat, providermemory.FaultUnavailable)
+	if _, err := env.service.PermanentDelete(ctx, env.owner, deleteTrash.Items[0].TrashID, "delete-stat-fault-001"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("delete stat fault = %v", err)
+	}
+	env.storage.InjectFault(providermemory.OperationDelete, providermemory.FaultUnavailable)
+	if _, err := env.service.PermanentDelete(ctx, env.owner, deleteTrash.Items[0].TrashID, "delete-data-fault-001"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("delete provider fault = %v", err)
+	}
+}
+
+func TestPublicShareProviderFailureMatrix(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	_, _ = env.service.CreateDirectory(ctx, env.owner, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/fault-public")})
+	entry := upload(t, env, env.owner, "/fault-public/file.txt", []byte("public"), "text/plain", "public-fault-upload-01")
+	created, err := env.service.CreateShare(ctx, env.owner, domain.MustParseUserPath("/fault-public"), nil, "public-fault-share-001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay, err := env.service.CreateShare(ctx, env.owner, domain.MustParseUserPath("/fault-public"), nil, "public-fault-share-001"); err != nil || replay.Record.ShareID != created.Record.ShareID {
+		t.Fatalf("nil-expiry share replay = %+v, %v", replay, err)
+	}
+	if _, err := env.service.CreateShare(ctx, env.owner, domain.MustParseUserPath("/missing"), nil, "public-missing-share-1"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("share missing root = %v", err)
+	}
+	token := strings.TrimPrefix(created.Link.Reveal(), "http://127.0.0.1:8080/s/")
+	validMissingToken := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x44}, 32))
+	if _, err := env.service.PublicShare(ctx, validMissingToken, "", 10, ""); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unknown valid token = %v", err)
+	}
+	env.storage.InjectFault(providermemory.OperationStat, providermemory.FaultUnavailable)
+	if _, err := env.service.PublicShare(ctx, token, "", 10, ""); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("public stat fault = %v", err)
+	}
+	env.storage.InjectFault(providermemory.OperationList, providermemory.FaultUnavailable)
+	if _, err := env.service.PublicShare(ctx, token, "", 10, ""); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("public list fault = %v", err)
+	}
+	env.storage.InjectFault(providermemory.OperationCreateDownload, providermemory.FaultUnavailable)
+	if _, _, err := env.service.PublicDownload(ctx, token, "/file.txt", entry.Version, false); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("public download provider fault = %v", err)
+	}
+}
+
+func TestDriveCancellationAndLateFailureMatrix(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	if _, _, err := env.service.Download(ctx, env.owner, domain.CreateDownloadRequest{Path: domain.MustParseUserPath("/missing"), Version: "v1"}, false); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing download = %v", err)
+	}
+	source := upload(t, env, env.owner, "/cancel-source.txt", []byte("x"), "text/plain", "cancel-source-upload-1")
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := env.service.BatchCopyMove(canceled, env.owner, []domain.CopyRequest{{Source: source.Path, Destination: domain.MustParseUserPath("/cancel-copy.txt")}}, false, "cancel-copy-batch-001"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled copy batch = %v", err)
+	}
+	if _, err := env.service.Trash(canceled, env.owner, []domain.UserPath{source.Path}, "cancel-trash-batch-01"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled trash batch = %v", err)
+	}
+	if _, err := env.service.TrashList(canceled, env.owner); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled trash list = %v", err)
+	}
+	if _, err := env.service.TrashPage(canceled, env.owner, 0, ""); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled trash page = %v", err)
+	}
+	if _, err := env.service.Restore(canceled, env.owner, "missing", domain.ConflictFail, "cancel-restore-key-001"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled restore = %v", err)
+	}
+	if _, err := env.service.PermanentDelete(canceled, env.owner, "missing", "cancel-delete-key-0001"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled permanent delete = %v", err)
+	}
+	if _, err := env.service.EmptyTrash(canceled, env.owner, true, "cancel-empty-trash-001"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled empty trash = %v", err)
+	}
+	if _, err := env.service.CreateShare(canceled, env.owner, source.Path, nil, "cancel-share-key-00001"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled create share = %v", err)
 	}
 }

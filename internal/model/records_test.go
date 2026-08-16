@@ -38,7 +38,7 @@ func TestProfileContainsExactlyIdentityFields(t *testing.T) {
 func TestThemePreferenceIsSeparateAndStrict(t *testing.T) {
 	t.Parallel()
 
-	for _, themeID := range []string{"system", "endlessfs-light", "custom-1"} {
+	for _, themeID := range []string{"system", "endlessfs-light", "custom-1", "com.example.theme"} {
 		record := &ThemePreference{SchemaVersion: SchemaVersion, ThemeID: themeID}
 		if _, err := state.EncodeJSON(record); err != nil {
 			t.Fatalf("theme %q: %v", themeID, err)
@@ -60,6 +60,30 @@ func TestRecordDecoderRejectsFieldsOutsideSchema(t *testing.T) {
 	if err := state.DecodeJSON(data, &profile); err == nil {
 		t.Fatal("profile accepted presentation state")
 	}
+}
+
+func FuzzPersistenceRecordDecoders(f *testing.F) {
+	for _, seed := range [][]byte{
+		[]byte(`{}`),
+		[]byte(`{"schemaVersion":1}`),
+		[]byte(`{"schemaVersion":1,"userID":"AAAAAAAAAAAAAAAAAAAAAA","displayName":"Name"}`),
+		[]byte(`{"schemaVersion":1,"unknown":"field"}`),
+		[]byte(`{"schemaVersion":1,"schemaVersion":1}`),
+		{0xff, 0xfe},
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		destinations := []state.Validatable{
+			&Profile{}, &Account{}, &Credential{}, &CredentialIndex{}, &Ceremony{},
+			&RegistrationOperation{}, &BootstrapState{}, &FirstAccountMarker{}, &IdempotencyRecord{},
+			&Session{}, &Invite{}, &Recovery{}, &Share{}, &Trash{}, &BatchOperation{},
+			&MutationOutcome{}, &ThemePreference{}, &AdminRoles{},
+		}
+		for _, destination := range destinations {
+			_ = state.DecodeJSONWithLimit(data, destination, state.MaxRecordBytes)
+		}
+	})
 }
 
 func mustUserID(t *testing.T, value byte) domain.UserID {

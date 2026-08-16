@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -32,6 +33,8 @@ type driveHTTPEnvironment struct {
 	otherSession *http.Cookie
 	otherCSRF    *http.Cookie
 	themes       *theme.Manager
+	user         domain.UserID
+	otherUser    domain.UserID
 }
 
 func newDriveHTTPEnvironment(t *testing.T) driveHTTPEnvironment {
@@ -78,7 +81,7 @@ func newDriveHTTPEnvironment(t *testing.T) driveHTTPEnvironment {
 		}
 	}
 	cfg := config.Config{BaseURL: origin, AllowedOrigin: origin, Secure: true}
-	return driveHTTPEnvironment{handler: NewCompleteApplication(cfg, "test", nil, sessions, service, themeManager), data: data, storage: storage, session: sessions.Cookie(issued[0]), csrf: sessions.CSRFCookie(issued[0]), otherSession: sessions.Cookie(issued[1]), otherCSRF: sessions.CSRFCookie(issued[1]), themes: themeManager}
+	return driveHTTPEnvironment{handler: NewCompleteApplication(cfg, "test", nil, sessions, service, themeManager), data: data, storage: storage, session: sessions.Cookie(issued[0]), csrf: sessions.CSRFCookie(issued[0]), otherSession: sessions.Cookie(issued[1]), otherCSRF: sessions.CSRFCookie(issued[1]), themes: themeManager, user: users[0], otherUser: users[1]}
 }
 
 func httpUserID(t *testing.T, fill byte) domain.UserID {
@@ -225,4 +228,186 @@ func TestFileHTTPRejectsProviderFieldsBodiesAndTraversalBeforeProvider(t *testin
 	if fileBody.Code != http.StatusBadRequest {
 		t.Fatalf("file body status = %d", fileBody.Code)
 	}
+}
+
+func TestReservedNamespaceAndEncodingCorpusFailsBeforeProviderAccess(t *testing.T) {
+	env := newDriveHTTPEnvironment(t)
+	const origin = "https://drive.example.test"
+	cookies := []*http.Cookie{env.session, env.csrf}
+	segment256 := "/" + string(bytes.Repeat([]byte{'a'}, 256))
+	path4097 := "/" + string(bytes.Repeat([]byte{'a'}, 4096))
+	jsonPaths := []string{
+		"", "relative", "//escape", "/escape/", "/./escape", "/../escape", "/safe/../../escape",
+		`/safe\escape`, "/safe\x00escape", "/safe\x1fescape", "/safe\x7fescape",
+		"/.endlessfs", "/.ENDLESSFS/records", "/.trash", "/.TrAsH/item", segment256, path4097,
+	}
+	before := env.storage.Instrumentation()
+	for index, value := range jsonPaths {
+		t.Run("json-"+strconv.Itoa(index), func(t *testing.T) {
+			body, _ := json.Marshal(map[string]string{"path": value})
+			response := performRequest(t, env.handler, http.MethodPost, "/api/v1/directories", origin, string(body), cookies, driveMutationHeaders(env.csrf.Value, ""))
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("path %q status = %d body=%s", value, response.Code, response.Body.String())
+			}
+		})
+	}
+	queries := []string{
+		"%2F..%2Fescape",
+		"%252F..%252Fescape",
+		"%2Fsafe%2F%2E%2E%2Fescape",
+		"%2Fsafe%5Cescape",
+		"%2F%2Eendlessfs%2Frecords",
+		"%2F%2Etrash%2Fitem",
+		"%2Fsafe%00escape",
+	}
+	for index, query := range queries {
+		t.Run("query-"+strconv.Itoa(index), func(t *testing.T) {
+			response := performRequest(t, env.handler, http.MethodGet, "/api/v1/files?path="+query, "", "", []*http.Cookie{env.session}, nil)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("query %q status = %d body=%s", query, response.Code, response.Body.String())
+			}
+		})
+	}
+	after := env.storage.Instrumentation()
+	if after.ProviderCalls[providermemory.OperationCreateDirectory] != before.ProviderCalls[providermemory.OperationCreateDirectory] || after.ProviderCalls[providermemory.OperationList] != before.ProviderCalls[providermemory.OperationList] {
+		t.Fatalf("traversal corpus reached provider: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestIntegrationCrossUserPrivateEndpointMatrix(t *testing.T) {
+	env := newDriveHTTPEnvironment(t)
+	const origin = "https://drive.example.test"
+	ownerCookies := []*http.Cookie{env.otherSession, env.otherCSRF}
+	attackerCookies := []*http.Cookie{env.session, env.csrf}
+
+	for _, path := range []string{"/foreign", "/page-two"} {
+		response := performRequest(t, env.handler, http.MethodPost, "/api/v1/directories", origin, `{"path":"`+path+`"}`, ownerCookies, driveMutationHeaders(env.otherCSRF.Value, ""))
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create owner directory %s = %d %s", path, response.Code, response.Body.String())
+		}
+	}
+	ownerEntry, ownerUpload := createHTTPFile(t, env, env.otherSession, env.otherCSRF, "/foreign/owned.txt", "owned", "cross-owner-upload-0001")
+	attackerEntry, _ := createHTTPFile(t, env, env.session, env.csrf, "/same.txt", "attacker", "cross-attacker-upload-01")
+	ownerSame, _ := createHTTPFile(t, env, env.otherSession, env.otherCSRF, "/same.txt", "owner", "cross-owner-upload-0002")
+	if attackerEntry.Version == ownerSame.Version {
+		t.Fatal("test setup requires distinct opaque versions")
+	}
+
+	ownerPage := performRequest(t, env.handler, http.MethodGet, "/api/v1/files?path=/&limit=1", "", "", []*http.Cookie{env.otherSession}, nil)
+	var page domain.ListPage
+	decodeResponse(t, ownerPage, &page)
+	if page.NextCursor == "" {
+		t.Fatal("test setup did not create an owner-scoped cursor")
+	}
+
+	copyResponse := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/copy", origin, `{"source":"/foreign/owned.txt","destination":"/foreign/copied.txt"}`, ownerCookies, driveMutationHeaders(env.otherCSRF.Value, "cross-owner-copy-000001"))
+	var ownerOperation domain.Operation
+	decodeResponse(t, copyResponse, &ownerOperation)
+	if copyResponse.Code != http.StatusAccepted || ownerOperation.ID == "" {
+		t.Fatalf("owner copy = %d %s", copyResponse.Code, copyResponse.Body.String())
+	}
+
+	shareResponse := performRequest(t, env.handler, http.MethodPost, "/api/v1/shares", origin, `{"path":"/foreign"}`, ownerCookies, driveMutationHeaders(env.otherCSRF.Value, "cross-owner-share-00001"))
+	var ownerShare struct {
+		Share model.Share `json:"share"`
+	}
+	decodeResponse(t, shareResponse, &ownerShare)
+	if shareResponse.Code != http.StatusCreated || ownerShare.Share.ShareID == "" {
+		t.Fatalf("owner share = %d %s", shareResponse.Code, shareResponse.Body.String())
+	}
+
+	trashResponse := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"paths":["/foreign/copied.txt"]}`, ownerCookies, driveMutationHeaders(env.otherCSRF.Value, "cross-owner-trash-00001"))
+	var ownerTrash drive.BatchResult
+	decodeResponse(t, trashResponse, &ownerTrash)
+	if trashResponse.Code != http.StatusAccepted || len(ownerTrash.Items) != 1 || ownerTrash.Items[0].TrashID == "" {
+		t.Fatalf("owner trash = %d %s", trashResponse.Code, trashResponse.Body.String())
+	}
+
+	checks := []struct {
+		name, method, target, body string
+		want                       int
+		key                        string
+	}{
+		{name: "list path", method: http.MethodGet, target: "/api/v1/files?path=/foreign", want: http.StatusNotFound},
+		{name: "stat", method: http.MethodGet, target: "/api/v1/files/stat?path=/foreign/owned.txt", want: http.StatusNotFound},
+		{name: "cursor", method: http.MethodGet, target: "/api/v1/files?path=/&limit=1&cursor=" + page.NextCursor, want: http.StatusBadRequest},
+		{name: "upload destination", method: http.MethodPost, target: "/api/v1/uploads", body: `{"path":"/foreign/new.txt","size":1,"mediaType":"text/plain"}`, want: http.StatusNotFound, key: "cross-attack-upload-001"},
+		{name: "upload status", method: http.MethodGet, target: "/api/v1/uploads/" + string(ownerUpload.UploadID), want: http.StatusNotFound},
+		{name: "upload complete", method: http.MethodPost, target: "/api/v1/uploads/" + string(ownerUpload.UploadID) + "/complete", body: `{"path":"/foreign/owned.txt","size":5,"mediaType":"text/plain"}`, want: http.StatusNotFound},
+		{name: "upload abort", method: http.MethodDelete, target: "/api/v1/uploads/" + string(ownerUpload.UploadID), body: `{}`, want: http.StatusNotFound},
+		{name: "download", method: http.MethodPost, target: "/api/v1/downloads", body: `{"path":"/foreign/owned.txt","version":"` + string(ownerEntry.Version) + `"}`, want: http.StatusNotFound},
+		{name: "preview", method: http.MethodPost, target: "/api/v1/downloads", body: `{"path":"/foreign/owned.txt","version":"` + string(ownerEntry.Version) + `","preview":true}`, want: http.StatusNotFound},
+		{name: "foreign version", method: http.MethodPost, target: "/api/v1/downloads", body: `{"path":"/same.txt","version":"` + string(ownerSame.Version) + `"}`, want: http.StatusPreconditionFailed},
+		{name: "copy", method: http.MethodPost, target: "/api/v1/files/copy", body: `{"source":"/foreign/owned.txt","destination":"/stolen.txt","expectedSource":"` + string(ownerEntry.Version) + `"}`, want: http.StatusNotFound, key: "cross-attack-copy-00001"},
+		{name: "move", method: http.MethodPost, target: "/api/v1/files/move", body: `{"source":"/foreign/owned.txt","destination":"/stolen.txt","expectedSource":"` + string(ownerEntry.Version) + `"}`, want: http.StatusNotFound, key: "cross-attack-move-00001"},
+		{name: "operation", method: http.MethodGet, target: "/api/v1/operations/" + string(ownerOperation.ID), want: http.StatusNotFound},
+		{name: "restore", method: http.MethodPost, target: "/api/v1/trash/" + ownerTrash.Items[0].TrashID + "/restore", body: `{}`, want: http.StatusNotFound, key: "cross-attack-restore-001"},
+		{name: "permanent delete", method: http.MethodDelete, target: "/api/v1/trash/" + ownerTrash.Items[0].TrashID, body: `{}`, want: http.StatusNotFound, key: "cross-attack-delete-0001"},
+		{name: "create share", method: http.MethodPost, target: "/api/v1/shares", body: `{"path":"/foreign/owned.txt"}`, want: http.StatusNotFound, key: "cross-attack-share-00001"},
+		{name: "revoke share", method: http.MethodDelete, target: "/api/v1/shares/" + ownerShare.Share.ShareID, body: `{}`, want: http.StatusNotFound},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			headers := map[string]string(nil)
+			cookies := []*http.Cookie{env.session}
+			if check.method != http.MethodGet {
+				headers = driveMutationHeaders(env.csrf.Value, check.key)
+				cookies = attackerCookies
+			}
+			response := performRequest(t, env.handler, check.method, check.target, origin, check.body, cookies, headers)
+			if response.Code != check.want {
+				t.Fatalf("status = %d, want %d: %s", response.Code, check.want, response.Body.String())
+			}
+			assertProblem(t, response)
+		})
+	}
+
+	attackerTrash := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"paths":["/foreign/owned.txt"]}`, attackerCookies, driveMutationHeaders(env.csrf.Value, "cross-attack-trash-00001"))
+	var deniedBatch drive.BatchResult
+	decodeResponse(t, attackerTrash, &deniedBatch)
+	if attackerTrash.Code != http.StatusAccepted || len(deniedBatch.Items) != 1 || deniedBatch.Items[0].ErrorKind != domain.ErrorNotFound {
+		t.Fatalf("cross-user trash result = %d %s", attackerTrash.Code, attackerTrash.Body.String())
+	}
+	shares := performRequest(t, env.handler, http.MethodGet, "/api/v1/shares", "", "", []*http.Cookie{env.session}, nil)
+	if shares.Code != http.StatusOK || bytes.Contains(shares.Body.Bytes(), []byte(ownerShare.Share.ShareID)) {
+		t.Fatalf("attacker share listing leaked owner record: %d %s", shares.Code, shares.Body.String())
+	}
+	ownerStillPresent := performRequest(t, env.handler, http.MethodGet, "/api/v1/files/stat?path=/foreign/owned.txt", "", "", []*http.Cookie{env.otherSession}, nil)
+	if ownerStillPresent.Code != http.StatusOK {
+		t.Fatalf("cross-user matrix mutated owner file: %d %s", ownerStillPresent.Code, ownerStillPresent.Body.String())
+	}
+}
+
+func createHTTPFile(t *testing.T, env driveHTTPEnvironment, session, csrf *http.Cookie, path, content, key string) (domain.Entry, domain.UploadCapability) {
+	t.Helper()
+	origin := "https://drive.example.test"
+	cookies := []*http.Cookie{session, csrf}
+	body, _ := json.Marshal(map[string]any{"path": path, "size": len(content), "mediaType": "text/plain", "resumable": true})
+	created := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads", origin, string(body), cookies, driveMutationHeaders(csrf.Value, key))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create upload for %s = %d %s", path, created.Code, created.Body.String())
+	}
+	var capability domain.UploadCapability
+	decodeResponse(t, created, &capability)
+	request, _ := http.NewRequest(capability.Method, capability.URL, bytes.NewBufferString(content))
+	for name, value := range capability.Headers {
+		request.Header.Set(name, value)
+	}
+	request.Header.Set("Origin", origin)
+	response, err := env.data.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("upload file %s = %d", path, response.StatusCode)
+	}
+	completedBody, _ := json.Marshal(map[string]any{"path": path, "size": len(content), "mediaType": "text/plain"})
+	completed := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/"+string(capability.UploadID)+"/complete", origin, string(completedBody), cookies, driveMutationHeaders(csrf.Value, ""))
+	if completed.Code != http.StatusOK {
+		t.Fatalf("complete file %s = %d %s", path, completed.Code, completed.Body.String())
+	}
+	var entry domain.Entry
+	decodeResponse(t, completed, &entry)
+	return entry, capability
 }

@@ -522,13 +522,13 @@ type ThemePreference struct {
 	ThemeID       string `json:"themeID"`
 }
 
-var themeIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
+var themeIDPattern = regexp.MustCompile(`^[a-z0-9]+(?:[.-][a-z0-9]+)+$`)
 
 func (r *ThemePreference) Validate() error {
 	if err := validateSchema(r.SchemaVersion); err != nil {
 		return err
 	}
-	if r.ThemeID != "system" && !themeIDPattern.MatchString(r.ThemeID) {
+	if r.ThemeID != "system" && (len(r.ThemeID) > 128 || !themeIDPattern.MatchString(r.ThemeID)) {
 		return domain.NewError(domain.ErrorInvalid, "invalid theme preference")
 	}
 	return nil

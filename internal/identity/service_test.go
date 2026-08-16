@@ -453,6 +453,144 @@ func TestIntegrationConcurrentAdminChangesPreserveEnabledAdministrator(t *testin
 	}
 }
 
+func TestIdentityAccountAndAdministrativeLifecycle(t *testing.T) {
+	env := newIdentityEnvironment(t, RegistrationPolicy{AllowPublic: true, AllowInvite: true})
+	adminID, adminActor := bootstrapIdentity(t, env)
+	current, err := env.service.CurrentUser(context.Background(), adminActor)
+	if err != nil || current.UserID != adminID || len(current.Roles) != 1 || current.Roles[0] != "admin" {
+		t.Fatalf("current admin = %+v, %v", current, err)
+	}
+	if _, err := env.service.UpdateDisplayName(context.Background(), adminActor, "in\nvalid"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid display name = %v", err)
+	}
+	if passkeys, err := env.service.Passkeys(context.Background(), adminActor); err != nil || len(passkeys) != 1 {
+		t.Fatalf("initial passkeys = %+v, %v", passkeys, err)
+	}
+	withoutLabel, err := env.service.StartAddPasskey(context.Background(), adminActor, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.service.VerifyRegistration(context.Background(), withoutLabel.CeremonyID, withoutLabel.BrowserBinding, fakeRegistrationResponse(0x52)); err != nil {
+		t.Fatal(err)
+	}
+	if passkeys, err := env.service.Passkeys(context.Background(), adminActor); err != nil || len(passkeys) != 2 {
+		t.Fatalf("passkeys after add = %+v, %v", passkeys, err)
+	}
+	if err := env.service.RemovePasskey(context.Background(), adminActor, "missing"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("remove missing passkey = %v", err)
+	}
+	env.clock.Advance(CeremonyLifetime + time.Second)
+	if err := env.service.RemovePasskey(context.Background(), adminActor, firstCredential(t, env, adminID).CredentialID); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("stale passkey removal = %v", err)
+	}
+	if _, err := env.service.StartAddPasskey(context.Background(), adminActor, "Late Key"); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("stale add passkey = %v", err)
+	}
+	env.clock.Advance(-(CeremonyLifetime + time.Second))
+
+	start, err := env.service.StartRegistration(context.Background(), RegistrationStartRequest{DisplayName: "Regular User"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, err := env.service.VerifyRegistration(context.Background(), start.CeremonyID, start.BrowserBinding, fakeRegistrationResponse(0x53))
+	if err != nil {
+		t.Fatal(err)
+	}
+	regularCredential := firstCredential(t, env, registered.UserID)
+	issued, err := env.sessions.Issue(context.Background(), registered.UserID, regularCredential.CredentialID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regularActor, err := env.sessions.Authenticate(context.Background(), issued.Token.Reveal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err = env.service.CurrentUser(context.Background(), regularActor)
+	if err != nil || len(current.Roles) != 0 {
+		t.Fatalf("current regular user = %+v, %v", current, err)
+	}
+	unauthorizedCalls := []func() error{
+		func() error {
+			_, err := env.service.CreateInvite(context.Background(), regularActor, nil, "unauthorized-invite-01")
+			return err
+		},
+		func() error { _, err := env.service.Invites(context.Background(), regularActor); return err },
+		func() error { return env.service.RevokeInvite(context.Background(), regularActor, "missing") },
+		func() error {
+			_, err := env.service.CreateRecovery(context.Background(), regularActor, adminID, time.Minute, "unauthorized-recover-1")
+			return err
+		},
+		func() error { _, err := env.service.AdminUsers(context.Background(), regularActor); return err },
+		func() error { return env.service.DisableUser(context.Background(), regularActor, adminID) },
+		func() error { return env.service.EnableUser(context.Background(), regularActor, adminID) },
+		func() error { return env.service.GrantAdmin(context.Background(), regularActor, registered.UserID) },
+		func() error { return env.service.RevokeAdmin(context.Background(), regularActor, adminID) },
+	}
+	for index, call := range unauthorizedCalls {
+		if err := call(); !errors.Is(err, domain.ErrUnauthorized) {
+			t.Fatalf("unauthorized admin call %d = %v", index, err)
+		}
+	}
+	if users, err := env.service.AdminUsers(context.Background(), adminActor); err != nil || len(users) != 2 {
+		t.Fatalf("admin users = %+v, %v", users, err)
+	}
+	if _, err := env.service.AdminUsersPage(context.Background(), adminActor, -1, ""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid admin page limit = %v", err)
+	}
+	if err := env.service.EnableUser(context.Background(), adminActor, registered.UserID); err != nil {
+		t.Fatalf("enable enabled user = %v", err)
+	}
+	if err := env.service.DisableUser(context.Background(), adminActor, registered.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.service.DisableUser(context.Background(), adminActor, registered.UserID); err != nil {
+		t.Fatalf("disable disabled user = %v", err)
+	}
+	if err := env.service.GrantAdmin(context.Background(), adminActor, registered.UserID); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("grant disabled user = %v", err)
+	}
+	if err := env.service.EnableUser(context.Background(), adminActor, registered.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.service.GrantAdmin(context.Background(), adminActor, registered.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.service.GrantAdmin(context.Background(), adminActor, registered.UserID); err != nil {
+		t.Fatalf("idempotent grant = %v", err)
+	}
+	if err := env.service.RevokeAdmin(context.Background(), adminActor, registered.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.service.RevokeAdmin(context.Background(), adminActor, registered.UserID); err != nil {
+		t.Fatalf("idempotent revoke = %v", err)
+	}
+	if err := env.service.RevokeAdmin(context.Background(), adminActor, adminID); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("final admin revoke = %v", err)
+	}
+
+	for _, ttl := range []time.Duration{0, time.Hour + time.Second} {
+		if _, err := env.service.CreateRecovery(context.Background(), adminActor, registered.UserID, ttl, "invalid-recovery-ttl"); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("recovery TTL %s = %v", ttl, err)
+		}
+	}
+	if _, err := env.service.CreateRecovery(context.Background(), adminActor, registered.UserID, time.Minute, "short"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("short recovery key = %v", err)
+	}
+	if _, err := env.service.CreateRecovery(context.Background(), adminActor, userID(t, 0xee), time.Minute, "missing-recovery-user-1"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing recovery user = %v", err)
+	}
+	createdInvite, err := env.service.CreateInvite(context.Background(), adminActor, nil, "invite-idempotent-revoke")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := env.service.RevokeInvite(context.Background(), adminActor, createdInvite.InviteID); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.service.RevokeInvite(context.Background(), adminActor, createdInvite.InviteID); err != nil {
+		t.Fatalf("idempotent invite revoke = %v", err)
+	}
+}
+
 type identityEnvironment struct {
 	service        *Service
 	repository     *Repository

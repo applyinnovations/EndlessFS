@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/base64"
+	"log/slog"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +35,40 @@ func TestParseDefaults(t *testing.T) {
 	}
 	if cfg.DefaultLightTheme != "endlessfs-light" || cfg.DefaultDarkTheme != "endlessfs-dark" {
 		t.Fatalf("theme defaults = %+v", cfg)
+	}
+	if cfg.LogLevel != slog.LevelInfo {
+		t.Fatalf("LogLevel = %v, want info", cfg.LogLevel)
+	}
+}
+
+func TestLoadReadsValidatedProcessEnvironment(t *testing.T) {
+	keys := []string{
+		"ENDLESSFS_LISTEN_ADDR", "ENDLESSFS_BASE_URL", "ALLOW_REGISTRATION", "INVITE_REGISTRATION",
+		"ENDLESSFS_STORAGE_PROVIDER", "ENDLESSFS_MOCK_PROVIDER_URL", "ENDLESSFS_BOOTSTRAP_TOKEN",
+		"ENDLESSFS_SESSION_SECRET", "ENDLESSFS_WEBAUTHN_RP_ID", "ENDLESSFS_WEBAUTHN_RP_NAME",
+		"ENDLESSFS_SESSION_TTL", "ENDLESSFS_DOWNLOAD_CAPABILITY_TTL", "ENDLESSFS_UPLOAD_INIT_TTL",
+		"ENDLESSFS_TEXT_PREVIEW_MAX_BYTES", "ENDLESSFS_DEFAULT_LIGHT_THEME", "ENDLESSFS_DEFAULT_DARK_THEME",
+		"ENDLESSFS_LOG_LEVEL",
+	}
+	for _, key := range keys {
+		value, existed := os.LookupEnv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if existed {
+				_ = os.Setenv(key, value)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		})
+	}
+	if err := os.Setenv("ENDLESSFS_SESSION_SECRET", testSecret); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load()
+	if err != nil || cfg.SessionSecret.Reveal() != testSecret {
+		t.Fatalf("Load = %+v, %v", cfg.Public(), err)
 	}
 }
 
@@ -138,6 +174,25 @@ func TestParseTransferConfiguration(t *testing.T) {
 	public := cfg.Public()
 	if public.MaximumUploadInitializations != 100 || public.DefaultTransferConcurrency != 4 || public.MaximumTransferConcurrency != 8 {
 		t.Fatalf("public limits = %+v", public)
+	}
+}
+
+func TestParseLogLevel(t *testing.T) {
+	for value, expected := range map[string]slog.Level{
+		"debug": slog.LevelDebug,
+		"info":  slog.LevelInfo,
+		"warn":  slog.LevelWarn,
+		"error": slog.LevelError,
+	} {
+		t.Run(value, func(t *testing.T) {
+			cfg, err := Parse(mapLookup(map[string]string{"ENDLESSFS_LOG_LEVEL": value}))
+			if err != nil || cfg.LogLevel != expected {
+				t.Fatalf("Parse() = level %v, %v", cfg.LogLevel, err)
+			}
+		})
+	}
+	if _, err := Parse(mapLookup(map[string]string{"ENDLESSFS_LOG_LEVEL": "verbose"})); err == nil {
+		t.Fatal("Parse accepted an undocumented log level")
 	}
 }
 

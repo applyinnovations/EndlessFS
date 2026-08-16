@@ -1,13 +1,16 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/applyinnovations/endlessfs/internal/config"
+	endlesslogging "github.com/applyinnovations/endlessfs/internal/logging"
 )
 
 func TestIntegrationPublicEndpoints(t *testing.T) {
@@ -107,6 +110,39 @@ func TestUnknownPathDoesNotFallBackToApplicationShell(t *testing.T) {
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestRequestLoggingUsesRouteTemplatesAndOmitsSensitiveMaterial(t *testing.T) {
+	t.Parallel()
+	const marker = "secret-marker-must-not-be-logged"
+	var output bytes.Buffer
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /public/shares/{token}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusGone)
+	})
+	handler := requestIDMiddleware(requestLogMiddleware(mux, endlesslogging.NewJSON(&output, slog.LevelInfo)))
+	request := httptest.NewRequest(http.MethodGet, "/public/shares/"+marker+"?capability="+marker, nil)
+	request.Header.Set("Authorization", "Bearer "+marker)
+	request.Header.Set("Cookie", "endlessfs_session="+marker)
+	request.Header.Set("X-Request-ID", "safe-request-id")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	got := output.String()
+	if strings.Contains(got, marker) {
+		t.Fatalf("request log leaked request material: %s", got)
+	}
+	for _, required := range []string{
+		`"msg":"request_completed"`,
+		`"requestID":"safe-request-id"`,
+		`"route":"GET /public/shares/{token}"`,
+		`"status":410`,
+		`"result":"client_error"`,
+		`"duration":`,
+	} {
+		if !strings.Contains(got, required) {
+			t.Fatalf("request log missing %s: %s", required, got)
+		}
 	}
 }
 

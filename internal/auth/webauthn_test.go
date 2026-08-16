@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/model"
 	"github.com/descope/virtualwebauthn"
+	"github.com/go-webauthn/webauthn/protocol"
+	wa "github.com/go-webauthn/webauthn/webauthn"
 )
 
 func TestIntegrationGoWebAuthnVirtualAuthenticatorUsernamelessFlow(t *testing.T) {
@@ -69,6 +72,81 @@ func TestIntegrationGoWebAuthnVirtualAuthenticatorUsernamelessFlow(t *testing.T)
 	}
 	if result.UserID != userID || result.Credential.SignCount != 1 {
 		t.Fatalf("authentication result = %+v", result)
+	}
+}
+
+func FuzzWebAuthnResponseBoundary(f *testing.F) {
+	for _, seed := range [][]byte{
+		[]byte(`{}`),
+		[]byte(`{"id":"AA","rawId":"AA","type":"public-key","response":{}}`),
+		[]byte(`{"id":"<script>","type":"public-key"}`),
+		{0xff, 0xfe},
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		_, _ = protocol.ParseCredentialCreationResponseBytes(data)
+		_, _ = protocol.ParseCredentialRequestResponseBytes(data)
+	})
+}
+
+func TestWebAuthnAdapterRejectsInvalidBoundaryValues(t *testing.T) {
+	adapter, err := NewGoWebAuthn("drive.example.test", "EndlessFS", "https://drive.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	displayName, _ := domain.ParseDisplayName("Boundary User")
+	validUser := User{ID: testUserID(t, 0x39), DisplayName: displayName}
+	invalidUsers := []User{{}, {ID: validUser.ID}}
+	for _, user := range invalidUsers {
+		if _, _, err := adapter.BeginRegistration(user, bytes.Repeat([]byte{1}, 32)); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("BeginRegistration invalid user = %v", err)
+		}
+		if _, err := adapter.FinishRegistration(user, []byte(`{}`), []byte(`{}`)); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("FinishRegistration invalid user = %v", err)
+		}
+	}
+	if _, _, err := adapter.BeginRegistration(validUser, bytes.Repeat([]byte{1}, 31)); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("short registration challenge = %v", err)
+	}
+	if _, _, err := adapter.BeginAuthentication(bytes.Repeat([]byte{1}, 31)); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("short authentication challenge = %v", err)
+	}
+	if _, err := adapter.FinishRegistration(validUser, []byte(`not-json`), []byte(`{}`)); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid registration state = %v", err)
+	}
+	if _, err := adapter.FinishAuthentication([]byte(`not-json`), []byte(`{}`), func(_, _ []byte) (User, error) { return validUser, nil }); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid authentication state = %v", err)
+	}
+	if _, _, err := encodeOpaque(make(chan int), struct{}{}); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("opaque options encoding = %v", err)
+	}
+	if _, _, err := encodeOpaque(struct{}{}, make(chan int)); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("opaque session encoding = %v", err)
+	}
+
+	if _, err := newWebAuthnUser(User{ID: validUser.ID, DisplayName: displayName, Credentials: []model.Credential{{CredentialID: "%%%", PublicKey: "AA"}}}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid stored credential ID = %v", err)
+	}
+	if _, err := libraryCredential(model.Credential{CredentialID: "AA", PublicKey: "%%%"}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid stored public key = %v", err)
+	}
+	backup := true
+	stored := model.Credential{CredentialID: "AA", PublicKey: "AQ", Transports: []string{"internal"}, BackupEligible: &backup, BackupState: &backup, SignCount: 7}
+	library, err := libraryCredential(stored)
+	if err != nil || !library.Flags.BackupEligible || !library.Flags.BackupState || library.Authenticator.SignCount != 7 {
+		t.Fatalf("library credential = %+v, %v", library, err)
+	}
+	if _, err := modelCredential(validUser.ID, nil, domain.CredentialLabel{}, false); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("nil verified credential = %v", err)
+	}
+	if _, err := modelCredential(validUser.ID, &wa.Credential{ID: []byte{1}}, domain.CredentialLabel{}, false); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("incomplete verified credential = %v", err)
+	}
+	label, _ := domain.ParseCredentialLabel("Laptop")
+	record, err := modelCredential(validUser.ID, &wa.Credential{ID: []byte{1}, PublicKey: []byte{2}, Transport: []protocol.AuthenticatorTransport{protocol.Internal}}, label, true)
+	if err != nil || record.Label == nil || record.Label.String() != "Laptop" || len(record.Transports) != 1 {
+		t.Fatalf("verified credential conversion = %+v, %v", record, err)
 	}
 }
 

@@ -246,7 +246,7 @@ func (s *Service) Trash(ctx context.Context, userID domain.UserID, paths []domai
 	batchID := domain.OperationID(s.derivedID("trash-batch", userID, idempotencyKey))
 	result := BatchResult{OperationID: batchID, Items: make([]ItemResult, 0, len(paths))}
 	seen := make(map[string]struct{}, len(paths))
-	for index, path := range paths {
+	for _, path := range paths {
 		if !path.Valid() || path.IsRoot() {
 			return BatchResult{}, domain.NewError(domain.ErrorInvalid, "trash path is invalid")
 		}
@@ -254,6 +254,8 @@ func (s *Service) Trash(ctx context.Context, userID domain.UserID, paths []domai
 			return BatchResult{}, domain.NewError(domain.ErrorInvalid, "trash batch contains duplicate paths")
 		}
 		seen[path.String()] = struct{}{}
+	}
+	for index, path := range paths {
 		item, itemErr := s.trashOne(ctx, userID, live, trash, path, idempotencyKey+":"+strconv.Itoa(index))
 		if itemErr != nil {
 			item = ItemResult{Path: path, State: domain.OperationFailed, ErrorKind: domain.KindOf(itemErr)}

@@ -62,6 +62,22 @@ func TestStrictJSONRejectsMalformedRecords(t *testing.T) {
 	}
 }
 
+func FuzzStrictJSONDecoder(f *testing.F) {
+	for _, seed := range [][]byte{
+		[]byte(`{"schemaVersion":1,"name":"safe"}`),
+		[]byte(`{"schemaVersion":1,"name":"a","name":"b"}`),
+		[]byte(`{"schemaVersion":1,"unknown":true}`),
+		[]byte("{}{}"),
+		{0xff, 0xfe},
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var destination testRecord
+		_ = DecodeJSONWithLimit(data, &destination, 1024)
+	})
+}
+
 var errTestValidation = &validationError{}
 
 type validationError struct{}

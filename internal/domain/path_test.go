@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -128,6 +129,31 @@ func FuzzParseUserPath(f *testing.F) {
 		reparsed, err := ParseUserPath(path.String())
 		if err != nil || reparsed != path {
 			t.Fatalf("canonical path did not reparse: %q, %v", path.String(), err)
+		}
+	})
+}
+
+func FuzzParseUserPathEncodingBoundary(f *testing.F) {
+	for _, seed := range []string{
+		"/safe/file.txt", "/../escape", "%2F..%2Fescape", "%252F..%252Fescape",
+		"/safe%5Cescape", "/.endlessfs/record", "/Cafe%CC%81/file", "%00",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, encoded string) {
+		value := encoded
+		for range 2 {
+			decoded, err := url.PathUnescape(value)
+			if err != nil {
+				return
+			}
+			value = decoded
+			if parsed, err := ParseUserPath(value); err == nil {
+				reparsed, err := ParseUserPath(parsed.String())
+				if err != nil || reparsed != parsed {
+					t.Fatalf("canonical path did not round-trip: %q -> %#v, %v", value, reparsed, err)
+				}
+			}
 		}
 	})
 }

@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -45,6 +46,7 @@ type Config struct {
 	TextPreviewMaxBytes   int64
 	DefaultLightTheme     string
 	DefaultDarkTheme      string
+	LogLevel              slog.Level
 }
 
 // PublicConfig contains the non-secret settings safe to expose to browsers.
@@ -165,6 +167,10 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	logLevel, err := parseLogLevel(lookup)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		ListenAddr:            listenAddr,
@@ -185,6 +191,7 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		TextPreviewMaxBytes:   textPreviewMax,
 		DefaultLightTheme:     defaultLightTheme,
 		DefaultDarkTheme:      defaultDarkTheme,
+		LogLevel:              logLevel,
 	}, nil
 }
 
@@ -303,6 +310,25 @@ func parseThemeID(lookup func(string) (string, bool), name, fallback string) (st
 		}
 	}
 	return value, nil
+}
+
+func parseLogLevel(lookup func(string) (string, bool)) (slog.Level, error) {
+	value, ok := lookup("ENDLESSFS_LOG_LEVEL")
+	if !ok {
+		return slog.LevelInfo, nil
+	}
+	switch value {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return 0, fmt.Errorf("ENDLESSFS_LOG_LEVEL: expected exactly debug, info, warn, or error")
+	}
 }
 
 func parseBool(lookup func(string) (string, bool), name string, fallback bool) (bool, error) {

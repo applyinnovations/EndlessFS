@@ -19,6 +19,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/httpapi"
 	"github.com/applyinnovations/endlessfs/internal/identity"
+	endlesslogging "github.com/applyinnovations/endlessfs/internal/logging"
 	providermemory "github.com/applyinnovations/endlessfs/internal/provider/memory"
 	"github.com/applyinnovations/endlessfs/internal/state"
 	"github.com/applyinnovations/endlessfs/internal/theme"
@@ -27,18 +28,19 @@ import (
 var version = "dev"
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	if err := run(context.Background(), logger); err != nil {
+	cfg, err := config.Load()
+	if err != nil {
+		endlesslogging.NewJSON(os.Stdout, slog.LevelInfo).Error("process_stopped", "result", "error", "error", err.Error())
+		os.Exit(1)
+	}
+	logger := endlesslogging.NewJSON(os.Stdout, cfg.LogLevel)
+	if err := run(context.Background(), logger, cfg); err != nil {
 		logger.Error("process_stopped", "result", "error", "error", err.Error())
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, logger *slog.Logger) error {
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
+func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	store := state.NewMemoryStore()
 	repository := identity.NewRepository(store)
 	ids := domain.SystemIDGenerator()
@@ -92,7 +94,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           httpapi.NewCompleteApplication(cfg, version, identityService, sessions, driveService, themeManager),
+		Handler:           httpapi.NewCompleteApplicationWithLogger(cfg, version, identityService, sessions, driveService, logger, themeManager),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,

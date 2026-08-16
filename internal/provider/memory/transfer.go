@@ -527,6 +527,9 @@ func parseRange(value string, size int64) (start, end int64, partial bool, err e
 }
 
 func safeDisposition(disposition domain.Disposition, filename string) string {
+	if disposition != domain.DispositionAttachment && disposition != domain.DispositionInline {
+		disposition = domain.DispositionAttachment
+	}
 	value := mime.FormatMediaType(string(disposition), map[string]string{"filename": filename})
 	if value == "" {
 		return string(disposition)

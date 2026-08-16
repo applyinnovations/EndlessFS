@@ -3,7 +3,9 @@ package httpapi
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/auth"
 	"github.com/applyinnovations/endlessfs/internal/config"
@@ -15,13 +17,13 @@ import (
 
 // New constructs the HTTP handler from already-validated public configuration.
 func New(cfg config.PublicConfig, version string) http.Handler {
-	return newHandler(cfg, version, false, "", nil)
+	return newHandler(cfg, version, false, "", nil, nil)
 }
 
 // NewApplication constructs the complete control-plane handler.
 func NewApplication(cfg config.Config, version string, identityService *identity.Service, sessions *auth.SessionManager) http.Handler {
 	api := &identityAPI{config: cfg, identity: identityService, sessions: sessions}
-	return newHandler(cfg.Public(), version, cfg.Secure, "", api)
+	return newHandler(cfg.Public(), version, cfg.Secure, "", api, nil)
 }
 
 // NewCompleteApplication includes the file/data-capability control plane.
@@ -30,10 +32,20 @@ func NewCompleteApplication(cfg config.Config, version string, identityService *
 	if len(themeManagers) != 0 {
 		api.themes = themeManagers[0]
 	}
-	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), api)
+	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), api, nil)
 }
 
-func newHandler(cfg config.PublicConfig, version string, secure bool, dataOrigin string, api *identityAPI) http.Handler {
+// NewCompleteApplicationWithLogger constructs the complete control plane with
+// safe structured request-completion events.
+func NewCompleteApplicationWithLogger(cfg config.Config, version string, identityService *identity.Service, sessions *auth.SessionManager, driveService *drive.Service, logger *slog.Logger, themeManagers ...*theme.Manager) http.Handler {
+	api := &identityAPI{config: cfg, identity: identityService, sessions: sessions, drive: driveService}
+	if len(themeManagers) != 0 {
+		api.themes = themeManagers[0]
+	}
+	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), api, logger)
+}
+
+func newHandler(cfg config.PublicConfig, version string, secure bool, dataOrigin string, api *identityAPI, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", textStatus(http.StatusOK, "ok\n"))
 	mux.HandleFunc("GET /readyz", textStatus(http.StatusOK, "ready\n"))
@@ -65,7 +77,11 @@ func newHandler(cfg config.PublicConfig, version string, secure bool, dataOrigin
 	}
 	mux.Handle("GET /", application)
 
-	return requestIDMiddleware(securityHeaders(mux, secure, dataOrigin))
+	handler := securityHeaders(mux, secure, dataOrigin)
+	if logger != nil {
+		handler = requestLogMiddleware(handler, logger)
+	}
+	return requestIDMiddleware(handler)
 }
 
 func textStatus(status int, body string) http.HandlerFunc {
@@ -93,4 +109,62 @@ func securityHeaders(next http.Handler, secure bool, dataOrigin string) http.Han
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (recorder *statusRecorder) WriteHeader(status int) {
+	if recorder.status != 0 {
+		return
+	}
+	recorder.status = status
+	recorder.ResponseWriter.WriteHeader(status)
+}
+
+func (recorder *statusRecorder) Write(body []byte) (int, error) {
+	if recorder.status == 0 {
+		recorder.status = http.StatusOK
+	}
+	return recorder.ResponseWriter.Write(body)
+}
+
+func (recorder *statusRecorder) Unwrap() http.ResponseWriter {
+	return recorder.ResponseWriter
+}
+
+func requestLogMiddleware(next http.Handler, logger *slog.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		recorder := &statusRecorder{ResponseWriter: w}
+		next.ServeHTTP(recorder, r)
+		status := recorder.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		route := r.Pattern
+		if route == "" {
+			route = "unmatched"
+		}
+		logger.InfoContext(r.Context(), "request_completed",
+			"requestID", requestID(r),
+			"route", route,
+			"status", status,
+			"result", resultClass(status),
+			"duration", time.Since(started),
+		)
+	})
+}
+
+func resultClass(status int) string {
+	switch {
+	case status >= 500:
+		return "server_error"
+	case status >= 400:
+		return "client_error"
+	default:
+		return "success"
+	}
 }

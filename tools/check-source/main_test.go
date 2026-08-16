@@ -62,6 +62,25 @@ func TestCheckSkipsBuildAndVersionControlDirectories(t *testing.T) {
 	}
 }
 
+func TestCheckRejectsForbiddenIdentityConceptsAndMissingRoot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "model", "identity.go")
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("email oauth password"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	violations, err := check(root)
+	if err != nil || len(violations) != 3 {
+		t.Fatalf("identity violations = %+v, %v", violations, err)
+	}
+	if _, err := check(filepath.Join(root, "missing")); err == nil {
+		t.Fatal("missing source root was accepted")
+	}
+}
+
 func writeFixture(t *testing.T, root, name string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(name))

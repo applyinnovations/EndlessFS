@@ -110,9 +110,20 @@ func inventory() {
 }
 
 func preview(paths []string) {
-	registry, err := theme.LoadRegistry(paths...)
+	registry, resolved, selected, err := loadPreview(paths)
 	if err != nil {
 		log.Fatal(err)
+	}
+	handler := newPreviewHandler(registry, resolved)
+	server := &http.Server{Addr: "127.0.0.1:8090", Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	fmt.Printf("theme preview: http://127.0.0.1:8090 (%s)\n", selected)
+	log.Fatal(server.ListenAndServe())
+}
+
+func loadPreview(paths []string) (*theme.Registry, *theme.ResolvedTheme, string, error) {
+	registry, err := theme.LoadRegistry(paths...)
+	if err != nil {
+		return nil, nil, "", err
 	}
 	selected := "endlessfs-light"
 	for _, metadata := range registry.Metadata() {
@@ -121,7 +132,14 @@ func preview(paths []string) {
 			break
 		}
 	}
-	resolved, _ := registry.Theme(selected)
+	resolved, ok := registry.Theme(selected)
+	if !ok {
+		return nil, nil, "", fmt.Errorf("selected theme %q is unavailable", selected)
+	}
+	return registry, resolved, selected, nil
+}
+
+func newPreviewHandler(registry *theme.Registry, resolved *theme.ResolvedTheme) http.Handler {
 	handler := http.NewServeMux()
 	handler.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -144,9 +162,7 @@ func preview(paths []string) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		_, _ = w.Write(asset.Data)
 	})
-	server := &http.Server{Addr: "127.0.0.1:8090", Handler: handler, ReadHeaderTimeout: 5 * time.Second}
-	fmt.Printf("theme preview: http://127.0.0.1:8090 (%s)\n", selected)
-	log.Fatal(server.ListenAndServe())
+	return handler
 }
 
 var fixtureTemplate = template.Must(template.New("fixture").Parse(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EndlessFS theme conformance</title><link rel="stylesheet" href="{{.CSS}}"><link rel="stylesheet" href="/fixture.css"></head><body><header><h1>{{.Theme}}</h1><p>Theme API conformance fixture</p></header><main><section aria-labelledby="controls"><h2 id="controls">Controls and states</h2><div class="row"><button>Primary action</button><button disabled>Disabled</button><a href="#focus">Focus link</a><input aria-label="Example field" value="Field value"></div><div class="states"><span class="success">Complete</span><span class="warning">Warning</span><span class="danger">Failed</span><span class="selected">Selected</span></div></section><section><h2>File browser</h2><table><thead><tr><th>Name</th><th>Size</th><th>Status</th></tr></thead><tbody><tr><td>Example file.txt</td><td>128 KiB</td><td>Shared</td></tr><tr><td>Uploads</td><td>—</td><td>Uploading</td></tr></tbody></table></section><section><h2>Dialogs and empty states</h2><div class="panel"><h3>Empty folder</h3><p class="muted">Drop files here or choose upload.</p><button>Upload files</button></div><div class="panel danger-border"><h3>Delete permanently?</h3><p>This action cannot be undone.</p><button class="destructive">Delete</button></div></section><section><h2>Typography</h2><p class="xs">Extra small metadata</p><p>Normal body text with <code>monospace</code>.</p><p class="xl">Large heading scale</p></section></main></body></html>`))

@@ -107,11 +107,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		cdpwebauthn.Enable(),
 		chromedp.ActionFunc(func(actionContext context.Context) error {
 			var addErr error
-			authenticatorID, addErr = cdpwebauthn.AddVirtualAuthenticator(&cdpwebauthn.VirtualAuthenticatorOptions{
-				Protocol: cdpwebauthn.AuthenticatorProtocolCtap2, Ctap2version: cdpwebauthn.Ctap2versionCtap21,
-				Transport: cdpwebauthn.AuthenticatorTransportInternal, HasResidentKey: true,
-				HasUserVerification: true, AutomaticPresenceSimulation: true, IsUserVerified: true,
-			}).Do(actionContext)
+			authenticatorID, addErr = addVirtualAuthenticator(actionContext)
 			return addErr
 		}),
 	); err != nil {
@@ -568,11 +564,7 @@ func newTestBrowser(t *testing.T) *testBrowser {
 	if err := chromedp.Run(ctx,
 		network.Enable(), runtime.Enable(), chromedp.Navigate("about:blank"), cdpwebauthn.Enable(),
 		chromedp.ActionFunc(func(actionContext context.Context) error {
-			_, err := cdpwebauthn.AddVirtualAuthenticator(&cdpwebauthn.VirtualAuthenticatorOptions{
-				Protocol: cdpwebauthn.AuthenticatorProtocolCtap2, Ctap2version: cdpwebauthn.Ctap2versionCtap21,
-				Transport: cdpwebauthn.AuthenticatorTransportInternal, HasResidentKey: true,
-				HasUserVerification: true, AutomaticPresenceSimulation: true, IsUserVerified: true,
-			}).Do(actionContext)
+			_, err := addVirtualAuthenticator(actionContext)
 			return err
 		}),
 	); err != nil {
@@ -626,6 +618,24 @@ func bootstrapKeyboardActions(token string) chromedp.Tasks {
 		chromedp.Focus("#registration-form button[type='submit']", chromedp.ByQuery),
 		chromedp.KeyEvent(kb.Enter),
 	}
+}
+
+func addVirtualAuthenticator(ctx context.Context) (cdpwebauthn.AuthenticatorID, error) {
+	authenticatorID, err := cdpwebauthn.AddVirtualAuthenticator(&cdpwebauthn.VirtualAuthenticatorOptions{
+		Protocol: cdpwebauthn.AuthenticatorProtocolCtap2, Ctap2version: cdpwebauthn.Ctap2versionCtap20,
+		Transport: cdpwebauthn.AuthenticatorTransportUsb, HasResidentKey: true,
+		HasUserVerification: true, AutomaticPresenceSimulation: true, IsUserVerified: true,
+	}).Do(ctx)
+	if err != nil {
+		return "", err
+	}
+	if err := cdpwebauthn.SetAutomaticPresenceSimulation(authenticatorID, true).Do(ctx); err != nil {
+		return "", err
+	}
+	if err := cdpwebauthn.SetUserVerified(authenticatorID, true).Do(ctx); err != nil {
+		return "", err
+	}
+	return authenticatorID, nil
 }
 
 func browserStatus(ctx context.Context) string {

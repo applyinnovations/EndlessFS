@@ -29,10 +29,13 @@
                 relative = lib.removePrefix (toString ./. + "/") (toString path);
               in
               relative == "go.mod"
+              || relative == "go.sum"
               || relative == "cmd"
               || lib.hasPrefix "cmd/" relative
               || relative == "internal"
-              || lib.hasPrefix "internal/" relative;
+              || lib.hasPrefix "internal/" relative
+              || relative == "vendor"
+              || lib.hasPrefix "vendor/" relative;
           };
 
           endlessfs = pkgs.buildGoModule {
@@ -228,7 +231,9 @@
             go test ./... -run '^TestIntegration'
           '';
 
-          test-contract = unavailable "endlessfs-test-contract" "Milestone 1";
+          test-contract = goTask "endlessfs-test-contract" ''
+            go test ./... -run '^TestContract'
+          '';
           test-e2e = unavailable "endlessfs-test-e2e" "Milestone 5";
 
           test-race = goTask "endlessfs-test-race" ''
@@ -237,6 +242,7 @@
 
           test-fuzz = goTask "endlessfs-test-fuzz" ''
             go test ./internal/config -run '^$' -fuzz FuzzParse -fuzztime "''${ENDLESSFS_FUZZTIME:-10s}"
+            go test ./internal/domain -run '^$' -fuzz FuzzParseUserPath -fuzztime "''${ENDLESSFS_FUZZTIME:-10s}"
           '';
 
           test-theme = unavailable "endlessfs-test-theme" "Milestone 4";
@@ -380,8 +386,12 @@
 
           tests = goCheck "tests" "go test ./..." [ ];
           integration = goCheck "integration" "go test ./... -run '^TestIntegration'" [ ];
+          contract = goCheck "contract" "go test ./... -run '^TestContract'" [ ];
           race = goCheck "race" "go test -race ./..." [ ];
-          fuzz = goCheck "fuzz" "go test ./internal/config -run '^$' -fuzz FuzzParse -fuzztime 1s" [ ];
+          fuzz = goCheck "fuzz" ''
+            go test ./internal/config -run '^$' -fuzz FuzzParse -fuzztime 1s
+            go test ./internal/domain -run '^$' -fuzz FuzzParseUserPath -fuzztime 1s
+          '' [ ];
           offline = goCheck "offline" "go test ./..." [ ];
 
           security =

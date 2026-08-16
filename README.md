@@ -3,7 +3,7 @@
 EndlessFS is an open-source, provider-neutral, security-first private cloud drive. Its Go control plane authorizes file operations while browser file bytes travel directly to and from the configured object-storage provider through short-lived provider-native capabilities.
 
 > [!IMPORTANT]
-> This repository is at **Milestone 0**. The reproducible skeleton, embedded browser shell, health/config endpoints, tests, OCI packaging, and CI/release policy exist; authentication, storage contracts, transfers, themes, and drive workflows are not implemented yet. Do not deploy this scaffold or describe it as v1 complete or production-ready.
+> This repository is at **Milestone 1**. The typed domain, strict paths, state CAS/codec contracts, provider abstraction, deterministic in-memory provider, and capability-aware local data plane are implemented. Authentication, application workflows, themes, and the complete browser UI remain under construction. Do not deploy this implementation or describe it as v1 complete or production-ready.
 
 The normative implementation contract is [docs/v1-specification.md](./docs/v1-specification.md). A feature-complete mock-backed v1 will prove the full product locally, but it will not prove Google Cloud Storage interoperability or provide a production storage adapter.
 
@@ -47,7 +47,7 @@ nix flake check
 nix run .#dev
 ```
 
-The development server listens on `http://127.0.0.1:8080` by default. Milestone 0 intentionally rejects non-loopback listeners.
+The development server listens on `http://127.0.0.1:8080` by default. The current implementation intentionally rejects non-loopback listeners until the complete deployment security contract is enforced.
 
 Build the binary or an OCI archive without Docker:
 
@@ -60,7 +60,7 @@ All required builds and checks are Nix sandbox derivations, so project code cann
 
 ## Nix task interface
 
-The v1 spec reserves the following interface. Implemented Milestone 0 commands are usable now; theme commands deliberately return an error until the theme compiler exists so an empty placeholder cannot be mistaken for validation.
+The v1 spec reserves the following interface. Implemented commands are usable now; incomplete commands deliberately return an error so an empty placeholder cannot be mistaken for validation.
 
 | Command | Current purpose |
 |---|---|
@@ -73,10 +73,10 @@ The v1 spec reserves the following interface. Implemented Milestone 0 commands a
 | `nix run .#lint` | Run `actionlint`, `go vet`, and `staticcheck`. |
 | `nix run .#test` / `.#test-unit` | Run the current Go suite. |
 | `nix run .#test-integration` | Run tests named as integration tests. |
-| `nix run .#test-contract` | Reserved for Milestone 1; currently fails closed. |
+| `nix run .#test-contract` | Run reusable provider and state-store contract suites. |
 | `nix run .#test-e2e` | Reserved for Milestone 5; currently fails closed. |
 | `nix run .#test-race` | Run the suite with Go's race detector. |
-| `nix run .#test-fuzz` | Run the bounded configuration fuzz smoke target. |
+| `nix run .#test-fuzz` | Run bounded configuration and canonical-path fuzz smoke targets. |
 | `nix run .#security` | Run deterministic static and forbidden-source checks. |
 | `nix run .#container` | Build the local OCI archive through Nix. |
 | `nix run .#theme-check -- PATH` | Reserved for Milestone 4; currently fails closed. |
@@ -91,7 +91,7 @@ ENDLESSFS_FUZZTIME=2m nix run .#test-fuzz
 
 ## Current configuration
 
-Only settings that have validation and tests are parsed by the Milestone 0 binary:
+Only settings that have validation and tests are parsed by the current binary:
 
 | Variable | Default | Behavior now |
 |---|---:|---|
@@ -106,6 +106,11 @@ The remaining environment contract in specification section 15 will be added wit
 ```text
 cmd/endlessfs/           process entry point
 internal/config/         environment parsing and validation
+internal/domain/         strict paths, names, IDs, entries, operations, and capabilities
+internal/model/          strict versioned persistence records
+internal/provider/       provider contract and deterministic capability-aware memory provider
+internal/state/          state contract, strict codec, and concurrency-safe memory CAS store
+internal/secret/         redacted bearer-token hashing and validation
 internal/httpapi/        router and transport security headers
 internal/web/            embedded HTML, CSS, and vanilla JavaScript
 tools/check-source/      forbidden dependency/source policy check
@@ -116,7 +121,7 @@ docs/                    normative specification and project documentation
 AGENTS.md                repository instructions for implementation agents
 ```
 
-The package structure will expand in the order defined by specification section 20: domain/state contracts, identity, file control plane, themes, browser drive, sharing/admin UI, then adversarial hardening and release proof.
+The package structure will expand in the order defined by specification section 20: identity, file control plane, themes, browser drive, sharing/admin UI, then adversarial hardening and release proof. Direct dependency rationale is recorded in [docs/dependencies.md](./docs/dependencies.md).
 
 ## CI, containers, releases, and branch protection
 
@@ -138,9 +143,9 @@ The policy requires one approval, resolved review threads, linear history, and t
 
 ## Delivery roadmap
 
-- **Milestone 0 — in progress:** reproducible skeleton, binary, embedded shell, Nix checks, OCI, CI and repository policy.
-- **Milestone 1:** typed domain, strict paths, state CAS, provider contracts, capability-aware local data plane, deterministic faults.
-- **Milestone 2:** WebAuthn, sessions, CSRF/origin policy, bootstrap, registration matrix, invites, roles, and recovery.
+- **Milestone 0 — complete:** reproducible skeleton, binary, embedded shell, Nix checks, OCI, CI and repository policy.
+- **Milestone 1 — complete:** typed domain, strict paths, state CAS, provider contracts, capability-aware local data plane, and deterministic faults.
+- **Milestone 2 — next:** WebAuthn, sessions, CSRF/origin policy, bootstrap, registration matrix, invites, roles, and recovery.
 - **Milestone 3:** browse and file operations, direct resumable transfers, idempotency, trash, previews, and sharing control plane.
 - **Milestone 4:** closed Theme API, safe media validation, complete light/dark bundles, inheritance and fallback.
 - **Milestones 5–6:** accessible browser drive, transfers, themes, shares, settings, and administration UI.

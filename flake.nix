@@ -556,9 +556,17 @@
                 nativeBuildInputs = [ go ] ++ tools;
               }
               ''
+                # Nix builds otherwise use /homeless-shelter. Chromium needs a
+                # writable home and XDG runtime directory for its per-user
+                # state, including crash reporter initialization.
+                export HOME="$TMPDIR/home"
                 export GOCACHE="$TMPDIR/go-cache"
                 export GOMODCACHE="$TMPDIR/go-mod-cache"
                 export XDG_CACHE_HOME="$TMPDIR/tool-cache"
+                export XDG_CONFIG_HOME="$HOME/.config"
+                export XDG_RUNTIME_DIR="$TMPDIR/runtime"
+                mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
+                chmod 700 "$XDG_RUNTIME_DIR"
                 export CGO_ENABLED=0
                 cp -R ${src} source
                 chmod -R u+w source

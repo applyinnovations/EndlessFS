@@ -4,7 +4,7 @@ This file applies to the entire repository. `docs/v1-specification.md` is normat
 
 ## Mission and current state
 
-Implement the complete mock-backed v1 specification in milestone order without weakening its security or reproducibility requirements. Milestones 0–6 currently provide the reproducible foundation, provider/state contracts, passkey identity, file/trash/preview/share control plane, closed data-only theme system, and the complete accessible browser product workflow with real Chromium evidence. Final adversarial, coverage, operations, and release proof remains unfinished, and the mock-backed runtime is not a production storage provider. Never present an unimplemented placeholder or empty test selection as v1 evidence.
+Maintain and extend the feature-complete mock-backed v1 implementation without weakening its security or reproducibility requirements. Milestones 0–7 provide the reproducible foundation, provider/state contracts, passkey identity, file/trash/preview/share control plane, closed data-only theme system, complete accessible browser workflows, adversarial hardening, and release proof. The mock-backed runtime remains ephemeral and is not a production storage provider. Never present an unimplemented placeholder, skipped path, or empty test selection as evidence.
 
 Real GCS integration, cloud resources, credentials, deployment, and production-provider claims are outside the v1 completion boundary. Preserve that distinction in code, tests, docs, and release notes.
 
@@ -31,6 +31,7 @@ Use these commands:
 nix develop
 nix build
 nix build .#container
+nix build .#release
 nix flake check
 nix run .#dev
 nix run .#fmt
@@ -41,12 +42,14 @@ nix run .#test-unit
 nix run .#test-integration
 nix run .#test-contract
 nix run .#test-e2e
+nix run .#test-coverage
 nix run .#test-race
 nix run .#test-fuzz
 nix run .#test-theme
 nix run .#theme-check -- PATH
 nix run .#theme-preview -- PATH
 nix run .#security
+nix run .#dependency-check
 nix run .#container
 ```
 

@@ -1,6 +1,6 @@
 # EndlessFS v1 implementation evidence
 
-This file is the living evidence index for the acceptance criteria and feature-completion checklist in [the v1 specification](./v1-specification.md). A checked milestone means its scoped implementation and automated evidence exist; it does not mean that v1 as a whole is complete.
+This is the release evidence index for the acceptance criteria and feature-completion checklist in [the v1 specification](./v1-specification.md). The deterministic, mock-backed v1 boundary is feature complete. This record does not claim production durability, deployment readiness, or Google Cloud Storage interoperability.
 
 ## Reproducible foundation — complete
 
@@ -50,8 +50,6 @@ The Milestone 2 checkpoint implements specification sections 10, 12.3, and 12.4 
 | No password-adjacent external identity concepts enter request, persistence, or embedded UI surfaces | `tools/check-source` identity-surface scan |
 
 The selected WebAuthn and virtual-authenticator modules are pinned in `go.mod`, `go.sum`, `vendor/`, and the Nix source closure. The application binary uses only the real verifier; the virtual authenticator is test-only. Invite and recovery creation use durable idempotency claims: repeating a key cannot create another resource and cannot recover the deliberately one-time raw link.
-
-## Remaining milestones
 
 ## File, transfer, trash, preview, and share control plane — complete
 
@@ -126,8 +124,100 @@ The Milestone 6 checkpoint completes the browser workflow inventory in specifica
 
 Browser network diagnostics retain only request methods and paths: credential ceremony bodies, bearer values, provider capability query strings, and authorization fields are deliberately excluded.
 
-## Remaining milestone
+## Adversarial hardening and release proof — complete
 
-- Complete adversarial matrices, coverage thresholds, threat-model review, operations/backup proof, and final release evidence.
+| Requirement | Automated or review evidence |
+|---|---|
+| Every private file/share/trash/operation family rejects another owner's paths, versions, cursor, upload/trash/share/operation IDs, and mutation intent | `TestIntegrationCrossUserPrivateEndpointMatrix`, `TestIntegrationDirectTransfersAndIsolation`, `TestIntegrationCopyMoveTrashRestoreAndDelete` |
+| Raw, encoded, double-encoded, Unicode-normalized, slash/backslash, dot, NUL/control, reserved, and overlong paths fail before provider access | `TestReservedNamespaceAndEncodingCorpusFailsBeforeProviderAccess`, `TestFileHTTPRejectsProviderFieldsBodiesAndTraversalBeforeProvider`, `FuzzParseUserPath`, `FuzzParseUserPathEncodingBoundary` |
+| Structured logs remain secret-safe at every configured level and request logs use route templates | `TestJSONLoggerRedactsSensitiveFieldsAtEveryLevel`, `TestJSONLoggerHonorsConfiguredLevelAndKeepsSafeFields`, `TestRequestLoggingUsesRouteTemplatesAndOmitsSensitiveMaterial`, `FuzzStructuredLogRedaction` |
+| Every required parser/security boundary has a bounded fuzz target | `nix run .#test-fuzz`: configuration/origin, path, percent encoding, JSON records, cursors, WebAuthn responses, share subtrees, ranges/dispositions, logging, and the complete theme boundary |
+| Race-sensitive identity, state, provider, transfer, trash, idempotency, and final-admin behavior is clean | `nix run .#test-race`; explicit concurrent tests and both reusable contracts |
+| Threats, runtime behavior, shutdown, ephemeral state, and absence of a v1 backup claim are reviewed | [Implemented threat model](./threat-model.md), [operations guide](./operations.md), and `TestRunStartsAndGracefullyStopsCompleteApplication` |
+| Static, vulnerability, dependency-license, source, configuration, and OCI policies pass with pinned inputs | `nix run .#security`, `nix run .#dependency-check`, `checks.security`, `checks.dependencies`, `checks.container-policy` |
+| Release output is self-describing and verifiable | `packages.release` emits the release and OCI archives, `SHA256SUMS`, `RELEASE-INVENTORY.txt`, locked module/license inventories, `THEMES.json`, release notes, and this evidence record |
 
-Until every remaining section is implemented and every section 21 criterion and section 22 item has evidence, the repository MUST continue to identify itself as under construction rather than v1 complete.
+### Coverage result
+
+The release coverage command is `nix run .#test-coverage`. It executes all Go packages plus real Chromium E2E coverage, de-duplicates the shared `-coverpkg=./...` profile, and fails below any threshold.
+
+| Boundary | Statements | Result | Required |
+|---|---:|---:|---:|
+| Repository | 4,418 / 5,197 | 85.011% | 85% |
+| Authentication | 154 / 161 | 95.652% | 95% |
+| Authorization | 419 / 438 | 95.662% | 95% |
+| Canonical path | 204 / 209 | 97.608% | 95% |
+| Bearer token | 20 / 21 | 95.238% | 95% |
+| Provider capability | 701 / 734 | 95.504% | 95% |
+| State CAS | 204 / 209 | 97.608% | 95% |
+| Scope mapping | 701 / 734 | 95.504% | 95% |
+| Theme validation/sanitization | 650 / 684 | 95.029% | 95% |
+| Configuration | 142 / 149 | 95.302% | 95% |
+
+### Acceptance-criterion index
+
+| Criterion | Evidence |
+|---|---|
+| AC-001 | `checks.build`, `checks.container`, `checks.release`, and the clean umbrella gate build without credentials/services. |
+| AC-002 | Nix-sandboxed `checks.offline` and all test derivations use vendored inputs and explicit loopback listeners only. |
+| AC-003 | One `cmd/endlessfs` entry point, embedded `internal/web`, `tools/check-source`, and OCI inspection; no Node/runtime frontend toolchain. |
+| AC-004 | `tools/check-source`, dependency inventory, runtime assembly tests, and the implemented threat review prove the prohibited services/identity/telemetry are absent. |
+| AC-005 | Provider-neutral domain interfaces, import boundaries, and source policy; GCS appears only in documentation. |
+| AC-006 | `checks.container-policy` inspects user, entry point, ports, volumes, and every layer path for shells, package managers, source, or credential-shaped material. |
+| AC-007 | Theme schema/archive/media/SVG negative matrices plus source policy reject executable/raw/remote theme inputs. |
+| AC-008 | Built-in/custom compiler tests, overridden custom-build smoke proof, and `THEMES.json` inventory all embedded bundles. |
+| AC-010 | `TestIntegrationConcurrentBootstrapCreatesExactlyOneAdmin`. |
+| AC-011 | Concurrent, invalid, absent, and replay bootstrap matrix in the identity integration suite. |
+| AC-012 | `TestIntegrationRegistrationPolicyMatrixAndVerificationRecheck`. |
+| AC-013 | `TestIntegrationInviteIsHashedSingleUseAndConcurrent` and admin HTTP/E2E workflows. |
+| AC-014 | Identity API/browser registration models accept only display name and passkey ceremony material. |
+| AC-015 | Identity-surface source scan plus strict request/profile codecs and browser assertions. |
+| AC-016 | Opaque-ID tests, duplicate-name registration, and server-only user creation. |
+| AC-017 | Real WebAuthn positive flow and complete origin/RP/challenge/handle/signature/owner/replay/expiry negative matrices. |
+| AC-018 | Multi-passkey integration and browser settings workflow, including final-passkey denial. |
+| AC-019 | `TestIntegrationSessionsCSRFRotationExpiryAndDisabledAccount` and owner-share disable/enable E2E. |
+| AC-020 | `TestIntegrationConcurrentAdminChangesPreserveEnabledAdministrator`. |
+| AC-021 | `TestIntegrationRecoveryAddsPasskeyPreservesIdentityAndRevokesSessions` and recovery E2E. |
+| AC-022 | `TestDisplayNameAndPasskeyLabelChangesDoNotAlterIdentityOrRoles`. |
+| AC-030 | `TestIntegrationCrossUserPrivateEndpointMatrix` plus service/provider isolation matrices. |
+| AC-031 | Reserved/encoding no-provider-call corpus and both path fuzz targets. |
+| AC-032 | Provider contract listing/pagination plus Drive HTTP/E2E browse workflows. |
+| AC-033 | Provider recursive-operation contract, batch/idempotency integrations, and copy/move E2E. |
+| AC-034 | Trash service/HTTP/browser suites cover restore conflict, generated rename, permanent delete, and bounded empty. |
+| AC-035 | Share move/trash invalidation integrations. |
+| AC-040 | Provider capability contract binds method, scope, path, headers, and expiry. |
+| AC-041 | Separate mock listener and control-byte instrumentation in HTTP integration and Chromium E2E. |
+| AC-042 | Provider resumable interruption/confirmed-offset/retry/completion contract and browser workflow. |
+| AC-043 | Provider fault/checksum/size/cancel/expiry matrices plus explicit browser retry/error/cancel states. |
+| AC-044 | Browser multi-file/folder queue and public max-init/concurrency policy; service batch bounds. |
+| AC-045 | Provider contract simulates greater-than-1-TiB logical size/offset without equivalent allocation. |
+| AC-046 | Exact-object download/preview capabilities and separate data-plane byte flow integration. |
+| AC-047 | Provider expiry/range/disposition contract and preview/download browser workflows. |
+| AC-048 | No-store HTTP assertions, request-log test, log fuzzing, and browser-storage source/runtime assertions. |
+| AC-050 | Share service/HTTP/E2E create/list/expire/revoke coverage; raw token appears only at creation. |
+| AC-051 | Share-subtree integration corpus and `FuzzShareSubtreeResolution`. |
+| AC-052 | Public failure matrix for absent/invalid/expired/revoked/disabled/moved records. |
+| AC-053 | Public router exposes only confined listing/stat/download; method and subtree denial tests. |
+| AC-054 | Signature-validated preview allowlist tests for raster/text/PDF and active/unknown attachments. |
+| AC-055 | Text-node-only browser source assertions, hostile-value tests, CSP, and Chromium execution diagnostics. |
+| AC-056 | Both built-ins use the ordinary compiler/conformance pipeline and run complete Chromium workflows. |
+| AC-057 | Minimal/older inheritance, selection, media, emergency, and reset fallback tests. |
+| AC-058 | Archive/manifest/media/SVG hostile matrices, fuzz target, build-input rejection, and browser origin capture. |
+| AC-059 | Preference persistence/resolution HTTP tests and both appearance-path E2E workflows. |
+| AC-060 | `TestE2EBrowserBootstrapLoginDriveShareAndTrash` and `TestE2EInviteSettingsAdminRecoveryAndShareRevocation`. |
+| AC-061 | Keyboard-driven Chromium paths at desktop/320 pixels plus focus, labels, live-region, reduced-motion, and responsive assertions. |
+| AC-062 | Chromium network capture permits only the control origin and returned loopback data origin. |
+| AC-063 | Header/cookie/origin/CSRF/strict-body/page/batch/rate/expiry tests cover valid and denied paths. |
+| AC-064 | Structured redaction unit/fuzz tests and route-template request-log integration. |
+| AC-065 | Nix race gate, explicit concurrency tests, deterministic provider faults, and leak-free E2E cleanup. |
+| AC-070 | The clean `nix flake check` umbrella contains build, format, lint, all test layers, race, fuzz, coverage, dependency, security, policy, offline, OCI, and release checks. |
+| AC-071 | Enforced statement results are recorded in the coverage table above. |
+| AC-072 | Confirmed fixes for same-folder generated-name copy, duplicate-trash prevalidation, CR/LF-safe disposition fallback, reverse-domain theme IDs, and request status recording each landed with regression coverage. |
+| AC-073 | The release output records source/input/artifact hashes, locked dependencies/licenses, check/coverage results, themes, and limitations. |
+| AC-074 | README, release notes, operations, threat model, inventory, and this record distinguish feature-complete mock v1 from GCS/production readiness. |
+
+### Release record contract
+
+`nix build .#release` derives every record from the exact Git source revision. `RELEASE-INVENTORY.txt` contains the source revision, `flake.lock` SHA-256, pinned vulnerability-database NAR hash, target, Go version, binary/OCI/theme/dependency/license hashes, thresholds, and explicit mock/no-GCS/no-deployment/no-credentials/no-external-services fields. `SHA256SUMS` covers every separately published file. The archive also contains this evidence, release notes, README, license, binary, and all inventories.
+
+The build/test boundary used no GCP credential, cloud service, database, external identity provider, container daemon, persistent service, deployment permission, or non-loopback application dependency. The current provider/state implementations are deliberately ephemeral; see [v1 release notes](./v1-release-notes.md).

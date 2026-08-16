@@ -3,9 +3,9 @@
 EndlessFS is an open-source, provider-neutral, security-first private cloud drive. Its Go control plane authorizes file operations while browser file bytes travel directly to and from the configured object-storage provider through short-lived provider-native capabilities.
 
 > [!IMPORTANT]
-> This repository is at **Milestone 6**. The complete embedded product workflow now exercises passkey bootstrap/sign-in, invite registration, account and passkey settings, direct file operations, public sharing, administration, account recovery, responsive layout, and theme delivery through Go-controlled Chromium. Final adversarial, coverage, operational, and release proof remains. Do not deploy this implementation or describe it as v1 complete or production-ready.
+> The deterministic, mock-backed **v1 specification is feature complete**. The complete embedded product and its security boundaries are exercised by unit, contract, integration, fuzz, race, coverage, and Go-controlled Chromium gates. This is not a production storage release: the v1 provider is ephemeral, and real GCS interoperability, deployment, and production durability have not been implemented or validated.
 
-The normative implementation contract is [docs/v1-specification.md](./docs/v1-specification.md). A feature-complete mock-backed v1 will prove the full product locally, but it will not prove Google Cloud Storage interoperability or provide a production storage adapter.
+The normative implementation contract is [docs/v1-specification.md](./docs/v1-specification.md). The feature-complete mock-backed v1 proves the full product locally, but it does not prove Google Cloud Storage interoperability or provide a production storage adapter.
 
 ## Why EndlessFS
 
@@ -51,11 +51,12 @@ nix run .#dev
 
 The development control server listens on `http://127.0.0.1:8080` by default. It also opens a separate ephemeral loopback data-plane listener; upload/download bytes use only that listener. Set `ENDLESSFS_MOCK_PROVIDER_URL=http://127.0.0.1:9090` to select a stable loopback data-plane port for browser testing.
 
-Build the binary or an OCI archive without Docker:
+Build the binary, OCI archive, or complete release record without Docker:
 
 ```console
 nix build
 nix build .#container
+nix build .#release
 ```
 
 Theme bundles are reproducible build inputs, never runtime directories. Downstream flakes may build an embedded custom set with:
@@ -88,9 +89,11 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#test-integration` | Run tests named as integration tests. |
 | `nix run .#test-contract` | Run reusable provider and state-store contract suites. |
 | `nix run .#test-e2e` | Run Go-controlled Chromium passkey and core Drive workflows. Nix supplies Chromium on Linux. |
+| `nix run .#test-coverage` | Run the complete suite and enforce 85% repository plus 95% security-boundary statement coverage. |
 | `nix run .#test-race` | Run the suite with Go's race detector. |
-| `nix run .#test-fuzz` | Run bounded configuration, canonical-path, and theme-boundary fuzz smoke targets. |
-| `nix run .#security` | Run deterministic static and forbidden-source checks. |
+| `nix run .#test-fuzz` | Run bounded path, encoding, JSON, cursor, share, capability, WebAuthn, logging, and theme fuzz smoke targets. |
+| `nix run .#security` | Run pinned static, vulnerability, configuration, dependency, source-policy, and OCI checks. |
+| `nix run .#dependency-check` | Verify the locked module inventory and retained dependency licenses. |
 | `nix run .#container` | Build the local OCI archive through Nix. |
 | `nix run .#theme-check -- PATH` | Validate and resolve a `.efstheme` archive or equivalent directory. |
 | `nix run .#theme-preview -- PATH` | Serve the application-owned responsive component/state conformance fixture on loopback. |
@@ -124,8 +127,9 @@ Only settings that have validation and tests are parsed by the current binary:
 | `ENDLESSFS_TEXT_PREVIEW_MAX_BYTES` | `1048576` | Maximum validated UTF-8 plain-text preview size, capped at 16 MiB. |
 | `ENDLESSFS_DEFAULT_LIGHT_THEME` | `endlessfs-light` | Installed light-appearance theme used by `system`; startup rejects missing/wrong-appearance values. |
 | `ENDLESSFS_DEFAULT_DARK_THEME` | `endlessfs-dark` | Installed dark-appearance theme used by `system`; startup rejects missing/wrong-appearance values. |
+| `ENDLESSFS_LOG_LEVEL` | `info` | Exact `debug`, `info`, `warn`, or `error`; all levels retain structural secret redaction. |
 
-The remaining theme and logging settings in specification section 15 will be added with the behavior they protect. Secrets are never accepted as command-line arguments or exposed through the public configuration endpoint. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after the initial administrator has been created. The current HTTP contract is documented in [docs/http-api.md](./docs/http-api.md).
+Secrets are never accepted as command-line arguments or exposed through the public configuration endpoint. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after the initial administrator has been created. The current HTTP contract is documented in [docs/http-api.md](./docs/http-api.md).
 
 ## Repository map
 
@@ -141,6 +145,7 @@ internal/secret/         redacted bearer-token hashing and validation
 internal/httpapi/        router and transport security headers
 internal/identity/       bootstrap, registration, accounts, passkeys, invites, roles, and recovery
 internal/drive/          authenticated files, transfers, operations, trash, previews, and shares
+internal/logging/        structured, level-aware, security-field-redacting JSON logging
 internal/theme/          closed Theme API, compiler, media validation, registry, preferences, and built-ins
 internal/web/            embedded HTML, CSS, and vanilla JavaScript
 internal/e2e/            Go-controlled Chromium passkey, Drive, responsive, and privacy workflows
@@ -148,13 +153,14 @@ tools/check-source/      forbidden dependency/source policy check
 tools/generate-secret/   operator-directed 256-bit environment-secret generator
 tools/theme/             theme validation, generated API inventory, build embedding, and preview fixture
 tools/repository-policy/ checked-in GitHub ruleset validator/applier
+tools/coverage.awk       repository and security-boundary coverage policy
 .github/rulesets/        declarative default-branch and release-tag policy
 .github/workflows/       PR, CI, GHCR, release, and policy workflows
 docs/                    normative specification and project documentation
 AGENTS.md                repository instructions for implementation agents
 ```
 
-The package structure will expand in the order defined by specification section 20: identity, file control plane, themes, browser drive, sharing/admin UI, then adversarial hardening and release proof. Direct dependency rationale is recorded in [docs/dependencies.md](./docs/dependencies.md).
+Direct dependency rationale is recorded in [docs/dependencies.md](./docs/dependencies.md). The implemented boundary review is [docs/threat-model.md](./docs/threat-model.md), operational guidance is [docs/operations.md](./docs/operations.md), and the acceptance record is [docs/v1-evidence.md](./docs/v1-evidence.md).
 
 ## CI, containers, releases, and branch protection
 
@@ -163,7 +169,7 @@ GitHub Actions contains no project test selection or tool installation logic bey
 - `CI` runs the authoritative Nix gate on pull requests, merge groups, and `main`, plus a Darwin build/unit smoke test.
 - `PR` provides the fast format, lint, and source-policy status used by the default-branch ruleset.
 - `Container` publishes `sha-<commit>` and `edge` images to `ghcr.io/applyinnovations/endlessfs` after changes reach `main`.
-- `Release` re-verifies `v*.*.*` tags, publishes version and `latest` images, and creates a GitHub release containing the Nix-built archive, checksum, and initial release inventory.
+- `Release` re-verifies `v*.*.*` tags, publishes version and `latest` images, and creates a GitHub release containing the Nix-built binary/archive, OCI archive, checksums, dependency/license inventory, theme inventory, and release evidence.
 - `Repository Policy` explicitly applies the checked-in branch and tag rulesets.
 
 Repository rules are external GitHub state, so checking in JSON does not activate them by itself. A repository administrator must:
@@ -183,9 +189,9 @@ The policy requires one approval, resolved review threads, linear history, and t
 - **Milestone 4 — complete:** closed Theme API, safe media validation, complete light/dark bundles, inheritance, fallback, preferences, and Nix tooling.
 - **Milestone 5 — complete:** accessible browser drive, confirmed-offset transfers, previews, trash, theme UX, and real Chromium coverage.
 - **Milestone 6 — complete:** public-share management, invite onboarding, profile/passkey settings, account administration, disable/enable behavior, recovery, and a second full Chromium journey.
-- **Milestone 7 — next:** cross-user/adversarial matrices, full fuzz/race/coverage gates, browser accessibility, OCI inspection, and release evidence.
+- **Milestone 7 — complete:** exhaustive cross-user and traversal matrices, fuzz/race/coverage gates, structured-log redaction, dependency/vulnerability policy, OCI inspection, threat/operations review, and release evidence.
 
-v1 is done only when every acceptance criterion in section 21 is evidenced, the section 22 checklist is complete, and a clean, network-denied `nix flake check` passes.
+Every acceptance criterion in specification section 21 is indexed in the evidence record, the section 22 checklist is complete, and `nix flake check` is the clean, network-denied release gate. “v1 complete” always means the mock-backed boundary described above, never production-provider readiness.
 
 ## Contributing and security
 

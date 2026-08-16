@@ -1,0 +1,29 @@
+# EndlessFS v1 implemented threat model
+
+This review applies the normative threat model in [v1 specification section 17](./v1-specification.md#17-threat-model) to the feature-complete mock-backed v1 implementation. It is an implementation review, not a claim of production-provider readiness.
+
+## Boundary review
+
+| Boundary or asset | Implemented controls and evidence | Residual risk |
+|---|---|---|
+| User files and owner isolation | Private scopes are derived from the authenticated session; public APIs accept only canonical `UserPath` values; raw provider keys are absent. The cross-user endpoint matrix, reserved/encoding corpus, provider contracts, and scope fuzz targets prove success and denial paths. | Logical silos are not cryptographic separation. A compromised process or operator is outside this boundary. |
+| Browser to control plane | Stateful hashed sessions, host-only `HttpOnly`/`SameSite=Strict` cookies, CSRF, exact-origin checks, strict JSON, request limits, safe problems, security headers, and no-store capability responses are tested. | A compromised same-origin browser context can act during the session lifetime. |
+| Browser to provider data plane | Upload/download capabilities are short-lived, exact-method/object/destination bound, CORS-bound to the application origin, and exercised on a separate instrumented listener. File-body instrumentation proves zero control-plane bytes. | A stolen unexpired capability remains bearer authority until expiry; the mock cannot prove a future provider's enforcement. |
+| Passkey identity and one-time links | An established pinned WebAuthn library requires discoverable credentials and user verification. Ceremonies and bootstrap/invite/recovery records are expiring, browser/type bound, hash-at-rest, and atomically consumed. See the focused [WebAuthn adapter threat review](./webauthn-threat-review.md). | Lost passkeys require another passkey or an administrator-issued recovery link. There is deliberately no email, password, backup-code, or OAuth fallback. |
+| Administrator invariants | Roles are separate from profiles; concurrent CAS tests preserve at least one enabled administrator; disable and recovery revoke sessions and stop owned shares from issuing new capabilities. | Previously issued provider capabilities live until their short expiry. A malicious operator remains trusted infrastructure. |
+| Public shares and previews | Random tokens are hash-at-rest and returned once; subtree resolution is confined and fuzzed; public errors are generic. Only signature-validated raster, bounded UTF-8 text, and PDF can be previewed; active/unknown types are attachments. | Browser image/PDF decoder defects and intentional sharing by the owner remain browser/user risks. |
+| Untrusted names and content | The UI creates text nodes for untrusted values, never uses untrusted HTML, embeds all application assets, and runs under a restrictive CSP with `nosniff` and no referrer. Chromium origin capture rejects unexpected requests. | Unicode confusables can mislead a person without escaping authorization. |
+| Theme build input | The closed Theme API accepts typed data and allowlisted static media only. Archive, media, SVG, inheritance, contrast, digest, and reference validation run before embedding; runtime selection cannot parse archives or add origins/code. | Restricted font/image decoders remain browser attack surface. Operator-selected branding is not an authenticity boundary. |
+| State integrity and concurrency | Conditional state operations, idempotency records, resumable registration operations, deterministic provider faults, explicit concurrency tests, and the Nix race gate cover replay and partial-failure invariants. | The v1 memory store is ephemeral. A future durable provider must pass the same contracts and a separate crash/reconciliation review. |
+| Logs and errors | Central structured logging redacts sensitive field families at every level. Request logs use route templates, coarse results, IDs, and durations rather than queries, bodies, full paths, or authorization material. Adversarial and fuzz tests cover the redactor. | Operators control log sinks, and even pseudonymous/coarse operational data has privacy value. |
+| Supply chain and release | Nix locks the Go source, dependencies, actions, and official vulnerability database. Modules are vendored, licenses inventoried, source constraints scanned, the OCI filesystem inspected, and artifacts hashed. | Scanning and reproducibility do not establish absence of unknown upstream vulnerabilities. |
+
+## Privacy and network review
+
+The production binary contains no telemetry, analytics, updater, license check, external identity client, remote theme registry, CDN asset, service worker, SQL client, cache, or queue integration. Required tests construct only explicit loopback control/data listeners. Nix derivation tests use vendored sources and pinned inputs and have no cloud credential, metadata-service, database, container-daemon, or Internet dependency.
+
+## Claims deliberately excluded
+
+EndlessFS v1 does not claim end-to-end encryption, cryptographic user isolation, defense against a malicious operator/host/provider, complete denial-of-service resistance, production durability, GCS interoperability, or production readiness. The deterministic local provider exists to prove the provider-neutral contracts and browser/control/data-plane boundaries.
+
+Any real storage adapter requires the separate contract, live interoperability, CORS, signing, identity, fault, deployment, and security review described in specification section 23.

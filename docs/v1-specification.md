@@ -1864,151 +1864,151 @@ An implementation agent should keep this checklist current and attach test names
 
 ### 22.1 Foundation and constraints
 
-- [ ] Go module exists with one application entry point and clear internal boundaries.
-- [ ] `flake.nix` and `flake.lock` pin the complete development/CI environment.
-- [ ] All required Nix commands in section 19 exist and are documented.
-- [ ] Embedded HTML/CSS/vanilla JavaScript and validated theme media load without third-party runtime requests.
-- [ ] Theme bundles contain data and allowlisted static media only; no theme CSS, HTML, JavaScript, template, executable expression, or remote reference is accepted.
-- [ ] No forbidden language, package manager, frontend framework, task runner, or runtime service is present.
-- [ ] Binary and minimal OCI image build reproducibly.
-- [ ] Required test suite runs without a container runtime.
-- [ ] Required test suite passes with cloud credentials absent and outbound network denied.
-- [ ] Open-source license, contribution guidance, security policy, and threat-model link are present.
+- [x] Go module exists with one application entry point and clear internal boundaries.
+- [x] `flake.nix` and `flake.lock` pin the complete development/CI environment.
+- [x] All required Nix commands in section 19 exist and are documented.
+- [x] Embedded HTML/CSS/vanilla JavaScript and validated theme media load without third-party runtime requests.
+- [x] Theme bundles contain data and allowlisted static media only; no theme CSS, HTML, JavaScript, template, executable expression, or remote reference is accepted.
+- [x] No forbidden language, package manager, frontend framework, task runner, or runtime service is present.
+- [x] Binary and minimal OCI image build reproducibly.
+- [x] Required test suite runs without a container runtime.
+- [x] Required test suite passes with cloud credentials absent and outbound network denied.
+- [x] Open-source license, contribution guidance, security policy, and threat-model link are present.
 
 ### 22.2 Domain, provider, and state
 
-- [ ] Opaque random IDs and injectable secure randomness/time are implemented.
-- [ ] Canonical typed `UserPath` implements every rule in section 7.1.
-- [ ] Provider-neutral entries, operations, errors, conflict modes, and capabilities are implemented.
-- [ ] `StorageProvider` and `StateStore` interfaces contain no GCS-specific types.
-- [ ] Reusable storage-provider and state-store contract suites are complete.
-- [ ] Deterministic in-memory storage and CAS state mocks pass all contracts.
-- [ ] Capability-aware local HTTP data-plane mock passes all contracts.
-- [ ] Mock expiry, scope, versions, resumability, range, faults, and byte instrumentation work.
-- [ ] Large logical objects are tested without equivalent allocation.
-- [ ] Application metadata is inaccessible through user file APIs.
-- [ ] Theme preference is separate from the two-field user profile and accepts only `system` or an installed compatible theme ID.
+- [x] Opaque random IDs and injectable secure randomness/time are implemented.
+- [x] Canonical typed `UserPath` implements every rule in section 7.1.
+- [x] Provider-neutral entries, operations, errors, conflict modes, and capabilities are implemented.
+- [x] `StorageProvider` and `StateStore` interfaces contain no GCS-specific types.
+- [x] Reusable storage-provider and state-store contract suites are complete.
+- [x] Deterministic in-memory storage and CAS state mocks pass all contracts.
+- [x] Capability-aware local HTTP data-plane mock passes all contracts.
+- [x] Mock expiry, scope, versions, resumability, range, faults, and byte instrumentation work.
+- [x] Large logical objects are tested without equivalent allocation.
+- [x] Application metadata is inaccessible through user file APIs.
+- [x] Theme preference is separate from the two-field user profile and accepts only `system` or an installed compatible theme ID.
 
 ### 22.3 Authentication and accounts
 
-- [ ] Established Go WebAuthn library is selected, pinned, wrapped, and threat-reviewed.
-- [ ] Discoverable credentials and user verification are required.
-- [ ] Usernameless authentication works with a virtual authenticator.
-- [ ] Ceremony challenges are random, browser/type bound, expiring, and atomically single-use.
-- [ ] Exact RP ID and origin validation has positive and negative tests.
-- [ ] Secure session cookie, rotation, expiry, revocation, CSRF, and origin enforcement work.
-- [ ] User profile persists only `userID` and `displayName`.
-- [ ] Display-name update and display/credential-label validation work without affecting identity.
-- [ ] No request/UI/schema/fixture models email or OAuth identity.
-- [ ] Multiple passkeys work and final-passkey self-removal is denied.
-- [ ] Disabled-account authentication/session/share behavior is enforced.
+- [x] Established Go WebAuthn library is selected, pinned, wrapped, and threat-reviewed.
+- [x] Discoverable credentials and user verification are required.
+- [x] Usernameless authentication works with a virtual authenticator.
+- [x] Ceremony challenges are random, browser/type bound, expiring, and atomically single-use.
+- [x] Exact RP ID and origin validation has positive and negative tests.
+- [x] Secure session cookie, rotation, expiry, revocation, CSRF, and origin enforcement work.
+- [x] User profile persists only `userID` and `displayName`.
+- [x] Display-name update and display/credential-label validation work without affecting identity.
+- [x] No request/UI/schema/fixture models email or OAuth identity.
+- [x] Multiple passkeys work and final-passkey self-removal is denied.
+- [x] Disabled-account authentication/session/share behavior is enforced.
 
 ### 22.4 Bootstrap, registration, invites, and recovery
 
-- [ ] Bootstrap token is supplied only by environment and never logged.
-- [ ] Exactly one concurrent bootstrap can create the first admin.
-- [ ] Completed bootstrap stays disabled even if the token remains configured.
-- [ ] All four public/invite registration configurations pass their matrix tests.
-- [ ] Public registration never implicitly creates an admin.
-- [ ] Admin can create, list, expire, and revoke single-use invites.
-- [ ] Invite and recovery raw tokens are returned only once and stored only as hashes.
-- [ ] Concurrent invite consumption creates at most one user.
-- [ ] Admin can create a target-specific one-use recovery link.
-- [ ] Recovery adds a passkey, preserves user identity, and revokes sessions.
-- [ ] Final enabled administrator cannot be disabled or demoted.
+- [x] Bootstrap token is supplied only by environment and never logged.
+- [x] Exactly one concurrent bootstrap can create the first admin.
+- [x] Completed bootstrap stays disabled even if the token remains configured.
+- [x] All four public/invite registration configurations pass their matrix tests.
+- [x] Public registration never implicitly creates an admin.
+- [x] Admin can create, list, expire, and revoke single-use invites.
+- [x] Invite and recovery raw tokens are returned only once and stored only as hashes.
+- [x] Concurrent invite consumption creates at most one user.
+- [x] Admin can create a target-specific one-use recovery link.
+- [x] Recovery adds a passkey, preserves user identity, and revokes sessions.
+- [x] Final enabled administrator cannot be disabled or demoted.
 
 ### 22.5 File and folder operations
 
-- [ ] Root/nested paginated listing and stat work.
-- [ ] Deterministic sorting and opaque scoped cursors work.
-- [ ] Empty folder creation works.
-- [ ] File and tree rename/move/copy work.
-- [ ] Conflict modes and version preconditions work.
-- [ ] Selection/batch operations have limits and per-item results.
-- [ ] Idempotency keys prevent duplicate mutations.
-- [ ] Normal delete moves to dedicated trash.
-- [ ] Trash list, restore, restore conflict, permanent delete, and empty-trash work.
-- [ ] Asynchronous operation polling is user scoped and fault safe.
-- [ ] Complete cross-user and reserved-namespace matrices pass for every operation.
+- [x] Root/nested paginated listing and stat work.
+- [x] Deterministic sorting and opaque scoped cursors work.
+- [x] Empty folder creation works.
+- [x] File and tree rename/move/copy work.
+- [x] Conflict modes and version preconditions work.
+- [x] Selection/batch operations have limits and per-item results.
+- [x] Idempotency keys prevent duplicate mutations.
+- [x] Normal delete moves to dedicated trash.
+- [x] Trash list, restore, restore conflict, permanent delete, and empty-trash work.
+- [x] Asynchronous operation polling is user scoped and fault safe.
+- [x] Complete cross-user and reserved-namespace matrices pass for every operation.
 
 ### 22.6 Direct uploads and downloads
 
-- [ ] Single and batch upload initialization return destination-bound capabilities.
-- [ ] Control API rejects file bodies and enforces request-body limits.
-- [ ] Browser bytes bypass control handlers in E2E instrumentation.
-- [ ] Concurrent multi-file and folder upload preserve validated paths.
-- [ ] Resumable offset, interruption, retry, completion, expiry, checksum, and cancel work.
-- [ ] Upload conflict modes and completion verification work.
-- [ ] Large-size/offset behavior is simulated above 1 TiB.
-- [ ] Download capabilities are exact-object, short-lived, and no-store.
-- [ ] Attachment filename and range behavior are safe.
-- [ ] Multi-selection initiates independent direct downloads without a ZIP proxy.
-- [ ] Capability secrets are absent from logs and persistent browser storage.
+- [x] Single and batch upload initialization return destination-bound capabilities.
+- [x] Control API rejects file bodies and enforces request-body limits.
+- [x] Browser bytes bypass control handlers in E2E instrumentation.
+- [x] Concurrent multi-file and folder upload preserve validated paths.
+- [x] Resumable offset, interruption, retry, completion, expiry, checksum, and cancel work.
+- [x] Upload conflict modes and completion verification work.
+- [x] Large-size/offset behavior is simulated above 1 TiB.
+- [x] Download capabilities are exact-object, short-lived, and no-store.
+- [x] Attachment filename and range behavior are safe.
+- [x] Multi-selection initiates independent direct downloads without a ZIP proxy.
+- [x] Capability secrets are absent from logs and persistent browser storage.
 
 ### 22.7 Sharing and previews
 
-- [ ] Owners can create/list/revoke expiring file and folder shares.
-- [ ] Share tokens are high entropy, hash-at-rest, no-store, and no-referrer.
-- [ ] Public folder traversal cannot escape its recorded subtree.
-- [ ] Shares are read-only and cannot re-share.
-- [ ] Share errors avoid record-existence leakage.
-- [ ] Disabled owner, moved root, trash, expiry, and revocation block new capabilities.
-- [ ] Safe raster image, bounded plain-text, and PDF previews work.
-- [ ] HTML, JavaScript, SVG, XML, and unknown content are never rendered inline.
-- [ ] Hostile names/content cannot inject HTML or script.
+- [x] Owners can create/list/revoke expiring file and folder shares.
+- [x] Share tokens are high entropy, hash-at-rest, no-store, and no-referrer.
+- [x] Public folder traversal cannot escape its recorded subtree.
+- [x] Shares are read-only and cannot re-share.
+- [x] Share errors avoid record-existence leakage.
+- [x] Disabled owner, moved root, trash, expiry, and revocation block new capabilities.
+- [x] Safe raster image, bounded plain-text, and PDF previews work.
+- [x] HTML, JavaScript, SVG, XML, and unknown content are never rendered inline.
+- [x] Hostile names/content cannot inject HTML or script.
 
 ### 22.8 Data-only themes
 
-- [ ] Closed versioned Theme API documents every typed token, unit, bound, fallback, contrast pair, font slot, and media slot.
-- [ ] Go parsing/serialization never concatenates raw manifest values into CSS or HTML.
-- [ ] `endlessfs-light` and `endlessfs-dark` are complete immutable bundles processed by the ordinary theme pipeline.
-- [ ] Custom themes directly inherit one built-in parent and cannot shadow built-in IDs.
-- [ ] Minimal custom bundles inherit all omitted tokens, fonts, and assets.
-- [ ] Older compatible themes inherit tokens/assets added by new features.
-- [ ] Missing/incompatible selected themes and failed custom media loads fall back without blocking functionality.
-- [ ] Emergency built-in-light rendering and permanent theme reset remain available.
-- [ ] ZIP traversal, duplicate/symlink/bomb/size rules and canonical digests are enforced.
-- [ ] Raster dimensions/signatures, WOFF2 declarations, sprite rectangles, and manifest references are validated.
-- [ ] SVG sanitization rejects scripts, handlers, external/data references, embedded HTML, and active content; SVG is never inserted inline.
-- [ ] Theme assets use exact media types, `nosniff`, restrictive CSP, same-origin content-addressed URLs, and immutable caching.
-- [ ] Application-owned accessible names, semantics, layout behavior, breakpoints, focus, visibility, and interaction cannot be overridden by a bundle.
-- [ ] Required color pairs and focus states meet documented WCAG contrast thresholds.
-- [ ] User can select light, dark, `system`, and embedded custom themes; selection follows the user across devices.
-- [ ] Signed-out appearance uses the safe allowlisted device preference or browser color scheme without carrying identity.
-- [ ] `theme-check`, `theme-preview`, and `test-theme` Nix commands work without Node or network access.
-- [ ] Both built-ins pass the full E2E suite; every custom build input passes validation, conformance, and functional smoke tests.
-- [ ] Runtime user/admin theme upload, remote theme registries, and filesystem theme directories are absent from v1.
+- [x] Closed versioned Theme API documents every typed token, unit, bound, fallback, contrast pair, font slot, and media slot.
+- [x] Go parsing/serialization never concatenates raw manifest values into CSS or HTML.
+- [x] `endlessfs-light` and `endlessfs-dark` are complete immutable bundles processed by the ordinary theme pipeline.
+- [x] Custom themes directly inherit one built-in parent and cannot shadow built-in IDs.
+- [x] Minimal custom bundles inherit all omitted tokens, fonts, and assets.
+- [x] Older compatible themes inherit tokens/assets added by new features.
+- [x] Missing/incompatible selected themes and failed custom media loads fall back without blocking functionality.
+- [x] Emergency built-in-light rendering and permanent theme reset remain available.
+- [x] ZIP traversal, duplicate/symlink/bomb/size rules and canonical digests are enforced.
+- [x] Raster dimensions/signatures, WOFF2 declarations, sprite rectangles, and manifest references are validated.
+- [x] SVG sanitization rejects scripts, handlers, external/data references, embedded HTML, and active content; SVG is never inserted inline.
+- [x] Theme assets use exact media types, `nosniff`, restrictive CSP, same-origin content-addressed URLs, and immutable caching.
+- [x] Application-owned accessible names, semantics, layout behavior, breakpoints, focus, visibility, and interaction cannot be overridden by a bundle.
+- [x] Required color pairs and focus states meet documented WCAG contrast thresholds.
+- [x] User can select light, dark, `system`, and embedded custom themes; selection follows the user across devices.
+- [x] Signed-out appearance uses the safe allowlisted device preference or browser color scheme without carrying identity.
+- [x] `theme-check`, `theme-preview`, and `test-theme` Nix commands work without Node or network access.
+- [x] Both built-ins pass the full E2E suite; every custom build input passes validation, conformance, and functional smoke tests.
+- [x] Runtime user/admin theme upload, remote theme registries, and filesystem theme directories are absent from v1.
 
 ### 22.9 Browser UX and accessibility
 
-- [ ] Bootstrap, register, sign-in, drive, trash, theme/settings, admin, and public-share views exist.
-- [ ] Breadcrumb, pagination, filtering, selection, metadata, and operation feedback are clear.
-- [ ] Drag/drop, multi-file, folder fallback, progress, retry, cancellation, and conflicts are usable.
-- [ ] Empty/loading/error/expired/denied/offline states are explicit.
-- [ ] Core workflows are keyboard operable with visible focus and accessible labels.
-- [ ] Progress and errors are announced without disruptive focus changes.
-- [ ] Core layouts work at 320 CSS pixels and desktop sizes.
-- [ ] Reduced motion is respected.
-- [ ] No sensitive token or capability is persisted in browser storage.
-- [ ] No unvalidated/external asset, analytics, telemetry, or update request occurs.
+- [x] Bootstrap, register, sign-in, drive, trash, theme/settings, admin, and public-share views exist.
+- [x] Breadcrumb, pagination, filtering, selection, metadata, and operation feedback are clear.
+- [x] Drag/drop, multi-file, folder fallback, progress, retry, cancellation, and conflicts are usable.
+- [x] Empty/loading/error/expired/denied/offline states are explicit.
+- [x] Core workflows are keyboard operable with visible focus and accessible labels.
+- [x] Progress and errors are announced without disruptive focus changes.
+- [x] Core layouts work at 320 CSS pixels and desktop sizes.
+- [x] Reduced motion is respected.
+- [x] No sensitive token or capability is persisted in browser storage.
+- [x] No unvalidated/external asset, analytics, telemetry, or update request occurs.
 
 ### 22.10 Security, tests, and release proof
 
-- [ ] Threat model is reviewed against the implemented boundaries.
-- [ ] Security headers and safe-cookie policies pass tests in secure and loopback modes.
-- [ ] CSRF, origin, body, pagination, batch, timeout, and rate limits pass negative tests.
-- [ ] Cross-user endpoint matrix is exhaustive and green.
-- [ ] Traversal/encoding fuzz corpus and continuous fuzz targets are green.
-- [ ] Theme archive/manifest/token/inheritance/SVG/sprite fuzz corpora and targets are green.
-- [ ] Bootstrap/invite/recovery/final-admin/upload concurrency tests are green.
-- [ ] `go test -race` is green through Nix.
-- [ ] Coverage meets 85% repository and 95% security-boundary package gates.
-- [ ] Structured log redaction passes adversarial tests.
-- [ ] Static, dependency, configuration, and OCI security checks are green.
-- [ ] Clean `nix flake check` is green with no cloud, database, external IdP, container runtime, or network.
-- [ ] Release evidence includes source/input/artifact hashes and all test summaries.
-- [ ] Release evidence inventories embedded themes, Theme API compatibility, licenses, and content digests.
-- [ ] Release notes explicitly state that real GCS integration and deployment were not tested and are not v1 acceptance requirements.
+- [x] Threat model is reviewed against the implemented boundaries.
+- [x] Security headers and safe-cookie policies pass tests in secure and loopback modes.
+- [x] CSRF, origin, body, pagination, batch, timeout, and rate limits pass negative tests.
+- [x] Cross-user endpoint matrix is exhaustive and green.
+- [x] Traversal/encoding fuzz corpus and continuous fuzz targets are green.
+- [x] Theme archive/manifest/token/inheritance/SVG/sprite fuzz corpora and targets are green.
+- [x] Bootstrap/invite/recovery/final-admin/upload concurrency tests are green.
+- [x] `go test -race` is green through Nix.
+- [x] Coverage meets 85% repository and 95% security-boundary package gates.
+- [x] Structured log redaction passes adversarial tests.
+- [x] Static, dependency, configuration, and OCI security checks are green.
+- [x] Clean `nix flake check` is green with no cloud, database, external IdP, container runtime, or network.
+- [x] Release evidence includes source/input/artifact hashes and all test summaries.
+- [x] Release evidence inventories embedded themes, Theme API compatibility, licenses, and content digests.
+- [x] Release notes explicitly state that real GCS integration and deployment were not tested and are not v1 acceptance requirements.
 
 ---
 

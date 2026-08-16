@@ -30,7 +30,7 @@ The WebAuthn dependency closure includes audited format/parsing support for CBOR
 
 ## Pinned security inputs
 
-The flake pins the Go toolchain source and the official Go vulnerability database as immutable Nix inputs. The required `govulncheck` gate reads that local database with `-db=file://...`; it never depends on mutable network results. `flake.lock` is therefore both the dependency-resolution record and the vulnerability-data freshness record for a release. Updating either input is an explicit, reviewed change followed by the complete Nix gate.
+The flake pins the Go toolchain source and the [official Go vulnerability database](https://go.dev/doc/security/vuln/database) as immutable Nix inputs. The required `govulncheck` gate reads that local database with `-db=file://...`; it never depends on mutable network results. `flake.lock` is therefore both the dependency-resolution record and the vulnerability-data freshness record for a release. Updating either input is an explicit, reviewed change followed by the complete Nix gate.
 
 Every module is vendored for offline builds. `nix run .#dependency-check` inventories the locked module versions and fails when a module root does not retain a license or copying notice. The release derivation emits the module inventory and a deterministic hash inventory of all retained dependency license files.
 

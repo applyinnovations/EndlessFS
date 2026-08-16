@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v*.*.*
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+  packages: write
+
+jobs:
+  release:
+    name: Verify and release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@61cbfe2efc2d4e7a8a6d56967c3c1058e846c858 # v3.21.9
+
+      - name: Restore and save Nix build cache
+        uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
+
+      - name: Verify the release source
+        run: nix flake check --print-build-logs
+
+      - name: Build release artifacts
+        run: nix build .#release --out-link result-release --print-build-logs
+
+      - name: Publish release container tags
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          nix run .#publish-container --
+          "ghcr.io/applyinnovations/endlessfs:${RELEASE_TAG}"
+          "ghcr.io/applyinnovations/endlessfs:latest"
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          nix develop --command gh release create "$RELEASE_TAG"
+          result-release/*
+          --verify-tag
+          --generate-notes
+          --title "$RELEASE_TAG"

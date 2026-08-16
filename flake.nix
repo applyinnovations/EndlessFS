@@ -1,0 +1,431 @@
+{
+  description = "EndlessFS — a private, provider-neutral cloud drive";
+
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+  outputs =
+    { self, nixpkgs }:
+    let
+      systems = [
+        "aarch64-darwin"
+        "aarch64-linux"
+        "x86_64-linux"
+      ];
+      forAllSystems = nixpkgs.lib.genAttrs systems;
+    in
+    {
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          lib = pkgs.lib;
+          version = self.shortRev or self.dirtyShortRev or "dev";
+          projectSource = lib.cleanSource ./.;
+          goSource = lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: _type:
+              let
+                relative = lib.removePrefix (toString ./. + "/") (toString path);
+              in
+              relative == "go.mod"
+              || relative == "cmd"
+              || lib.hasPrefix "cmd/" relative
+              || relative == "internal"
+              || lib.hasPrefix "internal/" relative;
+          };
+
+          endlessfs = pkgs.buildGoModule {
+            pname = "endlessfs";
+            inherit version;
+            src = goSource;
+            subPackages = [ "cmd/endlessfs" ];
+            vendorHash = null;
+            doCheck = false;
+            env.CGO_ENABLED = 0;
+            ldflags = [
+              "-s"
+              "-w"
+              "-X=main.version=${version}"
+            ];
+          };
+
+          linuxArchitecture = if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "amd64";
+          linuxBinary = pkgs.stdenvNoCC.mkDerivation {
+            pname = "endlessfs-linux-${linuxArchitecture}";
+            inherit version;
+            src = goSource;
+            nativeBuildInputs = [ pkgs.go ];
+            dontConfigure = true;
+            dontFixup = true;
+            buildPhase = ''
+              runHook preBuild
+              export GOCACHE="$TMPDIR/go-cache"
+              export GOOS=linux
+              export GOARCH=${linuxArchitecture}
+              export CGO_ENABLED=0
+              go build -trimpath -buildvcs=false \
+                -ldflags "-s -w -buildid= -X=main.version=${version}" \
+                -o endlessfs ./cmd/endlessfs
+              runHook postBuild
+            '';
+            installPhase = ''
+              runHook preInstall
+              install -D -m 0555 endlessfs "$out/bin/endlessfs"
+              runHook postInstall
+            '';
+          };
+
+          containerRoot = pkgs.runCommandLocal "endlessfs-container-root" { } ''
+            mkdir -p "$out/bin" "$out/etc/ssl/certs" "$out/share"
+            cp ${linuxBinary}/bin/endlessfs "$out/bin/endlessfs"
+            cp ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt "$out/etc/ssl/certs/ca-bundle.crt"
+            cp -R ${pkgs.tzdata}/share/zoneinfo "$out/share/zoneinfo"
+            chmod 0555 "$out/bin/endlessfs"
+          '';
+
+          container = pkgs.dockerTools.buildLayeredImage {
+            name = "endlessfs";
+            tag = version;
+            architecture = linuxArchitecture;
+            created = "1970-01-01T00:00:01Z";
+            contents = [ containerRoot ];
+            config = {
+              Entrypoint = [ "/bin/endlessfs" ];
+              User = "65532:65532";
+              Env = [
+                "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+                "ZONEINFO=/share/zoneinfo"
+              ];
+              ExposedPorts."8080/tcp" = { };
+              Labels = {
+                "org.opencontainers.image.title" = "EndlessFS";
+                "org.opencontainers.image.description" = "EndlessFS control plane";
+                "org.opencontainers.image.revision" = version;
+                "org.opencontainers.image.source" = "https://github.com/applyinnovations/EndlessFS";
+                "org.opencontainers.image.licenses" = "Apache-2.0";
+              };
+            };
+          };
+
+          release =
+            pkgs.runCommand "endlessfs-release-${version}-${system}"
+              {
+                nativeBuildInputs = [
+                  pkgs.coreutils
+                  pkgs.gnutar
+                  pkgs.gzip
+                ];
+              }
+              ''
+                mkdir -p "$out" staging
+                cp ${endlessfs}/bin/endlessfs staging/endlessfs
+                cp ${projectSource}/LICENSE staging/LICENSE
+                cp ${projectSource}/README.md staging/README.md
+                tar --sort=name --mtime=@1 --owner=0 --group=0 --numeric-owner \
+                  -C staging -czf "$out/endlessfs-${version}-${system}.tar.gz" .
+                (cd "$out"; sha256sum "endlessfs-${version}-${system}.tar.gz" > SHA256SUMS)
+                lock_hash="$(sha256sum ${projectSource}/flake.lock | cut -d ' ' -f 1)"
+                {
+                  printf 'source-revision=%s\n' '${version}'
+                  printf 'flake-lock=%s\n' "$lock_hash"
+                  printf 'target-system=%s\n' '${system}'
+                  printf 'storage-provider=%s\n' 'not-implemented-at-milestone-0'
+                  printf 'live-gcs-validation=%s\n' 'not-performed'
+                  printf 'build-and-test-external-services-used=%s\n' 'none'
+                } > "$out/RELEASE-INVENTORY.txt"
+              '';
+        in
+        {
+          default = endlessfs;
+          inherit container release;
+        }
+      );
+
+      apps = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          packages = self.packages.${system};
+          goTools = [ pkgs.go ];
+          qualityTools = goTools ++ [
+            pkgs.actionlint
+            pkgs.go-tools
+            pkgs.gosec
+            pkgs.nixfmt
+          ];
+          mkTask = name: runtimeInputs: text: {
+            type = "app";
+            meta.description = name;
+            program = "${
+              pkgs.writeShellApplication {
+                inherit name runtimeInputs text;
+              }
+            }/bin/${name}";
+          };
+          goTask = name: text: mkTask name goTools text;
+          unavailable =
+            name: milestone:
+            mkTask name [ ] ''
+              echo "${name} is reserved by the v1 specification and will be implemented in ${milestone}." >&2
+              exit 1
+            '';
+        in
+        {
+          default = {
+            type = "app";
+            meta.description = "Run EndlessFS";
+            program = "${packages.default}/bin/endlessfs";
+          };
+
+          dev = goTask "endlessfs-dev" ''
+            exec go run ./cmd/endlessfs "$@"
+          '';
+
+          fmt =
+            mkTask "endlessfs-fmt"
+              [
+                pkgs.fd
+                pkgs.go
+                pkgs.nixfmt
+              ]
+              ''
+                fd --type f --extension go --exec gofmt -w
+                nixfmt flake.nix
+              '';
+
+          fmt-check =
+            mkTask "endlessfs-fmt-check"
+              [
+                pkgs.go
+                pkgs.nixfmt
+              ]
+              ''
+                unformatted="$(gofmt -l .)"
+                if [ -n "$unformatted" ]; then
+                  echo "Go files need formatting:" >&2
+                  echo "$unformatted" >&2
+                  exit 1
+                fi
+                nixfmt --check flake.nix
+              '';
+
+          lint = mkTask "endlessfs-lint" qualityTools ''
+            actionlint .github/workflows/*.yml
+            go vet ./...
+            staticcheck ./...
+          '';
+
+          test = goTask "endlessfs-test" ''
+            go test ./...
+          '';
+
+          test-unit = goTask "endlessfs-test-unit" ''
+            go test -short ./...
+          '';
+
+          test-integration = goTask "endlessfs-test-integration" ''
+            go test ./... -run '^TestIntegration'
+          '';
+
+          test-contract = unavailable "endlessfs-test-contract" "Milestone 1";
+          test-e2e = unavailable "endlessfs-test-e2e" "Milestone 5";
+
+          test-race = goTask "endlessfs-test-race" ''
+            go test -race ./...
+          '';
+
+          test-fuzz = goTask "endlessfs-test-fuzz" ''
+            go test ./internal/config -run '^$' -fuzz FuzzParse -fuzztime "''${ENDLESSFS_FUZZTIME:-10s}"
+          '';
+
+          test-theme = unavailable "endlessfs-test-theme" "Milestone 4";
+          theme-check = unavailable "endlessfs-theme-check" "Milestone 4";
+          theme-preview = unavailable "endlessfs-theme-preview" "Milestone 4";
+
+          forbidden-check = goTask "endlessfs-forbidden-check" ''
+            exec go run ./tools/check-source "$@"
+          '';
+
+          security = mkTask "endlessfs-security" qualityTools ''
+            actionlint .github/workflows/*.yml
+            go vet ./...
+            staticcheck ./...
+            gosec -quiet -nosec-require-justification -nosec-require-rules ./...
+            go run ./tools/check-source .
+          '';
+
+          pr-check = mkTask "endlessfs-pr-check" qualityTools ''
+            unformatted="$(gofmt -l .)"
+            if [ -n "$unformatted" ]; then
+              echo "Go files need formatting:" >&2
+              echo "$unformatted" >&2
+              exit 1
+            fi
+            nixfmt --check flake.nix
+            actionlint .github/workflows/*.yml
+            go vet ./...
+            staticcheck ./...
+            go run ./tools/check-source .
+          '';
+
+          repository-policy = goTask "endlessfs-repository-policy" ''
+            exec go run ./tools/repository-policy "$@"
+          '';
+
+          container = mkTask "endlessfs-container" [ pkgs.nix ] ''
+            exec nix build .#container "$@"
+          '';
+
+          publish-container =
+            mkTask "endlessfs-publish-container"
+              [
+                pkgs.coreutils
+                pkgs.skopeo
+              ]
+              ''
+                if [ "$#" -lt 1 ]; then
+                  echo "usage: nix run .#publish-container -- ghcr.io/owner/image:tag [...]" >&2
+                  exit 2
+                fi
+                if [ -z "''${GHCR_TOKEN:-}" ] || [ -z "''${GHCR_USER:-}" ]; then
+                  echo "GHCR_TOKEN and GHCR_USER are required" >&2
+                  exit 1
+                fi
+                printf '%s' "$GHCR_TOKEN" | skopeo login --username "$GHCR_USER" --password-stdin ghcr.io >/dev/null
+                for destination in "$@"; do
+                  skopeo copy --all "docker-archive:${packages.container}" "docker://$destination"
+                done
+              '';
+        }
+      );
+
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          src = pkgs.lib.cleanSource ./.;
+          sandboxedStaticcheck = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "staticcheck ./...";
+          containerPolicy =
+            pkgs.runCommand "endlessfs-container-policy"
+              {
+                nativeBuildInputs = [
+                  pkgs.gnutar
+                  pkgs.gzip
+                  pkgs.jq
+                  pkgs.ripgrep
+                ];
+              }
+              ''
+                mkdir image
+                tar -xzf ${self.packages.${system}.container} -C image
+                config_file="$(jq -r '.[0].Config' image/manifest.json)"
+                jq -e '
+                  .os == "linux" and
+                  .created == "1970-01-01T00:00:01+00:00" and
+                  .config.Entrypoint == ["/bin/endlessfs"] and
+                  .config.User == "65532:65532" and
+                  .config.ExposedPorts == {"8080/tcp": {}}
+                ' "image/$config_file" >/dev/null
+                jq -r '.[0].Layers[]' image/manifest.json | while IFS= read -r layer; do
+                  tar -tf "image/$layer"
+                done > image-paths.txt
+                if rg '(^|/)(sh|bash|ash|dash|zsh|apk|apt|dpkg|rpm|yum|dnf)(/|$)' image-paths.txt; then
+                  echo "container includes a shell or package manager" >&2
+                  exit 1
+                fi
+                rg --quiet '(^|/)bin/endlessfs$' image-paths.txt
+                touch "$out"
+              '';
+          goCheck =
+            name: command: tools:
+            pkgs.runCommand "endlessfs-${name}"
+              {
+                nativeBuildInputs = [ pkgs.go ] ++ tools;
+              }
+              ''
+                export GOCACHE="$TMPDIR/go-cache"
+                export GOMODCACHE="$TMPDIR/go-mod-cache"
+                export XDG_CACHE_HOME="$TMPDIR/tool-cache"
+                cp -R ${src} source
+                chmod -R u+w source
+                cd source
+                ${command}
+                touch "$out"
+              '';
+        in
+        {
+          build = self.packages.${system}.default;
+          container = self.packages.${system}.container;
+          container-policy = containerPolicy;
+          release = self.packages.${system}.release;
+
+          format = goCheck "format" ''
+            unformatted="$(gofmt -l .)"
+            test -z "$unformatted"
+            nixfmt --check flake.nix
+          '' [ pkgs.nixfmt ];
+
+          lint =
+            goCheck "lint"
+              ''
+                actionlint .github/workflows/*.yml
+                go vet ./...
+                ${sandboxedStaticcheck}
+              ''
+              [
+                pkgs.actionlint
+                pkgs.go-tools
+              ];
+
+          tests = goCheck "tests" "go test ./..." [ ];
+          integration = goCheck "integration" "go test ./... -run '^TestIntegration'" [ ];
+          race = goCheck "race" "go test -race ./..." [ ];
+          fuzz = goCheck "fuzz" "go test ./internal/config -run '^$' -fuzz FuzzParse -fuzztime 1s" [ ];
+          offline = goCheck "offline" "go test ./..." [ ];
+
+          security =
+            goCheck "security"
+              ''
+                actionlint .github/workflows/*.yml
+                gosec -quiet -nosec-require-justification -nosec-require-rules ./...
+                go run ./tools/check-source .
+              ''
+              [
+                pkgs.actionlint
+                pkgs.gosec
+              ];
+
+          repository-policy = goCheck "repository-policy" "go run ./tools/repository-policy check" [ ];
+        }
+      );
+
+      devShells = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          default = pkgs.mkShellNoCC {
+            packages = [
+              pkgs.fd
+              pkgs.gh
+              pkgs.go
+              pkgs.go-tools
+              pkgs.gosec
+              pkgs.actionlint
+              pkgs.nixfmt
+              pkgs.ripgrep
+              pkgs.skopeo
+            ];
+            shellHook = ''
+              export GOFLAGS=-mod=readonly
+              echo "EndlessFS development shell — run: nix flake check"
+            '';
+          };
+        }
+      );
+
+      formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt);
+    };
+}

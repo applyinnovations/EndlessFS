@@ -1,0 +1,7 @@
+/result
+/result-*
+/.cache/
+/.direnv/
+/.env
+*.prof
+coverage.out

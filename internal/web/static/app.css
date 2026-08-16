@@ -1,0 +1,139 @@
+:root {
+  color-scheme: light dark;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f4f6fb;
+  color: #152039;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background:
+    radial-gradient(circle at 15% 15%, rgba(55, 105, 224, 0.17), transparent 34rem),
+    #f4f6fb;
+}
+
+main {
+  width: min(42rem, 100%);
+  padding: clamp(1.5rem, 6vw, 4rem);
+  border: 1px solid #dce2ef;
+  border-radius: 1.5rem;
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: 0 1.25rem 4rem rgba(30, 48, 88, 0.12);
+}
+
+.eyebrow {
+  margin: 0 0 0.75rem;
+  color: #315fc5;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(2.75rem, 10vw, 5.25rem);
+  line-height: 0.95;
+  letter-spacing: -0.065em;
+}
+
+.lede {
+  max-width: 36rem;
+  margin: 1.5rem 0 2.5rem;
+  color: #53617a;
+  font-size: 1.05rem;
+  line-height: 1.65;
+}
+
+dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+dl div {
+  padding: 1rem;
+  border-radius: 0.9rem;
+  background: #edf1f9;
+}
+
+dt {
+  margin-bottom: 0.4rem;
+  color: #66738b;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+dd {
+  margin: 0;
+  font-weight: 700;
+}
+
+.status {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  margin-right: 0.45rem;
+  border-radius: 50%;
+  background: #198754;
+}
+
+@media (max-width: 28rem) {
+  dl {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  main {
+    animation: arrive 360ms ease-out both;
+  }
+
+  @keyframes arrive {
+    from {
+      opacity: 0;
+      transform: translateY(0.5rem);
+    }
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    background: #101521;
+    color: #edf2ff;
+  }
+
+  body {
+    background:
+      radial-gradient(circle at 15% 15%, rgba(75, 124, 235, 0.18), transparent 34rem),
+      #101521;
+  }
+
+  main {
+    border-color: #29334a;
+    background: rgba(25, 32, 47, 0.9);
+    box-shadow: 0 1.25rem 4rem rgba(0, 0, 0, 0.28);
+  }
+
+  .eyebrow {
+    color: #92b2ff;
+  }
+
+  .lede,
+  dt {
+    color: #abb7cf;
+  }
+
+  dl div {
+    background: #222b3e;
+  }
+}

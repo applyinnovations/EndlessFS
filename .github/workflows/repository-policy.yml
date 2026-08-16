@@ -1,0 +1,33 @@
+name: Repository Policy
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: repository-policy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    name: Apply branch and tag rulesets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: repository-policy
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@61cbfe2efc2d4e7a8a6d56967c3c1058e846c858 # v3.21.9
+
+      - name: Validate checked-in policy
+        run: nix run .#repository-policy -- check
+
+      - name: Apply checked-in policy
+        env:
+          GH_TOKEN: ${{ secrets.REPOSITORY_RULESET_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: nix run .#repository-policy -- apply

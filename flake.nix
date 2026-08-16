@@ -3,7 +3,9 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.vulndb = {
-    url = "https://vuln.go.dev/vulndb.zip";
+    # The canonical vuln.go.dev hostname rejects GitHub-hosted runner IPs;
+    # this is the same immutable bulk object at the Go database's backing bucket.
+    url = "https://storage.googleapis.com/go-vulndb/vulndb.zip";
     flake = false;
   };
 

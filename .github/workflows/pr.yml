@@ -15,7 +15,6 @@ concurrency:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   fast-checks:
@@ -28,7 +27,9 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@61cbfe2efc2d4e7a8a6d56967c3c1058e846c858 # v3.21.9
+        uses: DeterminateSystems/nix-installer-action@33c9ab3ef95cd57c164d9d6eb1f9a46338538d41 # v3.21.9
+        with:
+          determinate: false
 
       - name: Restore and save Nix build cache
         uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14

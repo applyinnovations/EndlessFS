@@ -1,45 +1,101 @@
 # EndlessFS v1 operations
 
-This guide covers the feature-complete mock-backed v1. It is suitable for local acceptance and demonstrations, not production storage.
+This guide covers the provider-portable, multi-replica v1 runtime and its locally qualified GCS adapter. Local protocol qualification is not live-service or production-readiness validation.
 
 ## Runtime model
 
-EndlessFS starts one Go control-plane binary and an in-process deterministic storage provider with a separate loopback HTTP data-plane listener. Account metadata, sessions, files, uploads, trash, shares, and provider operations are held in memory. Restarting the process intentionally starts an empty instance.
+EndlessFS runs one Go control-plane binary. Application use cases always use one portable storage engine; only the thin atomic-object backend changes. The `mock` backend holds canonical records in memory and starts empty after a restart. The `gcs` backend stores the same canonical keys and bodies in a private GCS bucket.
 
-There is no v1 database, persistent filesystem requirement, background worker, migration job, backup format, or restore command. Do not place valuable data in this provider. Production backup, restore, retention, durability, and disaster-recovery procedures must be designed and validated with a future durable provider and are explicitly outside v1 acceptance.
+Several replicas may share one bucket. They must use the same base URL/RP identity, registration policy, session-secret-derived keyring identity, stable writer-set ID, writer protocol, and canonical features. Startup rejects an incompatible replica before it serves bucket-backed requests. There is no leader or process-local lock: every mutation uses a durable candidate/admitted ticket, canonical operation intent, conditional object updates, and a monotonically increasing fence.
 
-## Start and stop
+If a replica disappears while it owns a mutation, the durable operation remains. The affected resource can be temporarily unavailable until the lease expires. One competing replica wins the takeover CAS, increments the fence, reconciles any ambiguous provider result, and resumes the same intent. A returning stale replica cannot commit, unlock, or replace the recovered result; its old fence and object preconditions fail.
 
-Generate independent bootstrap and session secrets, export them only in the process environment, and start through Nix as shown in the README. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` from the environment after the first administrator exists. Use HTTPS with a matching base URL and RP ID for any non-loopback listener.
+## Local start and stop
 
-`SIGTERM` and `SIGINT` stop admission and give the control and data listeners up to ten seconds to shut down. The HTTP servers enforce header/read/write/idle limits, and control documents are independently bounded. Because v1 state is memory-only, shutdown integrity means no false success or in-process invariant corruption; it does not make state survive process termination.
+Generate independent bootstrap and session secrets, export them only in the process environment, and start through Nix as shown in the README. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after the first administrator exists. Use HTTPS with a matching base URL and RP ID for any non-loopback listener.
+
+`SIGTERM` and `SIGINT` stop admission and give the HTTP listeners up to ten seconds to shut down. The in-memory backend is intentionally ephemeral, so shutdown does not make it durable.
+
+## GCS identity and bucket policy
+
+Select GCS with:
+
+```console
+export ENDLESSFS_STORAGE_PROVIDER=gcs
+export ENDLESSFS_GCS_BUCKET=endlessfs-private
+export ENDLESSFS_WRITER_SET_ID="$(nix run .#generate-secret)"
+export ENDLESSFS_BASE_URL=https://drive.example
+```
+
+The runtime uses [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials). Prefer a dedicated application service account attached through the platform workload identity mechanism. For workloads outside Google Cloud, follow Google's [Workload Identity Federation best practices](https://cloud.google.com/iam/docs/best-practices-for-using-workload-identity-federation) with a narrowly matched external principal and service-account impersonation; do not deploy service-account JSON keys or HMAC keys.
+
+Grant only the bucket object permissions the adapter needs. `roles/storage.objectUser` scoped to the one bucket is the standard predefined starting role. Keep public access prevention and uniform bucket-level access enabled where policy permits. The service account used for [signed URLs](https://cloud.google.com/storage/docs/access-control/signed-urls) must also have `iam.serviceAccounts.signBlob` on itself (normally `roles/iam.serviceAccountTokenCreator`) and the IAM Service Account Credentials API must be enabled. Set `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` to that service-account email when automatic ADC identity discovery is unavailable; this is an identifier, not a credential.
+
+The browser needs [exact-origin bucket CORS](https://cloud.google.com/storage/docs/configuring-cors) for `GET`, `HEAD`, and `PUT`, request headers `Content-Type`, `Content-Range`, and `Range`, and exposed response headers `Content-Length`, `Content-Range`, `Range`, and `X-Goog-Generation`. Do not use a wildcard origin. Signed URLs and [resumable session URLs](https://cloud.google.com/storage/docs/performing-resumable-uploads) are short-lived bearer capabilities and must never be logged.
+
+Bucket creation, IAM, CORS, lifecycle, retention, monitoring, regional design, and deployment remain explicit operator responsibilities. The deterministic gate does not mutate cloud policy and no live GCS deployment has been qualified by this repository.
+
+## Quiescent provider cutover
+
+Canonical state deliberately contains no bucket/account identifier, GCS generation, S3 version ID, Azure ETag, provider metadata, signed URL, or resumable session URL. A supported cutover copies bytes; it never converts state:
+
+1. Close the canonical write gate. Every replica stops admitting new mutations.
+2. Allow fenced recovery to finish admitted operations and drain or abort live data-plane capabilities and native leases. A crashed operation may delay closure; do not delete its lock or force the gate closed.
+3. Create the closed-gate checkpoint and copy exactly its sorted authoritative key/body inventory plus the checkpoint object. Do not copy admissions, staging garbage, or backend leases.
+4. Copy each key and body unchanged. Destination-native versions and metadata may differ and are not preserved.
+5. Run the read-only destination verifier. Missing, extra-authoritative, corrupt, mixed-version, or unsupported objects fail closed.
+6. Reconfigure compatible replicas to the destination while retaining the same provider-independent application secrets and writer-set identity. Verify the checkpoint, increment/open the destination gate epoch, and continue mutations.
+
+The source remains closed. Online dual writes and reconciliation of mutations made outside EndlessFS are not supported. A pre-copy may reduce downtime, but the final checkpoint-authorized copy must be taken after quiescence.
+
+The verifier configuration is strict JSON. For GCS:
+
+```json
+{
+  "provider": "gcs",
+  "bucket": "endlessfs-destination",
+  "checkpointID": "cutover-2026-08-17",
+  "writerSetID": "BASE64URL_WRITER_SET_ID",
+  "configurationDigest": "EXPECTED_CONFIGURATION_DIGEST",
+  "keyringIdentifiers": ["EXPECTED_KEYRING_ID"],
+  "requiredFeatures": ["directory-manifests", "fenced-operations", "portable-checkpoints"]
+}
+```
+
+Then run:
+
+```console
+nix run .#provider-verify -- check ./verify.json
+```
+
+The command performs no `Put`, `Copy`, or `Delete`. Its local `memory` mode accepts a fixture path containing a JSON map from canonical object key to standard-base64 body; this exists for deterministic migration rehearsal.
 
 ## Health and observation
 
 - `GET /healthz` reports process liveness.
-- `GET /readyz` reports that the assembled application is ready to serve.
+- `GET /readyz` reports successful assembly, including writer-set compatibility checked during startup.
 - Logs are structured JSON. `ENDLESSFS_LOG_LEVEL` accepts exactly `debug`, `info`, `warn`, or `error`.
-- Central redaction remains active at every level. Logs must not be treated as a file/account audit trail.
+- Central redaction remains active at every level. Logs are not a file/account audit trail.
 
-Capability responses and public configuration use `no-store`. Browser and server diagnostics deliberately omit token-bearing query strings, request bodies, authorization values, provider keys, full user paths, and raw credential material.
+Capability responses and public configuration use `no-store`. Diagnostics omit token-bearing queries, request bodies, authorization values, provider keys, full user paths, native continuation values, and credential material.
 
 ## Build and release verification
 
-Run the acceptance gate from a clean checkout:
+Run the acceptance gates from a clean checkout:
 
 ```console
+nix run .#test-replica
+nix run .#test-portability
 nix flake check --print-build-logs
 nix build
 nix build .#container
 nix build .#release
 ```
 
-The release output includes `SHA256SUMS`, `RELEASE-INVENTORY.txt`, the binary/archive, OCI archive, dependency and license inventories, installed-theme inventory, release notes, and the acceptance record. Verify `SHA256SUMS` before distribution. The inventory records the source revision, `flake.lock` hash, pinned vulnerability database hash, Go toolchain, artifact hashes, thresholds, provider kind, and explicit no-cloud/no-deployment status.
-
-GitHub publishing is tag-driven. Protected `vMAJOR.MINOR.PATCH` tags cause the release workflow to repeat the full gate, push version and `latest` tags to GHCR, and attach the Nix-built evidence. Applying branch/tag rules is an explicit administrator operation through the protected Repository Policy workflow.
+No required gate needs GCP credentials or a cloud service. The release inventory distinguishes the ephemeral memory backend, locally qualified GCS adapter, absent live-GCS validation, and absent deployment validation.
 
 ## Failure handling
 
-Use stable problem kinds and operation states rather than provider internals when diagnosing a request. Retriable provider faults and resumable offsets are surfaced explicitly. Idempotency keys make mutation retries safe only for the same authenticated owner, operation kind, and request fingerprint; never reuse a key for different intent.
+Use stable problem kinds and durable operation states rather than provider error text. Retriable provider faults, ambiguous successes, and resumable offsets are reconciled by rereading canonical/provider state. An idempotency key is safe only for the same authenticated owner, operation kind, and request fingerprint.
 
-If the process exits unexpectedly, discard the ephemeral instance and restart cleanly. There is no supported recovery of its in-memory state. A release must not be promoted as a durable service until a real provider has passed specification section 23 and acquired provider-specific operations, backup, restore, and incident-response procedures.
+Never repair a portable bucket by editing canonical objects directly. If checkpoint verification fails, keep writes disabled and repair or repeat the byte-for-byte copy from the closed source. Promote a GCS deployment only after the opt-in live interoperability, real CORS/direct-transfer, IAM, durability, backup/restore, monitoring, incident-response, and security review required by specification section 23.

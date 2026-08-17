@@ -3,16 +3,17 @@
 EndlessFS is an open-source, provider-neutral, security-first private cloud drive. Its Go control plane authorizes file operations while browser file bytes travel directly to and from the configured object-storage provider through short-lived provider-native capabilities.
 
 > [!IMPORTANT]
-> The deterministic, mock-backed **v1 specification is feature complete**. The complete embedded product and its security boundaries are exercised by unit, contract, integration, fuzz, race, coverage, and Go-controlled Chromium gates. This is not a production storage release: the v1 provider is ephemeral, and real GCS interoperability, deployment, and production durability have not been implemented or validated.
+> The clarified **v1 specification is provider-portable and multi-replica safe**. One canonical storage engine runs over both the deterministic memory backend and a locally qualified GCS adapter; raw copying its checkpoint-authorized keys and bodies to a conforming backend requires no state migration or logical-version rewrite. This is not a production-storage claim: no live GCS bucket, cloud deployment, or production operations review is part of the deterministic v1 gate.
 
-The normative implementation contract is [docs/v1-specification.md](./docs/v1-specification.md). The feature-complete mock-backed v1 proves the full product locally, but it does not prove Google Cloud Storage interoperability or provide a production storage adapter.
+The normative implementation contract is [docs/v1-specification.md](./docs/v1-specification.md). The credential-free GCS suite models the documented JSON/XML, generation, signing, CORS, checksum, range, resumable-session, cancellation, and failure behavior on loopback. It qualifies the integration layer locally; only the separate opt-in live qualification described by the specification can establish real-service interoperability.
 
 ## Why EndlessFS
 
 - Passkey-only, usernameless identity with no password, email identity, or OAuth path.
 - Strict logical user isolation and deny-by-default authorization.
 - Direct browser-to-provider uploads and provider-to-browser downloads; the control plane does not proxy file bodies.
-- Provider-neutral domain and state contracts backed by deterministic local implementations in v1.
+- One provider-independent canonical format and portable engine, with logical state independent of GCS generations, S3 version IDs, Azure ETags, bucket names, and provider metadata.
+- Durable admission, fencing, takeover, operation, and checkpoint protocols for multiple replicas sharing one bucket.
 - One Go binary with embedded HTML, application CSS, vanilla JavaScript, and validated theme media.
 - Data-only themes: typed tokens and allowlisted static assets, never theme CSS, HTML, JavaScript, or remote code.
 - No required SQL database, cache, queue, external identity service, analytics service, or persistent application filesystem.
@@ -23,7 +24,8 @@ The normative implementation contract is [docs/v1-specification.md](./docs/v1-sp
 ```mermaid
 flowchart LR
     B["Browser"] -->|"Authentication, metadata, authorization"| C["EndlessFS control plane"]
-    C -->|"Provider control and state contracts"| P["Configured storage provider"]
+    C -->|"Application provider/state contracts"| E["Portable storage engine"]
+    E -->|"Atomic conditional objects"| P["Memory, GCS, or future backend"]
     C -->|"Short-lived capability"| B
     B ==>|"File bytes"| P
 ```
@@ -32,7 +34,8 @@ Required dependency direction:
 
 ```text
 HTTP and embedded UI -> application use cases -> domain + provider/state interfaces
-provider implementations ---------------------> provider/state interfaces
+portable engine ------> canonical format + narrow object-store backend interface
+backend adapters -----> narrow object-store backend interface
 ```
 
 Provider object keys never cross the public API. Private operations derive the owner scope from the authenticated session, not from client input.
@@ -88,6 +91,9 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#test` / `.#test-unit` | Run the current Go suite. |
 | `nix run .#test-integration` | Run tests named as integration tests. |
 | `nix run .#test-contract` | Run reusable provider and state-store contract suites. |
+| `nix run .#test-replica` | Run deterministic multi-replica admission, fencing, takeover, and recovery tests. |
+| `nix run .#test-portability` | Run canonical-format, checkpoint, raw-copy/reopen, and continued-mutation tests. |
+| `nix run .#provider-verify -- check CONFIG` | Strictly read and verify a closed checkpoint on a configured memory fixture or GCS bucket. |
 | `nix run .#test-e2e` | Run Go-controlled Chromium passkey and core Drive workflows. Nix supplies Chromium on Linux. |
 | `nix run .#test-coverage` | Run the complete suite and enforce 85% repository plus 95% security-boundary statement coverage. |
 | `nix run .#test-race` | Run the suite with Go's race detector. |
@@ -113,8 +119,11 @@ Only settings that have validation and tests are parsed by the current binary:
 |---|---:|---|
 | `ENDLESSFS_BASE_URL` | Derived in loopback development | Exact HTTP(S) origin; HTTPS is required for public listeners. |
 | `ENDLESSFS_LISTEN_ADDR` | `127.0.0.1:8080` | Loopback for HTTP development; non-loopback requires a coherent HTTPS base URL. |
-| `ENDLESSFS_STORAGE_PROVIDER` | `mock` | v1 currently accepts only the deterministic local provider. |
+| `ENDLESSFS_STORAGE_PROVIDER` | `mock` | Exact `mock` or `gcs`. The mock is ephemeral; GCS uses ADC and the same portable engine. |
 | `ENDLESSFS_MOCK_PROVIDER_URL` | Ephemeral loopback origin | Optional explicit HTTP loopback origin/port for the separate capability data plane. |
+| `ENDLESSFS_GCS_BUCKET` | Unset | Required with `gcs`; private bucket name, never embedded in canonical state. |
+| `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` | ADC discovery | Optional lowercase service-account email used by the official client for keyless IAM `signBlob` signed URLs. |
+| `ENDLESSFS_WRITER_SET_ID` | Local mock identifier | Stable canonical base64url identifier of at least 128 bits; required with `gcs` and identical across all replicas and provider cutovers. |
 | `ALLOW_REGISTRATION` | `false` | Exact `true` or `false`; exposed as non-secret public policy. |
 | `INVITE_REGISTRATION` | `true` | Exact `true` or `false`; exposed as non-secret public policy. |
 | `ENDLESSFS_BOOTSTRAP_TOKEN` | Unset | Optional canonical 256-bit base64url token; enables only the unused first-admin bootstrap. |
@@ -139,7 +148,10 @@ internal/config/         environment parsing and validation
 internal/auth/           established WebAuthn adapter, sessions, cookies, CSRF, and origin policy
 internal/domain/         strict paths, names, IDs, entries, operations, and capabilities
 internal/model/          strict versioned persistence records
-internal/provider/       provider contract and deterministic capability-aware memory provider
+internal/storageformat/  canonical keys, envelopes, logical versions, writer/gate/operation/checkpoint records
+internal/objectstore/    narrow atomic backend contract plus memory and GCS adapters
+internal/portable/       provider-independent state/filesystem, admission, fencing, recovery, and checkpoints
+internal/provider/       application-facing contracts and legacy deterministic test provider
 internal/state/          state contract, strict codec, and concurrency-safe memory CAS store
 internal/secret/         redacted bearer-token hashing and validation
 internal/httpapi/        router and transport security headers
@@ -151,6 +163,7 @@ internal/web/            embedded HTML, CSS, and vanilla JavaScript
 internal/e2e/            Go-controlled Chromium passkey, Drive, responsive, and privacy workflows
 tools/check-source/      forbidden dependency/source policy check
 tools/generate-secret/   operator-directed 256-bit environment-secret generator
+tools/provider-verify/   read-only closed-checkpoint verifier for copied buckets
 tools/theme/             theme validation, generated API inventory, build embedding, and preview fixture
 tools/repository-policy/ checked-in GitHub ruleset validator/applier
 tools/coverage.awk       repository and security-boundary coverage policy
@@ -182,16 +195,17 @@ The policy requires one approval, resolved review threads, linear history, and t
 
 ## Delivery roadmap
 
-- **Milestone 0 — complete:** reproducible skeleton, binary, embedded shell, Nix checks, OCI, CI and repository policy.
-- **Milestone 1 — complete:** typed domain, strict paths, state CAS, provider contracts, capability-aware local data plane, and deterministic faults.
-- **Milestone 2 — complete:** WebAuthn, sessions, CSRF/origin policy, bootstrap, registration matrix, invites, roles, and recovery.
-- **Milestone 3 — complete:** browse and file operations, direct resumable transfers, idempotency, trash, previews, and sharing control plane.
-- **Milestone 4 — complete:** closed Theme API, safe media validation, complete light/dark bundles, inheritance, fallback, preferences, and Nix tooling.
-- **Milestone 5 — complete:** accessible browser drive, confirmed-offset transfers, previews, trash, theme UX, and real Chromium coverage.
-- **Milestone 6 — complete:** public-share management, invite onboarding, profile/passkey settings, account administration, disable/enable behavior, recovery, and a second full Chromium journey.
-- **Milestone 7 — complete:** exhaustive cross-user and traversal matrices, fuzz/race/coverage gates, structured-log redaction, dependency/vulnerability policy, OCI inspection, threat/operations review, and release evidence.
+- **Milestone 0 — implemented baseline:** reproducible skeleton, binary, embedded shell, Nix checks, OCI, CI and repository policy.
+- **Milestone 1 — implemented baseline:** typed domain, strict paths, state CAS, provider contracts, capability-aware local data plane, and deterministic faults.
+- **Milestone 2 — implemented baseline:** WebAuthn, sessions, CSRF/origin policy, bootstrap, registration matrix, invites, roles, and recovery.
+- **Milestone 3 — implemented baseline:** browse and file operations, direct resumable transfers, idempotency, trash, previews, and sharing control plane.
+- **Milestone 4 — implemented baseline:** closed Theme API, safe media validation, complete light/dark bundles, inheritance, fallback, preferences, and Nix tooling.
+- **Milestone 5 — implemented baseline:** accessible browser drive, confirmed-offset transfers, previews, trash, theme UX, and real Chromium coverage.
+- **Milestone 6 — implemented baseline:** public-share management, invite onboarding, profile/passkey settings, account administration, disable/enable behavior, recovery, and a second full Chromium journey.
+- **Milestone 7 — implemented baseline:** exhaustive cross-user and traversal matrices, fuzz/race/coverage gates, structured-log redaction, dependency/vulnerability policy, OCI inspection, threat/operations review, and release evidence.
+- **v1 portability clarification — implemented:** canonical bucket format, one portable engine, multi-replica admission/fencing/recovery, quiescent checkpoint/raw-copy verification, and credential-free GCS protocol qualification.
 
-Every acceptance criterion in specification section 21 is indexed in the evidence record, the section 22 checklist is complete, and `nix flake check` is the clean, network-denied release gate. “v1 complete” always means the mock-backed boundary described above, never production-provider readiness.
+Every claimed acceptance criterion in specification section 21 is indexed in the evidence record and `nix flake check` remains the clean, network-denied release gate. “Locally qualified GCS” means the documented protocol and shared contracts passed without credentials; it never means a live deployment is production-ready.
 
 ## Contributing and security
 

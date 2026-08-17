@@ -1,8 +1,8 @@
 # EndlessFS v1 implementation evidence
 
-This is the release evidence index for the acceptance criteria and feature-completion checklist in [the v1 specification](./v1-specification.md). The deterministic, mock-backed v1 boundary is feature complete. This record does not claim production durability, deployment readiness, or Google Cloud Storage interoperability.
+This is the release evidence index for the acceptance criteria and feature-completion checklist in [the v1 specification](./v1-specification.md). It records the provider-portable, multi-replica implementation and credential-free local qualification of the GCS adapter. It does not claim live GCS interoperability, production durability, deployment readiness, or production operations validation.
 
-## Reproducible foundation — complete
+## Reproducible foundation — implemented baseline
 
 - The one-binary Go module, embedded browser shell, pinned Nix environment, minimal OCI image, release artifacts, GitHub workflows, and repository rulesets were introduced in commit `8c04cbb`.
 - `tools/check-source` rejects forbidden languages, dependency managers, task runners, and external browser resources.
@@ -10,7 +10,7 @@ This is the release evidence index for the acceptance criteria and feature-compl
 - `internal/httpapi` tests health, readiness, public configuration, route boundaries, payload limits, and security headers.
 - `nix flake check`, multi-system flake evaluation, OCI inspection, release checksums, and a local server smoke test form the bootstrap evidence.
 
-## Domain, provider, and state — complete
+## Domain, provider, and state — implemented baseline
 
 The Milestone 1 checkpoint implements specification sections 7–9 and checklist 22.2:
 
@@ -27,9 +27,28 @@ The Milestone 1 checkpoint implements specification sections 7–9 and checklist
 
 The shared suites are independently runnable with `nix run .#test-contract`. The race gate executes every implementation and contract under Go's race detector. The in-memory provider's HTTP loopback data plane instruments transfer bytes so contract tests prove that file bodies do not pass through application use cases.
 
-## Identity and registration — complete
+## Portable format, replicas, and GCS adapter
 
-The Milestone 2 checkpoint implements specification sections 10, 12.3, and 12.4 plus checklist sections 22.3 and 22.4:
+The v1 portability clarification is implemented without a second application provider implementation:
+
+| Requirement | Automated evidence |
+|---|---|
+| Canonical keys, envelopes, logical versions, manifests/pages, writer/gate/admission/operation/idempotency/checkpoint schemas | `TestCanonicalEnvelopeAndLogicalVersion`, `TestCanonicalKeyLayoutAndBounds`, `TestStrictEnvelopeRejectsCorruption`, portable filesystem/operation suites |
+| One portable state/provider engine over atomic object backends | `TestContractPortableStateStore`, `TestContractPortableProviderOverMemoryBackend`, `TestContractPortableProviderOverGCSProtocolFake` |
+| Stable encrypted state pagination across replicas and concurrent CAS | `TestPortableStateCursorMovesAcrossReplicasAndKeepsImmutableSnapshot`, `TestPortableStateCASAcrossReplicas`, `TestEightReplicaConcurrentCASHasOneWinner` |
+| Candidate admission barrier, node-loss recovery, and writer compatibility | `TestCandidateCannotAdmitAfterGateStartsClosing`, `TestReplicaDropAfterAdmissionIsFencedRecoveredAndClosed`, `TestReplicaCompatibilityRejectsWriterConfigurationDrift` |
+| Immutable multi-root preparation, one commit point, takeover fencing, and crash recovery | `TestReplicaDropAfterRootPrepareRecoversAtOneCommitPoint`, `TestSupersededReplicaCannotCommitWithTakeoverFence`, `TestReplicaDropAfterCommitOrFinalizationRecoversPostCommitView` |
+| Cross-replica upload idempotency, lost-success reconciliation, capability drain, and resumability | `TestPortableUploadInitiationIsIdempotentAcrossReplicas`, `TestConcurrentReplicaUploadInitiationHasOneIdempotentOutcome`, `TestUploadCompletionLostSuccessIsIdempotentlyReconciled`, `TestCheckpointWaitsForActiveCapabilityThenDrainsItAfterExpiry` |
+| Authoritative-only raw copy, native-version replacement, read-only verification, reopen, and continued mutation both ways | `TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections`, `TestCheckpointVerifierIsStrictlyReadOnly`, `TestCheckpointVerifierRejectsMissingExtraAndUnsupportedState`, `TestCheckpointPrunesExpiredStateSnapshotsButKeepsCurrentVersions` |
+| GCS generations, conditional mutation, checksums, pagination, errors, disconnect/lost-success, and full backend contract | `TestContractGCSProtocol`, `TestGenerationConditionsFenceEveryMutation`, `TestChecksumsSizesListingsAndCursorsFailClosed`, `TestLostUploadSuccessIsUnavailableAndNotRetried`, `TestProtocolErrorsMapToStableSafeKinds` |
+| GCS direct V4/resumable capabilities, replica handoff, generation binding, exact-origin CORS, and keyless construction | `TestGCSResumableCapabilityCanMoveBetweenReplicas`, `TestGCSSignedSingleUploadAndDownloadAreGenerationBound`, `TestGCSCORSRequiresExactApplicationOriginAndTransferHeaders`, `TestWorkloadIdentityTransferConstructionRequiresNoPrivateKeyOrNetwork` |
+| Read-only operator verification through Nix | `TestRunVerifiesLocalRawCopyFixtureWithoutWritingIt`, `TestRunRejectsMalformedFixtureAndUnknownConfiguration`; `nix run .#provider-verify -- check CONFIG` |
+
+The deterministic GCS server is loopback-only and uses an injected unauthenticated official client plus deterministic signer. No test contacts a metadata, token, IAM, or storage endpoint. `nix run .#test-replica` and `nix run .#test-portability` make the two clarified gates independently visible.
+
+## Identity and registration — implemented baseline
+
+The Milestone 2 checkpoint implements specification sections 10, 12.3, and 12.4 plus the identity checklist sections:
 
 | Requirement | Automated evidence |
 |---|---|
@@ -51,7 +70,7 @@ The Milestone 2 checkpoint implements specification sections 10, 12.3, and 12.4 
 
 The selected WebAuthn and virtual-authenticator modules are pinned in `go.mod`, `go.sum`, and Nix's fixed-output module closure. The application binary uses only the real verifier; the virtual authenticator is test-only. Invite and recovery creation use durable idempotency claims: repeating a key cannot create another resource and cannot recover the deliberately one-time raw link.
 
-## File, transfer, trash, preview, and share control plane — complete
+## File, transfer, trash, preview, and share control plane — implemented baseline
 
 The Milestone 3 checkpoint implements specification sections 11, 12.5, and 12.6 plus checklist sections 22.5–22.7:
 
@@ -69,7 +88,7 @@ The Milestone 3 checkpoint implements specification sections 11, 12.5, and 12.6 
 
 The public API accepts virtual paths only. Storage scopes are constructed from authenticated session owners, trash resides in a separate provider area, and share listings translate all paths relative to a version-bound root. The mock provider validates safe preview signatures after direct upload completion so a client-supplied media type alone cannot enable inline rendering.
 
-## Data-only theme system — complete
+## Data-only theme system — implemented baseline
 
 The Milestone 4 checkpoint implements specification section 14, acceptance criteria AC-056–AC-059 at the compiler/control-plane layer, and checklist 22.8 except the browser workflows that intentionally land in Milestone 5:
 
@@ -89,7 +108,7 @@ The Milestone 4 checkpoint implements specification section 14, acceptance crite
 
 The Nix-built production binary can be overridden with `themeBundles = [ ... ]`; each input is validated and compiled into generated Go data before the binary build. Normal runtime selection performs no archive parsing, mutable theme-directory lookup, or network installation. Release archives include `THEMES.json` with IDs, API versions, licenses, and content digests.
 
-## Browser Drive and accessibility — complete
+## Browser Drive and accessibility — implemented baseline
 
 The Milestone 5 checkpoint implements specification section 13’s core Drive workflows and checklist section 22.9 at the Drive/browser boundary:
 
@@ -107,9 +126,9 @@ The Milestone 5 checkpoint implements specification section 13’s core Drive wo
 
 The browser source creates every untrusted filename and display name through text nodes, keeps bearer material in short-lived closures, removes capability-bearing preview DOM on close, extracts invite/recovery tokens before the first request, and records no sensitive client-side storage.
 
-## Sharing and administration browser workflows — complete
+## Sharing and administration browser workflows — implemented baseline
 
-The Milestone 6 checkpoint completes the browser workflow inventory in specification section 18.2 and the remaining user-facing portions of checklist sections 22.3, 22.4, 22.7, and 22.9:
+The Milestone 6 checkpoint completes the browser workflow inventory in specification section 18.2 and the remaining user-facing checklist portions:
 
 | Requirement | Automated evidence |
 |---|---|
@@ -124,7 +143,7 @@ The Milestone 6 checkpoint completes the browser workflow inventory in specifica
 
 Browser network diagnostics retain only request methods and paths: credential ceremony bodies, bearer values, provider capability query strings, and authorization fields are deliberately excluded.
 
-## Adversarial hardening and release proof — complete
+## Adversarial hardening and release proof — implemented baseline
 
 | Requirement | Automated or review evidence |
 |---|---|
@@ -143,16 +162,16 @@ The release coverage command is `nix run .#test-coverage`. It executes all Go pa
 
 | Boundary | Statements | Result | Required |
 |---|---:|---:|---:|
-| Repository | 4,418 / 5,197 | 85.011% | 85% |
+| Repository | 7,120 / 8,367 | 85.096% | 85% |
 | Authentication | 154 / 161 | 95.652% | 95% |
 | Authorization | 419 / 438 | 95.662% | 95% |
-| Canonical path | 204 / 209 | 97.608% | 95% |
+| Canonical path | 206 / 211 | 97.630% | 95% |
 | Bearer token | 20 / 21 | 95.238% | 95% |
-| Provider capability | 701 / 734 | 95.504% | 95% |
+| Provider capability | 703 / 736 | 95.516% | 95% |
 | State CAS | 204 / 209 | 97.608% | 95% |
-| Scope mapping | 701 / 734 | 95.504% | 95% |
+| Scope mapping | 703 / 736 | 95.516% | 95% |
 | Theme validation/sanitization | 650 / 684 | 95.029% | 95% |
-| Configuration | 142 / 149 | 95.302% | 95% |
+| Configuration | 177 / 180 | 98.333% | 95% |
 
 ### Acceptance-criterion index
 
@@ -162,10 +181,11 @@ The release coverage command is `nix run .#test-coverage`. It executes all Go pa
 | AC-002 | Nix-sandboxed `checks.offline` and all test derivations use the fixed-output module closure and explicit loopback listeners only. |
 | AC-003 | One `cmd/endlessfs` entry point, embedded `internal/web`, `tools/check-source`, and OCI inspection; no Node/runtime frontend toolchain. |
 | AC-004 | `tools/check-source`, dependency inventory, runtime assembly tests, and the implemented threat review prove the prohibited services/identity/telemetry are absent. |
-| AC-005 | Provider-neutral domain interfaces, import boundaries, and source policy; GCS appears only in documentation. |
+| AC-005 | Provider-neutral domain interfaces and source-policy scans; only `internal/objectstore/gcs` imports the GCS SDK and adapter tests run the same portable contracts. |
 | AC-006 | `checks.container-policy` inspects user, entry point, ports, volumes, and every layer path for shells, package managers, source, or credential-shaped material. |
 | AC-007 | Theme schema/archive/media/SVG negative matrices plus source policy reject executable/raw/remote theme inputs. |
 | AC-008 | Built-in/custom compiler tests, overridden custom-build smoke proof, and `THEMES.json` inventory all embedded bundles. |
+| AC-009 | `internal/portable` is the sole application-facing `StorageProvider`/`StateStore` implementation over `internal/objectstore`; memory and GCS execute the shared contract suites through it. |
 | AC-010 | `TestIntegrationConcurrentBootstrapCreatesExactlyOneAdmin`. |
 | AC-011 | Concurrent, invalid, absent, and replay bootstrap matrix in the identity integration suite. |
 | AC-012 | `TestIntegrationRegistrationPolicyMatrixAndVerificationRecheck`. |
@@ -179,6 +199,13 @@ The release coverage command is `nix run .#test-coverage`. It executes all Go pa
 | AC-020 | `TestIntegrationConcurrentAdminChangesPreserveEnabledAdministrator`. |
 | AC-021 | `TestIntegrationRecoveryAddsPasskeyPreservesIdentityAndRevokesSessions` and recovery E2E. |
 | AC-022 | `TestDisplayNameAndPasskeyLabelChangesDoNotAlterIdentityOrRoles`. |
+| AC-023 | Canonical format golden/key/bounds tests plus strict writer, gate, admission, state-version, directory, operation, idempotency, and checkpoint codecs. |
+| AC-024 | Canonical path boundary tests, bounded directory-ID key construction, and stored name-digest collision/corruption denial in state/filesystem reads. |
+| AC-025 | Canonical schema/source inspection and authoritative-only checkpoint tests; native versions remain transport values and encrypted GCS session URLs occur only in excluded leases. |
+| AC-026 | `TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections` copies checkpoint-authorized bodies into independently versioned backends. |
+| AC-027 | The raw-copy test preserves logical versions/state CAS and continues state plus filesystem mutation after destination and reverse reopen. |
+| AC-028 | `TestCheckpointVerifierRejectsMissingExtraAndUnsupportedState`, `TestCheckpointDetectsAuthoritativeCorruption`, and strict envelope/collision tests. |
+| AC-029 | Gate/admission race, crashed-operation recovery, active-capability drain, pending-root recovery, authoritative inventory, and read-only verifier tests. |
 | AC-030 | `TestIntegrationCrossUserPrivateEndpointMatrix` plus service/provider isolation matrices. |
 | AC-031 | Reserved/encoding no-provider-call corpus and both path fuzz targets. |
 | AC-032 | Provider contract listing/pagination plus Drive HTTP/E2E browse workflows. |
@@ -214,10 +241,19 @@ The release coverage command is `nix run .#test-coverage`. It executes all Go pa
 | AC-071 | Enforced statement results are recorded in the coverage table above. |
 | AC-072 | Confirmed fixes for same-folder generated-name copy, duplicate-trash prevalidation, CR/LF-safe disposition fallback, reverse-domain theme IDs, and request status recording each landed with regression coverage. |
 | AC-073 | The release output records source/input/artifact hashes, locked dependencies/licenses, check/coverage results, themes, and limitations. |
-| AC-074 | README, release notes, operations, threat model, inventory, and this record distinguish feature-complete mock v1 from GCS/production readiness. |
+| AC-074 | README, release notes, operations, threat model, inventory, and this record distinguish provider-portable local qualification from live GCS interoperability and production readiness. |
+| AC-080 | Independent two-replica state/filesystem/operation/upload tests plus `TestEightReplicaConcurrentCASHasOneWinner`; no engine coordination is process-local. |
+| AC-081 | `TestCandidateCannotAdmitAfterGateStartsClosing` and `TestReplicaDropAfterAdmissionIsFencedRecoveredAndClosed`. |
+| AC-082 | Prepared-operation and admitted-state crash tests advance a fixed clock and recover through one CAS takeover. |
+| AC-083 | `TestSupersededReplicaCannotCommitWithTakeoverFence` deterministically resumes the stale owner while takeover owns the higher fence. |
+| AC-084 | Recursive operation, pending-root pre/post visibility, commit/finalization recovery, and shared-replica directory tests. |
+| AC-085 | Portable direct upload, concurrent initiation, lost-success completion, expiry/abort, and checkpoint-drain tests. |
+| AC-086 | `TestReplicaCompatibilityRejectsWriterConfigurationDrift` covers writer set, security configuration, keyring, and feature mismatch. |
+| AC-087 | Crashed admitted state/operation and active-capability tests require safe recovery/drain before checkpoint closure. |
+| AC-088 | The shared atomic backend contract runs against memory and the protocol-level GCS adapter; generation and lost-success tests enforce the linearization boundary. |
 
 ### Release record contract
 
-`nix build .#release` derives every record from the exact Git source revision. `RELEASE-INVENTORY.txt` contains the source revision, `flake.lock` SHA-256, pinned vulnerability-database NAR hash, target, Go version, binary/OCI/theme/dependency/license hashes, thresholds, and explicit mock/no-GCS/no-deployment/no-credentials/no-external-services fields. `SHA256SUMS` covers every separately published file. The archive also contains this evidence, release notes, README, license, binary, and all inventories.
+`nix build .#release` derives every record from the exact Git source revision. `RELEASE-INVENTORY.txt` contains the source revision, `flake.lock` SHA-256, pinned vulnerability-database NAR hash, target, Go version, binary/OCI/theme/dependency/license hashes, thresholds, canonical format/writer protocol, supported local provider modes, and explicit no-live-GCS/no-deployment/no-credentials/no-external-services fields. `SHA256SUMS` covers every separately published file. The archive also contains this evidence, release notes, README, license, binary, and all inventories.
 
-The build/test boundary used no GCP credential, cloud service, database, external identity provider, container daemon, persistent service, deployment permission, or non-loopback application dependency. The current provider/state implementations are deliberately ephemeral; see [v1 release notes](./v1-release-notes.md).
+The build/test boundary used no GCP credential, cloud service, database, external identity provider, container daemon, persistent service, deployment permission, or non-loopback application dependency. The local mock backend is deliberately ephemeral and the GCS adapter is locally protocol-qualified but not live-qualified; see [v1 release notes](./v1-release-notes.md).

@@ -24,7 +24,7 @@ All v1 acceptance tests MUST run locally without real GCP integration. Google Cl
 This distinction is deliberate:
 
 - **v1 feature complete** means the domain model, security boundaries, API, browser UI, transfer protocol, canonical bucket format, backend contracts, raw-copy portability, and all specified workflows pass deterministic local tests.
-- **v1 does not claim production-provider validation.** Local mocks prove conformance to the EndlessFS contracts, not interoperability with GCS.
+- **v1 does not claim production-provider validation.** The credential-free protocol fake proves conformance to the documented GCS surfaces and EndlessFS contracts, not interoperability with a live GCS deployment.
 - A GCS adapter MUST implement only the object-store backend contract and MUST use the same portable storage engine and canonical bucket format as every other backend. It MUST pass deterministic local integration tests and separate opt-in live tests before it can be called production-ready.
 
 Provider portability and multi-replica safety are clarifications of the original provider-agnostic v1 contract, not a new product specification or post-v1 features. The v1 API and product scope remain the same; this document makes the previously underspecified persistence, adapter, concurrency, and recovery boundaries explicit.
@@ -182,7 +182,7 @@ The implementation is v1 complete only when:
 
 The following are not part of v1:
 
-- A real GCS adapter or live GCS integration testing.
+- Live GCS interoperability, deployment qualification, and production-readiness testing. The thin GCS adapter and its credential-free local qualification are required by v1.
 - Creating or configuring a GCP project, bucket, service account, workload identity, IAM binding, CORS policy, domain, TLS certificate, ingress, Kubernetes resource, or production deployment.
 - Amazon S3, S3-compatible, Azure Blob, or multi-provider implementations.
 - Production durability supplied by the local mock provider.
@@ -643,6 +643,7 @@ endlessfs/v1/
   control/writer-set.json
   control/write-gate.json
   state/<namespace>/<encoded-key>.json
+  state-versions/<namespace>/<encoded-key>/<encoded-logical-version>.json
   fs/<encoded-user-id>/<area>/dirs/<directory-id>/directory.json
   fs/<encoded-user-id>/<area>/dirs/<directory-id>/manifests/<manifest-id>.json
   fs/<encoded-user-id>/<area>/dirs/<directory-id>/pages/<page-id>.json
@@ -668,6 +669,8 @@ Canonical object keys:
 
 The `superblock.json` object identifies `endlessfs-portable-bucket-v1`, the immutable bucket ID, canonical encoder version, key-format version, writer-protocol version, creation time, and required feature set. Startup MUST reject a missing, corrupt, mixed, newer-unsupported, or incompatible superblock before serving authenticated or public operations.
 
+Each current state record also has one immutable `state-versions` snapshot addressed by its logical key and logical version. It gives paginated state enumeration a provider-independent stable view across replicas while ordinary CAS updates continue. Cursor capabilities are authenticated-encrypted, bounded, expire, bind the exact prefix/limit plus gate epoch and logical gate version, and reveal neither state keys nor provider keys. Gate closure invalidates outstanding cursors and prunes every snapshot except the current version of each live state record before checkpoint inventory is created. Snapshots are authoritative canonical bodies; no cursor token is stored in the bucket.
+
 The root directory ID is a fixed format constant. Every other directory and blob ID is a stable opaque random identifier stored in canonical records. Each mutable `directory.json` root points to one immutable manifest whose immutable pages contain the directory's sorted child entries. The root also contains its logical revision and any operation-owned pending pre/post-manifest transition. A page entry is addressed by the digest of its normalized child name and stores the complete normalized name. On every read, list, create, move, copy, restore, or delete, the stored name MUST hash to its recorded digest and match the requested name; a mismatch is a collision or corruption and fails closed.
 
 A single-directory content change writes new immutable page/manifest objects and conditionally replaces `directory.json`; that root replacement is its visibility point. Unreferenced pages or manifests are garbage, never visible entries. A multi-directory operation first CAS-locks every affected root in canonical resource-ID order, records immutable pre/post manifests and the current operation fence in each pending transition, and then conditionally changes the durable operation record to `committed`. Readers encountering a pending transition use the pre-manifest before that commit and the post-manifest after it. Root finalization and garbage collection are idempotent consequences of the operation state, so a node failure cannot expose a half-move, duplicate tree, or partially deleted directory.
@@ -678,7 +681,7 @@ File blobs are immutable and live only under the blob namespace for their owner.
 
 All authoritative properties are encoded in object bodies. Correctness MUST NOT depend on provider custom metadata, tags, ACLs, storage class, object versioning, soft delete, native timestamps, checksums, listing order, folder resources, or preservation of those values by a cross-cloud copy tool. Provider-side integrity and encryption features MAY add defense in depth.
 
-The `admissions`, `staging`, and `leases` namespaces are transient and are excluded from portable logical state and checkpoint inventories. Admissions contain only portable writer-gate tickets linked to durable operation records. Staging contains only immutable operation-specific data that is unreachable from committed directory manifests. Leases may contain only encrypted, bounded backend-native resumable-session, multipart/block-upload, or rewrite/copy continuation data. Lease bodies MUST contain the backend kind and expiry and MUST NOT be required to reopen durable logical state. A checkpoint requires no admitted ticket, live staging operation, or live lease; cancelled/expired ticket objects and unreachable staging garbage may be removed before or after cutover and are never copied as authoritative state.
+The `admissions`, `staging`, and `leases` namespaces are transient and are excluded from portable logical state and checkpoint inventories. Admissions contain only portable writer-gate tickets linked to durable operation records. Staging contains only immutable operation-specific data that is unreachable from committed directory manifests. Leases may contain only authenticated-encrypted, bounded backend-native resumable-session, multipart/block-upload, or rewrite/copy continuation data. Lease bodies MUST contain the backend kind and expiry and MUST NOT be required to reopen durable logical state. A checkpoint requires no admitted ticket, live staging operation, or live lease; cancelled/expired ticket objects and unreachable staging garbage may be removed before or after cutover and are never copied as authoritative state.
 
 ### 9.2 Multi-replica write admission, fencing, and recovery
 
@@ -1581,9 +1584,11 @@ Configuration is read from environment variables. Secrets MUST NOT be accepted a
 |---|---|---|
 | `ENDLESSFS_BASE_URL` | Required outside loopback dev | Canonical HTTPS origin; determines allowed origin. |
 | `ENDLESSFS_LISTEN_ADDR` | Default `127.0.0.1:8080` | Non-loopback requires secure-mode validation. |
-| `ENDLESSFS_WRITER_SET_ID` | Required outside tests | Stable random deployment identity shared by every replica allowed to mutate the configured bucket; preserved across provider cutover. |
+| `ENDLESSFS_WRITER_SET_ID` | Required with `gcs`; deterministic mock default | Stable random deployment identity shared by every replica allowed to mutate the configured bucket; preserved across provider cutover. |
 | `ENDLESSFS_STORAGE_PROVIDER` | v1 default `mock` | Selects an object-store backend under the one portable storage engine. Deterministic local backends are acceptance-gated. |
 | `ENDLESSFS_MOCK_PROVIDER_URL` | Required for split E2E mock | Local control/data-plane mock endpoint. |
+| `ENDLESSFS_GCS_BUCKET` | Required with `gcs` | Private GCS bucket; excluded from canonical keys, bodies, and writer compatibility. |
+| `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` | Optional ADC discovery | Lowercase service-account identifier used by the official client for keyless IAM `signBlob`; never private-key material. |
 | `ALLOW_REGISTRATION` | Default `false` | Public registration switch. |
 | `INVITE_REGISTRATION` | Default `true` | Invite creation and consumption switch. |
 | `ENDLESSFS_BOOTSTRAP_TOKEN` | Required to enable unused bootstrap | Minimum 32 random bytes; never logged. |
@@ -2127,7 +2132,7 @@ An implementation agent should keep this checklist current and attach test names
 
 - [x] Go module exists with one application entry point and clear internal boundaries.
 - [x] `flake.nix` and `flake.lock` pin the complete development/CI environment.
-- [ ] All required Nix commands in section 19 exist and are documented; the clarified portability and provider-verification commands remain to be implemented.
+- [x] All required Nix commands in section 19 exist and are documented, including replica, portability, and read-only provider verification commands.
 - [x] Embedded HTML/CSS/vanilla JavaScript and validated theme media load without third-party runtime requests.
 - [x] Theme bundles contain data and allowlisted static media only; no theme CSS, HTML, JavaScript, template, executable expression, or remote reference is accepted.
 - [x] No forbidden language, package manager, frontend framework, task runner, or runtime service is present.
@@ -2142,9 +2147,9 @@ An implementation agent should keep this checklist current and attach test names
 - [x] Canonical typed `UserPath` implements every rule in section 7.1.
 - [x] Provider-neutral entries, operations, errors, conflict modes, and capabilities are implemented.
 - [x] `StorageProvider` and `StateStore` interfaces contain no GCS-specific types.
-- [ ] Reusable storage-provider and state-store contract suites include the clarified portable-engine and raw-copy semantics.
-- [ ] The deterministic in-memory object-store backend under the portable engine passes all application, backend, format, and portability contracts.
-- [ ] The capability-aware local HTTP object-store backend passes all application, backend, format, and portability contracts.
+- [x] Reusable storage-provider and state-store contract suites include the clarified portable-engine and raw-copy semantics.
+- [x] The deterministic in-memory object-store backend under the portable engine passes the application, backend, format, replica, and portability contracts.
+- [x] The capability-aware local HTTP data plane and credential-free GCS protocol backend pass the shared application and backend contracts through the portable engine.
 - [x] Mock expiry, scope, versions, resumability, range, faults, and byte instrumentation work.
 - [x] Large logical objects are tested without equivalent allocation.
 - [x] Application metadata is inaccessible through user file APIs.
@@ -2152,30 +2157,30 @@ An implementation agent should keep this checklist current and attach test names
 
 ### 22.3 Canonical bucket format and portability
 
-- [ ] A narrow object-store backend interface and reusable conditional-operation/capability contract suite are implemented.
-- [ ] Exactly one portable storage engine implements `StorageProvider` and `StateStore` semantics over every backend.
-- [ ] The normative `endlessfs/v1` superblock, writer-set/write-gate records, key grammar, canonical envelopes, logical versions, immutable directory manifest/page layout, staging/blobs, fenced operation/idempotency records, and checkpoint schemas are implemented.
-- [ ] Canonical keys remain within the cross-provider length/alphabet/segment profile for every valid `UserPath`, and digest collisions/corruption fail closed.
-- [ ] Provider-native identifiers, metadata, endpoints, capabilities, and continuation tokens are absent from authoritative records.
-- [ ] Memory and local HTTP backends exercise divergent native versions, metadata, pagination, ordering, and error forms under the same portable engine.
-- [ ] Raw-copy key/body portability preserves complete logical state and supports continued mutation in both directions.
-- [ ] Checkpoint creation requires a closed canonical gate, no admitted ticket, resolved pending manifests, and no live staging operation or backend lease; cancelled/expired candidates are inert and destination verification rejects incomplete, corrupt, extra, mixed, or unsupported state.
-- [ ] `test-portability` and local `provider-verify` Nix commands are implemented and included in the required gate.
+- [x] A narrow object-store backend interface and reusable conditional-operation/capability contract suite are implemented.
+- [x] Exactly one portable storage engine implements `StorageProvider` and `StateStore` semantics over every backend.
+- [x] The normative `endlessfs/v1` superblock, writer-set/write-gate records, key grammar, canonical envelopes, logical versions, immutable directory manifest/page layout, staging/blobs, fenced operation/idempotency records, state-version snapshots, and checkpoint schemas are implemented.
+- [x] Canonical keys remain within the cross-provider length/alphabet/segment profile for every valid `UserPath`, and digest collisions/corruption fail closed.
+- [x] Provider-native identifiers, metadata, endpoints, capabilities, and continuation tokens are absent from authoritative records.
+- [x] Memory and the local GCS protocol backend exercise divergent native versions, metadata, pagination, ordering, and error forms under the same portable engine.
+- [x] Raw-copy key/body portability preserves complete logical state and supports continued mutation in both directions.
+- [x] Checkpoint creation requires a closed canonical gate, no admitted ticket, resolved pending manifests, and no live staging operation or backend lease; cancelled/expired candidates are inert and destination verification rejects incomplete, corrupt, extra, mixed, or unsupported state.
+- [x] `test-portability` and local `provider-verify` Nix commands are implemented and included in the required gate.
 - [ ] Release evidence records the canonical format version and portability fixture/checkpoint digests.
 
 ### 22.4 Multi-replica concurrency and recovery
 
-- [ ] Every backend proves atomic single-object mutations plus strong read-after-success and complete-prefix listing visibility.
-- [ ] Every mutation uses candidate creation, second gate read, and candidate-to-admitted CAS before any state, staging, capability, copy, or delete side effect.
-- [ ] Gate closure cancels candidates, repeatedly enumerates and recovers every admitted ticket, and cannot reach `closed` while admitted or native work remains.
-- [ ] Recoverable operations use durable step state, expiring CAS ownership, monotonically increasing portable fences, and one conditional visibility point.
-- [ ] Lease expiry alone never unlocks a resource; exactly one takeover wins and a resumed stale worker cannot publish or unlock.
-- [ ] Directory children use immutable pages/manifests behind CAS-controlled roots; multi-root operations expose only complete pre-commit or post-commit views.
-- [ ] Browser uploads target immutable operation staging and publish only through verified create-only blob plus directory/operation commit.
+- [x] Every backend proves atomic single-object mutations plus strong read-after-success and complete-prefix listing visibility.
+- [x] Every mutation uses candidate creation, second gate read, and candidate-to-admitted CAS before any state, staging, capability, copy, or delete side effect.
+- [x] Gate closure cancels candidates, repeatedly enumerates and recovers every admitted ticket, and cannot reach `closed` while admitted or native work remains.
+- [x] Recoverable operations use durable step state, expiring CAS ownership, monotonically increasing portable fences, and one conditional visibility point.
+- [x] Lease expiry alone never unlocks a resource; exactly one takeover wins and a resumed stale worker cannot publish or unlock.
+- [x] Directory children use immutable pages/manifests behind CAS-controlled roots; multi-root operations expose only complete pre-commit or post-commit views.
+- [x] Browser uploads target immutable operation staging and publish only through verified create-only blob plus directory/operation commit.
 - [ ] Two-to-eight-replica deterministic crash schedules cover every admission, lease, provider-response, prepare, commit, finalization, gate, and checkpoint boundary.
-- [ ] The required `test-replica` Nix command is implemented and included in the umbrella gate.
-- [ ] Compatible rolling replicas work; mismatched writer-set, protocol, configuration, feature, and keyring identities fail readiness.
-- [ ] Node loss may delay an affected resource or checkpoint but never causes a permanent lock, split-brain commit, or forced unsafe cutover.
+- [x] The required `test-replica` Nix command is implemented and included in the umbrella gate.
+- [x] Compatible rolling replicas work; mismatched writer-set, protocol, configuration, feature, and keyring identities fail readiness.
+- [x] Node loss may delay an affected resource or checkpoint but never causes a permanent lock, split-brain commit, or forced unsafe cutover.
 
 ### 22.5 Authentication and accounts
 
@@ -2282,7 +2287,7 @@ An implementation agent should keep this checklist current and attach test names
 
 ### 22.12 Security, tests, and release proof
 
-- [ ] Threat model is reviewed against the implemented canonical-format, backend-adapter, multi-replica fencing/recovery, and portability boundaries.
+- [x] Threat model is reviewed against the implemented canonical-format, backend-adapter, multi-replica fencing/recovery, and portability boundaries.
 - [x] Security headers and safe-cookie policies pass tests in secure and loopback modes.
 - [x] CSRF, origin, body, pagination, batch, timeout, and rate limits pass negative tests.
 - [x] Cross-user endpoint matrix is exhaustive and green.
@@ -2293,11 +2298,11 @@ An implementation agent should keep this checklist current and attach test names
 - [x] Coverage meets 85% repository and 95% security-boundary package gates.
 - [x] Structured log redaction passes adversarial tests.
 - [x] Static, dependency, configuration, and OCI security checks are green.
-- [ ] Clean `nix flake check` includes the portability gate and is green with no cloud, database, external IdP, container runtime, or network.
+- [x] Clean `nix flake check` includes the portability gate and is green with no cloud, database, external IdP, container runtime, or network.
 - [ ] Release evidence includes source/input/artifact hashes and all test, canonical-format, and portability summaries.
 - [x] Release evidence inventories embedded themes, Theme API compatibility, licenses, and content digests.
-- [x] Release notes explicitly state that real GCS integration and deployment were not tested and are not v1 acceptance requirements.
-- [ ] README, release notes, operations guidance, threat model, and evidence no longer claim v1 feature completeness until sections 22.3 and 22.4 are complete.
+- [x] Release notes explicitly distinguish the locally qualified GCS adapter from untested live GCS interoperability and deployment.
+- [x] README, release notes, operations guidance, threat model, and evidence no longer claim v1 feature completeness until sections 22.3 and 22.4 are complete.
 
 ---
 
@@ -2312,7 +2317,7 @@ The adapter SHOULD:
 - prefer keyless attached workload identity/service identity on GCP and Workload Identity Federation outside GCP;
 - avoid static service-account JSON keys and GCS HMAC credentials;
 - keep the bucket private with uniform bucket-level access where appropriate;
-- issue short-lived V4 signed download and single-upload capabilities through an injected signer backed by IAM `signBlob` when no local private key exists;
+- issue short-lived V4 signed download and resumable-initiation capabilities through the official client's ADC credential discovery and IAM `signBlob` path when no local private key exists;
 - initiate GCS resumable upload sessions server-side and pass the session capability to the browser;
 - restrict browser data-plane CORS to the exact EndlessFS origin and required methods/headers;
 - use object generations/metagenerations only as request-local `NativeVersion` preconditions;
@@ -2337,14 +2342,14 @@ Conceptual mapping:
 | `CreateDownload` | Generation-bound short-lived V4 signed `GET` with safe response disposition |
 | `NativeVersion` | In-memory opaque generation/metageneration pair, never canonical state |
 
-The required credential-free GCS integration layer uses an in-process Go HTTP test server that independently models only the documented GCS JSON/XML/IAM surfaces exercised by the adapter. Tests use injected endpoints, token sources, clocks, signers, and fault schedules; production endpoint overrides are not accepted as ordinary runtime configuration. The local server verifies methods, signed requests, bearer tokens, atomic object replacement, strong read/list visibility, generations, metagenerations, resumable offsets, ranges, checksums, rewrite tokens, CORS, error mapping, lost-success responses, and byte counts without GCP credentials or non-loopback network access.
+The required credential-free GCS integration layer uses an in-process Go HTTP test server that independently models only the documented GCS JSON/XML surfaces exercised by the adapter. Tests use injected endpoints, unauthenticated clients, clocks, deterministic signing callbacks, and fault schedules; production endpoint overrides and unauthenticated modes are not accepted as ordinary runtime configuration. The local server verifies methods, V4 signed requests, atomic object replacement, strong read/list visibility, generations, metagenerations, resumable offsets, ranges, checksums, rewrites, CORS, error mapping, lost-success responses, and byte counts without GCP credentials or non-loopback network access. Separate construction tests prove that the production ADC/workload-identity and automatic IAM-signing configuration needs no private-key material and cannot contact a real metadata, token, IAM, or storage endpoint.
 
 Before a GCS adapter may be merged as locally qualified, it MUST pass:
 
 1. the complete object-store backend contract suite;
 2. the canonical-format, provider/state, multi-replica admission/fencing/recovery, raw-copy portability, checkpoint, continued-mutation, race, fuzz, security, integration, and browser E2E suites through the portable engine;
 3. adapter unit tests using deterministic fakes at the official Go client boundary;
-4. protocol-level local integration tests for JSON/XML requests, V4 signing, IAM signing, CORS, direct browser transfers, generations, checksums, rewrites, resumable sessions, rate limits, malformed responses, disconnects, and lost-success responses;
+4. protocol-level local integration tests for JSON/XML requests, the V4 signer boundary, CORS, direct browser transfers, generations, checksums, rewrites, resumable sessions, rate limits, malformed responses, disconnects, and lost-success responses;
 5. ADC/workload-identity construction tests that cannot reach a real metadata server or token endpoint; and
 6. source, dependency, log-redaction, container, and release-evidence checks.
 

@@ -4,9 +4,11 @@ This file applies to the entire repository. `docs/v1-specification.md` is normat
 
 ## Mission and current state
 
-Maintain and extend the feature-complete mock-backed v1 implementation without weakening its security or reproducibility requirements. Milestones 0–7 provide the reproducible foundation, provider/state contracts, passkey identity, file/trash/preview/share control plane, closed data-only theme system, complete accessible browser workflows, adversarial hardening, and release proof. The mock-backed runtime remains ephemeral and is not a production storage provider. Never present an unimplemented placeholder, skipped path, or empty test selection as evidence.
+Maintain and extend the mock-backed v1 implementation without weakening its security or reproducibility requirements. Milestones 0–7 provide the reproducible foundation, application-facing provider/state contracts, passkey identity, file/trash/preview/share control plane, closed data-only theme system, complete accessible browser workflows, adversarial hardening, and release proof.
 
-Real GCS integration, cloud resources, credentials, deployment, and production-provider claims are outside the v1 completion boundary. Preserve that distinction in code, tests, docs, and release notes.
+The clarified provider-agnostic v1 contract also requires the canonical provider-independent bucket format, portable logical versions, one portable storage engine over thin object-store backends, safe multi-replica write admission/fencing/recovery, and verified quiescent raw-copy portability in spec sections 5, 8, 9, 18, 21, 22.3, and 22.4. Those items are not implemented yet, so the repository MUST NOT be described as v1 feature complete until their unchecked checklist items have evidence. These are clarifications of v1, not a new specification or post-v1 milestone.
+
+The mock-backed runtime remains ephemeral and is not a production storage provider. A locally qualified GCS adapter, live GCS validation, cloud resources, credentials, deployment, and production-provider claims remain distinct stages. No live GCS resource or credential is required by the deterministic v1 gate. Never present an unimplemented placeholder, skipped path, empty test selection, local protocol mock, or unchecked portability item as evidence of completion or live interoperability.
 
 ## Required workflow
 
@@ -41,6 +43,8 @@ nix run .#test
 nix run .#test-unit
 nix run .#test-integration
 nix run .#test-contract
+nix run .#test-replica
+nix run .#test-portability
 nix run .#test-e2e
 nix run .#test-coverage
 nix run .#test-race
@@ -51,6 +55,7 @@ nix run .#theme-preview -- PATH
 nix run .#security
 nix run .#dependency-check
 nix run .#container
+nix run .#provider-verify -- check CONFIG
 ```
 
 Application, server, test-driver, helper, and generator code must be Go. Browser code is embedded semantic HTML, application-owned CSS, and minimal vanilla JavaScript. Do not introduce Node.js or a frontend/CSS framework. Do not add Python, Ruby, Java, .NET, PHP, Rust, SQL, Redis, queues, Docker Compose, or a required container runtime.
@@ -63,10 +68,13 @@ Required dependency direction:
 
 ```text
 HTTP/UI -> application use cases -> domain + provider/state interfaces
-provider implementations --------> provider/state interfaces
+portable storage engine ---------> provider/state + object-store interfaces
+object-store adapters -----------> object-store interface
 ```
 
-Keep process setup in `cmd/endlessfs`. Put behavior in narrow `internal` packages. Domain and application packages must not import HTTP transport, mock implementations, GCS SDKs, or construct raw provider object keys.
+Keep process setup in `cmd/endlessfs`. Put behavior in narrow `internal` packages. Domain and application packages must not import HTTP transport, mock backends, object-store adapters, GCS SDKs, or construct raw object keys. Backend adapters must not receive virtual paths, implement filesystem/state semantics, invent provider-specific durable layouts, or decode/re-encode canonical records.
+
+The canonical format package alone constructs bounded provider-independent object keys and encodes authoritative records. The portable engine alone implements `StorageProvider` and `StateStore` behavior, canonical write-gate admission, immutable directory manifests, durable operation state, fencing, takeover, staging publication, and checkpoint quiescence. GCS, memory, local HTTP, and every future S3/Azure adapter implement only atomic conditional object operations, strong read/list visibility, server-side copy, direct capabilities, resumability, and provider error/authentication translation.
 
 Expected v1 package responsibilities are described in spec section 5.3. Add them as their milestone begins; avoid speculative abstractions with no tested behavior.
 
@@ -79,6 +87,14 @@ Treat spec section 7 as a mandatory review checklist. In particular:
 - Derive every private owner scope from the authenticated session; never accept a user ID as storage scope.
 - Accept only canonical validated virtual paths. Never expose or accept provider keys in public APIs.
 - Keep reserved application metadata outside list, file, trash, preview, and share namespaces.
+- Keep all authoritative state in the canonical `endlessfs/v1` key/body format. Provider-native generations, ETags, version IDs, metadata, endpoints, capabilities, upload/multipart/block IDs, and rewrite/copy tokens cannot enter durable canonical records.
+- Use portable logical versions for application concurrency. Native versions are immediate backend preconditions only and must be discarded after the request.
+- Treat provider custom metadata, tags, ACLs, storage class, object versioning, native timestamps/checksums, folder resources, listing order, and page sizes as non-authoritative.
+- Create portability checkpoints only while mutations are quiesced and provider-native leases are drained or aborted; corrupt, incomplete, mixed, unsupported, or unverified destination state fails closed.
+- Admit every mutation through candidate-ticket creation, a second canonical gate read, and candidate-to-admitted CAS. Do not substitute process-local maintenance state, a leader, load-balancer draining, sticky routing, or a grace period for this durable admission protocol.
+- Publish directory/file changes only through CAS-controlled roots or a committed durable operation. Direct browser uploads and intermediate provider results target immutable operation staging, never visible file state.
+- Treat lease expiry only as eligibility for a one-winner CAS takeover that increments a portable fence. Never delete or unlock solely because time elapsed; stale workers must fail the same-object conditional visibility commit.
+- Require simultaneous replicas to match the canonical writer-set identity, protocol, security-critical configuration fingerprint, feature set, and provider-independent keyring identifiers before readiness.
 - Deny by default when there is no explicit policy decision.
 - Never log or persist raw session, CSRF, ceremony, bootstrap, invite, recovery, share, or provider-capability secrets.
 - Keep the identity profile to exactly `userID` and `displayName`. Do not model email, username, OAuth subject, or social identity.
@@ -87,7 +103,7 @@ Treat spec section 7 as a mandatory review checklist. In particular:
 - Reject unexpected control-plane bodies. File bytes must use the distinct capability-bearing data plane.
 - Keep themes data-only and closed-schema. Theme input can never add code, markup, arbitrary CSS, network origins, application wording, accessibility semantics, or behavior.
 
-Any change touching authentication, authorization, paths, state CAS, tokens, capabilities, shares, trash, themes, logging, or provider scoping needs explicit positive and negative tests.
+Any change touching authentication, authorization, paths, canonical keys/records/versions, state CAS, backend conditions/consistency, write admission, directory manifests, operation ownership/fencing/takeover, staging, tokens, capabilities, shares, trash, checkpoints, replica compatibility, portability, themes, logging, or provider scoping needs explicit positive and negative tests.
 
 ## Test organization
 
@@ -97,7 +113,11 @@ Name cross-layer tests with the runner prefixes already used by the flake:
 - `TestContract...` for reusable provider/state contract behavior.
 - `TestE2E...` for Go-controlled Chromium workflows.
 
-Keep unit tests beside their packages. Put reusable provider contract suites in an importable test package so every implementation runs identical semantics. Add fuzz seeds for every known traversal/encoding case. Tests must not depend on order, wall-clock sleeps, cloud credentials, network services, or persistent host state.
+Keep unit tests beside their packages. Put reusable application-facing provider/state, object-store backend, canonical-format, multi-replica, and raw-copy portability contract suites in importable test packages. Application semantics run once through the portable engine over every backend. Add fuzz seeds for every known traversal/encoding, key, envelope, logical-version, superblock, writer-set/gate, admission, manifest, operation/fence, and checkpoint case. Tests must not depend on order, wall-clock sleeps, cloud credentials, network services, or persistent host state.
+
+Multi-replica tests use two through eight separately constructed engines and a deterministic scheduler that can pause, crash, partition, restart, and resume them at every admission, lease, staging, provider-response, root-prepare, operation-commit, finalization, gate, and checkpoint boundary. They prove one-winner takeover, stale-fence denial, lost-success recovery, complete directory visibility, compatibility rejection, and no permanent lock without wall-clock sleeps.
+
+Portability tests close the canonical gate, recover all admissions/operations, and copy only authoritative object keys and bodies into an independently configured backend. They deliberately change every native version and provider metadata value, reopen the destination at a new gate epoch, and continue multi-replica mutations. They cover complete identity/file/share/trash/theme state and fail-closed corruption cases. GCS integration tests use an in-process protocol-level HTTP fake and must not contact GCP metadata, token, or storage endpoints.
 
 The completed v1 gate requires at least 85% repository statement coverage and at least 95% in the security-sensitive packages enumerated in spec section 18.4. Coverage does not replace invariant tests.
 
@@ -121,8 +141,8 @@ Workflows should bootstrap Nix, invoke flake commands, cache Nix outputs, and pu
 
 `.github/rulesets/*.json` is the source of truth for branch/tag policy. Validate it with `nix run .#repository-policy -- check`. Applying it is an explicit administrator action through the protected `Repository Policy` workflow; never place an administration token in source or ordinary CI.
 
-Release tags are `vMAJOR.MINOR.PATCH`. A v1 release needs the evidence in spec section 19.3, including source/input hashes, check and coverage summaries, binary/OCI hashes, dependency and theme inventories, limitations, and confirmation that no credentials or external services were used.
+Release tags are `vMAJOR.MINOR.PATCH`. A v1 release needs the evidence in spec section 19.3, including source/input hashes, check and coverage summaries, canonical-format/writer-protocol/checkpoint/portability fixture digests, multi-replica schedule results, binary/OCI hashes, dependency and theme inventories, limitations, and confirmation that no credentials or external services were used.
 
 ## Definition of done
 
-Before handing off a change, verify every item in spec section 24. At minimum: tests prove the behavior, relevant Nix checks pass, boundaries have success and denial coverage, logs/errors remain safe, no forbidden dependency or service was introduced, UI/theme contracts stay complete, and user/implementation documentation matches reality.
+Before handing off a change, verify every item in spec section 24. At minimum: tests prove the behavior, relevant Nix checks pass, boundaries have success and denial coverage, logs/errors remain safe, no forbidden dependency or service was introduced, canonical format/logical versions/write admission/fencing/stale-worker denial/raw-copy portability remain intact, no native provider value entered authoritative state, no lock relies on one process or timeout-only release, UI/theme contracts stay complete, and user/implementation documentation matches reality.

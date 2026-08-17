@@ -60,7 +60,7 @@ nix run .#provider-verify -- check CONFIG
 
 Application, server, test-driver, helper, and generator code must be Go. Browser code is embedded semantic HTML, application-owned CSS, and minimal vanilla JavaScript. Do not introduce Node.js or a frontend/CSS framework. Do not add Python, Ruby, Java, .NET, PHP, Rust, SQL, Redis, queues, Docker Compose, or a required container runtime.
 
-Pin every Go module, Nix input, and GitHub Action. Justify a direct dependency in review: maintenance health, license, security history, and why the standard library is insufficient. Cryptography and WebAuthn must use established libraries, never custom protocols.
+Pin every Go module, Nix input, and GitHub Action. Go modules are locked by `go.mod`, `go.sum`, and Nix's fixed-output module hash; `vendor/` is generated inside Nix builds and MUST NOT be tracked. Justify a direct dependency in review: maintenance health, license, security history, and why the standard library is insufficient. Cryptography and WebAuthn must use established libraries, never custom protocols.
 
 ## Architectural boundaries
 

@@ -40,4 +40,4 @@ Application tests separately cover browser-binding mismatch, expiry, atomic repl
 
 ## Residual risk and upgrade rule
 
-The upstream module is still pre-v1 and may make breaking security-driven changes. A version upgrade must read its release notes and storage guidance, rerun the real-adapter negative matrix, inspect changes to credential flags/counters and origin validation, update this review, regenerate `go.sum` and `vendor/`, and pass the offline Nix security gate. A mock-backed v1 does not claim certification of EndlessFS itself or interoperability with every authenticator.
+The upstream module is still pre-v1 and may make breaking security-driven changes. A version upgrade must read its release notes and storage guidance, rerun the real-adapter negative matrix, inspect changes to credential flags/counters and origin validation, update this review, regenerate `go.sum` and the fixed Nix module hash, and pass the offline Nix security gate. A mock-backed v1 does not claim certification of EndlessFS itself or interoperability with every authenticator.

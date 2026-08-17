@@ -49,15 +49,16 @@
             mkdir -p "$out/bin"
             makeWrapper "$browser" "$out/bin/chrome-headless-shell"
           '';
-      dependencyPolicyCommand = ''
+      dependencyPolicyCommand = moduleClosure: ''
         dependency_inventory="$(mktemp -t endlessfs-dependencies.XXXXXX)"
         trap 'rm -f "$dependency_inventory"' EXIT
-        awk '/^# / && $2 != "=>" { print $2, $3 }' vendor/modules.txt | LC_ALL=C sort -u > "$dependency_inventory"
+        module_closure=${nixpkgs.lib.escapeShellArg (toString moduleClosure)}
+        awk '/^# / && $2 != "=>" { print $2, $3 }' "$module_closure/modules.txt" | LC_ALL=C sort -u > "$dependency_inventory"
         test -s "$dependency_inventory"
         while read -r module _version; do
-          module_root="vendor/$module"
+          module_root="$module_closure/$module"
           if ! find "$module_root" -maxdepth 1 -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) -print -quit | grep -q .; then
-            echo "vendored module lacks a root license file: $module" >&2
+            echo "locked module lacks a root license file: $module" >&2
             exit 1
           fi
         done < "$dependency_inventory"
@@ -88,9 +89,7 @@
               || lib.hasPrefix "internal/" relative
               || relative == "tools"
               || relative == "tools/theme"
-              || lib.hasPrefix "tools/theme/" relative
-              || relative == "vendor"
-              || lib.hasPrefix "vendor/" relative;
+              || lib.hasPrefix "tools/theme/" relative;
           };
 
           themePreBuild =
@@ -115,7 +114,7 @@
               inherit version;
               src = goSource;
               subPackages = [ "cmd/endlessfs" ];
-              vendorHash = null;
+              vendorHash = "sha256-MB2a8d2+NdIIoEHIF5b/LT9uu16sqXd99KkSEPd4eXs=";
               inherit go;
               doCheck = false;
               env.CGO_ENABLED = 0;
@@ -145,6 +144,8 @@
               buildPhase = ''
                 runHook preBuild
                 export GOCACHE="$TMPDIR/go-cache"
+                cp -R ${endlessfs.goModules} vendor
+                export GOFLAGS=-mod=vendor
                 ${themePreBuild themeBundles}
                 export GOOS=linux
                 export GOARCH=${linuxArchitecture}
@@ -204,6 +205,7 @@
                 cd source
                 export GOCACHE="$TMPDIR/go-cache"
                 export CGO_ENABLED=0
+                cp -R ${endlessfs.goModules} vendor
                 export GOFLAGS=-mod=vendor
                 go run ./tools/theme inventory > "$out"
               '';
@@ -229,13 +231,12 @@
                 cp ${projectSource}/docs/v1-evidence.md staging/V1-EVIDENCE.md
                 cp ${projectSource}/docs/v1-release-notes.md staging/RELEASE-NOTES.md
                 cp ${themeInventory} staging/THEMES.json
+                awk '/^# / && $2 != "=>" { print $2, $3 }' \
+                  ${endlessfs.goModules}/modules.txt | LC_ALL=C sort -u \
+                  > staging/DEPENDENCIES.txt
                 (
-                  cd ${projectSource}
-                  awk '/^# / && $2 != "=>" { print $2, $3 }' vendor/modules.txt | LC_ALL=C sort -u
-                ) > staging/DEPENDENCIES.txt
-                (
-                  cd ${projectSource}
-                  find vendor -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) -print0 \
+                  cd ${endlessfs.goModules}
+                  find . -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) -print0 \
                     | LC_ALL=C sort -z \
                     | xargs -0 sha256sum
                 ) > staging/DEPENDENCY-LICENSES.sha256
@@ -471,7 +472,7 @@
                 gosec -quiet -nosec-require-justification -nosec-require-rules ./...
                 govulncheck -db=file://${vulndb} ./...
                 go test ./internal/config -count=1
-                ${dependencyPolicyCommand}
+                ${dependencyPolicyCommand packages.default.goModules}
                 go run ./tools/check-source .
                 nix build '.#checks.${system}.container-policy' --no-link --print-build-logs
               '';
@@ -480,7 +481,7 @@
             pkgs.findutils
             pkgs.gawk
             pkgs.gnugrep
-          ] dependencyPolicyCommand;
+          ] (dependencyPolicyCommand packages.default.goModules);
 
           pr-check = mkTask "endlessfs-pr-check" qualityTools ''
             unformatted="$(gofmt -l .)"
@@ -591,7 +592,9 @@
                 export CGO_ENABLED=0
                 cp -R ${src} source
                 chmod -R u+w source
+                cp -R ${self.packages.${system}.default.goModules} source/vendor
                 cd source
+                export GOFLAGS=-mod=vendor
                 ${command}
                 touch "$out"
               '';
@@ -649,7 +652,7 @@
                 actionlint .github/workflows/*.yml
                 gosec -quiet -nosec-require-justification -nosec-require-rules ./...
                 govulncheck -db=file://${vulndb} ./...
-                ${dependencyPolicyCommand}
+                ${dependencyPolicyCommand self.packages.${system}.default.goModules}
                 go run ./tools/check-source .
               ''
               [
@@ -661,11 +664,13 @@
                 pkgs.govulncheck
               ];
 
-          dependencies = goCheck "dependencies" dependencyPolicyCommand [
-            pkgs.findutils
-            pkgs.gawk
-            pkgs.gnugrep
-          ];
+          dependencies =
+            goCheck "dependencies" (dependencyPolicyCommand self.packages.${system}.default.goModules)
+              [
+                pkgs.findutils
+                pkgs.gawk
+                pkgs.gnugrep
+              ];
 
           repository-policy = goCheck "repository-policy" "go run ./tools/repository-policy check" [ ];
         }

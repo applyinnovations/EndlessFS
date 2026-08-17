@@ -99,8 +99,12 @@ func newEngine(t *testing.T, backend *objectmemory.Backend, seed byte) *portable
 
 func deterministic(seed byte, size int) []byte {
 	value := make([]byte, size)
+	state := uint64(seed) + 0x9e3779b97f4a7c15
 	for index := range value {
-		value[index] = byte(index*31) + seed
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		value[index] = byte(state >> 29)
 	}
 	return value
 }

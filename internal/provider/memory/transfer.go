@@ -76,10 +76,12 @@ func (p *Provider) CreateUpload(ctx context.Context, scope domain.Scope, request
 	}
 	protocol := domain.UploadSingle
 	method := http.MethodPut
+	framing := domain.UploadFramingWholeObject
 	var chunkRules *domain.ChunkRules
 	if request.Resumable {
 		protocol = domain.UploadResumable
 		method = http.MethodPatch
+		framing = domain.UploadFramingOffsetHeader
 		rules := p.chunkRules
 		chunkRules = &rules
 	} else if request.Size > p.maxMaterializedBytes {
@@ -111,7 +113,7 @@ func (p *Provider) CreateUpload(ctx context.Context, scope domain.Scope, request
 	}
 	capability := domain.UploadCapability{
 		UploadID: uploadID, Protocol: protocol, URL: p.baseURL + "/cap/upload/" + token,
-		Method: method, Headers: headers, ExpiresAt: expiresAt, ChunkRules: chunkRules,
+		Method: method, Headers: headers, ExpiresAt: expiresAt, ChunkRules: chunkRules, Framing: framing, DeclaredSize: request.Size,
 	}
 	if request.IdempotencyKey != "" {
 		p.uploadIdempotency[idempotencyKey(scope.UserID(), OperationCreateUpload, request.IdempotencyKey)] = idempotentUpload{fingerprint: fingerprint, capability: capability}

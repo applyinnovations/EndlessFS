@@ -49,7 +49,7 @@ The Milestone 2 checkpoint implements specification sections 10, 12.3, and 12.4 
 | Strict identity HTTP JSON/problems, origin, session/CSRF cookies, protected mutations, and one-time admin link responses | `TestIntegrationIdentityHTTPBootstrapLoginCSRFAndAdmin`, `TestIdentityHTTPRejectsOriginAndMalformedJSONWithStableProblem` |
 | No password-adjacent external identity concepts enter request, persistence, or embedded UI surfaces | `tools/check-source` identity-surface scan |
 
-The selected WebAuthn and virtual-authenticator modules are pinned in `go.mod`, `go.sum`, `vendor/`, and the Nix source closure. The application binary uses only the real verifier; the virtual authenticator is test-only. Invite and recovery creation use durable idempotency claims: repeating a key cannot create another resource and cannot recover the deliberately one-time raw link.
+The selected WebAuthn and virtual-authenticator modules are pinned in `go.mod`, `go.sum`, and Nix's fixed-output module closure. The application binary uses only the real verifier; the virtual authenticator is test-only. Invite and recovery creation use durable idempotency claims: repeating a key cannot create another resource and cannot recover the deliberately one-time raw link.
 
 ## File, transfer, trash, preview, and share control plane — complete
 
@@ -159,7 +159,7 @@ The release coverage command is `nix run .#test-coverage`. It executes all Go pa
 | Criterion | Evidence |
 |---|---|
 | AC-001 | `checks.build`, `checks.container`, `checks.release`, and the clean umbrella gate build without credentials/services. |
-| AC-002 | Nix-sandboxed `checks.offline` and all test derivations use vendored inputs and explicit loopback listeners only. |
+| AC-002 | Nix-sandboxed `checks.offline` and all test derivations use the fixed-output module closure and explicit loopback listeners only. |
 | AC-003 | One `cmd/endlessfs` entry point, embedded `internal/web`, `tools/check-source`, and OCI inspection; no Node/runtime frontend toolchain. |
 | AC-004 | `tools/check-source`, dependency inventory, runtime assembly tests, and the implemented threat review prove the prohibited services/identity/telemetry are absent. |
 | AC-005 | Provider-neutral domain interfaces, import boundaries, and source policy; GCS appears only in documentation. |

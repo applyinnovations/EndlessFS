@@ -41,6 +41,10 @@ func Run(t *testing.T, factory Factory) {
 		if _, err := backend.Put(context.Background(), key, []byte("two"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); !errors.Is(err, domain.ErrConflict) {
 			t.Fatalf("duplicate create error = %v", err)
 		}
+		info, err := backend.Head(context.Background(), key)
+		if err != nil || info.Key != key || info.Version != version || info.Size != 3 {
+			t.Fatalf("Head() = %+v, %v", info, err)
+		}
 	})
 
 	t.Run("single conditional winner", func(t *testing.T) {

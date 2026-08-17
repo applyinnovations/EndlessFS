@@ -32,12 +32,14 @@ type WriterConfiguration struct {
 }
 
 type Options struct {
-	Backend   objectstore.Backend
-	Clock     domain.Clock
-	IDs       *domain.IDGenerator
-	Writer    WriterConfiguration
-	LeaseTTL  time.Duration
-	Scheduler Scheduler
+	Backend     objectstore.Backend
+	Clock       domain.Clock
+	IDs         *domain.IDGenerator
+	Writer      WriterConfiguration
+	LeaseTTL    time.Duration
+	UploadTTL   time.Duration
+	DownloadTTL time.Duration
+	Scheduler   Scheduler
 }
 
 type Scheduler interface {
@@ -62,12 +64,14 @@ type stateListSnapshot struct {
 }
 
 type Engine struct {
-	backend   objectstore.Backend
-	clock     domain.Clock
-	ids       *domain.IDGenerator
-	writer    storageformat.WriterSet
-	leaseTTL  time.Duration
-	scheduler Scheduler
+	backend     objectstore.Backend
+	clock       domain.Clock
+	ids         *domain.IDGenerator
+	writer      storageformat.WriterSet
+	leaseTTL    time.Duration
+	uploadTTL   time.Duration
+	downloadTTL time.Duration
+	scheduler   Scheduler
 
 	snapshotMu        sync.Mutex
 	snapshots         map[string]*stateListSnapshot
@@ -90,7 +94,16 @@ func Open(ctx context.Context, options Options) (*Engine, error) {
 		MinimumReaderProtocol: 1, MaximumReaderProtocol: storageformat.WriterProtocolVersion,
 		MinimumWriterProtocol: storageformat.WriterProtocolVersion, MaximumWriterProtocol: storageformat.WriterProtocolVersion,
 	}
-	engine := &Engine{backend: options.Backend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, scheduler: options.Scheduler, snapshots: make(map[string]*stateListSnapshot)}
+	if options.UploadTTL == 0 {
+		options.UploadTTL = 10 * time.Minute
+	}
+	if options.DownloadTTL == 0 {
+		options.DownloadTTL = 10 * time.Minute
+	}
+	if options.UploadTTL <= 0 || options.DownloadTTL <= 0 || options.DownloadTTL > 10*time.Minute {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid portable transfer TTL")
+	}
+	engine := &Engine{backend: options.Backend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, uploadTTL: options.UploadTTL, downloadTTL: options.DownloadTTL, scheduler: options.Scheduler, snapshots: make(map[string]*stateListSnapshot)}
 	if err := engine.initialize(ctx); err != nil {
 		return nil, err
 	}

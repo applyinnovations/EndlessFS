@@ -84,6 +84,14 @@ const (
 	UploadResumable UploadProtocol = "resumable"
 )
 
+type UploadFraming string
+
+const (
+	UploadFramingWholeObject  UploadFraming = "whole-object"
+	UploadFramingOffsetHeader UploadFraming = "offset-header"
+	UploadFramingContentRange UploadFraming = "content-range"
+)
+
 type ChunkRules struct {
 	MinimumSize int64 `json:"minimumSize"`
 	MaximumSize int64 `json:"maximumSize"`
@@ -91,13 +99,15 @@ type ChunkRules struct {
 }
 
 type UploadCapability struct {
-	UploadID   UploadID          `json:"uploadID"`
-	Protocol   UploadProtocol    `json:"protocol"`
-	URL        string            `json:"url"`
-	Method     string            `json:"method"`
-	Headers    map[string]string `json:"headers"`
-	ExpiresAt  time.Time         `json:"expiresAt"`
-	ChunkRules *ChunkRules       `json:"chunkRules,omitempty"`
+	UploadID     UploadID          `json:"uploadID"`
+	Protocol     UploadProtocol    `json:"protocol"`
+	URL          string            `json:"url"`
+	Method       string            `json:"method"`
+	Headers      map[string]string `json:"headers"`
+	ExpiresAt    time.Time         `json:"expiresAt"`
+	ChunkRules   *ChunkRules       `json:"chunkRules,omitempty"`
+	Framing      UploadFraming     `json:"framing"`
+	DeclaredSize int64             `json:"declaredSize"`
 }
 
 // UploadStatus is the safe control-plane view of provider-confirmed progress.

@@ -12,8 +12,10 @@ import (
 )
 
 type record struct {
-	body    []byte
-	version objectstore.NativeVersion
+	body         []byte
+	version      objectstore.NativeVersion
+	size         int64
+	materialized bool
 }
 
 type snapshot struct {
@@ -29,10 +31,40 @@ type Backend struct {
 	snapshots map[string]*snapshot
 	versions  uint64
 	cursors   uint64
+
+	clock          domain.Clock
+	ids            *domain.IDGenerator
+	dataPlaneURL   string
+	uploads        map[string]*uploadSession
+	uploadTokens   map[[32]byte]string
+	downloads      map[[32]byte]downloadSession
+	transferFaults map[string][]string
+	uploadBytes    int64
+	downloadBytes  int64
 }
 
 func New() *Backend {
-	return &Backend{records: make(map[string]record), snapshots: make(map[string]*snapshot)}
+	return &Backend{
+		records: make(map[string]record), snapshots: make(map[string]*snapshot),
+		clock: domain.SystemClock{}, ids: domain.SystemIDGenerator(), uploads: make(map[string]*uploadSession),
+		uploadTokens: make(map[[32]byte]string), downloads: make(map[[32]byte]downloadSession), transferFaults: make(map[string][]string),
+	}
+}
+
+func (b *Backend) Head(ctx context.Context, key objectstore.Key) (objectstore.ObjectInfo, error) {
+	if err := objectstore.ContextError(ctx); err != nil {
+		return objectstore.ObjectInfo{}, err
+	}
+	if !key.Valid() {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorInvalid, "invalid object key")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	record, found := b.records[key.String()]
+	if !found {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorNotFound, "object not found")
+	}
+	return objectstore.ObjectInfo{Key: key, Version: record.version, Size: record.size}, nil
 }
 
 func (b *Backend) Get(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
@@ -49,7 +81,10 @@ func (b *Backend) Get(ctx context.Context, key objectstore.Key) (objectstore.Obj
 		return objectstore.Object{}, domain.NewError(domain.ErrorNotFound, "object not found")
 	}
 	body := append([]byte(nil), record.body...)
-	return objectstore.Object{Key: key, Body: body, Version: record.version, Size: int64(len(body))}, nil
+	if !record.materialized && record.size > int64(len(body)) {
+		return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "logical object body is not materialized")
+	}
+	return objectstore.Object{Key: key, Body: body, Version: record.version, Size: record.size}, nil
 }
 
 func (b *Backend) List(ctx context.Context, request objectstore.ListRequest) (objectstore.ListPage, error) {
@@ -85,7 +120,7 @@ func (b *Backend) List(ctx context.Context, request objectstore.ListRequest) (ob
 	objects := make([]objectstore.ObjectInfo, 0, len(keys))
 	for _, value := range keys {
 		record := b.records[value]
-		objects = append(objects, objectstore.ObjectInfo{Key: objectstore.MustKey(value), Version: record.version, Size: int64(len(record.body))})
+		objects = append(objects, objectstore.ObjectInfo{Key: objectstore.MustKey(value), Version: record.version, Size: record.size})
 	}
 	if len(objects) <= limit {
 		return objectstore.ListPage{Objects: objects}, nil
@@ -136,7 +171,7 @@ func (b *Backend) Put(ctx context.Context, key objectstore.Key, body []byte, con
 	}
 	b.versions++
 	version := objectstore.VersionString("m", b.versions)
-	b.records[key.String()] = record{body: append([]byte(nil), body...), version: version}
+	b.records[key.String()] = record{body: append([]byte(nil), body...), version: version, size: int64(len(body)), materialized: true}
 	return version, nil
 }
 
@@ -196,8 +231,8 @@ func (b *Backend) Copy(ctx context.Context, source, destination objectstore.Key,
 	b.versions++
 	version := objectstore.VersionString("m", b.versions)
 	body := append([]byte(nil), sourceRecord.body...)
-	b.records[destination.String()] = record{body: body, version: version}
-	return objectstore.CopyResult{Version: version, Size: int64(len(body))}, nil
+	b.records[destination.String()] = record{body: body, version: version, size: sourceRecord.size, materialized: sourceRecord.materialized}
+	return objectstore.CopyResult{Version: version, Size: sourceRecord.size}, nil
 }
 
 // Export returns a copy of all key/body pairs for portability tests.

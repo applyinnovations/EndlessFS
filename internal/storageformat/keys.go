@@ -12,6 +12,8 @@ import (
 
 const root = "endlessfs/v1/"
 
+const RootDirectoryID = "root"
+
 var base32Lower = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 
 func encodedPart(value string) string {
@@ -22,6 +24,8 @@ func digestPart(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return base32Lower.EncodeToString(sum[:])
 }
+
+func NameDigest(value string) string { return digestPart(value) }
 
 func fixedKey(value string) objectstore.Key { return objectstore.MustKey(root + value) }
 
@@ -74,6 +78,8 @@ func DirectoryPageKey(userID, area, directoryID, pageID string) objectstore.Key 
 func OperationKey(userID, operationID string) objectstore.Key {
 	return fixedKey("operations/" + encodedPart(userID) + "/" + encodedPart(operationID) + ".json")
 }
+
+func OperationPrefix() string { return root + "operations/" }
 
 func IdempotencyKey(userID, key string) objectstore.Key {
 	return fixedKey("idempotency/" + encodedPart(userID) + "/" + digestPart(key) + ".json")

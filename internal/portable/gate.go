@@ -48,6 +48,9 @@ func (e *Engine) CloseWrites(ctx context.Context, checkpointID string) error {
 	if err := e.drainAdmissions(ctx, gate.Epoch); err != nil {
 		return err
 	}
+	if err := e.drainActiveUploads(ctx); err != nil {
+		return err
+	}
 	gateObject, gateEnvelope, gate, err = e.readGate(ctx)
 	if err != nil {
 		return err
@@ -62,6 +65,59 @@ func (e *Engine) CloseWrites(ctx context.Context, checkpointID string) error {
 	}
 	_, err = e.backend.Put(ctx, storageformat.WriteGateKey(), body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: gateObject.Version})
 	return err
+}
+
+func (e *Engine) drainActiveUploads(ctx context.Context) error {
+	objects, err := e.listAll(ctx, storageformat.OperationPrefix())
+	if err != nil {
+		return err
+	}
+	for _, info := range objects {
+		object, getErr := e.backend.Get(ctx, info.Key)
+		if errors.Is(getErr, domain.ErrNotFound) {
+			continue
+		}
+		if getErr != nil {
+			return getErr
+		}
+		var generic storageformat.Envelope
+		if err := state.DecodeJSONWithLimit(object.Body, &generic, storageformat.MaxCanonicalBytes); err != nil {
+			return err
+		}
+		if generic.Schema != uploadRecordSchema {
+			continue
+		}
+		var envelope storageformat.Envelope
+		var upload storageformat.UploadRecord
+		if err := storageformat.DecodeEnvelope(object.Body, info.Key, uploadRecordSchema, &envelope, &upload); err != nil {
+			return err
+		}
+		if upload.State != storageformat.UploadActive {
+			continue
+		}
+		if !expired(e.clock.Now(), upload.ExpiresAt) {
+			return domain.NewError(domain.ErrorUnavailable, "active upload prevents write-gate closure")
+		}
+		transfers, ok := e.backend.(objectstore.DirectTransferBackend)
+		if !ok {
+			return domain.NewError(domain.ErrorPreconditionFailed, "active upload cannot be drained")
+		}
+		if err := transfers.AbortUpload(ctx, upload.UploadID); err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
+		upload.State = storageformat.UploadAborted
+		body, err := storageformat.EncodeEnvelope(uploadRecordSchema, info.Key, envelope.Revision+1, upload)
+		if err != nil {
+			return err
+		}
+		if _, err = e.backend.Put(ctx, info.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
+			if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrNotFound) {
+				return domain.NewError(domain.ErrorUnavailable, "upload changed while closing write gate")
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func (e *Engine) OpenWrites(ctx context.Context, checkpointID string) error {
@@ -184,6 +240,15 @@ func (e *Engine) recoverMutation(ctx context.Context, admission storageformat.Ad
 		return domain.NewError(domain.ErrorInvalid, "admission intent digest mismatch")
 	}
 	intent := *admission.Mutation
+	if err := e.ensureMutationPrerequisites(ctx, intent.Prerequisites); err != nil {
+		return err
+	}
+	if err := e.ensureMutationCopies(ctx, intent.Copies); err != nil {
+		return err
+	}
+	if err := e.ensureUploadAborts(ctx, intent.AbortUploads); err != nil {
+		return err
+	}
 	key, err := objectstore.ParseKey(intent.TargetKey)
 	if err != nil {
 		return err
@@ -248,6 +313,107 @@ func (e *Engine) recoverMutation(ctx context.Context, admission storageformat.Ad
 	default:
 		return domain.NewError(domain.ErrorInvalid, "unknown admission mutation")
 	}
+}
+
+func (e *Engine) ensureUploadAborts(ctx context.Context, uploadIDs []string) error {
+	if len(uploadIDs) == 0 {
+		return nil
+	}
+	transfers, ok := e.backend.(objectstore.DirectTransferBackend)
+	if !ok {
+		return domain.NewError(domain.ErrorPreconditionFailed, "object backend has no direct transfer support")
+	}
+	previous := ""
+	for _, uploadID := range uploadIDs {
+		if uploadID == "" || uploadID <= previous {
+			return domain.NewError(domain.ErrorInvalid, "invalid upload abort order")
+		}
+		if err := transfers.AbortUpload(ctx, uploadID); err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
+		previous = uploadID
+	}
+	return nil
+}
+
+func (e *Engine) ensureMutationCopies(ctx context.Context, copies []storageformat.MutationCopy) error {
+	previous := ""
+	for _, copyIntent := range copies {
+		if copyIntent.DestinationKey <= previous || copyIntent.Size < 0 || copyIntent.SourceKey == copyIntent.DestinationKey {
+			return domain.NewError(domain.ErrorInvalid, "invalid mutation copy order")
+		}
+		source, err := objectstore.ParseKey(copyIntent.SourceKey)
+		if err != nil {
+			return err
+		}
+		destination, err := objectstore.ParseKey(copyIntent.DestinationKey)
+		if err != nil {
+			return err
+		}
+		if existing, headErr := e.backend.Head(ctx, destination); headErr == nil {
+			if existing.Size != copyIntent.Size {
+				return domain.NewError(domain.ErrorInvalid, "mutation copy destination collision")
+			}
+			previous = copyIntent.DestinationKey
+			continue
+		} else if !errors.Is(headErr, domain.ErrNotFound) {
+			return headErr
+		}
+		sourceInfo, err := e.backend.Head(ctx, source)
+		if err != nil {
+			return err
+		}
+		if sourceInfo.Size != copyIntent.Size {
+			return domain.NewError(domain.ErrorPreconditionFailed, "mutation copy source size changed")
+		}
+		_, err = e.backend.Copy(ctx, source, destination, objectstore.CopyCondition{SourceVersion: sourceInfo.Version, Destination: objectstore.PutCondition{Mode: objectstore.PutCreateOnly}})
+		if err != nil {
+			if !errors.Is(err, domain.ErrConflict) {
+				return err
+			}
+			winner, headErr := e.backend.Head(ctx, destination)
+			if headErr != nil || winner.Size != copyIntent.Size {
+				return domain.NewError(domain.ErrorInvalid, "mutation copy destination collision")
+			}
+		}
+		previous = copyIntent.DestinationKey
+	}
+	return nil
+}
+
+func (e *Engine) ensureMutationPrerequisites(ctx context.Context, prerequisites []storageformat.MutationObject) error {
+	previous := ""
+	for _, prerequisite := range prerequisites {
+		if prerequisite.Key <= previous || len(prerequisite.Body) == 0 {
+			return domain.NewError(domain.ErrorInvalid, "invalid mutation prerequisite order")
+		}
+		key, err := objectstore.ParseKey(prerequisite.Key)
+		if err != nil {
+			return err
+		}
+		existing, err := e.backend.Get(ctx, key)
+		if err == nil {
+			if !bytes.Equal(existing.Body, prerequisite.Body) {
+				return domain.NewError(domain.ErrorInvalid, "mutation prerequisite collision")
+			}
+			previous = prerequisite.Key
+			continue
+		}
+		if !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
+		if _, err = e.backend.Put(ctx, key, prerequisite.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			if !errors.Is(err, domain.ErrConflict) {
+				return err
+			}
+			winner, getErr := e.backend.Get(ctx, key)
+			if getErr != nil || !bytes.Equal(winner.Body, prerequisite.Body) {
+				return domain.NewError(domain.ErrorInvalid, "mutation prerequisite collision")
+			}
+		}
+		previous = prerequisite.Key
+	}
+	return nil
 }
 
 func canonicalLogicalVersion(body []byte) (string, error) {

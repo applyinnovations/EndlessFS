@@ -382,8 +382,16 @@ func sendUpload(t *testing.T, client *http.Client, capability domain.UploadCapab
 	for name, value := range capability.Headers {
 		request.Header.Set(name, value)
 	}
-	if capability.Protocol == domain.UploadResumable {
+	switch capability.Framing {
+	case domain.UploadFramingOffsetHeader:
 		request.Header.Set("Upload-Offset", strconv.FormatInt(offset, 10))
+	case "":
+		if capability.Protocol == domain.UploadResumable {
+			request.Header.Set("Upload-Offset", strconv.FormatInt(offset, 10))
+		}
+	case domain.UploadFramingContentRange:
+		end := offset + int64(len(body)) - 1
+		request.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, end, capability.DeclaredSize))
 	}
 	response, err := client.Do(request)
 	if err != nil {

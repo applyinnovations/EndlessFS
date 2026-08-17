@@ -183,16 +183,93 @@ const (
 )
 
 type MutationIntent struct {
-	Action                 MutationAction `json:"action"`
-	TargetKey              string         `json:"targetKey"`
-	ExpectedLogicalVersion string         `json:"expectedLogicalVersion,omitempty"`
-	TargetBody             []byte         `json:"targetBody,omitempty"`
+	Action                 MutationAction   `json:"action"`
+	TargetKey              string           `json:"targetKey"`
+	ExpectedLogicalVersion string           `json:"expectedLogicalVersion,omitempty"`
+	TargetBody             []byte           `json:"targetBody,omitempty"`
+	Prerequisites          []MutationObject `json:"prerequisites,omitempty"`
+	Copies                 []MutationCopy   `json:"copies,omitempty"`
+	AbortUploads           []string         `json:"abortUploads,omitempty"`
+}
+
+type MutationObject struct {
+	Key  string `json:"key"`
+	Body []byte `json:"body"`
+}
+
+type MutationCopy struct {
+	SourceKey      string `json:"sourceKey"`
+	DestinationKey string `json:"destinationKey"`
+	Size           int64  `json:"size"`
+	SHA256         string `json:"sha256,omitempty"`
 }
 
 type StateRecord struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	LogicalKey    string `json:"logicalKey"`
 	Data          []byte `json:"data"`
+}
+
+type DirectoryRoot struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	DirectoryID   string `json:"directoryID"`
+	ManifestID    string `json:"manifestID"`
+}
+
+type DirectoryManifest struct {
+	SchemaVersion int       `json:"schemaVersion"`
+	DirectoryID   string    `json:"directoryID"`
+	ManifestID    string    `json:"manifestID"`
+	PageIDs       []string  `json:"pageIDs"`
+	EntryCount    int       `json:"entryCount"`
+	CreatedAt     time.Time `json:"createdAt"`
+}
+
+type DirectoryPage struct {
+	SchemaVersion int              `json:"schemaVersion"`
+	DirectoryID   string           `json:"directoryID"`
+	PageID        string           `json:"pageID"`
+	Entries       []DirectoryEntry `json:"entries"`
+}
+
+type DirectoryEntry struct {
+	Name           string           `json:"name"`
+	NameDigest     string           `json:"nameDigest"`
+	Kind           domain.EntryKind `json:"kind"`
+	DirectoryID    string           `json:"directoryID,omitempty"`
+	BlobID         string           `json:"blobID,omitempty"`
+	Size           int64            `json:"size"`
+	MediaType      string           `json:"mediaType,omitempty"`
+	SHA256         string           `json:"sha256,omitempty"`
+	ModifiedAt     time.Time        `json:"modifiedAt"`
+	LogicalVersion string           `json:"logicalVersion"`
+}
+
+type UploadState string
+
+const (
+	UploadActive    UploadState = "active"
+	UploadCompleted UploadState = "completed"
+	UploadAborted   UploadState = "aborted"
+)
+
+type UploadRecord struct {
+	SchemaVersion   int                 `json:"schemaVersion"`
+	UploadID        string              `json:"uploadID"`
+	UserID          string              `json:"userID"`
+	Area            string              `json:"area"`
+	RequestedPath   string              `json:"requestedPath"`
+	ResolvedPath    string              `json:"resolvedPath"`
+	StagingKey      string              `json:"stagingKey"`
+	Size            int64               `json:"size"`
+	MediaType       string              `json:"mediaType"`
+	Conflict        domain.ConflictMode `json:"conflict"`
+	ExpectedVersion domain.Version      `json:"expectedVersion,omitempty"`
+	TargetExisted   bool                `json:"targetExisted"`
+	Resumable       bool                `json:"resumable"`
+	State           UploadState         `json:"state"`
+	CreatedAt       time.Time           `json:"createdAt"`
+	ExpiresAt       time.Time           `json:"expiresAt"`
 }
 
 type CheckpointObject struct {

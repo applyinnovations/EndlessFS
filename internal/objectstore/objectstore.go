@@ -113,6 +113,7 @@ type ListPage struct {
 }
 
 type Backend interface {
+	Head(context.Context, Key) (ObjectInfo, error)
 	Get(context.Context, Key) (Object, error)
 	List(context.Context, ListRequest) (ListPage, error)
 	Put(context.Context, Key, []byte, PutCondition) (NativeVersion, error)

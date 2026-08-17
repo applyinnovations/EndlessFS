@@ -87,9 +87,6 @@
           lib = pkgs.lib;
           go = goFor pkgs;
           version = self.shortRev or self.dirtyShortRev or "dev";
-          dependencyInventoryDigest = builtins.hashString "sha256" (
-            (builtins.readFile ./go.mod) + (builtins.readFile ./go.sum)
-          );
           projectSource = lib.cleanSource ./.;
           goSource = lib.cleanSourceWith {
             src = ./.;
@@ -122,6 +119,16 @@
               gofmt -w internal/theme/custom_build_inputs.go
             '';
 
+          dependencyDigestBuildHook = ''
+            if [ -f vendor/modules.txt ]; then
+              dependency_inventory="$TMPDIR/endlessfs-dependencies.txt"
+              awk '/^# / && $2 != "=>" { print $2, $3 }' vendor/modules.txt \
+                | LC_ALL=C sort -u > "$dependency_inventory"
+              dependency_digest="$(sha256sum "$dependency_inventory" | cut -d ' ' -f 1)"
+              ldflags+=("-X=github.com/applyinnovations/endlessfs/internal/preview.DependencyInventoryDigest=$dependency_digest")
+            fi
+          '';
+
           mkEndlessFS =
             {
               themeBundles ? [ ],
@@ -131,7 +138,7 @@
               inherit version;
               src = goSource;
               subPackages = [ "cmd/endlessfs" ];
-              vendorHash = "sha256-VKX45eWoUXXVtAWI6DQ/SF3kofBHXEgGiezYbXpSRpk=";
+              vendorHash = "sha256-Rgxyk0aXuICRsQ8rJEhEbx2RbNZ81xcV9khACnVPcEY=";
               # Keep the fixed-output dependency closure address stable when the
               # source revision changes without changing go.mod/go.sum.
               overrideModAttrs = _final: _previous: {
@@ -140,12 +147,11 @@
               inherit go;
               doCheck = false;
               env.CGO_ENABLED = 0;
-              preBuild = themePreBuild themeBundles;
+              preBuild = (themePreBuild themeBundles) + dependencyDigestBuildHook;
               ldflags = [
                 "-s"
                 "-w"
                 "-X=main.version=${version}"
-                "-X=github.com/applyinnovations/endlessfs/internal/preview.DependencyInventoryDigest=${dependencyInventoryDigest}"
               ];
               passthru = { inherit themeBundles; };
             };
@@ -170,11 +176,15 @@
                 cp -R ${endlessfs.goModules} vendor
                 export GOFLAGS=-mod=vendor
                 ${themePreBuild themeBundles}
+                dependency_inventory="$TMPDIR/endlessfs-dependencies.txt"
+                awk '/^# / && $2 != "=>" { print $2, $3 }' vendor/modules.txt \
+                  | LC_ALL=C sort -u > "$dependency_inventory"
+                dependency_digest="$(sha256sum "$dependency_inventory" | cut -d ' ' -f 1)"
                 export GOOS=linux
                 export GOARCH=${linuxArchitecture}
                 export CGO_ENABLED=0
                 go build -trimpath -buildvcs=false \
-                  -ldflags "-s -w -buildid= -X=main.version=${version} -X=github.com/applyinnovations/endlessfs/internal/preview.DependencyInventoryDigest=${dependencyInventoryDigest}" \
+                  -ldflags "-s -w -buildid= -X=main.version=${version} -X=github.com/applyinnovations/endlessfs/internal/preview.DependencyInventoryDigest=$dependency_digest" \
                   -o endlessfs ./cmd/endlessfs
                 runHook postBuild
               '';
@@ -233,23 +243,31 @@
                 go run ./tools/theme inventory > "$out"
               '';
 
-          capabilityInventory = pkgs.writeText "endlessfs-capabilities-${version}.json" (
-            builtins.toJSON {
-              applicationVersion = version;
-              previewSpecification = "v1.1";
-              profile = "images";
-              packagedCapabilities = [ "image" ];
-              acceptedImageMediaTypes = [
-                "image/gif"
-                "image/jpeg"
-                "image/png"
-                "image/webp"
-              ];
-              artifactMediaTypes = [ "image/webp" ];
-              imageRecipeID = "image-webp-q80-v1";
-              dependencyInventorySHA256 = dependencyInventoryDigest;
-            }
-          );
+          dependencyInventory =
+            pkgs.runCommand "endlessfs-dependency-inventory-${version}" { nativeBuildInputs = [ pkgs.gawk ]; }
+              ''
+                awk '/^# / && $2 != "=>" { print $2, $3 }' \
+                  ${endlessfs.goModules}/modules.txt | LC_ALL=C sort -u > "$out"
+              '';
+
+          capabilityInventory =
+            pkgs.runCommand "endlessfs-capabilities-${version}.json" { nativeBuildInputs = [ pkgs.jq ]; }
+              ''
+                dependency_digest="$(sha256sum ${dependencyInventory} | cut -d ' ' -f 1)"
+                jq -n \
+                  --arg applicationVersion '${version}' \
+                  --arg dependencyInventorySHA256 "$dependency_digest" \
+                  '{
+                    applicationVersion: $applicationVersion,
+                    previewSpecification: "v1.1",
+                    profile: "images",
+                    packagedCapabilities: ["image"],
+                    acceptedImageMediaTypes: ["image/gif", "image/jpeg", "image/png", "image/webp"],
+                    artifactMediaTypes: ["image/webp"],
+                    imageRecipeID: "image-webp-q80-v1",
+                    dependencyInventorySHA256: $dependencyInventorySHA256
+                  }' > "$out"
+              '';
 
           release =
             pkgs.runCommand "endlessfs-release-${version}-${system}"
@@ -272,9 +290,7 @@
                 cp ${projectSource}/docs/v1-evidence.md staging/V1-EVIDENCE.md
                 cp ${projectSource}/docs/v1-release-notes.md staging/RELEASE-NOTES.md
                 cp ${themeInventory} staging/THEMES.json
-                awk '/^# / && $2 != "=>" { print $2, $3 }' \
-                  ${endlessfs.goModules}/modules.txt | LC_ALL=C sort -u \
-                  > staging/DEPENDENCIES.txt
+                cp ${dependencyInventory} staging/DEPENDENCIES.txt
                 cp ${capabilityInventory} staging/CAPABILITIES.json
                 (
                   cd ${endlessfs.goModules}

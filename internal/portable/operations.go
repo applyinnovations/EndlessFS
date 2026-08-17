@@ -109,6 +109,9 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 			return domain.Operation{}, err
 		}
 	}
+	if move {
+		materializePreviewContentIdentity(&preparation.entry)
+	}
 	preparation.entry.Name = resolved.Name()
 	preparation.entry.NameDigest = storageformat.NameDigest(resolved.Name())
 	preparation.entry.ModifiedAt = s.engine.clock.Now().UTC()
@@ -265,6 +268,8 @@ func (s *FileStore) cloneTree(ctx context.Context, from, to domain.Scope, source
 			result.entry.ContentID = contentID
 			result.entry.ContentVersion = contentVersion
 			result.entry.ContentModifiedAt = now
+		} else {
+			materializePreviewContentIdentity(&result.entry)
 		}
 		result.entry.ModifiedAt = now
 		return result, nil

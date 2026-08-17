@@ -125,9 +125,7 @@ func TestRunValidatesConfiguredPreviewDependenciesBeforeServing(t *testing.T) {
 	}
 
 	cfg.PreviewKeySecret = ""
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := run(ctx, endlesslogging.NewJSON(io.Discard, slog.LevelInfo), cfg); err != nil {
+	if err := run(newAlreadyDoneContext(), endlesslogging.NewJSON(io.Discard, slog.LevelInfo), cfg); err != nil {
 		t.Fatalf("configured mock preview startup = %v", err)
 	}
 }

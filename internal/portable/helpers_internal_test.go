@@ -20,9 +20,23 @@ func TestPortableDirectoryEntryValidationMatrix(t *testing.T) {
 	validDirectory.LogicalVersion, _ = directoryEntryVersion(validDirectory)
 	validFile := storageformat.DirectoryEntry{Name: "file", NameDigest: storageformat.NameDigest("file"), Kind: domain.EntryFile, BlobID: "blob", Size: 3, MediaType: "text/plain", ContentID: "content", ContentVersion: "version", ContentModifiedAt: now, ModifiedAt: now}
 	validFile.LogicalVersion, _ = directoryEntryVersion(validFile)
+	legacyFile := storageformat.DirectoryEntry{Name: "legacy", NameDigest: storageformat.NameDigest("legacy"), Kind: domain.EntryFile, BlobID: "legacy-blob", Size: 3, MediaType: "text/plain", ModifiedAt: now}
+	legacyFile.LogicalVersion, _ = directoryEntryVersion(legacyFile)
 	valid := replaceDirectoryEntry([]storageformat.DirectoryEntry{validDirectory}, nil, validFile)
 	if err := validateDirectoryEntries(valid); err != nil {
 		t.Fatalf("valid entries error = %v", err)
+	}
+	if err := validateDirectoryEntries([]storageformat.DirectoryEntry{legacyFile}); err != nil {
+		t.Fatalf("pre-v1.1 canonical entry error = %v", err)
+	}
+	legacyIdentity := domainEntry(domain.MustParseUserPath("/legacy"), legacyFile).PreviewContentIdentity()
+	materializePreviewContentIdentity(&legacyFile)
+	legacyFile.Name = "renamed"
+	legacyFile.NameDigest = storageformat.NameDigest(legacyFile.Name)
+	legacyFile.ModifiedAt = now.Add(time.Hour)
+	legacyFile.LogicalVersion, _ = directoryEntryVersion(legacyFile)
+	if renamed := domainEntry(domain.MustParseUserPath("/renamed"), legacyFile).PreviewContentIdentity(); renamed != legacyIdentity || renamed.ContentID == "" || renamed.ContentVersion == "" || renamed.ContentModifiedAt.IsZero() {
+		t.Fatalf("derived legacy identity changed on rename: before=%+v after=%+v", legacyIdentity, renamed)
 	}
 
 	invalid := []storageformat.DirectoryEntry{
@@ -39,6 +53,10 @@ func TestPortableDirectoryEntryValidationMatrix(t *testing.T) {
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.ContentID = "" }),
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.ContentVersion = "" }),
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.ContentModifiedAt = time.Time{} }),
+		withEntry(validFile, func(entry *storageformat.DirectoryEntry) {
+			entry.ContentID = ""
+			entry.ContentVersion = ""
+		}),
 		withEntry(validDirectory, func(entry *storageformat.DirectoryEntry) { entry.ContentID = "content" }),
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.Kind = "link" }),
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.LogicalVersion = "wrong" }),

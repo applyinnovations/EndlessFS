@@ -384,7 +384,7 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 	blobKey := storageformat.BlobKey(scope.UserID().String(), blobID)
 	contentID := ""
 	if exists {
-		contentID = current.ContentID
+		contentID = string(previewContentIdentity(current).ContentID)
 	}
 	if contentID == "" {
 		contentID, err = s.engine.ids.OpaqueID()

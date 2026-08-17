@@ -4,18 +4,18 @@ This is the release evidence index for the acceptance criteria and feature-compl
 
 ## v1.1 media browsing and generated image previews — complete
 
-The [v1.1 extension specification](./v1.1-media-preview-specification.md) is implemented for the deterministic mock-backed boundary. The virtualized grid, metadata filters, full-screen viewer, and file-type icons are always available. Image thumbnail artifacts are optional static WebP only. They live behind an optional artifact-store interface and distinct capability-bearing loopback data origin; original files remain authoritative and ordinary file operations remain available when previews are disabled or unavailable. Video and PDF generation remain deferred to the separate v1.2 and v1.3 specifications.
+The [v1.1 extension specification](./v1.1-media-preview-specification.md) is implemented with the portable engine as its authoritative source and the independently faultable deterministic preview store as its artifact boundary. The virtualized grid, metadata filters, full-screen viewer, and file-type icons are always available. Image thumbnail artifacts are optional static WebP only. Original files remain authoritative and ordinary file operations remain available when previews are disabled or unavailable. The preview-store proof does not claim a durable cloud preview bucket. Video and PDF generation remain deferred to the separate v1.2 and v1.3 specifications.
 
 | Requirement | Automated evidence |
 |---|---|
 | Independent, default-off browser/store configuration; unpackaged generators and inaccessible configured stores fail startup | `TestParsePreviewConfiguration`, `TestParseRejectsInvalidPreviewConfiguration`, `TestNewServiceFailsFastForGeneratorAndStoreMisconfiguration`, and `TestRunValidatesConfiguredPreviewDependenciesBeforeServing` |
-| Non-public move-stable identity is preserved by rename/move/trash/restore, while copy/replacement cannot alias an artifact | provider contract `preview content identity lifecycle`, `TestResolveGeneratesOnceAndRenameReusesArtifact`, and `TestResolveCopyAndReplacementRequireDistinctArtifacts` |
+| Non-public move-stable identity is canonical across replicas and raw-copy cutovers, is preserved by rename/move/trash/restore, and cannot alias copy/replacement artifacts | shared provider contract `preview content identity lifecycle` over portable memory and local GCS; `TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections`; `TestResolveGeneratesOnceAndRenameReusesArtifact`; `TestResolveCopyAndReplacementRequireDistinctArtifacts` |
 | Automatic recency and source-size policies are independent, exact at their boundaries, and read zero excluded source bytes; explicit generation bypasses those policies | `TestResolveAutomaticPolicyExclusionsReadNoOriginalBytes` and `TestResolveAutomaticPolicyIncludesExactAgeAndSizeBoundaries` |
-| Closed PNG/JPEG/GIF/WebP input set produces bounded, metadata-free, source-aspect-preserving static WebP variants | image-generator positive/negative matrix beginning with `TestGeneratorProducesStaticWebPAtSourceAspectRatio`, every-orientation coverage, and `FuzzGeneratorMalformed` |
+| Closed PNG/JPEG/GIF/WebP input set produces bounded, metadata-free, source-aspect-preserving static WebP variants through portable memory and locally qualified GCS source capabilities | image-generator positive/negative matrix beginning with `TestGeneratorProducesStaticWebPAtSourceAspectRatio`, `TestIntegrationGeneratedPreviewReadsPortableGCSSource`, every-orientation coverage, and `FuzzGeneratorMalformed` |
 | Artifact identity, validation, immutable generations, exact capabilities, expiry, corruption denial, runtime removal, and revalidation | reusable preview-store contract via `TestContractMemoryPreviewStore`; `TestContentBindingAndArtifactValidationFailures`; memory-store boundary tests |
 | Authenticated exact-version resolve, explicit generate/regenerate, CSRF/origin enforcement, owner isolation, runtime health failure, safe logging, and unchanged file availability | `TestIntegrationGeneratedPreviewResolveRegenerateAndAuthorization`, `TestPreviewHTTPRejectsUnexpectedFieldsAndStaleVersions`, and `TestIntegrationPreviewRuntimeLossFailsReadinessButNotFileListing` |
 | Lazy virtual grid, square frames with uncropped source-ratio WebP, full-screen viewer, keyboard navigation, 320-pixel dark-theme operation, and bounded 10,002-entry DOM/request behavior | `TestE2EBrowserBootstrapLoginDriveShareAndTrash`, `TestE2EInviteSettingsAdminRecoveryAndShareRevocation`, and embedded-browser source assertions |
-| Profile-selectable release contract and identical configuration schema | `.#container-images` and `.#release-images`; release `CAPABILITIES.json`, dependency/license inventories, recipe/dependency digests, OCI sizes, and mock-only limitation |
+| Profile-selectable release contract and identical configuration schema | `.#container-images` and `.#release-images`; release `CAPABILITIES.json`, dependency/license inventories, recipe/dependency digests, OCI sizes, and deterministic-preview-store limitation |
 
 The focused gate is `nix run .#test-preview`. The final acceptance run used `nix flake check --print-build-logs`; it passed the full build, format, lint, unit, contract, integration, preview, theme, race, fuzz, offline, dependency, security, OCI, and release set without cloud credentials or external services. The real Chromium workflows passed through `nix run .#test-e2e`.
 
@@ -180,16 +180,16 @@ The release coverage command is `nix run .#test-coverage`. CI first runs the cac
 
 | Boundary | Statements | Result | Required |
 |---|---:|---:|---:|
-| Repository | 7,120 / 8,367 | 85.096% | 85% |
+| Repository | 8,091 / 9,426 | 85.837% | 85% |
 | Authentication | 154 / 161 | 95.652% | 95% |
 | Authorization | 419 / 438 | 95.662% | 95% |
-| Canonical path | 206 / 211 | 97.630% | 95% |
+| Canonical path | 207 / 212 | 97.642% | 95% |
 | Bearer token | 20 / 21 | 95.238% | 95% |
-| Provider capability | 703 / 736 | 95.516% | 95% |
+| Provider capability | 729 / 764 | 95.419% | 95% |
 | State CAS | 204 / 209 | 97.608% | 95% |
-| Scope mapping | 703 / 736 | 95.516% | 95% |
+| Scope mapping | 729 / 764 | 95.419% | 95% |
 | Theme validation/sanitization | 650 / 684 | 95.029% | 95% |
-| Configuration | 177 / 180 | 98.333% | 95% |
+| Configuration | 264 / 270 | 97.778% | 95% |
 | Preview core | 266 / 276 | 96.377% | 95% |
 | Preview image generator | 189 / 196 | 96.429% | 95% |
 | Preview store | 158 / 166 | 95.181% | 95% |
@@ -291,7 +291,7 @@ The release coverage command is `nix run .#test-coverage`. CI first runs the cac
 | MP-012 | Provider lifecycle contract plus rename reuse and copy/replacement distinct-generation service tests. |
 | MP-013 | Store/service/HTTP negative matrices, preview CSP and origin tests, safe runtime-loss logging, fuzz, race, and security gates. |
 | MP-014 | Loaded-metadata browser filters, no search API/index, and documentation that preserves search as a future feature. |
-| MP-015 | README, operations guide, threat model, release notes, capability inventory, and release inventory all state the mock-only boundary. |
+| MP-015 | README, operations guide, threat model, release notes, capability inventory, and release inventory distinguish portable memory/local-GCS source qualification, the deterministic preview store, and absent live/production validation. |
 
 ### Release record contract
 

@@ -5,7 +5,7 @@ This file applies to the entire repository. `docs/v1-specification.md` is normat
 ## Mission and current state
 
 Maintain and extend the provider-portable v1 implementation without weakening its security or reproducibility requirements. Milestones 0–7 provide the reproducible foundation, application-facing provider/state contracts, passkey identity, file/trash/preview/share control plane, closed data-only theme system, complete accessible browser workflows, adversarial hardening, and release proof.
-The v1.1 media-preview extension is approved for implementation but remains incomplete until its own evidence is recorded. The v1.2 video and v1.3 PDF drafts are deferred for revision after v1.1 implementation. Never present an unimplemented placeholder, graceful fallback, skipped path, or empty test selection as evidence that an optional extension itself is complete.
+The v1.1 media-preview extension is implemented for provider-portable source storage and the deterministic independent preview-store boundary recorded in its evidence. Its virtualized grid and accessible viewer are unconditional; generated image thumbnails remain optional. The v1.2 video and v1.3 PDF drafts are deferred for revision after v1.1. Never present an unimplemented placeholder, graceful fallback, skipped path, or empty test selection as evidence that an optional extension itself is complete.
 
 The clarified provider-agnostic v1 contract requires the canonical provider-independent single-/split-bucket storage-set format, portable logical versions, one portable storage engine over thin object-store backends, safe multi-replica write admission/fencing/recovery, and verified quiescent raw-copy portability in spec sections 5, 8, 9, 18, 21, 22.3, and 22.4. Implemented claims still require evidence for every relevant checklist item; the repository MUST NOT be described as v1 feature complete while any required item remains unchecked. These are clarifications of v1, not a new specification or post-v1 milestone.
 
@@ -44,6 +44,7 @@ nix run .#test
 nix run .#test-unit
 nix run .#test-integration
 nix run .#test-contract
+nix run .#test-preview
 nix run .#test-replica
 nix run .#test-portability
 nix run .#test-e2e
@@ -57,6 +58,8 @@ nix run .#security
 nix run .#dependency-check
 nix run .#container
 nix run .#provider-verify -- check CONFIG
+nix build .#container-images
+nix build .#release-images
 ```
 
 Application, server, test-driver, helper, and generator code must be Go. Browser code is embedded semantic HTML, application-owned CSS, and minimal vanilla JavaScript. Do not introduce Node.js or a frontend/CSS framework. Do not add Python, Ruby, Java, .NET, PHP, Rust, SQL, Redis, queues, Docker Compose, or a required container runtime.

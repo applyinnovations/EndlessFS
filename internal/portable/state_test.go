@@ -58,11 +58,17 @@ func TestPortableStateRawCopyPreservesLogicalVersions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := engine.CreateCheckpoint(context.Background(), "portable-copy"); err != nil {
+		t.Fatal(err)
+	}
 	destination := objectmemory.New()
 	if err := destination.Import(source.Export()); err != nil {
 		t.Fatal(err)
 	}
 	reopened := newEngine(t, destination, 5)
+	if err := reopened.OpenWrites(context.Background(), "portable-copy"); err != nil {
+		t.Fatal(err)
+	}
 	value, err := reopened.Get(context.Background(), key)
 	if err != nil || value.Version != version || string(value.Data) != `{"enabled":true}` {
 		t.Fatalf("reopened Get() = %+v, %v", value, err)

@@ -159,22 +159,59 @@ const (
 )
 
 type Admission struct {
-	SchemaVersion    int            `json:"schemaVersion"`
-	Epoch            uint64         `json:"epoch"`
-	OperationID      string         `json:"operationID"`
-	WriterSetID      string         `json:"writerSetID"`
-	ReplicaAttemptID string         `json:"replicaAttemptID"`
-	ObservedGate     string         `json:"observedGateLogicalVersion"`
-	State            AdmissionState `json:"state"`
-	CreatedAt        time.Time      `json:"createdAt"`
-	ExpiresAt        time.Time      `json:"expiresAt"`
-	IntentDigest     string         `json:"intentDigest"`
+	SchemaVersion    int             `json:"schemaVersion"`
+	Epoch            uint64          `json:"epoch"`
+	OperationID      string          `json:"operationID"`
+	WriterSetID      string          `json:"writerSetID"`
+	ReplicaAttemptID string          `json:"replicaAttemptID"`
+	ObservedGate     string          `json:"observedGateLogicalVersion"`
+	State            AdmissionState  `json:"state"`
+	Attempt          uint64          `json:"attempt"`
+	Fence            uint64          `json:"fence"`
+	CreatedAt        time.Time       `json:"createdAt"`
+	ExpiresAt        time.Time       `json:"expiresAt"`
+	IntentDigest     string          `json:"intentDigest"`
+	Mutation         *MutationIntent `json:"mutation,omitempty"`
+}
+
+type MutationAction string
+
+const (
+	MutationCreate MutationAction = "create"
+	MutationCAS    MutationAction = "compare-and-swap"
+	MutationDelete MutationAction = "delete"
+)
+
+type MutationIntent struct {
+	Action                 MutationAction `json:"action"`
+	TargetKey              string         `json:"targetKey"`
+	ExpectedLogicalVersion string         `json:"expectedLogicalVersion,omitempty"`
+	TargetBody             []byte         `json:"targetBody,omitempty"`
 }
 
 type StateRecord struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	LogicalKey    string `json:"logicalKey"`
 	Data          []byte `json:"data"`
+}
+
+type CheckpointObject struct {
+	Key    string `json:"key"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+type Checkpoint struct {
+	SchemaVersion         int                `json:"schemaVersion"`
+	CheckpointID          string             `json:"checkpointID"`
+	BucketID              string             `json:"bucketID"`
+	WriterSetID           string             `json:"writerSetID"`
+	GateEpoch             uint64             `json:"gateEpoch"`
+	KeyFormatVersion      int                `json:"keyFormatVersion"`
+	WriterProtocolVersion int                `json:"writerProtocolVersion"`
+	CreatedAt             time.Time          `json:"createdAt"`
+	Objects               []CheckpointObject `json:"objects"`
+	InventoryDigest       string             `json:"inventoryDigest"`
 }
 
 func Digest(data []byte) string {

@@ -32,12 +32,27 @@ type WriterConfiguration struct {
 }
 
 type Options struct {
-	Backend  objectstore.Backend
-	Clock    domain.Clock
-	IDs      *domain.IDGenerator
-	Writer   WriterConfiguration
-	LeaseTTL time.Duration
+	Backend   objectstore.Backend
+	Clock     domain.Clock
+	IDs       *domain.IDGenerator
+	Writer    WriterConfiguration
+	LeaseTTL  time.Duration
+	Scheduler Scheduler
 }
+
+type Scheduler interface {
+	Step(context.Context, string) error
+}
+
+type SchedulerFunc func(context.Context, string) error
+
+func (f SchedulerFunc) Step(ctx context.Context, step string) error { return f(ctx, step) }
+
+const (
+	StepAdmissionAfterCandidate = "admission:after-candidate"
+	StepStateAfterAdmitted      = "state:after-admitted"
+	StepStateAfterBackend       = "state:after-backend"
+)
 
 type stateListSnapshot struct {
 	prefix string
@@ -47,11 +62,12 @@ type stateListSnapshot struct {
 }
 
 type Engine struct {
-	backend  objectstore.Backend
-	clock    domain.Clock
-	ids      *domain.IDGenerator
-	writer   storageformat.WriterSet
-	leaseTTL time.Duration
+	backend   objectstore.Backend
+	clock     domain.Clock
+	ids       *domain.IDGenerator
+	writer    storageformat.WriterSet
+	leaseTTL  time.Duration
+	scheduler Scheduler
 
 	snapshotMu        sync.Mutex
 	snapshots         map[string]*stateListSnapshot
@@ -74,11 +90,18 @@ func Open(ctx context.Context, options Options) (*Engine, error) {
 		MinimumReaderProtocol: 1, MaximumReaderProtocol: storageformat.WriterProtocolVersion,
 		MinimumWriterProtocol: storageformat.WriterProtocolVersion, MaximumWriterProtocol: storageformat.WriterProtocolVersion,
 	}
-	engine := &Engine{backend: options.Backend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, snapshots: make(map[string]*stateListSnapshot)}
+	engine := &Engine{backend: options.Backend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, scheduler: options.Scheduler, snapshots: make(map[string]*stateListSnapshot)}
 	if err := engine.initialize(ctx); err != nil {
 		return nil, err
 	}
 	return engine, nil
+}
+
+func (e *Engine) step(ctx context.Context, name string) error {
+	if e.scheduler == nil {
+		return nil
+	}
+	return e.scheduler.Step(ctx, name)
 }
 
 func (e *Engine) initialize(ctx context.Context) error {

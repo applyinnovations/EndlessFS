@@ -101,13 +101,14 @@ func (e *Engine) Create(ctx context.Context, key state.Key, data []byte) (state.
 	if err := validateStateMutation(key, data); err != nil {
 		return "", err
 	}
+	objectKey := canonicalStateKey(key)
+	body, err := storageformat.EncodeEnvelope(stateRecordSchema, objectKey, 1, storageformat.StateRecord{SchemaVersion: 1, LogicalKey: key.String(), Data: append([]byte(nil), data...)})
+	if err != nil {
+		return "", err
+	}
+	intent := storageformat.MutationIntent{Action: storageformat.MutationCreate, TargetKey: objectKey.String(), TargetBody: body}
 	var result state.Version
-	err := e.withAdmission(ctx, "state-create:"+key.String(), func() error {
-		objectKey := canonicalStateKey(key)
-		body, err := storageformat.EncodeEnvelope(stateRecordSchema, objectKey, 1, storageformat.StateRecord{SchemaVersion: 1, LogicalKey: key.String(), Data: append([]byte(nil), data...)})
-		if err != nil {
-			return err
-		}
+	err = e.withAdmission(ctx, intent, func() error {
 		if _, err := e.backend.Put(ctx, objectKey, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
 			return err
 		}
@@ -124,24 +125,25 @@ func (e *Engine) CompareAndSwap(ctx context.Context, key state.Key, current stat
 	if current == "" {
 		return "", domain.NewError(domain.ErrorInvalid, "current state version is required")
 	}
+	objectKey := canonicalStateKey(key)
+	object, err := e.backend.Get(ctx, objectKey)
+	if err != nil {
+		return "", err
+	}
+	_, envelope, err := decodeStateObject(object, key)
+	if err != nil {
+		return "", err
+	}
+	if state.Version(envelope.LogicalVersion) != current {
+		return "", domain.NewError(domain.ErrorPreconditionFailed, "stale state version")
+	}
+	body, err := storageformat.EncodeEnvelope(stateRecordSchema, objectKey, envelope.Revision+1, storageformat.StateRecord{SchemaVersion: 1, LogicalKey: key.String(), Data: append([]byte(nil), data...)})
+	if err != nil {
+		return "", err
+	}
+	intent := storageformat.MutationIntent{Action: storageformat.MutationCAS, TargetKey: objectKey.String(), ExpectedLogicalVersion: string(current), TargetBody: body}
 	var result state.Version
-	err := e.withAdmission(ctx, "state-cas:"+key.String(), func() error {
-		objectKey := canonicalStateKey(key)
-		object, err := e.backend.Get(ctx, objectKey)
-		if err != nil {
-			return err
-		}
-		_, envelope, err := decodeStateObject(object, key)
-		if err != nil {
-			return err
-		}
-		if state.Version(envelope.LogicalVersion) != current {
-			return domain.NewError(domain.ErrorPreconditionFailed, "stale state version")
-		}
-		body, err := storageformat.EncodeEnvelope(stateRecordSchema, objectKey, envelope.Revision+1, storageformat.StateRecord{SchemaVersion: 1, LogicalKey: key.String(), Data: append([]byte(nil), data...)})
-		if err != nil {
-			return err
-		}
+	err = e.withAdmission(ctx, intent, func() error {
 		if _, err := e.backend.Put(ctx, objectKey, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
 			return err
 		}
@@ -158,19 +160,20 @@ func (e *Engine) Delete(ctx context.Context, key state.Key, current state.Versio
 	if current == "" {
 		return domain.NewError(domain.ErrorInvalid, "current state version is required")
 	}
-	return e.withAdmission(ctx, "state-delete:"+key.String(), func() error {
-		objectKey := canonicalStateKey(key)
-		object, err := e.backend.Get(ctx, objectKey)
-		if err != nil {
-			return err
-		}
-		_, envelope, err := decodeStateObject(object, key)
-		if err != nil {
-			return err
-		}
-		if state.Version(envelope.LogicalVersion) != current {
-			return domain.NewError(domain.ErrorPreconditionFailed, "stale state version")
-		}
+	objectKey := canonicalStateKey(key)
+	object, err := e.backend.Get(ctx, objectKey)
+	if err != nil {
+		return err
+	}
+	_, envelope, err := decodeStateObject(object, key)
+	if err != nil {
+		return err
+	}
+	if state.Version(envelope.LogicalVersion) != current {
+		return domain.NewError(domain.ErrorPreconditionFailed, "stale state version")
+	}
+	intent := storageformat.MutationIntent{Action: storageformat.MutationDelete, TargetKey: objectKey.String(), ExpectedLogicalVersion: string(current)}
+	return e.withAdmission(ctx, intent, func() error {
 		return e.backend.Delete(ctx, objectKey, objectstore.DeleteCondition{Version: object.Version})
 	})
 }

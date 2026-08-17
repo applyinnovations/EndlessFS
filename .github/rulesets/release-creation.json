@@ -1,7 +1,14 @@
 {
-  "name": "Protect release tags",
+  "name": "Restrict release tag creation",
   "target": "tag",
   "enforcement": "active",
+  "bypass_actors": [
+    {
+      "actor_id": 111744509,
+      "actor_type": "User",
+      "bypass_mode": "always"
+    }
+  ],
   "conditions": {
     "ref_name": {
       "include": [
@@ -12,10 +19,7 @@
   },
   "rules": [
     {
-      "type": "deletion"
-    },
-    {
-      "type": "non_fast_forward"
+      "type": "creation"
     }
   ]
 }

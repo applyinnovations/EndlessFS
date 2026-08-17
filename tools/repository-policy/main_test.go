@@ -29,6 +29,27 @@ func TestLoadPolicies(t *testing.T) {
 	}
 }
 
+func TestLoadPoliciesAcceptsBypassActors(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	writePolicy(t, directory, "release-creation.json", `{
+  "name": "Restrict release creation",
+  "target": "tag",
+  "enforcement": "active",
+  "bypass_actors": [{"actor_id": 7, "actor_type": "User", "bypass_mode": "always"}],
+  "conditions": {"ref_name": {"include": ["refs/tags/v*.*.*"], "exclude": []}},
+  "rules": [{"type": "creation"}]
+}`)
+	documents, err := loadPolicies(directory)
+	if err != nil {
+		t.Fatalf("loadPolicies() error = %v", err)
+	}
+	if len(documents) != 1 || !strings.Contains(string(documents[0].payload), `"bypass_actors"`) {
+		t.Fatalf("loadPolicies() = %+v", documents)
+	}
+}
+
 func TestLoadPoliciesRejectsUnknownAndTrailingFields(t *testing.T) {
 	t.Parallel()
 

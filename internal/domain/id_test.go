@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -39,6 +40,44 @@ func TestIDGeneratorRejectsShortRandomReads(t *testing.T) {
 	if _, err := generator.UserID(); err == nil {
 		t.Fatal("UserID() succeeded with broken randomness")
 	}
+}
+
+func TestIDGeneratorSerializesConcurrentEntropyReads(t *testing.T) {
+	generator := NewIDGenerator(bytes.NewReader(deterministicIDBytes(64 * 16)))
+	values := make(chan string, 64)
+	var wait sync.WaitGroup
+	for range 64 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			value, err := generator.OpaqueID()
+			if err != nil {
+				t.Errorf("OpaqueID() error = %v", err)
+				return
+			}
+			values <- value
+		}()
+	}
+	wait.Wait()
+	close(values)
+	seen := make(map[string]struct{}, 64)
+	for value := range values {
+		if _, duplicate := seen[value]; duplicate {
+			t.Fatalf("duplicate concurrent ID %q", value)
+		}
+		seen[value] = struct{}{}
+	}
+	if len(seen) != 64 {
+		t.Fatalf("generated IDs = %d, want 64", len(seen))
+	}
+}
+
+func deterministicIDBytes(size int) []byte {
+	value := make([]byte, size)
+	for index := range value {
+		value[index] = byte(index/16) ^ byte(index*17)
+	}
+	return value
 }
 
 func TestScopeRequiresTrustedValidValues(t *testing.T) {

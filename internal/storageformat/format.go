@@ -1,0 +1,212 @@
+// Package storageformat owns the canonical EndlessFS v1 key and body format.
+package storageformat
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
+	"github.com/applyinnovations/endlessfs/internal/state"
+)
+
+const (
+	FormatID              = "endlessfs-portable-bucket-v1"
+	CanonicalEncoder      = "canonical-json-v1"
+	KeyFormatVersion      = 1
+	WriterProtocolVersion = 1
+	MaxCanonicalBytes     = 1 << 20
+)
+
+type Envelope struct {
+	Schema         string          `json:"schema"`
+	Revision       uint64          `json:"revision"`
+	LogicalVersion string          `json:"logicalVersion"`
+	Payload        json.RawMessage `json:"payload"`
+}
+
+func EncodeCanonical(value any) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, domain.WrapError(domain.ErrorInvalid, "encode canonical record", err)
+	}
+	data := bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'})
+	if len(data) == 0 || len(data) > MaxCanonicalBytes {
+		return nil, domain.NewError(domain.ErrorInvalid, "canonical record exceeds size limit")
+	}
+	return append([]byte(nil), data...), nil
+}
+
+func EncodeEnvelope(schema string, key objectstore.Key, revision uint64, payload any) ([]byte, error) {
+	if schema == "" || !key.Valid() || revision == 0 {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid canonical envelope")
+	}
+	payloadBytes, err := EncodeCanonical(payload)
+	if err != nil {
+		return nil, err
+	}
+	version := logicalVersion(key, revision, payloadBytes)
+	envelope := struct {
+		Schema         string          `json:"schema"`
+		Revision       uint64          `json:"revision"`
+		LogicalVersion string          `json:"logicalVersion"`
+		Payload        json.RawMessage `json:"payload"`
+	}{schema, revision, version, payloadBytes}
+	return EncodeCanonical(envelope)
+}
+
+func DecodeEnvelope(data []byte, key objectstore.Key, schema string, envelope *Envelope, payload any) error {
+	if envelope == nil || payload == nil || !key.Valid() || schema == "" {
+		return domain.NewError(domain.ErrorInvalid, "invalid canonical envelope destination")
+	}
+	if err := state.DecodeJSONWithLimit(data, envelope, MaxCanonicalBytes); err != nil {
+		return err
+	}
+	if envelope.Schema != schema || envelope.Revision == 0 || envelope.LogicalVersion == "" || len(envelope.Payload) == 0 {
+		return domain.NewError(domain.ErrorInvalid, "invalid canonical envelope fields")
+	}
+	if err := state.DecodeJSONWithLimit(envelope.Payload, payload, MaxCanonicalBytes); err != nil {
+		return err
+	}
+	payloadBytes, err := EncodeCanonical(payload)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(payloadBytes, envelope.Payload) {
+		return domain.NewError(domain.ErrorInvalid, "non-canonical payload encoding")
+	}
+	want := logicalVersion(key, envelope.Revision, payloadBytes)
+	if envelope.LogicalVersion != want {
+		return domain.NewError(domain.ErrorInvalid, "canonical logical version mismatch")
+	}
+	canonical, err := EncodeEnvelope(schema, key, envelope.Revision, payload)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(canonical, data) {
+		return domain.NewError(domain.ErrorInvalid, "non-canonical envelope encoding")
+	}
+	return nil
+}
+
+func logicalVersion(key objectstore.Key, revision uint64, payload []byte) string {
+	payloadDigest := sha256.Sum256(payload)
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("endlessfs-logical-version-v1"))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(key.String()))
+	_, _ = hash.Write([]byte{0})
+	var encodedRevision [8]byte
+	binary.BigEndian.PutUint64(encodedRevision[:], revision)
+	_, _ = hash.Write(encodedRevision[:])
+	_, _ = hash.Write(payloadDigest[:])
+	return base64.RawURLEncoding.EncodeToString(hash.Sum(nil))
+}
+
+type Superblock struct {
+	SchemaVersion         int       `json:"schemaVersion"`
+	FormatID              string    `json:"formatID"`
+	BucketID              string    `json:"bucketID"`
+	CanonicalEncoder      string    `json:"canonicalEncoder"`
+	KeyFormatVersion      int       `json:"keyFormatVersion"`
+	WriterProtocolVersion int       `json:"writerProtocolVersion"`
+	CreatedAt             time.Time `json:"createdAt"`
+	RequiredFeatures      []string  `json:"requiredFeatures"`
+}
+
+type WriterSet struct {
+	SchemaVersion         int      `json:"schemaVersion"`
+	WriterSetID           string   `json:"writerSetID"`
+	WriterProtocolVersion int      `json:"writerProtocolVersion"`
+	RequiredFeatures      []string `json:"requiredFeatures"`
+	ConfigurationDigest   string   `json:"configurationDigest"`
+	KeyringIdentifiers    []string `json:"keyringIdentifiers"`
+	MinimumReaderProtocol int      `json:"minimumReaderProtocol"`
+	MaximumReaderProtocol int      `json:"maximumReaderProtocol"`
+	MinimumWriterProtocol int      `json:"minimumWriterProtocol"`
+	MaximumWriterProtocol int      `json:"maximumWriterProtocol"`
+}
+
+type GateMode string
+
+const (
+	GateOpen    GateMode = "open"
+	GateClosing GateMode = "closing"
+	GateClosed  GateMode = "closed"
+)
+
+type WriteGate struct {
+	SchemaVersion int      `json:"schemaVersion"`
+	Epoch         uint64   `json:"epoch"`
+	Mode          GateMode `json:"mode"`
+	CheckpointID  string   `json:"checkpointID,omitempty"`
+}
+
+type AdmissionState string
+
+const (
+	AdmissionCandidate AdmissionState = "candidate"
+	AdmissionAdmitted  AdmissionState = "admitted"
+	AdmissionCancelled AdmissionState = "cancelled"
+)
+
+type Admission struct {
+	SchemaVersion    int            `json:"schemaVersion"`
+	Epoch            uint64         `json:"epoch"`
+	OperationID      string         `json:"operationID"`
+	WriterSetID      string         `json:"writerSetID"`
+	ReplicaAttemptID string         `json:"replicaAttemptID"`
+	ObservedGate     string         `json:"observedGateLogicalVersion"`
+	State            AdmissionState `json:"state"`
+	CreatedAt        time.Time      `json:"createdAt"`
+	ExpiresAt        time.Time      `json:"expiresAt"`
+	IntentDigest     string         `json:"intentDigest"`
+}
+
+type StateRecord struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	LogicalKey    string `json:"logicalKey"`
+	Data          []byte `json:"data"`
+}
+
+func Digest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func ValidateGate(gate WriteGate) error {
+	if gate.SchemaVersion != 1 || gate.Epoch == 0 || (gate.Mode != GateOpen && gate.Mode != GateClosing && gate.Mode != GateClosed) {
+		return domain.NewError(domain.ErrorInvalid, "invalid write gate")
+	}
+	return nil
+}
+
+func ValidateNamespace(value string) error {
+	if value == "" {
+		return domain.NewError(domain.ErrorInvalid, "empty canonical namespace")
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || character == '-' {
+			continue
+		}
+		return domain.NewError(domain.ErrorInvalid, fmt.Sprintf("invalid canonical namespace %q", value))
+	}
+	return nil
+}
+
+func SortedUnique(values []string) bool {
+	for index := 1; index < len(values); index++ {
+		if strings.Compare(values[index-1], values[index]) >= 0 {
+			return false
+		}
+	}
+	return true
+}

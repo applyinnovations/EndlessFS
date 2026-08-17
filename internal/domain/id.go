@@ -84,6 +84,7 @@ func (s Scope) Valid() bool {
 }
 
 type IDGenerator struct {
+	mu     sync.Mutex
 	source io.Reader
 }
 
@@ -112,6 +113,8 @@ func (g *IDGenerator) BearerToken() (string, error) {
 }
 
 func (g *IDGenerator) bytes(size int) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	value := make([]byte, size)
 	if _, err := io.ReadFull(g.source, value); err != nil {
 		return "", WrapError(ErrorInternal, "secure randomness unavailable", err)

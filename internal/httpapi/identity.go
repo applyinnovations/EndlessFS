@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/identity"
 	"github.com/applyinnovations/endlessfs/internal/model"
+	"github.com/applyinnovations/endlessfs/internal/preview"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
 	"github.com/applyinnovations/endlessfs/internal/theme"
@@ -36,6 +38,8 @@ type identityAPI struct {
 	sessions *auth.SessionManager
 	drive    *drive.Service
 	themes   *theme.Manager
+	previews *preview.Service
+	logger   *slog.Logger
 }
 
 func (api *identityAPI) routes(mux *http.ServeMux) {
@@ -68,6 +72,9 @@ func (api *identityAPI) routes(mux *http.ServeMux) {
 	}
 	if api.themes != nil {
 		api.themeRoutes(mux)
+	}
+	if api.previews != nil {
+		api.previewRoutes(mux)
 	}
 }
 

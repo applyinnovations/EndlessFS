@@ -42,6 +42,14 @@ The flake pins the Go toolchain source and the [official Go vulnerability databa
 
 Every module is pinned by `go.mod`, `go.sum`, and the fixed Nix module hash. Nix materializes that closure in its sandbox for offline builds without tracking `vendor/` in Git. `nix run .#dependency-check` inventories the locked module versions and fails when a module root does not retain a license or copying notice. The release derivation emits the module inventory and a deterministic hash inventory of all retained dependency license files.
 
+## `github.com/deepteams/webp`
+
+- **Purpose:** Decode the closed PNG/JPEG/GIF/WebP source allowlist where applicable, validate static WebP containers, and encode every generated v1.1 preview as a static WebP artifact.
+- **Why the standard library is insufficient:** Go's standard library decodes PNG, JPEG, and GIF but neither decodes nor encodes WebP. A single audited codec is required to accept WebP originals and produce the one artifact format selected for low transfer and storage cost.
+- **Maintenance:** The project publishes signed, verified release tags and maintains a pure-Go codec with active tests and fuzzing. EndlessFS pins `v1.2.6`, vendors the complete source, and runs its own malformed-input, resource-bound, static-frame, metadata-removal, and startup-integrity tests before accepting an upgrade.
+- **License:** MIT; the vendored license is retained.
+- **Security posture:** The codec is statically linked with `CGO_ENABLED=0`; it starts no process, performs no network or filesystem access, and loads no runtime plugin. EndlessFS bounds compressed bytes, decoded dimensions, decoded pixels, execution time, and output variants before or around codec use. Artifacts are decoded and structurally revalidated before immutable commit. Source metadata is not copied into generated output.
+
 ## `github.com/chromedp/chromedp` and `github.com/chromedp/cdproto`
 
 - **Purpose:** Test-only control of pinned Chromium and its WebAuthn virtual-authenticator, network, download, viewport, and DOM accessibility surfaces.

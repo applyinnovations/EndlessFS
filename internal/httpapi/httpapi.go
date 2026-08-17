@@ -5,25 +5,27 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/auth"
 	"github.com/applyinnovations/endlessfs/internal/config"
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/identity"
+	"github.com/applyinnovations/endlessfs/internal/preview"
 	"github.com/applyinnovations/endlessfs/internal/theme"
 	webassets "github.com/applyinnovations/endlessfs/internal/web"
 )
 
 // New constructs the HTTP handler from already-validated public configuration.
 func New(cfg config.PublicConfig, version string) http.Handler {
-	return newHandler(cfg, version, false, "", nil, nil)
+	return newHandler(cfg, version, false, "", "", nil, nil, nil)
 }
 
 // NewApplication constructs the complete control-plane handler.
 func NewApplication(cfg config.Config, version string, identityService *identity.Service, sessions *auth.SessionManager) http.Handler {
 	api := &identityAPI{config: cfg, identity: identityService, sessions: sessions}
-	return newHandler(cfg.Public(), version, cfg.Secure, "", api, nil)
+	return newHandler(cfg.Public(), version, cfg.Secure, "", "", api, nil, nil)
 }
 
 // NewCompleteApplication includes the file/data-capability control plane.
@@ -32,34 +34,62 @@ func NewCompleteApplication(cfg config.Config, version string, identityService *
 	if len(themeManagers) != 0 {
 		api.themes = themeManagers[0]
 	}
-	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), api, nil)
+	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), "", api, nil, nil)
+}
+
+// NewCompleteApplicationWithPreview includes the optional generated-preview
+// control plane and dynamic readiness dependency.
+func NewCompleteApplicationWithPreview(cfg config.Config, version string, identityService *identity.Service, sessions *auth.SessionManager, driveService *drive.Service, previewService *preview.Service, themeManagers ...*theme.Manager) http.Handler {
+	api := &identityAPI{config: cfg, identity: identityService, sessions: sessions, drive: driveService, previews: previewService}
+	if len(themeManagers) != 0 {
+		api.themes = themeManagers[0]
+	}
+	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), previewService.DataOrigin(), api, nil, previewService.Ready)
 }
 
 // NewCompleteApplicationWithLogger constructs the complete control plane with
 // safe structured request-completion events.
 func NewCompleteApplicationWithLogger(cfg config.Config, version string, identityService *identity.Service, sessions *auth.SessionManager, driveService *drive.Service, logger *slog.Logger, themeManagers ...*theme.Manager) http.Handler {
-	api := &identityAPI{config: cfg, identity: identityService, sessions: sessions, drive: driveService}
+	api := &identityAPI{config: cfg, identity: identityService, sessions: sessions, drive: driveService, logger: logger}
 	if len(themeManagers) != 0 {
 		api.themes = themeManagers[0]
 	}
-	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), api, logger)
+	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), "", api, logger, nil)
 }
 
-func newHandler(cfg config.PublicConfig, version string, secure bool, dataOrigin string, api *identityAPI, logger *slog.Logger) http.Handler {
+// NewCompleteApplicationWithPreviewAndLogger constructs the complete control
+// plane with generated previews and safe request logging.
+func NewCompleteApplicationWithPreviewAndLogger(cfg config.Config, version string, identityService *identity.Service, sessions *auth.SessionManager, driveService *drive.Service, previewService *preview.Service, logger *slog.Logger, themeManagers ...*theme.Manager) http.Handler {
+	api := &identityAPI{config: cfg, identity: identityService, sessions: sessions, drive: driveService, previews: previewService, logger: logger}
+	if len(themeManagers) != 0 {
+		api.themes = themeManagers[0]
+	}
+	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), previewService.DataOrigin(), api, logger, previewService.Ready)
+}
+
+func newHandler(cfg config.PublicConfig, version string, secure bool, dataOrigin, previewOrigin string, api *identityAPI, logger *slog.Logger, ready func() bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", textStatus(http.StatusOK, "ok\n"))
-	mux.HandleFunc("GET /readyz", textStatus(http.StatusOK, "ready\n"))
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if ready != nil && !ready() {
+			textStatus(http.StatusServiceUnavailable, "not ready\n")(w, nil)
+			return
+		}
+		textStatus(http.StatusOK, "ready\n")(w, nil)
+	})
 	mux.HandleFunc("GET /api/v1/config", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(struct {
-			Product string `json:"product"`
-			Version string `json:"version"`
+			Product             string                     `json:"product"`
+			Version             string                     `json:"version"`
+			PreviewCapabilities preview.CapabilityManifest `json:"previewCapabilities"`
 			config.PublicConfig
 		}{
-			Product:      "EndlessFS",
-			Version:      version,
-			PublicConfig: cfg,
+			Product:             "EndlessFS",
+			Version:             version,
+			PreviewCapabilities: preview.BuildCapabilityManifest(version),
+			PublicConfig:        cfg,
 		})
 	})
 	if api != nil {
@@ -77,7 +107,7 @@ func newHandler(cfg config.PublicConfig, version string, secure bool, dataOrigin
 	}
 	mux.Handle("GET /", application)
 
-	handler := securityHeaders(mux, secure, dataOrigin)
+	handler := securityHeaders(mux, secure, dataOrigin, previewOrigin)
 	if logger != nil {
 		handler = requestLogMiddleware(handler, logger)
 	}
@@ -93,13 +123,21 @@ func textStatus(status int, body string) http.HandlerFunc {
 	}
 }
 
-func securityHeaders(next http.Handler, secure bool, dataOrigin string) http.Handler {
+func securityHeaders(next http.Handler, secure bool, dataOrigin, previewOrigin string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		connectSource := "'self'"
+		imageSources := []string{"'self'"}
+		frameSources := []string{"'self'"}
+		connectSources := []string{"'self'"}
 		if dataOrigin != "" {
-			connectSource += " " + dataOrigin
+			imageSources = append(imageSources, dataOrigin)
+			frameSources = append(frameSources, dataOrigin)
+			connectSources = append(connectSources, dataOrigin)
 		}
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' "+dataOrigin+"; frame-src 'self' "+dataOrigin+"; font-src 'self'; style-src 'self'; script-src 'self'; connect-src "+connectSource)
+		if previewOrigin != "" && previewOrigin != dataOrigin {
+			imageSources = append(imageSources, previewOrigin)
+			connectSources = append(connectSources, previewOrigin)
+		}
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; img-src "+strings.Join(imageSources, " ")+"; frame-src "+strings.Join(frameSources, " ")+"; font-src 'self'; style-src 'self'; script-src 'self'; connect-src "+strings.Join(connectSources, " "))
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 		w.Header().Set("Referrer-Policy", "no-referrer")

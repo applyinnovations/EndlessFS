@@ -20,6 +20,9 @@ function belongs(file, group) {
   if (group == "state-CAS") return index(file, "/internal/state/") > 0 && index(file, "/internal/state/statecontract/") == 0
   if (group == "theme-validation") return index(file, "/internal/theme/") > 0
   if (group == "configuration") return index(file, "/internal/config/") > 0
+  if (group == "preview-core") return index(file, "/internal/preview/") > 0 && index(file, "/internal/preview/imagegen/") == 0 && index(file, "/internal/preview/memory/") == 0 && index(file, "/internal/preview/storecontract/") == 0
+  if (group == "preview-image-generator") return index(file, "/internal/preview/imagegen/") > 0
+  if (group == "preview-store") return index(file, "/internal/preview/memory/") > 0
   return 0
 }
 
@@ -38,11 +41,14 @@ END {
   groups[7] = "scope-mapping"
   groups[8] = "theme-validation"
   groups[9] = "configuration"
+  groups[10] = "preview-core"
+  groups[11] = "preview-image-generator"
+  groups[12] = "preview-store"
 
   for (key in statements) {
     repo_total += statements[key]
     if (hit[key]) repo_covered += statements[key]
-    for (index_value = 1; index_value <= 9; index_value++) {
+    for (index_value = 1; index_value <= 12; index_value++) {
       group = groups[index_value]
       if (belongs(files[key], group)) {
         group_total[group] += statements[key]
@@ -56,7 +62,7 @@ END {
   printf "repository coverage: %.3f%% (%d/%d; required >= 85%%)\n", repo_percentage, repo_covered, repo_total
   if (repo_percentage + 0.000001 < 85) failed = 1
 
-  for (index_value = 1; index_value <= 9; index_value++) {
+  for (index_value = 1; index_value <= 12; index_value++) {
     group = groups[index_value]
     group_percentage = percentage(group_covered[group], group_total[group])
     printf "%s coverage: %.3f%% (%d/%d; required >= 95%%)\n", group, group_percentage, group_covered[group], group_total[group]

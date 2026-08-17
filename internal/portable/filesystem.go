@@ -399,11 +399,11 @@ func validateDirectoryEntries(entries []storageformat.DirectoryEntry) error {
 			return domain.NewError(domain.ErrorInvalid, "invalid directory entry")
 		}
 		if entry.Kind == domain.EntryDirectory {
-			if entry.DirectoryID == "" || entry.BlobID != "" || entry.Size != 0 || entry.MediaType != "" {
+			if entry.DirectoryID == "" || entry.BlobID != "" || entry.Size != 0 || entry.MediaType != "" || entry.ContentID != "" || entry.ContentVersion != "" || !entry.ContentModifiedAt.IsZero() {
 				return domain.NewError(domain.ErrorInvalid, "invalid directory entry target")
 			}
 		} else if entry.Kind == domain.EntryFile {
-			if entry.BlobID == "" || entry.DirectoryID != "" || entry.MediaType == "" {
+			if entry.BlobID == "" || entry.DirectoryID != "" || entry.MediaType == "" || entry.ContentID == "" || entry.ContentVersion == "" || entry.ContentModifiedAt.IsZero() {
 				return domain.NewError(domain.ErrorInvalid, "invalid file entry target")
 			}
 		} else {
@@ -516,7 +516,11 @@ func findDirectoryEntry(entries []storageformat.DirectoryEntry, name string) (st
 }
 
 func domainEntry(path domain.UserPath, entry storageformat.DirectoryEntry) domain.Entry {
-	return domain.Entry{Path: path, Name: entry.Name, Kind: entry.Kind, Size: entry.Size, MediaType: entry.MediaType, ModifiedAt: entry.ModifiedAt, Version: domain.Version(entry.LogicalVersion)}
+	return domain.Entry{
+		Path: path, Name: entry.Name, Kind: entry.Kind, Size: entry.Size, MediaType: entry.MediaType,
+		ModifiedAt: entry.ModifiedAt, Version: domain.Version(entry.LogicalVersion),
+		ContentID: domain.ContentID(entry.ContentID), ContentVersion: domain.ContentVersion(entry.ContentVersion), ContentModifiedAt: entry.ContentModifiedAt,
+	}
 }
 
 func validateFileRequest(ctx context.Context, scope domain.Scope) error {

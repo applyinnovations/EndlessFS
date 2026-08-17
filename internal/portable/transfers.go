@@ -382,9 +382,25 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 	}
 	blobID := record.UploadID
 	blobKey := storageformat.BlobKey(scope.UserID().String(), blobID)
+	contentID := ""
+	if exists {
+		contentID = current.ContentID
+	}
+	if contentID == "" {
+		contentID, err = s.engine.ids.OpaqueID()
+		if err != nil {
+			return domain.Entry{}, err
+		}
+	}
+	contentVersion, err := s.engine.ids.OpaqueID()
+	if err != nil {
+		return domain.Entry{}, err
+	}
+	contentModifiedAt := s.engine.clock.Now().UTC()
 	entry := storageformat.DirectoryEntry{
 		Name: resolvedPath.Name(), NameDigest: storageformat.NameDigest(resolvedPath.Name()), Kind: domain.EntryFile,
 		BlobID: blobID, Size: record.Size, MediaType: mediaType, SHA256: progress.SHA256, ModifiedAt: record.CreatedAt,
+		ContentID: contentID, ContentVersion: contentVersion, ContentModifiedAt: contentModifiedAt,
 	}
 	entry.LogicalVersion, err = directoryEntryVersion(entry)
 	if err != nil {

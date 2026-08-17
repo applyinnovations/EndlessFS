@@ -250,16 +250,19 @@ type DirectoryPage struct {
 }
 
 type DirectoryEntry struct {
-	Name           string           `json:"name"`
-	NameDigest     string           `json:"nameDigest"`
-	Kind           domain.EntryKind `json:"kind"`
-	DirectoryID    string           `json:"directoryID,omitempty"`
-	BlobID         string           `json:"blobID,omitempty"`
-	Size           int64            `json:"size"`
-	MediaType      string           `json:"mediaType,omitempty"`
-	SHA256         string           `json:"sha256,omitempty"`
-	ModifiedAt     time.Time        `json:"modifiedAt"`
-	LogicalVersion string           `json:"logicalVersion"`
+	Name              string           `json:"name"`
+	NameDigest        string           `json:"nameDigest"`
+	Kind              domain.EntryKind `json:"kind"`
+	DirectoryID       string           `json:"directoryID,omitempty"`
+	BlobID            string           `json:"blobID,omitempty"`
+	Size              int64            `json:"size"`
+	MediaType         string           `json:"mediaType,omitempty"`
+	SHA256            string           `json:"sha256,omitempty"`
+	ContentID         string           `json:"contentID,omitempty"`
+	ContentVersion    string           `json:"contentVersion,omitempty"`
+	ContentModifiedAt time.Time        `json:"contentModifiedAt,omitempty"`
+	ModifiedAt        time.Time        `json:"modifiedAt"`
+	LogicalVersion    string           `json:"logicalVersion"`
 }
 
 type UploadState string

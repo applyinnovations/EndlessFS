@@ -56,6 +56,18 @@ This document fixes the v1 JSON field casing and control-plane routes implemente
 
 `preview: true` is accepted only for provider-validated PNG, JPEG, GIF, WebP, PDF, and UTF-8 `text/plain` within `ENDLESSFS_TEXT_PREVIEW_MAX_BYTES`. HTML, JavaScript, SVG, XML, office, unknown, oversized, and media-spoofed files remain attachment-only.
 
+## Generated image previews (v1.1)
+
+These authenticated-owner routes use the optional independent preview store. Resolve is a POST because it may lazily generate a missing artifact. All three routes derive owner scope from the session; content identities, store keys, and bucket configuration are never public fields.
+
+| Method | Route | Request or query |
+|---|---|---|
+| `POST` | `/api/v1/previews/resolve` | `items` with 1–64 exact `path`, `version`, and configured `variant` values; CSRF and exact origin required. |
+| `POST` | `/api/v1/previews/generations` | One exact `path`, `version`, `variant`, and `action=generate|regenerate`; also requires `Idempotency-Key`. |
+| `GET` | `/api/v1/previews/operations/{operationID}` | Poll one authenticated-owner-scoped explicit generation result. |
+
+Resolve items return `disabled`, `unsupported`, `ineligible`, `missing`, `generating`, `ready`, `failed`, or `unavailable`. `ready` includes static WebP metadata and a short-lived exact-artifact capability on the separate preview data origin. Automatic age/size exclusions never retrieve the original. Generate and Regenerate bypass those two automatic policies but not authorization, format, hard byte, pixel, dimension, concurrency, or timeout limits.
+
 ## Public shares
 
 | Method | Route | Request or query |

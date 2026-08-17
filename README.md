@@ -7,7 +7,7 @@ EndlessFS is an open-source, provider-neutral, security-first private cloud driv
 
 The normative implementation contract is [docs/v1-specification.md](./docs/v1-specification.md). The credential-free GCS suite models the documented JSON/XML, generation, signing, CORS, checksum, range, resumable-session, cancellation, and failure behavior on loopback. It qualifies the integration layer locally; only the separate opt-in live qualification described by the specification can establish real-service interoperability.
 
-The [v1.1 media browsing and image preview specification](./docs/v1.1-media-preview-specification.md) is approved for implementation but is not yet part of the implemented-v1 claim. The [v1.2 video](./docs/v1.2-video-preview-specification.md) and [v1.3 PDF](./docs/v1.3-pdf-preview-specification.md) preview drafts are deferred for revision after v1.1 implementation. Their unchecked acceptance criteria are plans, not current release evidence.
+The [v1.1 media browsing and image preview specification](./docs/v1.1-media-preview-specification.md) is implemented for the same deterministic mock-backed boundary. It adds an optional virtualized media grid, WebP-only generated image previews, an independently faultable preview store, and full-screen navigation without changing original-file authority. The [v1.2 video](./docs/v1.2-video-preview-specification.md) and [v1.3 PDF](./docs/v1.3-pdf-preview-specification.md) preview drafts remain deferred for revision; their unchecked acceptance criteria are plans, not current release evidence.
 
 ## Why EndlessFS
 
@@ -16,6 +16,7 @@ The [v1.1 media browsing and image preview specification](./docs/v1.1-media-prev
 - Direct browser-to-provider uploads and provider-to-browser downloads; the control plane does not proxy file bodies.
 - One provider-independent canonical format and portable engine, with logical state independent of GCS generations, S3 version IDs, Azure ETags, bucket names, and provider metadata.
 - Durable admission, fencing, takeover, operation, and checkpoint protocols for multiple replicas sharing one single- or split-bucket storage set.
+- Optional lazy image previews stored independently from originals, with fast WebP variants and file-type icon fallback.
 - One Go binary with embedded HTML, application CSS, vanilla JavaScript, and validated theme media.
 - Data-only themes: typed tokens and allowlisted static assets, never theme CSS, HTML, JavaScript, or remote code.
 - No required SQL database, cache, queue, external identity service, analytics service, or persistent application filesystem.
@@ -30,6 +31,8 @@ flowchart LR
     E -->|"Atomic conditional objects"| P["Memory, GCS, or future backend"]
     C -->|"Short-lived capability"| B
     B ==>|"File bytes"| P
+    C -->|"Disposable preview artifacts"| V["Optional preview store"]
+    V -->|"Short-lived preview capability"| B
 ```
 
 Required dependency direction:
@@ -61,7 +64,9 @@ Build the binary, OCI archive, or complete release record without Docker:
 ```console
 nix build
 nix build .#container
+nix build .#container-images
 nix build .#release
+nix build .#release-images
 ```
 
 Theme bundles are reproducible build inputs, never runtime directories. Downstream flakes may build an embedded custom set with:
@@ -72,7 +77,7 @@ endlessfs.packages.${system}.default.override {
 }
 ```
 
-Every supplied archive/directory is validated before generated data is compiled into the binary. See [Theme API 1.0](./docs/theme-api.md).
+Every supplied archive/directory is validated before generated data is compiled into the binary. See [Theme API 1.1](./docs/theme-api.md).
 
 All required builds and checks are Nix sandbox derivations, so project code cannot quietly depend on tools installed on the host. The required test gates are designed to run without cloud credentials, GCP, databases, persistent services, a container daemon, or non-loopback network access.
 
@@ -96,6 +101,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#test-replica` | Run deterministic multi-replica admission, fencing, takeover, and recovery tests. |
 | `nix run .#test-portability` | Run canonical-format, checkpoint, raw-copy/reopen, and continued-mutation tests. |
 | `nix run .#provider-verify -- check CONFIG` | Strictly read and verify a closed checkpoint on configured single- or split-backend memory fixtures/GCS buckets. |
+| `nix run .#test-preview` | Run focused preview policy, generator, store-contract, and HTTP tests. |
 | `nix run .#test-e2e` | Run Go-controlled Chromium passkey and core Drive workflows. Nix supplies Chromium on Linux. |
 | `nix run .#test-coverage` | Run the complete suite and enforce 85% repository plus 95% security-boundary statement coverage. |
 | `nix run .#test-race` | Run the suite with Go's race detector. |
@@ -140,6 +146,17 @@ Only settings that have validation and tests are parsed by the current binary:
 | `ENDLESSFS_DEFAULT_LIGHT_THEME` | `endlessfs-light` | Installed light-appearance theme used by `system`; startup rejects missing/wrong-appearance values. |
 | `ENDLESSFS_DEFAULT_DARK_THEME` | `endlessfs-dark` | Installed dark-appearance theme used by `system`; startup rejects missing/wrong-appearance values. |
 | `ENDLESSFS_LOG_LEVEL` | `info` | Exact `debug`, `info`, `warn`, or `error`; all levels retain structural secret redaction. |
+| `ENDLESSFS_MEDIA_BROWSER_ENABLED` | `false` | Enables the list/grid presentation choice and loaded-metadata filters independently of preview generation. |
+| `ENDLESSFS_PREVIEW_PROVIDER` | `disabled` | Accepts `disabled` or the independently faultable local `mock` preview store. Configured access is a startup requirement. |
+| `ENDLESSFS_PREVIEW_AUTOMATIC` | Provider configured | Enables lazy generation for visible eligible image tiles; `false` is manual-only. |
+| `ENDLESSFS_PREVIEW_FORMATS` | `image` | Closed packaged capability set. `video`, `pdf`, unknown, duplicate, or unpackaged values fail startup in the image profile. |
+| `ENDLESSFS_PREVIEW_AUTO_MAX_AGE` | Unset | Optional positive source-age limit for automatic generation. |
+| `ENDLESSFS_PREVIEW_AUTO_MAX_SOURCE_BYTES` | Unset | Optional positive source-size limit for automatic generation. |
+| `ENDLESSFS_PREVIEW_RESOLUTIONS` | `256,512,1600` | Strictly increasing maximum-edge WebP variants from 64 through 4096. |
+| `ENDLESSFS_PREVIEW_MAX_CONCURRENCY` | `2` | Global generation bound from 1 through 8; per-user generation remains serialized. |
+| `ENDLESSFS_PREVIEW_OPERATION_TIMEOUT` | `45s` | Hard generation timeout, capped at 5 minutes. |
+| `ENDLESSFS_PREVIEW_STARTUP_TIMEOUT` | `10s` | Generator and preview-store startup validation timeout, capped at 60 seconds. |
+| `ENDLESSFS_PREVIEW_KEY_SECRET` | Ephemeral for mock | Optional canonical 256-bit key for non-revealing artifact bindings; durable stores will require an explicit value. |
 
 Secrets are never accepted as command-line arguments or exposed through the public configuration endpoint. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after the initial administrator has been created. The current HTTP contract is documented in [docs/http-api.md](./docs/http-api.md).
 
@@ -161,6 +178,7 @@ internal/httpapi/        router and transport security headers
 internal/identity/       bootstrap, registration, accounts, passkeys, invites, roles, and recovery
 internal/drive/          authenticated files, transfers, operations, trash, previews, and shares
 internal/logging/        structured, level-aware, security-field-redacting JSON logging
+internal/preview/        generated-preview policy, static WebP codec, independent store, contracts, and orchestration
 internal/theme/          closed Theme API, compiler, media validation, registry, preferences, and built-ins
 internal/web/            embedded HTML, CSS, and vanilla JavaScript
 internal/e2e/            Go-controlled Chromium passkey, Drive, responsive, and privacy workflows
@@ -209,6 +227,8 @@ The policy requires pull requests, resolved review threads, squash-only linear h
 - **Milestone 6 — implemented baseline:** public-share management, invite onboarding, profile/passkey settings, account administration, disable/enable behavior, recovery, and a second full Chromium journey.
 - **Milestone 7 — implemented baseline:** exhaustive cross-user and traversal matrices, fuzz/race/coverage gates, structured-log redaction, dependency/vulnerability policy, OCI inspection, threat/operations review, and release evidence.
 - **v1 portability clarification — implemented:** canonical single-/split-bucket storage-set format, one portable engine, multi-replica admission/fencing/recovery, quiescent checkpoint/raw-copy verification, and credential-free GCS protocol qualification.
+- **v1.1 media previews — complete:** optional virtualized grid, generated image WebP variants, independent preview-store lifecycle, strict startup validation, and real-browser scale proof.
+- **v1.2/v1.3 — deferred:** video and PDF generator profiles will be revised now that the v1.1 base architecture is implemented.
 
 Every claimed acceptance criterion in specification section 21 is indexed in the evidence record and `nix flake check` remains the clean, network-denied release gate. “Locally qualified GCS” means the documented protocol and shared contracts passed without credentials; it never means a live deployment is production-ready.
 

@@ -254,6 +254,17 @@ func (s *FileStore) cloneTree(ctx context.Context, from, to domain.Scope, source
 			destinationKey := storageformat.BlobKey(to.UserID().String(), blobID)
 			result.copies = append(result.copies, storageformat.MutationCopy{SourceKey: sourceKey.String(), DestinationKey: destinationKey.String(), Size: source.Size, SHA256: source.SHA256})
 			result.entry.BlobID = blobID
+			contentID, err := s.engine.ids.OpaqueID()
+			if err != nil {
+				return treePreparation{}, err
+			}
+			contentVersion, err := s.engine.ids.OpaqueID()
+			if err != nil {
+				return treePreparation{}, err
+			}
+			result.entry.ContentID = contentID
+			result.entry.ContentVersion = contentVersion
+			result.entry.ContentModifiedAt = now
 		}
 		result.entry.ModifiedAt = now
 		return result, nil

@@ -326,6 +326,93 @@ func Run(t *testing.T, factory Factory) {
 		}
 	})
 
+	t.Run("preview content identity lifecycle", func(t *testing.T) {
+		harness := factory(t)
+		live := testScope(t, 0x79, domain.AreaLive)
+		trash := testScope(t, 0x79, domain.AreaTrash)
+		originalPath := domain.MustParseUserPath("/original.txt")
+		original := uploadFile(t, harness, live, originalPath, []byte("original"), false)
+		if original.ContentID == "" || original.ContentVersion == "" || original.ContentModifiedAt.IsZero() {
+			t.Fatalf("new file preview identity = %+v", original.PreviewContentIdentity())
+		}
+
+		if _, err := harness.Storage.Move(context.Background(), live, live, domain.MoveRequest{
+			Source: originalPath, Destination: domain.MustParseUserPath("/renamed.txt"), IdempotencyKey: "preview-rename",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		renamed, err := harness.Storage.Stat(context.Background(), live, domain.MustParseUserPath("/renamed.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if renamed.PreviewContentIdentity() != original.PreviewContentIdentity() {
+			t.Fatalf("rename identity = %+v, want %+v", renamed.PreviewContentIdentity(), original.PreviewContentIdentity())
+		}
+
+		if _, err := harness.Storage.Move(context.Background(), live, trash, domain.MoveRequest{
+			Source: renamed.Path, Destination: domain.MustParseUserPath("/trashed.txt"), IdempotencyKey: "preview-trash",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		trashed, err := harness.Storage.Stat(context.Background(), trash, domain.MustParseUserPath("/trashed.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if trashed.PreviewContentIdentity() != original.PreviewContentIdentity() {
+			t.Fatalf("trash identity = %+v, want %+v", trashed.PreviewContentIdentity(), original.PreviewContentIdentity())
+		}
+
+		if _, err := harness.Storage.Move(context.Background(), trash, live, domain.MoveRequest{
+			Source: trashed.Path, Destination: domain.MustParseUserPath("/restored.txt"), IdempotencyKey: "preview-restore",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		restored, err := harness.Storage.Stat(context.Background(), live, domain.MustParseUserPath("/restored.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if restored.PreviewContentIdentity() != original.PreviewContentIdentity() {
+			t.Fatalf("restore identity = %+v, want %+v", restored.PreviewContentIdentity(), original.PreviewContentIdentity())
+		}
+
+		if _, err := harness.Storage.Copy(context.Background(), live, live, domain.CopyRequest{
+			Source: restored.Path, Destination: domain.MustParseUserPath("/copy.txt"), IdempotencyKey: "preview-copy",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		copied, err := harness.Storage.Stat(context.Background(), live, domain.MustParseUserPath("/copy.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if copied.ContentID == restored.ContentID || copied.ContentVersion == restored.ContentVersion {
+			t.Fatalf("copy identity = %+v, source = %+v", copied.PreviewContentIdentity(), restored.PreviewContentIdentity())
+		}
+
+		harness.Advance(time.Second)
+		replacementData := []byte("replacement")
+		replacementUpload, err := harness.Storage.CreateUpload(context.Background(), live, domain.CreateUploadRequest{
+			Path: restored.Path, Size: int64(len(replacementData)), MediaType: "text/plain", Conflict: domain.ConflictReplace,
+			ExpectedVersion: restored.Version,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := sendUpload(t, harness.Client, replacementUpload, replacementData, 0)
+		closeBody(t, response)
+		if !successfulUploadStatus(response.StatusCode) {
+			t.Fatalf("replacement upload status = %d", response.StatusCode)
+		}
+		replacement, err := harness.Storage.CompleteUpload(context.Background(), live, domain.CompleteUploadRequest{
+			UploadID: replacementUpload.UploadID, Path: restored.Path, Size: int64(len(replacementData)), MediaType: "text/plain",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if replacement.ContentID != restored.ContentID || replacement.ContentVersion == restored.ContentVersion || !replacement.ContentModifiedAt.After(restored.ContentModifiedAt) {
+			t.Fatalf("replacement identity = %+v, previous = %+v", replacement.PreviewContentIdentity(), restored.PreviewContentIdentity())
+		}
+	})
+
 	t.Run("large logical object", func(t *testing.T) {
 		harness := factory(t)
 		scope := testScope(t, 0x81, domain.AreaLive)

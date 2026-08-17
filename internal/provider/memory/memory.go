@@ -430,6 +430,26 @@ func (p *Provider) newEntryLocked(path domain.UserPath, kind domain.EntryKind, s
 	}
 }
 
+func (p *Provider) newFileEntryLocked(path domain.UserPath, size int64, mediaType string, existing domain.PreviewContentIdentity) (domain.Entry, error) {
+	contentID := existing.ContentID
+	if contentID == "" {
+		value, err := p.ids.OpaqueID()
+		if err != nil {
+			return domain.Entry{}, err
+		}
+		contentID = domain.ContentID(value)
+	}
+	contentVersion, err := p.ids.OpaqueID()
+	if err != nil {
+		return domain.Entry{}, err
+	}
+	entry := p.newEntryLocked(path, domain.EntryFile, size, mediaType)
+	entry.ContentID = contentID
+	entry.ContentVersion = domain.ContentVersion(contentVersion)
+	entry.ContentModifiedAt = p.clock.Now().UTC()
+	return entry, nil
+}
+
 func (p *Provider) deleteTreeLocked(scope domain.Scope, path domain.UserPath) {
 	objects := p.scopeObjectsLocked(scope)
 	for candidate := range objects {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/applyinnovations/endlessfs/internal/config"
 	endlesslogging "github.com/applyinnovations/endlessfs/internal/logging"
+	"github.com/applyinnovations/endlessfs/internal/secret"
 )
 
 func runtimeTestConfig(t *testing.T) config.Config {
@@ -108,3 +109,26 @@ func (ctx *alreadyDoneContext) Err() error {
 	return nil
 }
 func (*alreadyDoneContext) Value(any) any { return nil }
+
+func TestRunValidatesConfiguredPreviewDependenciesBeforeServing(t *testing.T) {
+	cfg := runtimeTestConfig(t)
+	cfg.MediaBrowserEnabled = true
+	cfg.PreviewProvider = "mock"
+	cfg.PreviewAutomatic = true
+	cfg.PreviewFormats = []string{"image"}
+	cfg.PreviewResolutions = []int{256, 512, 1600}
+	cfg.PreviewMaxConcurrency = 2
+	cfg.PreviewOperationTimeout = 45 * time.Second
+	cfg.PreviewStartupTimeout = 10 * time.Second
+	cfg.PreviewKeySecret = secret.Value("invalid")
+	if err := run(context.Background(), endlesslogging.NewJSON(io.Discard, slog.LevelInfo), cfg); err == nil {
+		t.Fatal("configured preview store accepted an invalid key")
+	}
+
+	cfg.PreviewKeySecret = ""
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := run(ctx, endlesslogging.NewJSON(io.Discard, slog.LevelInfo), cfg); err != nil {
+		t.Fatalf("configured mock preview startup = %v", err)
+	}
+}

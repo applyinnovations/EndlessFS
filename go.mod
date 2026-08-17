@@ -6,6 +6,7 @@ require (
 	cloud.google.com/go/storage v1.64.0
 	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
 	github.com/chromedp/chromedp v0.15.1
+	github.com/deepteams/webp v1.2.6
 	github.com/descope/virtualwebauthn v1.0.5
 	github.com/go-webauthn/webauthn v0.17.4
 	golang.org/x/text v0.41.0

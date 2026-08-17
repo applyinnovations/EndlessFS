@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,85 @@ func TestParseDefaults(t *testing.T) {
 	if cfg.LogLevel != slog.LevelInfo {
 		t.Fatalf("LogLevel = %v, want info", cfg.LogLevel)
 	}
+	if cfg.MediaBrowserEnabled || cfg.PreviewProvider != "disabled" || cfg.PreviewAutomatic {
+		t.Fatalf("preview defaults = %+v", cfg.Public())
+	}
+	if strings.Join(cfg.PreviewFormats, ",") != "image" || strings.Join(intStrings(cfg.PreviewResolutions), ",") != "256,512,1600" {
+		t.Fatalf("preview capability defaults = formats %v resolutions %v", cfg.PreviewFormats, cfg.PreviewResolutions)
+	}
+}
+
+func TestParsePreviewConfiguration(t *testing.T) {
+	t.Parallel()
+
+	values := map[string]string{
+		"ENDLESSFS_MEDIA_BROWSER_ENABLED":         "true",
+		"ENDLESSFS_PREVIEW_PROVIDER":              "mock",
+		"ENDLESSFS_PREVIEW_AUTOMATIC":             "false",
+		"ENDLESSFS_PREVIEW_FORMATS":               "image",
+		"ENDLESSFS_PREVIEW_AUTO_MAX_AGE":          "72h",
+		"ENDLESSFS_PREVIEW_AUTO_MAX_SOURCE_BYTES": "10485760",
+		"ENDLESSFS_PREVIEW_RESOLUTIONS":           "128,512,2048",
+		"ENDLESSFS_PREVIEW_MAX_CONCURRENCY":       "4",
+		"ENDLESSFS_PREVIEW_OPERATION_TIMEOUT":     "90s",
+		"ENDLESSFS_PREVIEW_STARTUP_TIMEOUT":       "30s",
+	}
+	cfg, err := Parse(mapLookup(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MediaBrowserEnabled || cfg.PreviewProvider != "mock" || cfg.PreviewAutomatic {
+		t.Fatalf("preview switches = %+v", cfg.Public())
+	}
+	if cfg.PreviewAutoMaxAge == nil || *cfg.PreviewAutoMaxAge != 72*time.Hour {
+		t.Fatalf("PreviewAutoMaxAge = %v", cfg.PreviewAutoMaxAge)
+	}
+	if cfg.PreviewAutoMaxSourceBytes == nil || *cfg.PreviewAutoMaxSourceBytes != 10<<20 {
+		t.Fatalf("PreviewAutoMaxSourceBytes = %v", cfg.PreviewAutoMaxSourceBytes)
+	}
+	if cfg.PreviewMaxConcurrency != 4 || cfg.PreviewOperationTimeout != 90*time.Second || cfg.PreviewStartupTimeout != 30*time.Second {
+		t.Fatalf("preview execution limits = %+v", cfg)
+	}
+	public := cfg.Public()
+	if !public.MediaBrowserEnabled || !public.PreviewConfigured || public.PreviewAutomatic || strings.Join(public.PreviewFormats, ",") != "image" || public.PreviewMaxConcurrency != 4 {
+		t.Fatalf("public preview configuration = %+v", public)
+	}
+}
+
+func TestParseRejectsInvalidPreviewConfiguration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		field string
+		value string
+		want  string
+	}{
+		{name: "unknown provider", field: "ENDLESSFS_PREVIEW_PROVIDER", value: "s3", want: "disabled or mock"},
+		{name: "unpackaged generator", field: "ENDLESSFS_PREVIEW_FORMATS", value: "video", want: "not packaged"},
+		{name: "unknown generator", field: "ENDLESSFS_PREVIEW_FORMATS", value: "office", want: "unknown"},
+		{name: "duplicate generator", field: "ENDLESSFS_PREVIEW_FORMATS", value: "image,image", want: "duplicate"},
+		{name: "empty generator", field: "ENDLESSFS_PREVIEW_FORMATS", value: "", want: "at least one"},
+		{name: "zero max age", field: "ENDLESSFS_PREVIEW_AUTO_MAX_AGE", value: "0s", want: "greater than zero"},
+		{name: "zero max bytes", field: "ENDLESSFS_PREVIEW_AUTO_MAX_SOURCE_BYTES", value: "0", want: "from 1"},
+		{name: "duplicate resolution", field: "ENDLESSFS_PREVIEW_RESOLUTIONS", value: "256,256", want: "strictly increasing"},
+		{name: "descending resolution", field: "ENDLESSFS_PREVIEW_RESOLUTIONS", value: "512,256", want: "strictly increasing"},
+		{name: "small resolution", field: "ENDLESSFS_PREVIEW_RESOLUTIONS", value: "63", want: "64 through 4096"},
+		{name: "too many resolutions", field: "ENDLESSFS_PREVIEW_RESOLUTIONS", value: "64,128,256,512,1024", want: "at most 4"},
+		{name: "excess concurrency", field: "ENDLESSFS_PREVIEW_MAX_CONCURRENCY", value: "9", want: "1 through 8"},
+		{name: "long operation", field: "ENDLESSFS_PREVIEW_OPERATION_TIMEOUT", value: "6m", want: "at most 5m0s"},
+		{name: "long startup", field: "ENDLESSFS_PREVIEW_STARTUP_TIMEOUT", value: "61s", want: "at most 1m0s"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse(mapLookup(map[string]string{test.field: test.value}))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Parse() error = %v, want text %q", err, test.want)
+			}
+		})
+	}
 }
 
 func TestURLAndLoopbackHelperBoundaryMatrix(t *testing.T) {
@@ -62,7 +142,11 @@ func TestLoadReadsValidatedProcessEnvironment(t *testing.T) {
 		"ENDLESSFS_SESSION_SECRET", "ENDLESSFS_WEBAUTHN_RP_ID", "ENDLESSFS_WEBAUTHN_RP_NAME",
 		"ENDLESSFS_SESSION_TTL", "ENDLESSFS_DOWNLOAD_CAPABILITY_TTL", "ENDLESSFS_UPLOAD_INIT_TTL",
 		"ENDLESSFS_TEXT_PREVIEW_MAX_BYTES", "ENDLESSFS_DEFAULT_LIGHT_THEME", "ENDLESSFS_DEFAULT_DARK_THEME",
-		"ENDLESSFS_LOG_LEVEL",
+		"ENDLESSFS_LOG_LEVEL", "ENDLESSFS_MEDIA_BROWSER_ENABLED", "ENDLESSFS_PREVIEW_PROVIDER",
+		"ENDLESSFS_PREVIEW_AUTOMATIC", "ENDLESSFS_PREVIEW_FORMATS", "ENDLESSFS_PREVIEW_AUTO_MAX_AGE",
+		"ENDLESSFS_PREVIEW_AUTO_MAX_SOURCE_BYTES", "ENDLESSFS_PREVIEW_RESOLUTIONS",
+		"ENDLESSFS_PREVIEW_MAX_CONCURRENCY", "ENDLESSFS_PREVIEW_OPERATION_TIMEOUT",
+		"ENDLESSFS_PREVIEW_STARTUP_TIMEOUT", "ENDLESSFS_PREVIEW_KEY_SECRET",
 	}
 	for _, key := range keys {
 		value, existed := os.LookupEnv(key)
@@ -320,4 +404,12 @@ func mapLookup(values map[string]string) func(string) (string, bool) {
 		value, ok := values[name]
 		return value, ok
 	}
+}
+
+func intStrings(values []int) []string {
+	result := make([]string, len(values))
+	for index, value := range values {
+		result[index] = strconv.Itoa(value)
+	}
+	return result
 }

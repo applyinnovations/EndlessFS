@@ -1,4 +1,4 @@
-# EndlessFS Theme API 1.0
+# EndlessFS Theme API 1.1
 
 The Theme API is a closed data contract. A bundle may override only identifiers emitted by:
 
@@ -26,7 +26,7 @@ Each token maps one-to-one to `--efs-` plus the token ID with dots changed to hy
 
 ## Media and fonts
 
-The semantic registry includes brand logo/mark/favicon; every file-operation, settings, passkey, warning, and error icon; and empty-drive, empty-folder, empty-trash, and upload-failure illustrations. Accepted theme images are sanitized SVG, signature-validated PNG/WebP/AVIF, bounded by the emitted per-slot byte/dimension/pixel limits. Structured raster sprite rectangles must remain within the decoded image and use a pixel ratio from 1 through 4.
+The semantic registry includes brand logo/mark/favicon; every file-operation, settings, passkey, warning, and error icon; semantic image, video, PDF, audio, document, archive, and unknown file-type icons; and empty-drive, empty-folder, empty-trash, and upload-failure illustrations. The file-type slots were added in minor API 1.1 and older compatible custom themes inherit them from their selected built-in parent. Accepted theme images are sanitized SVG, signature-validated PNG/WebP/AVIF, bounded by the emitted per-slot byte/dimension/pixel limits. Structured raster sprite rectangles must remain within the decoded image and use a pixel ratio from 1 through 4.
 
 SVG validation rejects declarations, scripts, event attributes, style attributes, external/data references, `foreignObject`, text/HTML, animation, and unsupported elements. SVG is served as an external image or mask, never inserted into the DOM. Fonts are bounded WOFF2 declarations in the `interface` or `monospace` logical slots, with regular and bold weights; generated family names prevent CSS injection.
 

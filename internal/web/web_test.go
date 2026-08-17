@@ -49,6 +49,37 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 	}
 }
 
+func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *testing.T) {
+	t.Parallel()
+
+	shell := string(mustRead("static/index.html"))
+	for _, required := range []string{
+		`id="file-view-list"`, `id="file-view-grid"`, `id="media-grid"`, `aria-label="File presentation"`,
+		`id="filter-kind"`, `id="filter-media"`, `id="filter-preview"`,
+		`id="preview-previous"`, `id="preview-next"`, `id="preview-generate"`, `id="preview-regenerate"`, `id="preview-original"`,
+	} {
+		if !strings.Contains(shell, required) {
+			t.Errorf("media browser shell is missing %q", required)
+		}
+	}
+	script := string(mustRead("static/app.js"))
+	for _, required := range []string{
+		"renderVirtualGrid", "IntersectionObserver", "gridOverscanRows = 3", "URL.revokeObjectURL",
+		"/api/v1/previews/resolve", "/api/v1/previews/generations", "image/webp", "filterLoadedEntries",
+		"ArrowLeft", "ArrowRight",
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("media browser script is missing %q", required)
+		}
+	}
+	stylesheet := string(mustRead("static/app.css"))
+	for _, required := range []string{".media-grid", ".media-tile", "aspect-ratio: 1", "object-fit: contain"} {
+		if !strings.Contains(stylesheet, required) {
+			t.Errorf("media browser stylesheet is missing %q", required)
+		}
+	}
+}
+
 func TestUnknownBrowserRouteIsNotAClientSideFallback(t *testing.T) {
 	t.Parallel()
 

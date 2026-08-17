@@ -27,6 +27,10 @@ import (
 	gcstore "github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
+	"github.com/applyinnovations/endlessfs/internal/preview"
+	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
+	previewmemory "github.com/applyinnovations/endlessfs/internal/preview/memory"
+	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
 	"github.com/applyinnovations/endlessfs/internal/theme"
 )
@@ -153,9 +157,62 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	previewEnabled := cfg.MediaBrowserEnabled || (cfg.PreviewProvider != "" && cfg.PreviewProvider != "disabled")
+	if previewEnabled {
+		if err := validatePreviewCapabilities(cfg.PreviewFormats); err != nil {
+			return err
+		}
+	}
+	var previewStore *previewmemory.Store
+	if cfg.PreviewProvider != "" && cfg.PreviewProvider != "disabled" {
+		if cfg.PreviewProvider != "mock" {
+			return domain.NewError(domain.ErrorInvalid, "unsupported preview provider configuration")
+		}
+		previewKey := cfg.PreviewKeySecret
+		if previewKey.Reveal() == "" {
+			value, keyErr := ids.BearerToken()
+			if keyErr != nil {
+				return keyErr
+			}
+			previewKey = secret.Value(value)
+		}
+		previewStore, err = previewmemory.New(previewmemory.Options{
+			Clock: clock, IDs: ids, Key: previewKey, CapabilityTTL: cfg.DownloadCapabilityTTL, AllowedOrigin: cfg.AllowedOrigin,
+		})
+		if err != nil {
+			return domain.NewError(domain.ErrorInvalid, "invalid configured preview store")
+		}
+	}
+	var previewListener net.Listener
+	if previewStore != nil {
+		previewListener, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return err
+		}
+		defer previewListener.Close()
+		previewOrigin := "http://" + previewListener.Addr().String()
+		if err := previewStore.SetDataPlaneBaseURL(previewOrigin); err != nil {
+			return err
+		}
+	}
 	driveService, err := drive.NewService(storage, store, repository, ids, clock, cfg.SessionSecret, cfg.BaseURL, dataOrigin, cfg.TextPreviewMaxBytes)
 	if err != nil {
 		return err
+	}
+	var previewService *preview.Service
+	if previewEnabled {
+		previewService, err = preview.NewService(preview.Options{
+			Automatic:        cfg.PreviewAutomatic,
+			MaxAge:           cfg.PreviewAutoMaxAge,
+			MaxSourceBytes:   cfg.PreviewAutoMaxSourceBytes,
+			Resolutions:      cfg.PreviewResolutions,
+			MaxConcurrency:   cfg.PreviewMaxConcurrency,
+			OperationTimeout: cfg.PreviewOperationTimeout,
+			StartupTimeout:   cfg.PreviewStartupTimeout,
+		}, storage, previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, http.DefaultClient, ids, clock)
+		if err != nil {
+			return err
+		}
 	}
 	themeRegistry, err := theme.NewRegistry()
 	if err != nil {
@@ -168,10 +225,18 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if dataHandler != nil {
 		dataServer = &http.Server{Handler: dataHandler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	}
+	var previewDataServer *http.Server
+	if previewStore != nil {
+		previewDataServer = &http.Server{Handler: previewStore, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	}
 
+	applicationHandler := httpapi.NewCompleteApplicationWithLogger(cfg, version, identityService, sessions, driveService, logger, themeManager)
+	if previewService != nil {
+		applicationHandler = httpapi.NewCompleteApplicationWithPreviewAndLogger(cfg, version, identityService, sessions, driveService, previewService, logger, themeManager)
+	}
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           httpapi.NewCompleteApplicationWithLogger(cfg, version, identityService, sessions, driveService, logger, themeManager),
+		Handler:           applicationHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -182,9 +247,12 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	shutdownCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	if dataServer != nil {
 		go func() { errCh <- dataServer.Serve(dataListener) }()
+	}
+	if previewDataServer != nil {
+		go func() { errCh <- previewDataServer.Serve(previewListener) }()
 	}
 	go func() {
 		logger.Info("server_started", "listenAddress", cfg.ListenAddr, "version", version)
@@ -208,6 +276,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 				return err
 			}
 		}
+		if previewDataServer != nil {
+			if err := previewDataServer.Shutdown(graceCtx); err != nil {
+				return err
+			}
+		}
 		logger.Info("server_stopped", "result", "graceful")
 		return nil
 	}
@@ -219,4 +292,18 @@ func deriveKey(label string, material []byte) []byte {
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write(material)
 	return hash.Sum(nil)
+}
+
+func validatePreviewCapabilities(formats []string) error {
+	if len(formats) == 0 {
+		formats = []string{"image"}
+	}
+	seen := make(map[string]bool)
+	for _, format := range formats {
+		if format != "image" || seen[format] {
+			return domain.NewError(domain.ErrorInvalid, "configured preview generator is not packaged")
+		}
+		seen[format] = true
+	}
+	return nil
 }

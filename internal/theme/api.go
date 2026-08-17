@@ -17,7 +17,7 @@ import (
 
 const (
 	APIMajor = 1
-	APIMinor = 0
+	APIMinor = 1
 )
 
 type TokenKind string
@@ -117,6 +117,7 @@ var contrastPairs = []ContrastPair{
 var mediaSlotIDs = []string{
 	"brand.logo", "brand.mark", "brand.favicon",
 	"icon.file", "icon.folder", "icon.upload", "icon.download", "icon.copy", "icon.move", "icon.share", "icon.trash", "icon.restore", "icon.settings", "icon.passkey", "icon.warning", "icon.error",
+	"icon.file.image", "icon.file.video", "icon.file.pdf", "icon.file.audio", "icon.file.document", "icon.file.archive", "icon.file.unknown",
 	"illustration.emptyDrive", "illustration.emptyFolder", "illustration.emptyTrash", "illustration.uploadFailed",
 }
 

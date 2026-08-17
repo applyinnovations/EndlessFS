@@ -13,3 +13,13 @@ The release is built and verified exclusively through the pinned Nix interface. 
 Important limitation: no live GCS bucket interoperability, cloud resource creation, deployment, production operations, backup/restore, regional durability, or incident-response procedure was tested. They are not deterministic v1 acceptance requirements. “Locally qualified GCS adapter” is evidence of integration-layer behavior against the documented protocol, not evidence that a particular live deployment is production-ready.
 
 No GCP credentials, cloud services, database, external identity provider, container runtime, deployment target, or non-loopback runtime service is needed to build or accept v1. The local `mock` backend is intentionally in-memory; the `gcs` runtime uses Application Default Credentials and keyless workload identity/IAM signing, but still requires the separate live qualification and operations review before production use.
+
+## v1.1 media browsing and generated image previews
+
+v1.1 adds an optional row-virtualized thumbnail grid, loaded-metadata filtering, file-type icon fallback, and a full-screen previous/next viewer. Generated PNG/JPEG/GIF/WebP source previews are static WebP only, preserve the source aspect ratio, remove source metadata, and are served in configured maximum-edge variants. The UI centers those uncropped artifacts inside square grid frames.
+
+Preview artifacts live behind an independent store contract and data origin. Opaque content bindings survive rename, move, trash, and restore, while copy and content replacement receive distinct identities. Automatic age and source-size policies are independently optional and are evaluated before any original read; explicit owner-authorized Generate and Regenerate bypass only those automatic policies.
+
+Configuration mistakes fail fast: a configured unpackaged `video` or `pdf` generator, unknown capability, invalid policy, failed codec self-test, or inaccessible configured preview store prevents startup. Runtime preview-store loss fails readiness and logs a safe error while authoritative file operations continue. The base and `container-images` outputs remain the same image-only static binary profile. Release output now includes `CAPABILITIES.json` with recipe, format, profile, and dependency-inventory binding.
+
+Video and PDF generated previews remain separate deferred v1.2 and v1.3 deliverables. Neither dependency class is present in the v1.1 image build. The implementation and evidence remain mock-backed; no durable preview bucket or production storage provider has been implemented or claimed.

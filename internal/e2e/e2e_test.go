@@ -255,6 +255,12 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if !fitsMobile || !namedControls || focusOutline == "none" {
 		t.Fatalf("accessibility result: fitsMobile=%v namedControls=%v focus=%q focusOutline=%q", fitsMobile, namedControls, focusID, focusOutline)
 	}
+	if err := chromedp.Run(ctx,
+		chromedp.Click("#logout-button", chromedp.ByQuery),
+		chromedp.WaitVisible("#auth-view", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("sign out: %v (%s)", err, browserStatus(ctx))
+	}
 
 	mu.Lock()
 	defer mu.Unlock()

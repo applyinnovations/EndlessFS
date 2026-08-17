@@ -3,6 +3,7 @@ package portable_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -50,6 +51,80 @@ func TestPortableStateCASAcrossReplicas(t *testing.T) {
 	}
 }
 
+func TestEightReplicaConcurrentCASHasOneWinner(t *testing.T) {
+	backend := objectmemory.New()
+	engines := make([]*portable.Engine, 8)
+	for index := range engines {
+		engines[index] = newEngine(t, backend, byte(10+index))
+	}
+	key := state.MustKey(state.NamespaceInvites, "eight-replica-cas")
+	version, err := engines[0].Create(context.Background(), key, []byte("initial"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var winners atomic.Int32
+	var wait sync.WaitGroup
+	for index, engine := range engines {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			if _, swapErr := engine.CompareAndSwap(context.Background(), key, version, []byte{byte(index)}); swapErr == nil {
+				winners.Add(1)
+			} else if !errors.Is(swapErr, domain.ErrPreconditionFailed) {
+				t.Errorf("CompareAndSwap() error = %v", swapErr)
+			}
+		}()
+	}
+	close(start)
+	wait.Wait()
+	if winners.Load() != 1 {
+		t.Fatalf("CAS winners = %d", winners.Load())
+	}
+}
+
+func TestPortableStateCursorMovesAcrossReplicasAndKeepsImmutableSnapshot(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2035, 1, 2, 3, 4, 5, 0, time.UTC))
+	first := openEngine(t, backend, clock, 31, nil)
+	second := openEngine(t, backend, clock, 32, nil)
+	prefix := state.MustPrefix(state.NamespaceSessions, "cursor-owner")
+	versions := make(map[string]state.Version)
+	for index := range 5 {
+		key := state.MustKey(state.NamespaceSessions, "cursor-owner", string(rune('a'+index)))
+		version, err := first.Create(context.Background(), key, []byte{byte('a' + index)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		versions[key.String()] = version
+	}
+	page, err := first.List(context.Background(), prefix, state.PageRequest{Limit: 2})
+	if err != nil || page.NextCursor == "" {
+		t.Fatalf("first List() = %+v, %v", page, err)
+	}
+	decoded, decodeErr := base64.RawURLEncoding.DecodeString(page.NextCursor)
+	if decodeErr != nil || bytes.Contains(decoded, []byte("endlessfs/v1/")) || bytes.Contains(decoded, []byte("cursor-owner")) {
+		t.Fatalf("state cursor exposed internal scope: %q, %v", decoded, decodeErr)
+	}
+	tampered := page.NextCursor[:len(page.NextCursor)-1] + "A"
+	if _, err := second.List(context.Background(), prefix, state.PageRequest{Limit: 2, Cursor: tampered}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("tampered cursor error = %v", err)
+	}
+	changed := state.MustKey(state.NamespaceSessions, "cursor-owner", "c")
+	if _, err := first.CompareAndSwap(context.Background(), changed, versions[changed.String()], []byte("changed")); err != nil {
+		t.Fatal(err)
+	}
+	page, err = second.List(context.Background(), prefix, state.PageRequest{Limit: 2, Cursor: page.NextCursor})
+	if err != nil || len(page.Items) != 2 || string(page.Items[0].Value.Data) != "c" {
+		t.Fatalf("cross-replica snapshot page = %+v, %v", page, err)
+	}
+	clock.Advance(11 * time.Minute)
+	if _, err := first.List(context.Background(), prefix, state.PageRequest{Limit: 2, Cursor: page.NextCursor}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("expired cursor error = %v", err)
+	}
+}
+
 func TestPortableStateRawCopyPreservesLogicalVersions(t *testing.T) {
 	source := objectmemory.New()
 	engine := newEngine(t, source, 4)
@@ -89,7 +164,7 @@ func newEngine(t *testing.T, backend *objectmemory.Backend, seed byte) *portable
 			ConfigurationDigest: "config-v1",
 			KeyringIdentifiers:  []string{"session-v1"},
 		},
-		LeaseTTL: time.Minute,
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -41,7 +41,7 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 	}
 	for _, required := range []string{
 		"navigator.credentials.create", "navigator.credentials.get", "textContent",
-		"Upload-Offset", "webkitRelativePath", "history.replaceState",
+		"Upload-Offset", "Content-Range", "webkitRelativePath", "history.replaceState",
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("browser source is missing workflow primitive %q", required)

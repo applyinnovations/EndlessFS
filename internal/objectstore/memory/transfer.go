@@ -38,6 +38,7 @@ type uploadSession struct {
 	tokenHash    [sha256.Size]byte
 	aborted      bool
 	version      objectstore.NativeVersion
+	capability   objectstore.UploadCapability
 }
 
 type downloadSession struct {
@@ -56,8 +57,11 @@ type TransferByteCounts struct {
 
 func (b *Backend) ConfigureDataPlane(baseURL string, clock domain.Clock, ids *domain.IDGenerator) error {
 	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed == nil {
+		return domain.NewError(domain.ErrorInvalid, "memory data plane requires a loopback URL, clock, and IDs")
+	}
 	ip := net.ParseIP(parsed.Hostname())
-	if err != nil || parsed.Scheme != "http" || parsed.Port() == "" || ip == nil || !ip.IsLoopback() || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || clock == nil || ids == nil {
+	if parsed.Scheme != "http" || parsed.Port() == "" || ip == nil || !ip.IsLoopback() || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || clock == nil || ids == nil {
 		return domain.NewError(domain.ErrorInvalid, "memory data plane requires a loopback URL, clock, and IDs")
 	}
 	b.mu.Lock()
@@ -80,24 +84,29 @@ func (b *Backend) TransferByteCounts() TransferByteCounts {
 	return TransferByteCounts{Upload: b.uploadBytes, Download: b.downloadBytes}
 }
 
-func (b *Backend) BeginUpload(ctx context.Context, request objectstore.UploadRequest) (objectstore.UploadCapability, error) {
+func (b *Backend) BackendKind() string { return "memory" }
+
+func (b *Backend) BeginUpload(ctx context.Context, request objectstore.UploadRequest) (objectstore.UploadHandle, error) {
 	if err := objectstore.ContextError(ctx); err != nil {
-		return objectstore.UploadCapability{}, err
+		return objectstore.UploadHandle{}, err
 	}
 	if request.UploadID == "" || !request.Key.Valid() || request.Size < 0 || request.MediaType == "" || !request.ExpiresAt.After(b.clock.Now()) {
-		return objectstore.UploadCapability{}, domain.NewError(domain.ErrorInvalid, "invalid direct upload request")
+		return objectstore.UploadHandle{}, domain.NewError(domain.ErrorInvalid, "invalid direct upload request")
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.dataPlaneURL == "" {
-		return objectstore.UploadCapability{}, domain.NewError(domain.ErrorUnavailable, "memory data plane is not configured")
+		return objectstore.UploadHandle{}, domain.NewError(domain.ErrorUnavailable, "memory data plane is not configured")
 	}
-	if _, exists := b.uploads[request.UploadID]; exists {
-		return objectstore.UploadCapability{}, domain.NewError(domain.ErrorConflict, "upload already exists")
+	if existing, exists := b.uploads[request.UploadID]; exists {
+		if existing.key != request.Key || existing.size != request.Size || existing.mediaType != request.MediaType || existing.expiresAt != request.ExpiresAt.UTC() || existing.aborted {
+			return objectstore.UploadHandle{}, domain.NewError(domain.ErrorConflict, "upload already exists")
+		}
+		return objectstore.UploadHandle{Capability: copyUploadCapability(existing.capability), Lease: []byte(request.UploadID)}, nil
 	}
 	token, err := b.ids.BearerToken()
 	if err != nil {
-		return objectstore.UploadCapability{}, err
+		return objectstore.UploadHandle{}, err
 	}
 	protocol := domain.UploadSingle
 	method := http.MethodPut
@@ -121,19 +130,47 @@ func (b *Backend) BeginUpload(ctx context.Context, request objectstore.UploadReq
 	if request.Resumable {
 		headers["Upload-Offset"] = "0"
 	}
-	return objectstore.UploadCapability{
+	capability := objectstore.UploadCapability{
 		Protocol: protocol, URL: b.dataPlaneURL + "/cap/upload/" + token, Method: method,
 		Headers: headers, ExpiresAt: request.ExpiresAt.UTC(), ChunkRules: chunkRules, Framing: framing, DeclaredSize: request.Size,
-	}, nil
+	}
+	session.capability = copyUploadCapability(capability)
+	return objectstore.UploadHandle{Capability: capability, Lease: []byte(request.UploadID)}, nil
 }
 
-func (b *Backend) UploadProgress(ctx context.Context, uploadID string) (objectstore.UploadProgress, error) {
+func (b *Backend) ResumeUpload(ctx context.Context, lease []byte) (objectstore.UploadCapability, error) {
+	if err := objectstore.ContextError(ctx); err != nil {
+		return objectstore.UploadCapability{}, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	session, found := b.uploads[string(lease)]
+	if !found || session.aborted || !b.clock.Now().Before(session.expiresAt) {
+		return objectstore.UploadCapability{}, domain.NewError(domain.ErrorNotFound, "upload not found")
+	}
+	return copyUploadCapability(session.capability), nil
+}
+
+func copyUploadCapability(capability objectstore.UploadCapability) objectstore.UploadCapability {
+	result := capability
+	result.Headers = make(map[string]string, len(capability.Headers))
+	for name, value := range capability.Headers {
+		result.Headers[name] = value
+	}
+	if capability.ChunkRules != nil {
+		rules := *capability.ChunkRules
+		result.ChunkRules = &rules
+	}
+	return result
+}
+
+func (b *Backend) UploadProgress(ctx context.Context, lease []byte) (objectstore.UploadProgress, error) {
 	if err := objectstore.ContextError(ctx); err != nil {
 		return objectstore.UploadProgress{}, err
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	session, found := b.uploads[uploadID]
+	session, found := b.uploads[string(lease)]
 	if !found || session.aborted {
 		return objectstore.UploadProgress{}, domain.NewError(domain.ErrorNotFound, "upload not found")
 	}
@@ -147,12 +184,13 @@ func (b *Backend) UploadProgress(ctx context.Context, uploadID string) (objectst
 	}, nil
 }
 
-func (b *Backend) AbortUpload(ctx context.Context, uploadID string) error {
+func (b *Backend) AbortUpload(ctx context.Context, lease []byte) error {
 	if err := objectstore.ContextError(ctx); err != nil {
 		return err
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	uploadID := string(lease)
 	session, found := b.uploads[uploadID]
 	if !found {
 		return domain.NewError(domain.ErrorNotFound, "upload not found")
@@ -198,7 +236,7 @@ func (b *Backend) CreateDownload(ctx context.Context, request objectstore.Downlo
 }
 
 func (b *Backend) UploadOffset(ctx context.Context, uploadID string) (int64, error) {
-	progress, err := b.UploadProgress(ctx, uploadID)
+	progress, err := b.UploadProgress(ctx, []byte(uploadID))
 	return progress.Offset, err
 }
 

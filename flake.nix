@@ -114,7 +114,7 @@
               inherit version;
               src = goSource;
               subPackages = [ "cmd/endlessfs" ];
-              vendorHash = "sha256-MB2a8d2+NdIIoEHIF5b/LT9uu16sqXd99KkSEPd4eXs=";
+              vendorHash = "sha256-VKX45eWoUXXVtAWI6DQ/SF3kofBHXEgGiezYbXpSRpk=";
               inherit go;
               doCheck = false;
               env.CGO_ENABLED = 0;
@@ -262,8 +262,10 @@
                   printf 'coverage-command=%s\n' 'nix run .#test-coverage'
                   printf 'repository-coverage-minimum=%s\n' '85%'
                   printf 'security-boundary-coverage-minimum=%s\n' '95%'
-                  printf 'storage-provider=%s\n' 'deterministic-local-mock'
-                  printf 'implementation-status=%s\n' 'v1-feature-complete-mock-backed'
+                  printf 'storage-providers=%s\n' 'deterministic-memory,locally-qualified-gcs-adapter'
+                  printf 'canonical-format=%s\n' 'endlessfs-portable-bucket-v1'
+                  printf 'writer-protocol-version=%s\n' '1'
+                  printf 'implementation-status=%s\n' 'v1-portable-local-qualification'
                   printf 'live-gcs-validation=%s\n' 'not-performed'
                   printf 'deployment-validation=%s\n' 'not-performed'
                   printf 'build-and-test-credentials-used=%s\n' 'none'
@@ -393,6 +395,17 @@
           test-contract = goTask "endlessfs-test-contract" ''
             go test ./... -run '^TestContract'
           '';
+
+          test-replica = goTask "endlessfs-test-replica" ''
+            exec go test ./internal/portable ./internal/objectstore/gcs \
+              -run '(Replica|CandidateCannot|Superseded|GenerationConditionsFence|LostMutation)' -count=1 "$@"
+          '';
+
+          test-portability = goTask "endlessfs-test-portability" ''
+            exec go test ./internal/storageformat ./internal/objectstore/... ./internal/portable \
+              -run '(Portab|Checkpoint|ContractGCSProtocol|GCSResumableCapability)' -count=1 "$@"
+          '';
+
           test-e2e =
             mkTask "endlessfs-test-e2e"
               (goTools ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
@@ -501,6 +514,10 @@
             exec go run ./tools/repository-policy "$@"
           '';
 
+          provider-verify = goTask "endlessfs-provider-verify" ''
+            exec go run ./tools/provider-verify "$@"
+          '';
+
           container = mkTask "endlessfs-container" [ pkgs.nix ] ''
             exec nix build .#container "$@"
           '';
@@ -607,11 +624,20 @@
 
           e2e = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
 
-          format = goCheck "format" ''
-            unformatted="$(gofmt -l .)"
-            test -z "$unformatted"
-            nixfmt --check flake.nix
-          '' [ pkgs.nixfmt ];
+          format =
+            goCheck "format"
+              ''
+                # goCheck installs the fixed-output module closure at ./vendor for
+                # offline builds. Formatting policy applies only to repository-owned
+                # source; generated third-party modules are immutable build inputs.
+                unformatted="$(find . -path ./vendor -prune -o -type f -name '*.go' -exec gofmt -l {} +)"
+                test -z "$unformatted"
+                nixfmt --check flake.nix
+              ''
+              [
+                pkgs.findutils
+                pkgs.nixfmt
+              ];
 
           lint =
             goCheck "lint"
@@ -628,6 +654,15 @@
           tests = goCheck "tests" "go test ./..." [ ];
           integration = goCheck "integration" "go test ./... -run '^TestIntegration'" [ ];
           contract = goCheck "contract" "go test ./... -run '^TestContract'" [ ];
+          replica =
+            goCheck "replica"
+              "go test ./internal/portable ./internal/objectstore/gcs -run '(Replica|CandidateCannot|Superseded|GenerationConditionsFence|LostMutation)' -count=1"
+              [ ];
+          portability =
+            goCheck "portability"
+              "go test ./internal/storageformat ./internal/objectstore/... ./internal/portable -run '(Portab|Checkpoint|ContractGCSProtocol|GCSResumableCapability)' -count=1"
+              [ ];
+          provider-verify = goCheck "provider-verify" "go test ./tools/provider-verify -count=1" [ ];
           theme = goCheck "theme" "go test ./internal/theme ./internal/httpapi -run 'Theme'" [ ];
           race = goCheck "race" "CGO_ENABLED=1 go test -race ./..." [ pkgs.stdenv.cc ];
           coverage = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];

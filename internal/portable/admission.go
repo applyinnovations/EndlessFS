@@ -77,11 +77,11 @@ func (e *Engine) admit(ctx context.Context, intent storageformat.MutationIntent)
 	if err != nil {
 		return admissionLease{}, err
 	}
-	if err := e.step(ctx, StepAdmissionAfterCandidate); err != nil {
-		return admissionLease{}, err
-	}
 	candidateVersion, err := e.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
 	if err != nil {
+		return admissionLease{}, err
+	}
+	if err := e.step(ctx, StepAdmissionAfterCandidate); err != nil {
 		return admissionLease{}, err
 	}
 	_, secondEnvelope, secondGate, err := e.readGate(ctx)

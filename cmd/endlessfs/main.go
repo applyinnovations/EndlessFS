@@ -3,7 +3,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -20,7 +23,10 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/httpapi"
 	"github.com/applyinnovations/endlessfs/internal/identity"
 	endlesslogging "github.com/applyinnovations/endlessfs/internal/logging"
-	providermemory "github.com/applyinnovations/endlessfs/internal/provider/memory"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
+	gcstore "github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
+	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
+	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/state"
 	"github.com/applyinnovations/endlessfs/internal/theme"
 )
@@ -41,10 +47,79 @@ func main() {
 }
 
 func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
-	store := state.NewMemoryStore()
-	repository := identity.NewRepository(store)
+	if ctx.Err() != nil {
+		return nil
+	}
 	ids := domain.SystemIDGenerator()
 	clock := domain.SystemClock{}
+	secretBytes, err := base64.RawURLEncoding.DecodeString(cfg.SessionSecret.Reveal())
+	if err != nil || len(secretBytes) != 32 {
+		return domain.NewError(domain.ErrorInvalid, "invalid storage key material")
+	}
+	leaseKey := deriveKey("endlessfs-transfer-lease-v1", secretBytes)
+	keyringID := base64.RawURLEncoding.EncodeToString(deriveKey("endlessfs-keyring-id-v1", secretBytes))
+	configuration := fmt.Sprintf("%s\x00%s\x00%s\x00%t\x00%t\x00%s", cfg.AllowedOrigin, cfg.WebAuthnRPID, cfg.WebAuthnRPName, cfg.AllowRegistration, cfg.InviteRegistration, keyringID)
+	configurationDigest := base64.RawURLEncoding.EncodeToString(deriveKey("endlessfs-writer-configuration-v1", []byte(configuration)))
+
+	var backend objectstore.Backend
+	var dataHandler http.Handler
+	var dataListener net.Listener
+	var dataServer *http.Server
+	dataOrigin := "https://storage.googleapis.com"
+	closeBackend := func() {}
+	switch cfg.StorageProvider {
+	case "mock":
+		dataListenAddress := "127.0.0.1:0"
+		if cfg.MockProviderURL != "" {
+			parsed, parseErr := url.Parse(cfg.MockProviderURL)
+			if parseErr != nil {
+				return parseErr
+			}
+			dataListenAddress = parsed.Host
+		}
+		dataListener, err = net.Listen("tcp", dataListenAddress)
+		if err != nil {
+			return err
+		}
+		defer dataListener.Close()
+		dataOrigin = "http://" + dataListener.Addr().String()
+		memoryBackend := objectmemory.New()
+		if err := memoryBackend.ConfigureDataPlane(dataOrigin, clock, ids); err != nil {
+			return err
+		}
+		backend = memoryBackend
+		dataHandler = memoryBackend
+	case "gcs":
+		gcsBackend, openErr := gcstore.Open(ctx, cfg.GCSBucket)
+		if openErr != nil {
+			return openErr
+		}
+		if err := gcsBackend.EnableWorkloadIdentityTransfers(leaseKey, cfg.GCSSigningAccount); err != nil {
+			_ = gcsBackend.Close()
+			return err
+		}
+		backend = gcsBackend
+		closeBackend = func() { _ = gcsBackend.Close() }
+	default:
+		return domain.NewError(domain.ErrorInvalid, "unsupported storage provider")
+	}
+	defer closeBackend()
+	engine, err := portable.Open(ctx, portable.Options{
+		Backend: backend, Clock: clock, IDs: ids,
+		Writer: portable.WriterConfiguration{
+			WriterSetID: cfg.WriterSetID, ConfigurationDigest: configurationDigest,
+			KeyringIdentifiers: []string{keyringID},
+			RequiredFeatures:   []string{"directory-manifests", "fenced-operations", "portable-checkpoints"},
+		},
+		LeaseTTL: 2 * time.Minute, UploadTTL: cfg.UploadInitTTL, DownloadTTL: cfg.DownloadCapabilityTTL,
+		CursorKey: deriveKey("endlessfs-state-cursor-key-v1", secretBytes),
+	})
+	if err != nil {
+		return err
+	}
+	var store state.Store = engine
+	storage := engine.Files()
+	repository := identity.NewRepository(store)
 	webAuthn, err := auth.NewGoWebAuthn(cfg.WebAuthnRPID, cfg.WebAuthnRPName, cfg.AllowedOrigin)
 	if err != nil {
 		return err
@@ -60,24 +135,6 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	dataListenAddress := "127.0.0.1:0"
-	if cfg.MockProviderURL != "" {
-		parsed, parseErr := url.Parse(cfg.MockProviderURL)
-		if parseErr != nil {
-			return parseErr
-		}
-		dataListenAddress = parsed.Host
-	}
-	dataListener, err := net.Listen("tcp", dataListenAddress)
-	if err != nil {
-		return err
-	}
-	defer dataListener.Close()
-	dataOrigin := "http://" + dataListener.Addr().String()
-	storage := providermemory.New(providermemory.Options{Clock: clock, IDs: ids, UploadTTL: cfg.UploadInitTTL, DownloadTTL: cfg.DownloadCapabilityTTL, AllowedOrigin: cfg.AllowedOrigin})
-	if err := storage.SetDataPlaneBaseURL(dataOrigin); err != nil {
-		return err
-	}
 	driveService, err := drive.NewService(storage, store, repository, ids, clock, cfg.SessionSecret, cfg.BaseURL, dataOrigin, cfg.TextPreviewMaxBytes)
 	if err != nil {
 		return err
@@ -90,7 +147,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	dataServer := &http.Server{Handler: storage, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	if dataHandler != nil {
+		dataServer = &http.Server{Handler: dataHandler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	}
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -106,7 +165,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	defer stop()
 
 	errCh := make(chan error, 2)
-	go func() { errCh <- dataServer.Serve(dataListener) }()
+	if dataServer != nil {
+		go func() { errCh <- dataServer.Serve(dataListener) }()
+	}
 	go func() {
 		logger.Info("server_started", "listenAddress", cfg.ListenAddr, "version", version)
 		errCh <- server.ListenAndServe()
@@ -124,10 +185,20 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 		if err := server.Shutdown(graceCtx); err != nil {
 			return err
 		}
-		if err := dataServer.Shutdown(graceCtx); err != nil {
-			return err
+		if dataServer != nil {
+			if err := dataServer.Shutdown(graceCtx); err != nil {
+				return err
+			}
 		}
 		logger.Info("server_stopped", "result", "graceful")
 		return nil
 	}
+}
+
+func deriveKey(label string, material []byte) []byte {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(label))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write(material)
+	return hash.Sum(nil)
 }

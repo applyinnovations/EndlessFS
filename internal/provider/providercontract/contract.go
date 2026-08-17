@@ -44,6 +44,7 @@ type Harness struct {
 	UploadOffset   func(context.Context, domain.Scope, domain.UploadID) (int64, error)
 	SimulateOffset func(context.Context, domain.Scope, domain.UploadID, int64) error
 	ByteCounts     func() ByteCounts
+	ChecksumSHA256 bool
 }
 
 type Factory func(t *testing.T) Harness
@@ -164,31 +165,41 @@ func Run(t *testing.T, factory Factory) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		harness.InjectFault(faultOperationUploadData, faultInterruptedUpload)
+		if harness.InjectFault != nil {
+			harness.InjectFault(faultOperationUploadData, faultInterruptedUpload)
+		}
 		response := sendUpload(t, harness.Client, capability, []byte("abcdefgh"), 0)
-		if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Upload-Offset") != "4" {
+		if harness.InjectFault != nil && (response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Upload-Offset") != "4") {
 			closeBody(t, response)
 			t.Fatalf("interrupted response = %d offset=%q", response.StatusCode, response.Header.Get("Upload-Offset"))
 		}
 		closeBody(t, response)
 		offset, err := harness.UploadOffset(context.Background(), scope, capability.UploadID)
-		if err != nil || offset != 4 {
+		wantOffset := int64(8)
+		if harness.InjectFault != nil {
+			wantOffset = 4
+		}
+		if err != nil || offset != wantOffset {
 			t.Fatalf("UploadOffset() = %d, %v", offset, err)
 		}
-		response = sendUpload(t, harness.Client, capability, []byte("efgh"), offset)
-		closeBody(t, response)
-		if response.StatusCode != http.StatusNoContent {
-			t.Fatalf("resume status = %d", response.StatusCode)
+		if harness.InjectFault != nil {
+			response = sendUpload(t, harness.Client, capability, []byte("efgh"), offset)
+			closeBody(t, response)
+			if !successfulUploadStatus(response.StatusCode) {
+				t.Fatalf("resume status = %d", response.StatusCode)
+			}
 		}
-		if _, err := harness.Storage.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{
-			UploadID: capability.UploadID, Path: path, Size: 8, MediaType: "application/octet-stream", ChecksumSHA256: "wrong",
-		}); !errors.Is(err, domain.ErrPreconditionFailed) {
-			t.Fatalf("checksum mismatch error = %v", err)
+		completion := domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: 8, MediaType: "application/octet-stream"}
+		if harness.ChecksumSHA256 {
+			if _, err := harness.Storage.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{
+				UploadID: capability.UploadID, Path: path, Size: 8, MediaType: "application/octet-stream", ChecksumSHA256: "wrong",
+			}); !errors.Is(err, domain.ErrPreconditionFailed) {
+				t.Fatalf("checksum mismatch error = %v", err)
+			}
+			sum := sha256.Sum256([]byte("abcdefgh"))
+			completion.ChecksumSHA256 = hex.EncodeToString(sum[:])
 		}
-		sum := sha256.Sum256([]byte("abcdefgh"))
-		if _, err := harness.Storage.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{
-			UploadID: capability.UploadID, Path: path, Size: 8, MediaType: "application/octet-stream", ChecksumSHA256: hex.EncodeToString(sum[:]),
-		}); err != nil {
+		if _, err := harness.Storage.CompleteUpload(context.Background(), scope, completion); err != nil {
 			t.Fatalf("CompleteUpload() error = %v", err)
 		}
 
@@ -286,22 +297,32 @@ func Run(t *testing.T, factory Factory) {
 			t.Fatalf("moved descendant missing: %v", err)
 		}
 
-		harness.InjectFault(faultOperationDelete, faultPartialOperation)
+		if harness.InjectFault != nil {
+			harness.InjectFault(faultOperationDelete, faultPartialOperation)
+		}
 		failed, err := harness.Storage.Delete(context.Background(), trash, domain.DeleteRequest{Path: domain.MustParseUserPath("/trashed"), IdempotencyKey: "delete-failed"})
-		if err != nil || failed.State != domain.OperationFailed {
+		wantDeleteState := domain.OperationSucceeded
+		if harness.InjectFault != nil {
+			wantDeleteState = domain.OperationFailed
+		}
+		if err != nil || failed.State != wantDeleteState {
 			t.Fatalf("failed Delete() = %+v, %v", failed, err)
 		}
-		if _, err := harness.Storage.Stat(context.Background(), trash, domain.MustParseUserPath("/trashed")); err != nil {
-			t.Fatalf("partial-failure tree was removed: %v", err)
+		if harness.InjectFault != nil {
+			if _, err := harness.Storage.Stat(context.Background(), trash, domain.MustParseUserPath("/trashed")); err != nil {
+				t.Fatalf("partial-failure tree was removed: %v", err)
+			}
 		}
 		stored, err := harness.Storage.GetOperation(context.Background(), live.UserID(), failed.ID)
-		if err != nil || stored.State != domain.OperationFailed {
+		if err != nil || stored.State != wantDeleteState {
 			t.Fatalf("GetOperation() = %+v, %v", stored, err)
 		}
 
-		harness.InjectFault(faultOperationStat, faultUnavailable)
-		if _, err := harness.Storage.Stat(context.Background(), live, domain.MustParseUserPath("/tree")); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("injected unavailable error = %v", err)
+		if harness.InjectFault != nil {
+			harness.InjectFault(faultOperationStat, faultUnavailable)
+			if _, err := harness.Storage.Stat(context.Background(), live, domain.MustParseUserPath("/tree")); !errors.Is(err, domain.ErrUnavailable) {
+				t.Fatalf("injected unavailable error = %v", err)
+			}
 		}
 	})
 
@@ -353,12 +374,16 @@ func uploadFile(t *testing.T, harness Harness, scope domain.Scope, path domain.U
 	}
 	response := sendUpload(t, harness.Client, capability, data, 0)
 	closeBody(t, response)
-	if response.StatusCode != http.StatusNoContent {
+	if !successfulUploadStatus(response.StatusCode) {
 		t.Fatalf("upload status = %d", response.StatusCode)
 	}
 	sum := sha256.Sum256(data)
+	checksum := ""
+	if harness.ChecksumSHA256 {
+		checksum = hex.EncodeToString(sum[:])
+	}
 	entry, err := harness.Storage.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{
-		UploadID: capability.UploadID, Path: path, Size: int64(len(data)), MediaType: "text/plain", ChecksumSHA256: hex.EncodeToString(sum[:]),
+		UploadID: capability.UploadID, Path: path, Size: int64(len(data)), MediaType: "text/plain", ChecksumSHA256: checksum,
 	})
 	if err != nil {
 		t.Fatalf("CompleteUpload() error = %v", err)
@@ -390,14 +415,22 @@ func sendUpload(t *testing.T, client *http.Client, capability domain.UploadCapab
 			request.Header.Set("Upload-Offset", strconv.FormatInt(offset, 10))
 		}
 	case domain.UploadFramingContentRange:
-		end := offset + int64(len(body)) - 1
-		request.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, end, capability.DeclaredSize))
+		if len(body) == 0 {
+			request.Header.Set("Content-Range", fmt.Sprintf("bytes */%d", capability.DeclaredSize))
+		} else {
+			end := offset + int64(len(body)) - 1
+			request.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, end, capability.DeclaredSize))
+		}
 	}
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatalf("upload request error = %v", err)
 	}
 	return response
+}
+
+func successfulUploadStatus(status int) bool {
+	return status == http.StatusOK || status == http.StatusCreated || status == http.StatusNoContent
 }
 
 func testScope(t *testing.T, value byte, area domain.Area) domain.Scope {

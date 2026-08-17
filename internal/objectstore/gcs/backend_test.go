@@ -45,7 +45,6 @@ func TestLostUploadSuccessIsUnavailableAndNotRetried(t *testing.T) {
 
 func TestProtocolErrorsMapToStableSafeKinds(t *testing.T) {
 	backend, fake := newProtocolBackend(t)
-	key := objectstore.MustKey("endlessfs/v1/state/users/fault.json")
 	tests := []struct {
 		status int
 		want   error
@@ -58,7 +57,7 @@ func TestProtocolErrorsMapToStableSafeKinds(t *testing.T) {
 		fake.mu.Lock()
 		fake.nextStatus = test.status
 		fake.mu.Unlock()
-		key = objectstore.MustKey("endlessfs/v1/state/users/fault-" + string(rune('a'+index)) + ".json")
+		key := objectstore.MustKey("endlessfs/v1/state/users/fault-" + string(rune('a'+index)) + ".json")
 		_, err := backend.Put(context.Background(), key, []byte("fault"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
 		if !errors.Is(err, test.want) {
 			t.Errorf("status %d error = %v, want %v", test.status, err, test.want)
@@ -146,6 +145,86 @@ func TestInputAndContextBoundaries(t *testing.T) {
 	cancel()
 	if _, err := backend.Get(cancelled, objectstore.MustKey("endlessfs/v1/state/users/cancelled.json")); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("Get(cancelled) error = %v", err)
+	}
+}
+
+func TestEveryGCSOperationFailsClosedAtItsBoundary(t *testing.T) {
+	backend, fake := newProtocolBackend(t)
+	ctx := context.Background()
+	key := objectstore.MustKey("endlessfs/v1/state/users/boundary.json")
+	destination := objectstore.MustKey("endlessfs/v1/state/users/destination.json")
+	version, err := backend.Put(ctx, key, []byte("value"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := backend.Head(canceled, key); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled Head error = %v", err)
+	}
+	if _, err := backend.List(canceled, objectstore.ListRequest{Prefix: "endlessfs/v1/"}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled List error = %v", err)
+	}
+	if _, err := backend.Put(canceled, key, nil, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled Put error = %v", err)
+	}
+	if err := backend.Delete(canceled, key, objectstore.DeleteCondition{Version: version}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled Delete error = %v", err)
+	}
+	if _, err := backend.Copy(canceled, key, destination, objectstore.CopyCondition{SourceVersion: version, Destination: objectstore.PutCondition{Mode: objectstore.PutCreateOnly}}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled Copy error = %v", err)
+	}
+
+	var invalidKey objectstore.Key
+	if _, err := backend.Head(ctx, invalidKey); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid Head error = %v", err)
+	}
+	if _, err := backend.Get(ctx, invalidKey); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid Get error = %v", err)
+	}
+	if _, err := backend.Put(ctx, invalidKey, nil, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid Put error = %v", err)
+	}
+	if err := backend.Delete(ctx, invalidKey, objectstore.DeleteCondition{Version: version}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid Delete error = %v", err)
+	}
+	if err := backend.Delete(ctx, key, objectstore.DeleteCondition{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("versionless Delete error = %v", err)
+	}
+	if _, err := backend.Copy(ctx, invalidKey, destination, objectstore.CopyCondition{SourceVersion: version, Destination: objectstore.PutCondition{Mode: objectstore.PutCreateOnly}}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid Copy error = %v", err)
+	}
+	if _, err := backend.Copy(ctx, key, destination, objectstore.CopyCondition{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("versionless Copy error = %v", err)
+	}
+	if _, err := backend.Copy(ctx, key, destination, objectstore.CopyCondition{SourceVersion: "foreign", Destination: objectstore.PutCondition{Mode: objectstore.PutCreateOnly}}); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("foreign Copy version error = %v", err)
+	}
+
+	for operation, invoke := range map[string]func() error{
+		"head": func() error { _, err := backend.Head(ctx, key); return err },
+		"get":  func() error { _, err := backend.Get(ctx, key); return err },
+		"list": func() error {
+			_, err := backend.List(ctx, objectstore.ListRequest{Prefix: "endlessfs/v1/"})
+			return err
+		},
+		"delete": func() error { return backend.Delete(ctx, key, objectstore.DeleteCondition{Version: version}) },
+	} {
+		fake.mu.Lock()
+		fake.nextStatus = 418
+		fake.mu.Unlock()
+		if err := invoke(); !errors.Is(err, domain.ErrInternal) || strings.Contains(err.Error(), key.String()) {
+			t.Fatalf("%s provider error = %v", operation, err)
+		}
+	}
+
+	page, err := backend.List(ctx, objectstore.ListRequest{Prefix: "endlessfs/v1/"})
+	if err != nil || len(page.Objects) != 1 || page.Objects[0].Version != version {
+		t.Fatalf("default List = %+v, %v", page, err)
+	}
+	if err := backend.Delete(ctx, key, objectstore.DeleteCondition{Version: "foreign"}); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("foreign Delete version error = %v", err)
 	}
 }
 

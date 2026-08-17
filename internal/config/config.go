@@ -2,6 +2,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net"
@@ -34,6 +35,9 @@ type Config struct {
 	Secure                bool
 	StorageProvider       string
 	MockProviderURL       string
+	GCSBucket             string
+	GCSSigningAccount     string
+	WriterSetID           string
 	AllowRegistration     bool
 	InviteRegistration    bool
 	BootstrapToken        secret.Value
@@ -106,8 +110,8 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if value, ok := lookup("ENDLESSFS_STORAGE_PROVIDER"); ok {
 		storageProvider = strings.TrimSpace(value)
 	}
-	if storageProvider != "mock" {
-		return Config{}, fmt.Errorf("ENDLESSFS_STORAGE_PROVIDER: v1 supports exactly mock")
+	if storageProvider != "mock" && storageProvider != "gcs" {
+		return Config{}, fmt.Errorf("ENDLESSFS_STORAGE_PROVIDER: expected exactly mock or gcs")
 	}
 	mockProviderURL := ""
 	if value, ok := lookup("ENDLESSFS_MOCK_PROVIDER_URL"); ok {
@@ -116,6 +120,37 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 			return Config{}, fmt.Errorf("ENDLESSFS_MOCK_PROVIDER_URL: %w", parseErr)
 		}
 		mockProviderURL = strings.TrimSuffix(parsed.String(), "/")
+	}
+	gcsBucket := ""
+	if value, ok := lookup("ENDLESSFS_GCS_BUCKET"); ok {
+		gcsBucket = strings.TrimSpace(value)
+	}
+	gcsSigningAccount := ""
+	if value, ok := lookup("ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT"); ok {
+		gcsSigningAccount = strings.TrimSpace(value)
+		if !validGCSServiceAccount(gcsSigningAccount) {
+			return Config{}, fmt.Errorf("ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT: expected a service-account email")
+		}
+	}
+	writerSetID := "AAAAAAAAAAAAAAAAAAAAAA"
+	if value, ok := lookup("ENDLESSFS_WRITER_SET_ID"); ok {
+		writerSetID = strings.TrimSpace(value)
+	}
+	if storageProvider == "gcs" {
+		if gcsBucket == "" {
+			return Config{}, fmt.Errorf("ENDLESSFS_GCS_BUCKET: required for GCS")
+		}
+		if _, configured := lookup("ENDLESSFS_WRITER_SET_ID"); !configured {
+			return Config{}, fmt.Errorf("ENDLESSFS_WRITER_SET_ID: required for GCS")
+		}
+		if mockProviderURL != "" {
+			return Config{}, fmt.Errorf("ENDLESSFS_MOCK_PROVIDER_URL: unavailable with GCS")
+		}
+	} else if gcsBucket != "" || gcsSigningAccount != "" {
+		return Config{}, fmt.Errorf("GCS configuration is unavailable with mock storage")
+	}
+	if !validRandomIdentifier(writerSetID) {
+		return Config{}, fmt.Errorf("ENDLESSFS_WRITER_SET_ID: expected canonical base64url encoding of at least 16 bytes")
 	}
 
 	bootstrapToken, err := parseOptionalBearer(lookup, "ENDLESSFS_BOOTSTRAP_TOKEN")
@@ -179,6 +214,9 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		Secure:                secure,
 		StorageProvider:       storageProvider,
 		MockProviderURL:       mockProviderURL,
+		GCSBucket:             gcsBucket,
+		GCSSigningAccount:     gcsSigningAccount,
+		WriterSetID:           writerSetID,
 		AllowRegistration:     allowRegistration,
 		InviteRegistration:    inviteRegistration,
 		BootstrapToken:        bootstrapToken,
@@ -193,6 +231,24 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		DefaultDarkTheme:      defaultDarkTheme,
 		LogLevel:              logLevel,
 	}, nil
+}
+
+func validRandomIdentifier(value string) bool {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	return err == nil && len(decoded) >= 16 && base64.RawURLEncoding.EncodeToString(decoded) == value
+}
+
+func validGCSServiceAccount(value string) bool {
+	if len(value) < len("a@b.iam.gserviceaccount.com") || len(value) > 254 || value != strings.ToLower(value) || !strings.HasSuffix(value, ".iam.gserviceaccount.com") || strings.Count(value, "@") != 1 {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' || character == '.' || character == '@' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // Public returns a copy containing no secrets.

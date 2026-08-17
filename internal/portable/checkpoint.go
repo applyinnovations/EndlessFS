@@ -15,6 +15,43 @@ import (
 
 const checkpointSchema = "checkpoint-v1"
 
+// VerifyCheckpointReadOnly validates an existing canonical bucket and closed
+// checkpoint without initializing, repairing, or otherwise writing storage.
+func VerifyCheckpointReadOnly(ctx context.Context, backend objectstore.Backend, writerConfiguration WriterConfiguration, checkpointID string) error {
+	if backend == nil || checkpointID == "" {
+		return domain.NewError(domain.ErrorInvalid, "backend and checkpoint ID are required")
+	}
+	writer, err := canonicalWriterConfiguration(writerConfiguration)
+	if err != nil {
+		return err
+	}
+	engine := &Engine{backend: backend, writer: writer}
+	superblockObject, err := backend.Get(ctx, storageformat.SuperblockKey())
+	if err != nil {
+		return err
+	}
+	var superblock storageformat.Superblock
+	if err := state.DecodeJSONWithLimit(superblockObject.Body, &superblock, storageformat.MaxCanonicalBytes); err != nil {
+		return err
+	}
+	if superblock.SchemaVersion != 1 || superblock.FormatID != storageformat.FormatID || superblock.BucketID == "" || superblock.CanonicalEncoder != storageformat.CanonicalEncoder || superblock.KeyFormatVersion != storageformat.KeyFormatVersion || superblock.WriterProtocolVersion != storageformat.WriterProtocolVersion || superblock.CreatedAt.IsZero() || !reflect.DeepEqual(superblock.RequiredFeatures, writer.RequiredFeatures) {
+		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable superblock")
+	}
+	writerObject, err := backend.Get(ctx, storageformat.WriterSetKey())
+	if err != nil {
+		return err
+	}
+	var writerEnvelope storageformat.Envelope
+	var storedWriter storageformat.WriterSet
+	if err := storageformat.DecodeEnvelope(writerObject.Body, storageformat.WriterSetKey(), writerSetSchema, &writerEnvelope, &storedWriter); err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(storedWriter, writer) {
+		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable writer set")
+	}
+	return engine.VerifyCheckpoint(ctx, checkpointID)
+}
+
 func (e *Engine) CreateCheckpoint(ctx context.Context, checkpointID string) (storageformat.Checkpoint, error) {
 	if err := e.CloseWrites(ctx, checkpointID); err != nil {
 		return storageformat.Checkpoint{}, err

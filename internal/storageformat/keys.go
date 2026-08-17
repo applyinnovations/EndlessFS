@@ -47,6 +47,16 @@ func StatePrefix(namespace string) string {
 	return root + "state/" + namespace + "/"
 }
 
+func StateRecordsPrefix() string  { return root + "state/" }
+func StateVersionsPrefix() string { return root + "state-versions/" }
+
+func StateVersionKey(namespace, logicalKey, logicalVersion string) objectstore.Key {
+	if err := ValidateNamespace(namespace); err != nil {
+		panic(err)
+	}
+	return fixedKey("state-versions/" + namespace + "/" + digestPart(logicalKey) + "/" + digestPart(logicalVersion) + ".json")
+}
+
 func AdmissionKey(epoch uint64, operationID string) objectstore.Key {
 	return fixedKey("admissions/" + strconv.FormatUint(epoch, 10) + "/" + digestPart(operationID) + ".json")
 }

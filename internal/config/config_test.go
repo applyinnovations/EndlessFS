@@ -45,6 +45,7 @@ func TestLoadReadsValidatedProcessEnvironment(t *testing.T) {
 	keys := []string{
 		"ENDLESSFS_LISTEN_ADDR", "ENDLESSFS_BASE_URL", "ALLOW_REGISTRATION", "INVITE_REGISTRATION",
 		"ENDLESSFS_STORAGE_PROVIDER", "ENDLESSFS_MOCK_PROVIDER_URL", "ENDLESSFS_BOOTSTRAP_TOKEN",
+		"ENDLESSFS_GCS_BUCKET", "ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT", "ENDLESSFS_WRITER_SET_ID",
 		"ENDLESSFS_SESSION_SECRET", "ENDLESSFS_WEBAUTHN_RP_ID", "ENDLESSFS_WEBAUTHN_RP_NAME",
 		"ENDLESSFS_SESSION_TTL", "ENDLESSFS_DOWNLOAD_CAPABILITY_TTL", "ENDLESSFS_UPLOAD_INIT_TTL",
 		"ENDLESSFS_TEXT_PREVIEW_MAX_BYTES", "ENDLESSFS_DEFAULT_LIGHT_THEME", "ENDLESSFS_DEFAULT_DARK_THEME",
@@ -118,8 +119,18 @@ func TestParseRejectsUnsafeOrMalformedValues(t *testing.T) {
 		{name: "wildcard origin", values: map[string]string{"ENDLESSFS_BASE_URL": "https://*.example.com"}, want: "wildcard"},
 		{name: "origin path", values: map[string]string{"ENDLESSFS_BASE_URL": "https://drive.example.com/path"}, want: "without credentials"},
 		{name: "RP mismatch", values: map[string]string{"ENDLESSFS_BASE_URL": "https://drive.example.com", "ENDLESSFS_WEBAUTHN_RP_ID": "example.com"}, want: "exactly match"},
-		{name: "unsupported provider", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs"}, want: "exactly mock"},
+		{name: "unsupported provider", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "azure"}, want: "mock or gcs"},
+		{name: "gcs missing bucket", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_WRITER_SET_ID": "EREREREREREREREREREREQ"}, want: "GCS_BUCKET"},
+		{name: "gcs missing writer set", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_GCS_BUCKET": "endlessfs-test"}, want: "WRITER_SET_ID"},
+		{name: "gcs forbids mock endpoint", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_GCS_BUCKET": "endlessfs-test", "ENDLESSFS_WRITER_SET_ID": "EREREREREREREREREREREQ", "ENDLESSFS_MOCK_PROVIDER_URL": "http://127.0.0.1:9090"}, want: "unavailable with GCS"},
+		{name: "mock forbids GCS bucket", values: map[string]string{"ENDLESSFS_GCS_BUCKET": "endlessfs-test"}, want: "unavailable with mock"},
+		{name: "invalid writer set", values: map[string]string{"ENDLESSFS_WRITER_SET_ID": "not-base64url"}, want: "canonical base64url"},
+		{name: "invalid GCS signing account", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_GCS_BUCKET": "endlessfs-test", "ENDLESSFS_WRITER_SET_ID": "EREREREREREREREREREREQ", "ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT": "owner@example.com"}, want: "service-account email"},
+		{name: "GCS signing account invalid character", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_GCS_BUCKET": "endlessfs-test", "ENDLESSFS_WRITER_SET_ID": "EREREREREREREREREREREQ", "ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT": "writer_name@example-project.iam.gserviceaccount.com"}, want: "service-account email"},
+		{name: "empty RP name", values: map[string]string{"ENDLESSFS_WEBAUTHN_RP_NAME": " "}, want: "relying-party display name"},
 		{name: "long session", values: map[string]string{"ENDLESSFS_SESSION_TTL": "169h"}, want: "at most"},
+		{name: "invalid upload duration", values: map[string]string{"ENDLESSFS_UPLOAD_INIT_TTL": "forever"}, want: "duration"},
+		{name: "invalid dark theme", values: map[string]string{"ENDLESSFS_DEFAULT_DARK_THEME": ""}, want: "invalid theme ID"},
 	}
 
 	for _, test := range tests {
@@ -131,6 +142,23 @@ func TestParseRejectsUnsafeOrMalformedValues(t *testing.T) {
 				t.Fatalf("Parse() error = %v, want text %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestParseGCSUsesOnlyBucketAndPortableWriterConfiguration(t *testing.T) {
+	t.Parallel()
+	values := map[string]string{
+		"ENDLESSFS_STORAGE_PROVIDER":            "gcs",
+		"ENDLESSFS_GCS_BUCKET":                  "endlessfs-production",
+		"ENDLESSFS_WRITER_SET_ID":               "EREREREREREREREREREREQ",
+		"ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT": "endlessfs-writer@example-project.iam.gserviceaccount.com",
+	}
+	cfg, err := Parse(mapLookup(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StorageProvider != "gcs" || cfg.GCSBucket != values["ENDLESSFS_GCS_BUCKET"] || cfg.GCSSigningAccount != values["ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT"] || cfg.WriterSetID != values["ENDLESSFS_WRITER_SET_ID"] {
+		t.Fatalf("GCS configuration = %+v", cfg)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"hash/crc32"
 	"io"
 	"mime"
@@ -16,24 +17,43 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/applyinnovations/endlessfs/internal/domain"
 )
 
 type fakeObject struct {
 	body           []byte
+	logicalSize    int64
 	generation     int64
 	metageneration int64
 }
 
+type fakeResumableSession struct {
+	name      string
+	size      int64
+	mediaType string
+	body      []byte
+}
+
 type fakeGCS struct {
-	t                       *testing.T
-	mu                      sync.Mutex
-	objects                 map[string]fakeObject
-	nextGeneration          int64
-	nextStatus              int
-	failUploadAfterCommit   bool
-	uploadRequests          int
-	corruptNextDownloadCRC  bool
-	wrongNextMetadataSizeBy int
+	t                         *testing.T
+	mu                        sync.Mutex
+	objects                   map[string]fakeObject
+	nextGeneration            int64
+	nextStatus                int
+	failUploadAfterCommit     bool
+	failUploadAfterCommitName string
+	uploadRequests            int
+	corruptNextDownloadCRC    bool
+	wrongNextMetadataSizeBy   int
+	baseURL                   string
+	sessions                  map[string]*fakeResumableSession
+	nextSession               int64
+	clock                     domain.Clock
+	uploadBytes               int64
+	downloadBytes             int64
+	allowedOrigin             string
 }
 
 func newGCSServer(t *testing.T) *httptest.Server {
@@ -43,13 +63,36 @@ func newGCSServer(t *testing.T) *httptest.Server {
 
 func newGCSServerWithFake(t *testing.T) (*httptest.Server, *fakeGCS) {
 	t.Helper()
-	fake := &fakeGCS{t: t, objects: make(map[string]fakeObject), nextGeneration: 100}
+	fake := &fakeGCS{t: t, objects: make(map[string]fakeObject), sessions: make(map[string]*fakeResumableSession), nextGeneration: 100, clock: domain.SystemClock{}}
 	server := httptest.NewServer(fake)
+	fake.baseURL = server.URL
 	t.Cleanup(server.Close)
 	return server, fake
 }
 
 func (f *fakeGCS) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if origin := request.Header.Get("Origin"); origin != "" {
+		f.mu.Lock()
+		allowedOrigin := f.allowedOrigin
+		f.mu.Unlock()
+		if origin != allowedOrigin {
+			f.problem(writer, http.StatusForbidden, "corsOriginDenied")
+			return
+		}
+		writer.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+		writer.Header().Set("Access-Control-Expose-Headers", "Content-Range, Range, Upload-Offset, X-Goog-Generation")
+		writer.Header().Set("Vary", "Origin")
+		if request.Method == http.MethodOptions {
+			if request.Header.Get("Access-Control-Request-Method") != http.MethodPut {
+				f.problem(writer, http.StatusForbidden, "corsMethodDenied")
+				return
+			}
+			writer.Header().Set("Access-Control-Allow-Methods", "PUT")
+			writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Range")
+			writer.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
 	f.mu.Lock()
 	status := f.nextStatus
 	f.nextStatus = 0
@@ -64,6 +107,32 @@ func (f *fakeGCS) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 	if request.URL.Path == "/upload/storage/v1/b/endlessfs-test/o" && request.Method == http.MethodPost {
 		f.upload(writer, request)
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, "/resumable/") {
+		f.resumable(writer, request, strings.TrimPrefix(request.URL.Path, "/resumable/"))
+		return
+	}
+	if strings.HasPrefix(request.URL.Path, "/endlessfs-test/") {
+		name, err := url.PathUnescape(strings.TrimPrefix(request.URL.EscapedPath(), "/endlessfs-test/"))
+		if err != nil {
+			f.problem(writer, http.StatusForbidden, "signatureDoesNotMatch")
+			return
+		}
+		if status := f.v4Status(request.URL.Query()); status != 0 {
+			f.problem(writer, status, "signatureDoesNotMatch")
+			return
+		}
+		switch request.Method {
+		case http.MethodPost:
+			f.startResumable(writer, request, name)
+		case http.MethodPut:
+			f.signedPut(writer, request, name)
+		case http.MethodGet:
+			f.signedGet(writer, request, name)
+		default:
+			f.problem(writer, http.StatusMethodNotAllowed, "methodNotAllowed")
+		}
 		return
 	}
 	prefix := "/storage/v1/b/endlessfs-test/o/"
@@ -89,6 +158,170 @@ func (f *fakeGCS) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	f.problem(writer, http.StatusNotFound, "notFound")
+}
+
+func (f *fakeGCS) v4Status(query url.Values) int {
+	if !(query.Get("X-Goog-Algorithm") == "GOOG4-RSA-SHA256" &&
+		query.Get("X-Goog-Credential") != "" && query.Get("X-Goog-Date") != "" &&
+		query.Get("X-Goog-Expires") != "" && query.Get("X-Goog-SignedHeaders") != "" &&
+		query.Get("X-Goog-Signature") != "") {
+		return http.StatusForbidden
+	}
+	issued, err := time.Parse("20060102T150405Z", query.Get("X-Goog-Date"))
+	seconds, secondsErr := strconv.ParseInt(query.Get("X-Goog-Expires"), 10, 64)
+	if err != nil || secondsErr != nil || seconds < 1 {
+		return http.StatusForbidden
+	}
+	if !f.clock.Now().Before(issued.Add(time.Duration(seconds) * time.Second)) {
+		return http.StatusGone
+	}
+	return 0
+}
+
+func (f *fakeGCS) startResumable(writer http.ResponseWriter, request *http.Request, name string) {
+	if request.Header.Get("x-goog-resumable") != "start" || request.URL.Query().Get("ifGenerationMatch") != "0" {
+		f.problem(writer, http.StatusBadRequest, "invalid")
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, exists := f.objects[name]; exists {
+		f.problem(writer, http.StatusPreconditionFailed, "conditionNotMet")
+		return
+	}
+	f.nextSession++
+	id := strconv.FormatInt(f.nextSession, 10)
+	f.sessions[id] = &fakeResumableSession{name: name, size: -1, mediaType: request.Header.Get("Content-Type")}
+	writer.Header().Set("Location", f.baseURL+"/resumable/"+id)
+	writer.WriteHeader(http.StatusCreated)
+}
+
+func (f *fakeGCS) signedPut(writer http.ResponseWriter, request *http.Request, name string) {
+	if request.URL.Query().Get("ifGenerationMatch") != "0" {
+		f.problem(writer, http.StatusBadRequest, "invalid")
+		return
+	}
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		f.problem(writer, http.StatusBadRequest, "invalid")
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.uploadBytes += int64(len(body))
+	if _, exists := f.objects[name]; exists {
+		f.problem(writer, http.StatusPreconditionFailed, "conditionNotMet")
+		return
+	}
+	f.nextGeneration++
+	object := fakeObject{body: body, generation: f.nextGeneration, metageneration: 1}
+	f.objects[name] = object
+	writer.Header().Set("x-goog-generation", strconv.FormatInt(object.generation, 10))
+	writer.WriteHeader(http.StatusOK)
+}
+
+func (f *fakeGCS) signedGet(writer http.ResponseWriter, request *http.Request, name string) {
+	f.mu.Lock()
+	object, exists := f.objects[name]
+	f.mu.Unlock()
+	if !exists || request.URL.Query().Get("generation") != strconv.FormatInt(object.generation, 10) || request.URL.Query().Get("ifGenerationMatch") != strconv.FormatInt(object.generation, 10) {
+		f.problem(writer, http.StatusPreconditionFailed, "conditionNotMet")
+		return
+	}
+	writer.Header().Set("Content-Type", request.URL.Query().Get("response-content-type"))
+	writer.Header().Set("Content-Disposition", request.URL.Query().Get("response-content-disposition"))
+	size := fakeObjectSize(object)
+	if rangeHeader := request.Header.Get("Range"); rangeHeader != "" {
+		start, end, ok := parseFakeRange(rangeHeader, size)
+		if !ok {
+			writer.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+			writer.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		writer.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
+		writer.WriteHeader(http.StatusPartialContent)
+		length := end - start + 1
+		f.mu.Lock()
+		f.downloadBytes += length
+		f.mu.Unlock()
+		if object.logicalSize > 0 {
+			_, _ = writer.Write(make([]byte, length))
+		} else {
+			_, _ = writer.Write(object.body[start : end+1])
+		}
+		return
+	}
+	writer.WriteHeader(http.StatusOK)
+	f.mu.Lock()
+	f.downloadBytes += size
+	f.mu.Unlock()
+	_, _ = writer.Write(object.body)
+}
+
+func (f *fakeGCS) resumable(writer http.ResponseWriter, request *http.Request, id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	session, exists := f.sessions[id]
+	if !exists {
+		f.problem(writer, http.StatusNotFound, "notFound")
+		return
+	}
+	if request.Method == http.MethodDelete {
+		delete(f.sessions, id)
+		writer.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if request.Method != http.MethodPut {
+		f.problem(writer, http.StatusMethodNotAllowed, "methodNotAllowed")
+		return
+	}
+	contentRange := request.Header.Get("Content-Range")
+	if strings.HasPrefix(contentRange, "bytes */") {
+		total, err := strconv.ParseInt(strings.TrimPrefix(contentRange, "bytes */"), 10, 64)
+		if err != nil || total < 0 {
+			f.problem(writer, http.StatusBadRequest, "invalid")
+			return
+		}
+		session.size = total
+		if total == 0 {
+			f.nextGeneration++
+			f.objects[session.name] = fakeObject{body: []byte{}, generation: f.nextGeneration, metageneration: 1}
+			delete(f.sessions, id)
+			writer.WriteHeader(http.StatusOK)
+			return
+		}
+		if len(session.body) > 0 {
+			writer.Header().Set("Range", fmt.Sprintf("bytes=0-%d", len(session.body)-1))
+		}
+		writer.WriteHeader(http.StatusPermanentRedirect)
+		return
+	}
+	var start, end, total int64
+	if _, err := fmt.Sscanf(contentRange, "bytes %d-%d/%d", &start, &end, &total); err != nil || start != int64(len(session.body)) || end < start || total < end+1 {
+		f.problem(writer, http.StatusBadRequest, "invalid")
+		return
+	}
+	body, err := io.ReadAll(request.Body)
+	if err != nil || int64(len(body)) != end-start+1 {
+		f.problem(writer, http.StatusBadRequest, "invalid")
+		return
+	}
+	session.size = total
+	session.body = append(session.body, body...)
+	f.uploadBytes += int64(len(body))
+	if int64(len(session.body)) < total {
+		writer.Header().Set("Range", fmt.Sprintf("bytes=0-%d", len(session.body)-1))
+		writer.WriteHeader(http.StatusPermanentRedirect)
+		return
+	}
+	if int64(len(session.body)) != total {
+		f.problem(writer, http.StatusBadRequest, "invalid")
+		return
+	}
+	f.nextGeneration++
+	f.objects[session.name] = fakeObject{body: append([]byte(nil), session.body...), generation: f.nextGeneration, metageneration: 1}
+	delete(f.sessions, id)
+	writer.WriteHeader(http.StatusOK)
 }
 
 func (f *fakeGCS) upload(writer http.ResponseWriter, request *http.Request) {
@@ -143,8 +376,9 @@ func (f *fakeGCS) upload(writer http.ResponseWriter, request *http.Request) {
 	f.nextGeneration++
 	created := fakeObject{body: append([]byte(nil), body...), generation: f.nextGeneration, metageneration: 1}
 	f.objects[name] = created
-	if f.failUploadAfterCommit {
+	if f.failUploadAfterCommit || f.failUploadAfterCommitName == name {
 		f.failUploadAfterCommit = false
+		f.failUploadAfterCommitName = ""
 		f.problem(writer, http.StatusServiceUnavailable, "backendError")
 		return
 	}
@@ -296,11 +530,11 @@ func (f *fakeGCS) rewrite(writer http.ResponseWriter, request *http.Request, tai
 		return
 	}
 	f.nextGeneration++
-	created := fakeObject{body: append([]byte(nil), sourceObject.body...), generation: f.nextGeneration, metageneration: 1}
+	created := fakeObject{body: append([]byte(nil), sourceObject.body...), logicalSize: sourceObject.logicalSize, generation: f.nextGeneration, metageneration: 1}
 	f.objects[destination] = created
 	f.writeJSON(writer, http.StatusOK, map[string]any{
-		"kind": "storage#rewriteResponse", "totalBytesRewritten": strconv.Itoa(len(created.body)),
-		"objectSize": strconv.Itoa(len(created.body)), "done": true, "resource": objectJSON(destination, created),
+		"kind": "storage#rewriteResponse", "totalBytesRewritten": strconv.FormatInt(fakeObjectSize(created), 10),
+		"objectSize": strconv.FormatInt(fakeObjectSize(created), 10), "done": true, "resource": objectJSON(destination, created),
 	})
 }
 
@@ -317,10 +551,40 @@ func generationMatch(raw string, generation int64, exists bool) bool {
 func objectJSON(name string, object fakeObject) map[string]any {
 	return map[string]any{
 		"kind": "storage#object", "bucket": "endlessfs-test", "name": name,
-		"size": strconv.Itoa(len(object.body)), "generation": strconv.FormatInt(object.generation, 10),
+		"size": strconv.FormatInt(fakeObjectSize(object), 10), "generation": strconv.FormatInt(object.generation, 10),
 		"metageneration": strconv.FormatInt(object.metageneration, 10), "crc32c": crc32c(object.body),
 		"contentType": "application/octet-stream",
 	}
+}
+
+func fakeObjectSize(object fakeObject) int64 {
+	if object.logicalSize > 0 {
+		return object.logicalSize
+	}
+	return int64(len(object.body))
+}
+
+func parseFakeRange(value string, size int64) (int64, int64, bool) {
+	if !strings.HasPrefix(value, "bytes=") || strings.Contains(value, ",") {
+		return 0, 0, false
+	}
+	parts := strings.Split(strings.TrimPrefix(value, "bytes="), "-")
+	if len(parts) != 2 || parts[0] == "" {
+		return 0, 0, false
+	}
+	start, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || start < 0 || start >= size {
+		return 0, 0, false
+	}
+	end := size - 1
+	if parts[1] != "" {
+		end, err = strconv.ParseInt(parts[1], 10, 64)
+		if err != nil || end < start {
+			return 0, 0, false
+		}
+		end = min(end, size-1)
+	}
+	return start, end, true
 }
 
 func crc32c(body []byte) string {

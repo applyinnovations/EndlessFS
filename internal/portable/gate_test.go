@@ -81,6 +81,27 @@ func TestCandidateCannotAdmitAfterGateStartsClosing(t *testing.T) {
 	}
 }
 
+func TestReplicaCompatibilityRejectsWriterConfigurationDrift(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2036, 2, 4, 4, 5, 6, 0, time.UTC))
+	_ = openEngine(t, backend, clock, 15, nil)
+	tests := []portable.WriterConfiguration{
+		{WriterSetID: "different-writer", ConfigurationDigest: "config-v1", KeyringIdentifiers: []string{"session-v1"}},
+		{WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "different-config", KeyringIdentifiers: []string{"session-v1"}},
+		{WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1", KeyringIdentifiers: []string{"different-keyring"}},
+		{WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1", KeyringIdentifiers: []string{"session-v1"}, RequiredFeatures: []string{"future-feature"}},
+	}
+	for index, writer := range tests {
+		_, err := portable.Open(context.Background(), portable.Options{
+			Backend: backend, Clock: clock, IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(byte(60+index), 1<<20))),
+			Writer: writer, LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+		})
+		if !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Errorf("configuration %d error = %v", index, err)
+		}
+	}
+}
+
 type stepFailure struct {
 	mu   sync.Mutex
 	step string
@@ -106,7 +127,7 @@ func openEngine(t *testing.T, backend *objectmemory.Backend, clock *domain.Fixed
 			WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1",
 			KeyringIdentifiers: []string{"session-v1"},
 		},
-		LeaseTTL: time.Minute, Scheduler: scheduler,
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32), Scheduler: scheduler,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -3,10 +3,11 @@ package portable
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"errors"
 	"reflect"
 	"sort"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,11 +18,12 @@ import (
 )
 
 const (
-	superblockSchema  = "superblock-v1"
-	writerSetSchema   = "writer-set-v1"
-	writeGateSchema   = "write-gate-v1"
-	admissionSchema   = "admission-v1"
-	stateRecordSchema = "state-record-v1"
+	superblockSchema   = "superblock-v1"
+	writerSetSchema    = "writer-set-v1"
+	writeGateSchema    = "write-gate-v1"
+	admissionSchema    = "admission-v1"
+	stateRecordSchema  = "state-record-v1"
+	stateVersionSchema = "state-version-v1"
 )
 
 type WriterConfiguration struct {
@@ -39,6 +41,8 @@ type Options struct {
 	LeaseTTL    time.Duration
 	UploadTTL   time.Duration
 	DownloadTTL time.Duration
+	CursorKey   []byte
+	CursorTTL   time.Duration
 	Scheduler   Scheduler
 }
 
@@ -56,13 +60,6 @@ const (
 	StepStateAfterBackend       = "state:after-backend"
 )
 
-type stateListSnapshot struct {
-	prefix string
-	limit  int
-	items  []state.Item
-	index  int
-}
-
 type Engine struct {
 	backend     objectstore.Backend
 	clock       domain.Clock
@@ -71,28 +68,20 @@ type Engine struct {
 	leaseTTL    time.Duration
 	uploadTTL   time.Duration
 	downloadTTL time.Duration
+	cursorAEAD  cipher.AEAD
+	cursorTTL   time.Duration
 	scheduler   Scheduler
 
-	snapshotMu        sync.Mutex
-	snapshots         map[string]*stateListSnapshot
 	admissionSequence atomic.Uint64
 }
 
 func Open(ctx context.Context, options Options) (*Engine, error) {
-	if options.Backend == nil || options.Clock == nil || options.IDs == nil || options.Writer.WriterSetID == "" || options.Writer.ConfigurationDigest == "" || len(options.Writer.KeyringIdentifiers) == 0 || options.LeaseTTL <= 0 {
+	if options.Backend == nil || options.Clock == nil || options.IDs == nil || options.LeaseTTL <= 0 || len(options.CursorKey) != 32 {
 		return nil, domain.NewError(domain.ErrorInvalid, "invalid portable engine configuration")
 	}
-	keyrings := append([]string(nil), options.Writer.KeyringIdentifiers...)
-	features := append([]string(nil), options.Writer.RequiredFeatures...)
-	sort.Strings(keyrings)
-	sort.Strings(features)
-	writer := storageformat.WriterSet{
-		SchemaVersion: 1, WriterSetID: options.Writer.WriterSetID,
-		WriterProtocolVersion: storageformat.WriterProtocolVersion,
-		RequiredFeatures:      features, ConfigurationDigest: options.Writer.ConfigurationDigest,
-		KeyringIdentifiers:    keyrings,
-		MinimumReaderProtocol: 1, MaximumReaderProtocol: storageformat.WriterProtocolVersion,
-		MinimumWriterProtocol: storageformat.WriterProtocolVersion, MaximumWriterProtocol: storageformat.WriterProtocolVersion,
+	writer, err := canonicalWriterConfiguration(options.Writer)
+	if err != nil {
+		return nil, err
 	}
 	if options.UploadTTL == 0 {
 		options.UploadTTL = 10 * time.Minute
@@ -100,14 +89,53 @@ func Open(ctx context.Context, options Options) (*Engine, error) {
 	if options.DownloadTTL == 0 {
 		options.DownloadTTL = 10 * time.Minute
 	}
-	if options.UploadTTL <= 0 || options.DownloadTTL <= 0 || options.DownloadTTL > 10*time.Minute {
+	if options.CursorTTL == 0 {
+		options.CursorTTL = 10 * time.Minute
+	}
+	if options.UploadTTL <= 0 || options.DownloadTTL <= 0 || options.DownloadTTL > 10*time.Minute || options.CursorTTL <= 0 || options.CursorTTL > time.Hour {
 		return nil, domain.NewError(domain.ErrorInvalid, "invalid portable transfer TTL")
 	}
-	engine := &Engine{backend: options.Backend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, uploadTTL: options.UploadTTL, downloadTTL: options.DownloadTTL, scheduler: options.Scheduler, snapshots: make(map[string]*stateListSnapshot)}
+	block, err := aes.NewCipher(options.CursorKey)
+	if err != nil {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid portable cursor key")
+	}
+	cursorAEAD, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, domain.WrapError(domain.ErrorInternal, "initialize portable cursor protection", err)
+	}
+	engine := &Engine{backend: options.Backend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, uploadTTL: options.UploadTTL, downloadTTL: options.DownloadTTL, cursorAEAD: cursorAEAD, cursorTTL: options.CursorTTL, scheduler: options.Scheduler}
 	if err := engine.initialize(ctx); err != nil {
 		return nil, err
 	}
 	return engine, nil
+}
+
+func canonicalWriterConfiguration(configuration WriterConfiguration) (storageformat.WriterSet, error) {
+	if configuration.WriterSetID == "" || configuration.ConfigurationDigest == "" || len(configuration.KeyringIdentifiers) == 0 {
+		return storageformat.WriterSet{}, domain.NewError(domain.ErrorInvalid, "invalid portable writer configuration")
+	}
+	keyrings := append([]string(nil), configuration.KeyringIdentifiers...)
+	features := append([]string(nil), configuration.RequiredFeatures...)
+	sort.Strings(keyrings)
+	sort.Strings(features)
+	for index, value := range keyrings {
+		if value == "" || (index > 0 && value == keyrings[index-1]) {
+			return storageformat.WriterSet{}, domain.NewError(domain.ErrorInvalid, "invalid portable keyring identifiers")
+		}
+	}
+	for index, value := range features {
+		if value == "" || (index > 0 && value == features[index-1]) {
+			return storageformat.WriterSet{}, domain.NewError(domain.ErrorInvalid, "invalid portable required features")
+		}
+	}
+	return storageformat.WriterSet{
+		SchemaVersion: 1, WriterSetID: configuration.WriterSetID,
+		WriterProtocolVersion: storageformat.WriterProtocolVersion,
+		RequiredFeatures:      features, ConfigurationDigest: configuration.ConfigurationDigest,
+		KeyringIdentifiers:    keyrings,
+		MinimumReaderProtocol: 1, MaximumReaderProtocol: storageformat.WriterProtocolVersion,
+		MinimumWriterProtocol: storageformat.WriterProtocolVersion, MaximumWriterProtocol: storageformat.WriterProtocolVersion,
+	}, nil
 }
 
 func (e *Engine) step(ctx context.Context, name string) error {

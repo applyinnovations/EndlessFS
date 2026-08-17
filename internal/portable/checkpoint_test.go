@@ -1,15 +1,135 @@
 package portable_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
+	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/state"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
+
+func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t *testing.T) {
+	clock := domain.NewFixedClock(time.Date(2037, 2, 3, 4, 5, 6, 0, time.UTC))
+	source := objectmemory.New()
+	sourceServer := httptest.NewServer(source)
+	t.Cleanup(sourceServer.Close)
+	if err := source.ConfigureDataPlane(sourceServer.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(80, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	sourceEngine := openEngine(t, source, clock, 81, nil)
+	stateValues := map[state.Key][]byte{
+		state.MustKey(state.NamespaceUsers, "portable-user"):                   []byte(`{"displayName":"Portable"}`),
+		state.MustKey(state.NamespaceCredentials, "portable-credential"):       []byte(`{"credential":"portable"}`),
+		state.MustKey(state.NamespaceSessions, "portable-session"):             []byte(`{"session":"portable"}`),
+		state.MustKey(state.NamespaceRoles, "admins"):                          []byte(`{"admins":["portable-user"]}`),
+		state.MustKey(state.NamespaceShares, "portable-share-token-hash"):      []byte(`{"share":"portable"}`),
+		state.MustKey(state.NamespaceTrash, "portable-user", "portable-trash"): []byte(`{"trash":"portable"}`),
+		state.MustKey(state.NamespacePreferences, "portable-user", "theme"):    []byte(`{"themeID":"endlessfs-dark"}`),
+		state.MustKey(state.NamespaceOperations, "portable-operation"):         []byte(`{"state":"succeeded"}`),
+		state.MustKey(state.NamespaceIdempotency, "portable-idempotency"):      []byte(`{"outcome":"portable"}`),
+	}
+	stateVersions := make(map[state.Key]state.Version, len(stateValues))
+	for key, value := range stateValues {
+		version, createErr := sourceEngine.Create(context.Background(), key, value)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		stateVersions[key] = version
+	}
+	user, _ := domain.ParseUserID("U1NTU1NTU1NTU1NTU1NTUw")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	trashScope, _ := domain.NewScope(user, domain.AreaTrash)
+	if _, err := sourceEngine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/documents")}); err != nil {
+		t.Fatal(err)
+	}
+	uploadPortableFile(t, sourceServer.Client(), sourceEngine.Files(), scope, domain.MustParseUserPath("/documents/file.txt"), []byte("portable bytes"))
+	if _, err := sourceEngine.Files().CreateDirectory(context.Background(), trashScope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/trash-folder")}); err != nil {
+		t.Fatal(err)
+	}
+	uploadPortableFile(t, sourceServer.Client(), sourceEngine.Files(), trashScope, domain.MustParseUserPath("/trash-folder/deleted.txt"), []byte("trash bytes"))
+	if _, err := sourceEngine.Files().Copy(context.Background(), scope, scope, domain.CopyRequest{Source: domain.MustParseUserPath("/documents"), Destination: domain.MustParseUserPath("/copy"), IdempotencyKey: "portable-copy"}); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := sourceEngine.CreateCheckpoint(context.Background(), "source-checkpoint")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	destination := objectmemory.New()
+	destinationServer := httptest.NewServer(destination)
+	t.Cleanup(destinationServer.Close)
+	if err := destination.ConfigureDataPlane(destinationServer.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(82, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.Import(authoritativeCopy(t, source.Export(), checkpoint)); err != nil {
+		t.Fatal(err)
+	}
+	destinationEngine := openEngine(t, destination, clock, 83, nil)
+	if err := destinationEngine.VerifyCheckpoint(context.Background(), "source-checkpoint"); err != nil {
+		t.Fatal(err)
+	}
+	if err := destinationEngine.OpenWrites(context.Background(), "source-checkpoint"); err != nil {
+		t.Fatal(err)
+	}
+	for key, expected := range stateValues {
+		value, getErr := destinationEngine.Get(context.Background(), key)
+		if getErr != nil || value.Version != stateVersions[key] || !bytes.Equal(value.Data, expected) {
+			t.Fatalf("destination state %q = %+v, %v", key, value, getErr)
+		}
+	}
+	if _, err := destinationEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/copy/file.txt")); err != nil {
+		t.Fatalf("destination copied file missing: %v", err)
+	}
+	if _, err := destinationEngine.Files().Stat(context.Background(), trashScope, domain.MustParseUserPath("/trash-folder/deleted.txt")); err != nil {
+		t.Fatalf("destination trash file missing: %v", err)
+	}
+	if _, err := destinationEngine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/after-cutover")}); err != nil {
+		t.Fatalf("destination continued mutation error = %v", err)
+	}
+	returnCheckpoint, err := destinationEngine.CreateCheckpoint(context.Background(), "return-checkpoint")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	returned := objectmemory.New()
+	if err := returned.Import(authoritativeCopy(t, destination.Export(), returnCheckpoint)); err != nil {
+		t.Fatal(err)
+	}
+	returnedEngine := openEngine(t, returned, clock, 84, nil)
+	if err := returnedEngine.OpenWrites(context.Background(), "return-checkpoint"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := returnedEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/after-cutover")); err != nil {
+		t.Fatalf("reverse-copy continued state missing: %v", err)
+	}
+}
+
+func authoritativeCopy(t *testing.T, source map[string][]byte, checkpoint storageformat.Checkpoint) map[string][]byte {
+	t.Helper()
+	result := make(map[string][]byte, len(checkpoint.Objects)+1)
+	for _, object := range checkpoint.Objects {
+		body, found := source[object.Key]
+		if !found {
+			t.Fatalf("checkpoint object %q is absent from source", object.Key)
+		}
+		result[object.Key] = append([]byte(nil), body...)
+	}
+	checkpointKey := storageformat.CheckpointKey(checkpoint.CheckpointID).String()
+	body, found := source[checkpointKey]
+	if !found {
+		t.Fatalf("checkpoint record %q is absent from source", checkpointKey)
+	}
+	result[checkpointKey] = append([]byte(nil), body...)
+	return result
+}
 
 func TestCheckpointDetectsAuthoritativeCorruption(t *testing.T) {
 	backend := objectmemory.New()
@@ -44,4 +164,139 @@ func TestCheckpointDetectsAuthoritativeCorruption(t *testing.T) {
 	if err := engine.VerifyCheckpoint(context.Background(), "checkpoint-corruption"); err == nil {
 		t.Fatal("VerifyCheckpoint() accepted corrupt authoritative object")
 	}
+}
+
+func TestCheckpointVerifierIsStrictlyReadOnly(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2037, 3, 4, 5, 6, 7, 0, time.UTC))
+	engine := openEngine(t, backend, clock, 85, nil)
+	if _, err := engine.Create(context.Background(), state.MustKey(state.NamespaceAccounts, "verify-only"), []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.CreateCheckpoint(context.Background(), "verify-only"); err != nil {
+		t.Fatal(err)
+	}
+	guard := &readOnlyBackend{Backend: backend}
+	err := portable.VerifyCheckpointReadOnly(context.Background(), guard, portable.WriterConfiguration{
+		WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1",
+		KeyringIdentifiers: []string{"session-v1"},
+	}, "verify-only")
+	if err != nil {
+		t.Fatalf("VerifyCheckpointReadOnly() error = %v", err)
+	}
+	if guard.writes != 0 {
+		t.Fatalf("read-only verifier attempted %d writes", guard.writes)
+	}
+}
+
+func TestCheckpointVerifierRejectsMissingExtraAndUnsupportedState(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2037, 3, 5, 5, 6, 7, 0, time.UTC))
+	engine := openEngine(t, backend, clock, 86, nil)
+	if _, err := engine.Create(context.Background(), state.MustKey(state.NamespaceAccounts, "verification-matrix"), []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := engine.CreateCheckpoint(context.Background(), "verification-matrix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := authoritativeCopy(t, backend.Export(), checkpoint)
+	writer := portable.WriterConfiguration{
+		WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1",
+		KeyringIdentifiers: []string{"session-v1"},
+	}
+	verify := func(objects map[string][]byte) error {
+		destination := objectmemory.New()
+		if err := destination.Import(objects); err != nil {
+			t.Fatal(err)
+		}
+		return portable.VerifyCheckpointReadOnly(context.Background(), destination, writer, checkpoint.CheckpointID)
+	}
+	t.Run("missing authoritative object", func(t *testing.T) {
+		objects := cloneObjects(base)
+		delete(objects, checkpoint.Objects[len(checkpoint.Objects)-1].Key)
+		if err := verify(objects); !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("verification error = %v", err)
+		}
+	})
+	t.Run("extra authoritative object", func(t *testing.T) {
+		objects := cloneObjects(base)
+		objects[storageformat.StateKey("users", state.MustKey(state.NamespaceUsers, "extra").String()).String()] = []byte("extra")
+		if err := verify(objects); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("verification error = %v", err)
+		}
+	})
+	t.Run("unsupported superblock feature", func(t *testing.T) {
+		objects := cloneObjects(base)
+		var superblock storageformat.Superblock
+		if err := state.DecodeJSONWithLimit(objects[storageformat.SuperblockKey().String()], &superblock, storageformat.MaxCanonicalBytes); err != nil {
+			t.Fatal(err)
+		}
+		superblock.RequiredFeatures = []string{"future-incompatible-feature"}
+		body, err := storageformat.EncodeCanonical(superblock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		objects[storageformat.SuperblockKey().String()] = body
+		if err := verify(objects); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("verification error = %v", err)
+		}
+	})
+}
+
+func TestCheckpointPrunesExpiredStateSnapshotsButKeepsCurrentVersions(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2037, 3, 6, 5, 6, 7, 0, time.UTC))
+	engine := openEngine(t, backend, clock, 87, nil)
+	kept := state.MustKey(state.NamespaceAccounts, "kept")
+	version, err := engine.Create(context.Background(), kept, []byte("first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.CompareAndSwap(context.Background(), kept, version, []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	removed := state.MustKey(state.NamespaceSessions, "removed")
+	version, err = engine.Create(context.Background(), removed, []byte("sensitive"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Delete(context.Background(), removed, version); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.CreateCheckpoint(context.Background(), "snapshot-pruning"); err != nil {
+		t.Fatal(err)
+	}
+	page, err := backend.List(context.Background(), objectstore.ListRequest{Prefix: storageformat.StateVersionsPrefix(), Limit: 1000})
+	if err != nil || len(page.Objects) != 1 || page.NextCursor != "" {
+		t.Fatalf("state-version objects = %+v, %v", page, err)
+	}
+}
+
+func cloneObjects(source map[string][]byte) map[string][]byte {
+	result := make(map[string][]byte, len(source))
+	for key, body := range source {
+		result[key] = append([]byte(nil), body...)
+	}
+	return result
+}
+
+type readOnlyBackend struct {
+	objectstore.Backend
+	writes int
+}
+
+func (backend *readOnlyBackend) Put(context.Context, objectstore.Key, []byte, objectstore.PutCondition) (objectstore.NativeVersion, error) {
+	backend.writes++
+	return "", domain.NewError(domain.ErrorInternal, "verifier attempted put")
+}
+
+func (backend *readOnlyBackend) Delete(context.Context, objectstore.Key, objectstore.DeleteCondition) error {
+	backend.writes++
+	return domain.NewError(domain.ErrorInternal, "verifier attempted delete")
+}
+
+func (backend *readOnlyBackend) Copy(context.Context, objectstore.Key, objectstore.Key, objectstore.CopyCondition) (objectstore.CopyResult, error) {
+	backend.writes++
+	return objectstore.CopyResult{}, domain.NewError(domain.ErrorInternal, "verifier attempted copy")
 }

@@ -478,12 +478,21 @@
   async function sendFileData(transfer, capability) {
     let offset = transfer.confirmed;
     const headersTemplate = capability.headers || {};
+    const framing = capability.framing || "offset-header";
+    const declaredSize = Number.isSafeInteger(capability.declaredSize) ? capability.declaredSize : transfer.file.size;
     const maximum = capability.chunkRules && capability.chunkRules.maximumSize ? capability.chunkRules.maximumSize : transfer.file.size;
     let failures = 0;
     while (offset < transfer.file.size || (transfer.file.size === 0 && offset === 0)) {
       const end = transfer.file.size === 0 ? 0 : Math.min(transfer.file.size, offset + maximum);
       const headers = new Headers(headersTemplate);
-      headers.set("Upload-Offset", String(offset));
+      if (framing === "content-range") {
+        headers.delete("Upload-Offset");
+        headers.set("Content-Range", transfer.file.size === 0 ? `bytes */${declaredSize}` : `bytes ${offset}-${end - 1}/${declaredSize}`);
+      } else if (framing === "offset-header") {
+        headers.set("Upload-Offset", String(offset));
+      } else {
+        headers.delete("Upload-Offset");
+      }
       let response;
       try {
         response = await fetch(capability.url, { method: capability.method, headers, body: transfer.file.slice(offset, end), signal: transfer.controller.signal });
@@ -491,8 +500,16 @@
         if (error.name === "AbortError") throw error;
         response = null;
       }
-      if (response && response.ok) {
-        const confirmed = Number.parseInt(response.headers.get("Upload-Offset") || String(end), 10);
+      if (response && (response.ok || (framing === "content-range" && response.status === 308))) {
+        const range = response.headers.get("Range") || "";
+        const rangeMatch = /^bytes=0-([0-9]+)$/.exec(range);
+        let confirmed = Number.parseInt(response.headers.get("Upload-Offset") || "", 10);
+        if (rangeMatch) confirmed = Number.parseInt(rangeMatch[1], 10) + 1;
+        if (!Number.isSafeInteger(confirmed) && response.ok) confirmed = end;
+        if (!Number.isSafeInteger(confirmed)) {
+          const status = await api(`/api/v1/uploads/${encodeURIComponent(capability.uploadID)}`);
+          confirmed = status.confirmedOffset;
+        }
         offset = Math.max(offset, confirmed);
         transfer.confirmed = offset;
         failures = 0;

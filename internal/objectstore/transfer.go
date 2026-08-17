@@ -37,6 +37,14 @@ type UploadProgress struct {
 	Materialized bool
 }
 
+// UploadHandle contains a browser capability and an opaque encrypted backend
+// lease. The lease may be persisted only in the transient canonical lease
+// namespace and lets another replica continue provider-native coordination.
+type UploadHandle struct {
+	Capability UploadCapability
+	Lease      []byte
+}
+
 type DownloadRequest struct {
 	Key         Key
 	Version     NativeVersion
@@ -56,8 +64,10 @@ type DownloadCapability struct {
 // DirectTransferBackend exposes only provider-native data-plane capabilities.
 // It receives canonical object keys, never virtual paths or filesystem state.
 type DirectTransferBackend interface {
-	BeginUpload(context.Context, UploadRequest) (UploadCapability, error)
-	UploadProgress(context.Context, string) (UploadProgress, error)
-	AbortUpload(context.Context, string) error
+	BackendKind() string
+	BeginUpload(context.Context, UploadRequest) (UploadHandle, error)
+	ResumeUpload(context.Context, []byte) (UploadCapability, error)
+	UploadProgress(context.Context, []byte) (UploadProgress, error)
+	AbortUpload(context.Context, []byte) error
 	CreateDownload(context.Context, DownloadRequest) (DownloadCapability, error)
 }

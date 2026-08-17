@@ -24,10 +24,39 @@ const versionPrefix = "gcs-v1."
 
 // Backend is a thin conditional-object adapter over one GCS bucket.
 type Backend struct {
-	client *storage.Client
-	bucket *storage.BucketHandle
-	name   string
-	owned  bool
+	client   *storage.Client
+	bucket   *storage.BucketHandle
+	name     string
+	owned    bool
+	transfer *transferConfiguration
+}
+
+// NewWithTransfers binds an injected client and explicit signing/lease
+// dependencies. It is used by credential-free protocol tests and by process
+// construction that has already selected its workload-identity credentials.
+func NewWithTransfers(client *storage.Client, bucket string, options TransferOptions) (*Backend, error) {
+	backend, err := New(client, bucket)
+	if err != nil {
+		return nil, err
+	}
+	configuration, err := newTransferConfiguration(options)
+	if err != nil {
+		return nil, err
+	}
+	backend.transfer = configuration
+	return backend, nil
+}
+
+// EnableWorkloadIdentityTransfers enables V4 signing through the credentials
+// already discovered by the official client. The client library uses IAM
+// signBlob when the workload identity has no local private key.
+func (b *Backend) EnableWorkloadIdentityTransfers(leaseKey []byte, signingAccount string) error {
+	configuration, err := newTransferConfiguration(TransferOptions{LeaseKey: leaseKey, GoogleAccessID: signingAccount})
+	if err != nil {
+		return err
+	}
+	b.transfer = configuration
+	return nil
 }
 
 // Open creates a production client using Application Default Credentials.
@@ -175,13 +204,15 @@ func (b *Backend) Put(ctx context.Context, key objectstore.Key, body []byte, con
 	if err != nil {
 		return "", err
 	}
-	writer := handle.NewWriter(ctx)
+	writeCtx, cancelWrite := context.WithCancel(ctx)
+	defer cancelWrite()
+	writer := handle.NewWriter(writeCtx)
 	writer.ChunkSize = 0
 	writer.ContentType = "application/octet-stream"
 	writer.CRC32C = crc32.Checksum(body, crc32.MakeTable(crc32.Castagnoli))
 	writer.SendCRC32C = true
 	if _, err = io.Copy(writer, bytes.NewReader(body)); err != nil {
-		_ = writer.CloseWithError(err)
+		cancelWrite()
 		return "", classifyPut(condition, err)
 	}
 	if err = writer.Close(); err != nil {

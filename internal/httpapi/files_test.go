@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -227,6 +228,115 @@ func TestFileHTTPRejectsProviderFieldsBodiesAndTraversalBeforeProvider(t *testin
 	fileBody := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads", origin, "raw file bytes", cookies, map[string]string{csrfHeader: env.csrf.Value, "Content-Type": "application/octet-stream", "Idempotency-Key": "http-upload-request-0002"})
 	if fileBody.Code != http.StatusBadRequest {
 		t.Fatalf("file body status = %d", fileBody.Code)
+	}
+}
+
+func TestIntegrationBatchUploadEmptyTrashAndPublicDownloadRoutes(t *testing.T) {
+	env := newDriveHTTPEnvironment(t)
+	const origin = "https://drive.example.test"
+	cookies := []*http.Cookie{env.session, env.csrf}
+	headers := driveMutationHeaders(env.csrf.Value, "batch-upload-route-0001")
+
+	emptyBatch := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/batch", origin, `{"uploads":[]}`, cookies, headers)
+	if emptyBatch.Code != http.StatusBadRequest {
+		t.Fatalf("empty batch = %d %s", emptyBatch.Code, emptyBatch.Body.String())
+	}
+	batch := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/batch", origin, `{"uploads":[{"path":"/one.txt","size":3,"mediaType":"text/plain"},{"path":"relative","size":1,"mediaType":"text/plain"}]}`, cookies, headers)
+	if batch.Code != http.StatusCreated || !bytes.Contains(batch.Body.Bytes(), []byte(`"capability"`)) || !bytes.Contains(batch.Body.Bytes(), []byte(`"errorKind":"invalid"`)) {
+		t.Fatalf("mixed batch = %d %s", batch.Code, batch.Body.String())
+	}
+
+	entry, _ := createHTTPFile(t, env, env.session, env.csrf, "/public.txt", "public", "public-download-upload-1")
+	share := performRequest(t, env.handler, http.MethodPost, "/api/v1/shares", origin, `{"path":"/public.txt"}`, cookies, driveMutationHeaders(env.csrf.Value, "public-download-share-01"))
+	if share.Code != http.StatusCreated {
+		t.Fatalf("share = %d %s", share.Code, share.Body.String())
+	}
+	var shareEnvelope struct {
+		Link string `json:"link"`
+	}
+	decodeResponse(t, share, &shareEnvelope)
+	token := strings.TrimPrefix(shareEnvelope.Link, origin+"/s/")
+	downloadBody, _ := json.Marshal(map[string]any{"path": "/", "version": entry.Version, "preview": true})
+	denied := performRequest(t, env.handler, http.MethodPost, "/api/v1/public/shares/"+token+"/downloads", "https://attacker.example", string(downloadBody), nil, map[string]string{"Content-Type": "application/json"})
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin public download = %d %s", denied.Code, denied.Body.String())
+	}
+	download := performRequest(t, env.handler, http.MethodPost, "/api/v1/public/shares/"+token+"/downloads", origin, string(downloadBody), nil, map[string]string{"Content-Type": "application/json"})
+	if download.Code != http.StatusCreated || !bytes.Contains(download.Body.Bytes(), []byte(`"mode":"text"`)) {
+		t.Fatalf("public download = %d %s", download.Code, download.Body.String())
+	}
+
+	trashed := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"paths":["/public.txt"]}`, cookies, driveMutationHeaders(env.csrf.Value, "empty-trash-route-00001"))
+	if trashed.Code != http.StatusAccepted {
+		t.Fatalf("trash = %d %s", trashed.Code, trashed.Body.String())
+	}
+	listing := performRequest(t, env.handler, http.MethodGet, "/api/v1/trash", "", "", []*http.Cookie{env.session}, nil)
+	if listing.Code != http.StatusOK || !bytes.Contains(listing.Body.Bytes(), []byte("public.txt")) {
+		t.Fatalf("trash listing = %d %s", listing.Code, listing.Body.String())
+	}
+	unconfirmed := performRequest(t, env.handler, http.MethodPost, "/api/v1/trash/empty", origin, `{"confirm":false}`, cookies, driveMutationHeaders(env.csrf.Value, "empty-trash-route-00002"))
+	if unconfirmed.Code != http.StatusBadRequest {
+		t.Fatalf("unconfirmed empty = %d %s", unconfirmed.Code, unconfirmed.Body.String())
+	}
+	empty := performRequest(t, env.handler, http.MethodPost, "/api/v1/trash/empty", origin, `{"confirm":true}`, cookies, driveMutationHeaders(env.csrf.Value, "empty-trash-route-00003"))
+	if empty.Code != http.StatusAccepted {
+		t.Fatalf("empty trash = %d %s", empty.Code, empty.Body.String())
+	}
+
+	shell := performRequest(t, env.handler, http.MethodGet, "/s/"+token, "", "", nil, nil)
+	if shell.Code != http.StatusOK || !bytes.Contains(shell.Body.Bytes(), []byte("EndlessFS")) {
+		t.Fatalf("public shell = %d %s", shell.Code, shell.Body.String())
+	}
+}
+
+func TestIntegrationBatchCopyMoveAndUploadLifecycleRoutes(t *testing.T) {
+	env := newDriveHTTPEnvironment(t)
+	const origin = "https://drive.example.test"
+	cookies := []*http.Cookie{env.session, env.csrf}
+	createHTTPFile(t, env, env.session, env.csrf, "/a.txt", "a", "batch-copy-upload-a-01")
+	createHTTPFile(t, env, env.session, env.csrf, "/b.txt", "b", "batch-copy-upload-b-01")
+
+	mixed := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/copy", origin, `{"source":"/a.txt","items":[{"source":"/a.txt","destination":"/copy-a.txt"}]}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-copy-mixed-0001"))
+	if mixed.Code != http.StatusBadRequest {
+		t.Fatalf("mixed batch fields = %d %s", mixed.Code, mixed.Body.String())
+	}
+	invalidSource := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/copy", origin, `{"items":[{"source":"relative","destination":"/copy-a.txt"}]}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-copy-invalid-001"))
+	if invalidSource.Code != http.StatusBadRequest {
+		t.Fatalf("invalid batch source = %d %s", invalidSource.Code, invalidSource.Body.String())
+	}
+	invalidDestination := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/copy", origin, `{"items":[{"source":"/a.txt","destination":"relative"}]}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-copy-invalid-002"))
+	if invalidDestination.Code != http.StatusBadRequest {
+		t.Fatalf("invalid batch destination = %d %s", invalidDestination.Code, invalidDestination.Body.String())
+	}
+	copyResponse := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/copy", origin, `{"items":[{"source":"/a.txt","destination":"/copy-a.txt"},{"source":"/b.txt","destination":"/copy-b.txt"}]}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-copy-success-001"))
+	if copyResponse.Code != http.StatusAccepted || !bytes.Contains(copyResponse.Body.Bytes(), []byte(`"items"`)) {
+		t.Fatalf("batch copy = %d %s", copyResponse.Code, copyResponse.Body.String())
+	}
+	moveResponse := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/move", origin, `{"items":[{"source":"/copy-a.txt","destination":"/moved-a.txt"},{"source":"/copy-b.txt","destination":"/moved-b.txt"}]}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-move-success-001"))
+	if moveResponse.Code != http.StatusAccepted {
+		t.Fatalf("batch move = %d %s", moveResponse.Code, moveResponse.Body.String())
+	}
+
+	created := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads", origin, `{"path":"/abort.txt","size":1,"mediaType":"text/plain","resumable":true}`, cookies, driveMutationHeaders(env.csrf.Value, "upload-abort-route-0001"))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("upload create = %d %s", created.Code, created.Body.String())
+	}
+	var capability domain.UploadCapability
+	decodeResponse(t, created, &capability)
+	status := performRequest(t, env.handler, http.MethodGet, "/api/v1/uploads/"+string(capability.UploadID), "", "", []*http.Cookie{env.session}, nil)
+	if status.Code != http.StatusOK {
+		t.Fatalf("upload status = %d %s", status.Code, status.Body.String())
+	}
+	aborted := performRequest(t, env.handler, http.MethodDelete, "/api/v1/uploads/"+string(capability.UploadID), origin, `{}`, cookies, driveMutationHeaders(env.csrf.Value, ""))
+	if aborted.Code != http.StatusNoContent {
+		t.Fatalf("upload abort = %d %s", aborted.Code, aborted.Body.String())
+	}
+
+	for _, target := range []string{"/api/v1/files?limit=invalid", "/api/v1/files?order=sideways", "/api/v1/trash?limit=1001", "/api/v1/public/shares/missing?limit=0"} {
+		response := performRequest(t, env.handler, http.MethodGet, target, "", "", []*http.Cookie{env.session}, nil)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid query %q = %d %s", target, response.Code, response.Body.String())
+		}
 	}
 }
 

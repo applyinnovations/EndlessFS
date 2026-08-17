@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
+	"strings"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
@@ -48,7 +50,13 @@ func (e *Engine) CloseWrites(ctx context.Context, checkpointID string) error {
 	if err := e.drainAdmissions(ctx, gate.Epoch); err != nil {
 		return err
 	}
+	if err := e.drainFileOperations(ctx); err != nil {
+		return err
+	}
 	if err := e.drainActiveUploads(ctx); err != nil {
+		return err
+	}
+	if err := e.pruneStateVersions(ctx); err != nil {
 		return err
 	}
 	gateObject, gateEnvelope, gate, err = e.readGate(ctx)
@@ -65,6 +73,44 @@ func (e *Engine) CloseWrites(ctx context.Context, checkpointID string) error {
 	}
 	_, err = e.backend.Put(ctx, storageformat.WriteGateKey(), body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: gateObject.Version})
 	return err
+}
+
+func (e *Engine) pruneStateVersions(ctx context.Context) error {
+	stateObjects, err := e.listAll(ctx, storageformat.StateRecordsPrefix())
+	if err != nil {
+		return err
+	}
+	live := make(map[string]struct{}, len(stateObjects))
+	for _, info := range stateObjects {
+		object, getErr := e.backend.Get(ctx, info.Key)
+		if getErr != nil {
+			return getErr
+		}
+		var envelope storageformat.Envelope
+		var record storageformat.StateRecord
+		if err := storageformat.DecodeEnvelope(object.Body, info.Key, stateRecordSchema, &envelope, &record); err != nil {
+			return err
+		}
+		logical, err := parseExistingStateKey(record.LogicalKey)
+		if err != nil || logical.String() != record.LogicalKey {
+			return domain.NewError(domain.ErrorInvalid, "invalid state record during checkpoint")
+		}
+		namespace := strings.SplitN(record.LogicalKey, "/", 2)[0]
+		live[storageformat.StateVersionKey(namespace, record.LogicalKey, envelope.LogicalVersion).String()] = struct{}{}
+	}
+	versionObjects, err := e.listAll(ctx, storageformat.StateVersionsPrefix())
+	if err != nil {
+		return err
+	}
+	for _, info := range versionObjects {
+		if _, found := live[info.Key.String()]; found {
+			continue
+		}
+		if err := e.backend.Delete(ctx, info.Key, objectstore.DeleteCondition{Version: info.Version}); err != nil && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (e *Engine) drainActiveUploads(ctx context.Context) error {
@@ -102,8 +148,14 @@ func (e *Engine) drainActiveUploads(ctx context.Context) error {
 		if !ok {
 			return domain.NewError(domain.ErrorPreconditionFailed, "active upload cannot be drained")
 		}
-		if err := transfers.AbortUpload(ctx, upload.UploadID); err != nil && !errors.Is(err, domain.ErrNotFound) {
-			return err
+		lease, leaseObject, leaseErr := e.Files().readTransferLease(ctx, upload)
+		if leaseErr == nil {
+			if err := transfers.AbortUpload(ctx, lease.Ciphertext); err != nil && !errors.Is(err, domain.ErrNotFound) {
+				return err
+			}
+			_ = e.backend.Delete(ctx, leaseObject.Key, objectstore.DeleteCondition{Version: leaseObject.Version})
+		} else if !errors.Is(leaseErr, domain.ErrNotFound) {
+			return leaseErr
 		}
 		upload.State = storageformat.UploadAborted
 		body, err := storageformat.EncodeEnvelope(uploadRecordSchema, info.Key, envelope.Revision+1, upload)
@@ -228,7 +280,43 @@ func (e *Engine) takeoverAndRecover(ctx context.Context, object objectstore.Obje
 	if err := e.recoverMutation(ctx, admission); err != nil {
 		return err
 	}
+	if admission.Mutation.RecoverOperationKey != "" {
+		key, parseErr := objectstore.ParseKey(admission.Mutation.RecoverOperationKey)
+		if parseErr != nil {
+			return parseErr
+		}
+		if err := e.Files().recoverFileOperation(ctx, key); err != nil {
+			return err
+		}
+	}
 	return e.backend.Delete(ctx, object.Key, objectstore.DeleteCondition{Version: version})
+}
+
+func (e *Engine) drainFileOperations(ctx context.Context) error {
+	objects, err := e.listAll(ctx, storageformat.OperationPrefix())
+	if err != nil {
+		return err
+	}
+	for _, info := range objects {
+		object, getErr := e.backend.Get(ctx, info.Key)
+		if errors.Is(getErr, domain.ErrNotFound) {
+			continue
+		}
+		if getErr != nil {
+			return getErr
+		}
+		var generic storageformat.Envelope
+		if err := state.DecodeJSONWithLimit(object.Body, &generic, storageformat.MaxCanonicalBytes); err != nil {
+			return err
+		}
+		if generic.Schema != fileOperationSchema {
+			continue
+		}
+		if err := e.Files().recoverFileOperation(ctx, info.Key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (e *Engine) recoverMutation(ctx context.Context, admission storageformat.Admission) error {
@@ -240,8 +328,17 @@ func (e *Engine) recoverMutation(ctx context.Context, admission storageformat.Ad
 		return domain.NewError(domain.ErrorInvalid, "admission intent digest mismatch")
 	}
 	intent := *admission.Mutation
-	if err := e.ensureMutationPrerequisites(ctx, intent.Prerequisites); err != nil {
+	if err := e.ensureMutationPrerequisitesForRecovery(ctx, intent.Prerequisites, intent.RecoverOperationKey); err != nil {
 		return err
+	}
+	if intent.RecoverUploadKey != "" {
+		key, parseErr := objectstore.ParseKey(intent.RecoverUploadKey)
+		if parseErr != nil {
+			return parseErr
+		}
+		if err := e.Files().recoverUploadLease(ctx, key); err != nil {
+			return err
+		}
 	}
 	if err := e.ensureMutationCopies(ctx, intent.Copies); err != nil {
 		return err
@@ -328,7 +425,27 @@ func (e *Engine) ensureUploadAborts(ctx context.Context, uploadIDs []string) err
 		if uploadID == "" || uploadID <= previous {
 			return domain.NewError(domain.ErrorInvalid, "invalid upload abort order")
 		}
-		if err := transfers.AbortUpload(ctx, uploadID); err != nil && !errors.Is(err, domain.ErrNotFound) {
+		leaseKey := storageformat.LeaseKey(transfers.BackendKind(), uploadID)
+		leaseObject, err := e.backend.Get(ctx, leaseKey)
+		if errors.Is(err, domain.ErrNotFound) {
+			previous = uploadID
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var envelope storageformat.Envelope
+		var lease storageformat.TransferLease
+		if err := storageformat.DecodeEnvelope(leaseObject.Body, leaseKey, transferLeaseSchema, &envelope, &lease); err != nil {
+			return err
+		}
+		if lease.SchemaVersion != 1 || lease.BackendKind != transfers.BackendKind() || lease.UploadID != uploadID || len(lease.Ciphertext) == 0 {
+			return domain.NewError(domain.ErrorInvalid, "invalid upload abort lease")
+		}
+		if err := transfers.AbortUpload(ctx, lease.Ciphertext); err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
+		if err := e.backend.Delete(ctx, leaseKey, objectstore.DeleteCondition{Version: leaseObject.Version}); err != nil && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
 			return err
 		}
 		previous = uploadID
@@ -382,6 +499,10 @@ func (e *Engine) ensureMutationCopies(ctx context.Context, copies []storageforma
 }
 
 func (e *Engine) ensureMutationPrerequisites(ctx context.Context, prerequisites []storageformat.MutationObject) error {
+	return e.ensureMutationPrerequisitesForRecovery(ctx, prerequisites, "")
+}
+
+func (e *Engine) ensureMutationPrerequisitesForRecovery(ctx context.Context, prerequisites []storageformat.MutationObject, recoverOperationKey string) error {
 	previous := ""
 	for _, prerequisite := range prerequisites {
 		if prerequisite.Key <= previous || len(prerequisite.Body) == 0 {
@@ -393,7 +514,7 @@ func (e *Engine) ensureMutationPrerequisites(ctx context.Context, prerequisites 
 		}
 		existing, err := e.backend.Get(ctx, key)
 		if err == nil {
-			if !bytes.Equal(existing.Body, prerequisite.Body) {
+			if !bytes.Equal(existing.Body, prerequisite.Body) && (prerequisite.Key != recoverOperationKey || !sameFileOperationIntent(existing.Body, prerequisite.Body, key)) {
 				return domain.NewError(domain.ErrorInvalid, "mutation prerequisite collision")
 			}
 			previous = prerequisite.Key
@@ -407,13 +528,30 @@ func (e *Engine) ensureMutationPrerequisites(ctx context.Context, prerequisites 
 				return err
 			}
 			winner, getErr := e.backend.Get(ctx, key)
-			if getErr != nil || !bytes.Equal(winner.Body, prerequisite.Body) {
+			if getErr != nil || (!bytes.Equal(winner.Body, prerequisite.Body) && (prerequisite.Key != recoverOperationKey || !sameFileOperationIntent(winner.Body, prerequisite.Body, key))) {
 				return domain.NewError(domain.ErrorInvalid, "mutation prerequisite collision")
 			}
 		}
 		previous = prerequisite.Key
 	}
 	return nil
+}
+
+func sameFileOperationIntent(currentBody, initialBody []byte, key objectstore.Key) bool {
+	var currentEnvelope, initialEnvelope storageformat.Envelope
+	var current, initial storageformat.FileOperation
+	if storageformat.DecodeEnvelope(currentBody, key, fileOperationSchema, &currentEnvelope, &current) != nil || storageformat.DecodeEnvelope(initialBody, key, fileOperationSchema, &initialEnvelope, &initial) != nil {
+		return false
+	}
+	current.State = initial.State
+	current.Attempt = initial.Attempt
+	current.Fence = initial.Fence
+	current.ReplicaAttemptID = initial.ReplicaAttemptID
+	current.ExpiresAt = initial.ExpiresAt
+	current.UpdatedAt = initial.UpdatedAt
+	current.ErrorKind = initial.ErrorKind
+	current.Error = initial.Error
+	return reflect.DeepEqual(current, initial)
 }
 
 func canonicalLogicalVersion(body []byte) (string, error) {

@@ -45,6 +45,7 @@ func TestContractMemoryProvider(t *testing.T) {
 					Download: metrics.DownloadBytes,
 				}
 			},
+			ChecksumSHA256: true,
 		}
 	})
 }

@@ -3,12 +3,14 @@ package portable_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
 )
@@ -84,6 +86,33 @@ func TestPortableDirectoryCursorAndRawCopyIgnoreNativeVersions(t *testing.T) {
 		got, statErr := reopened.Files().Stat(context.Background(), scope, entry.Path)
 		if statErr != nil || got.Version != entry.Version {
 			t.Fatalf("portable Stat(%s) = %+v, %v", entry.Path.String(), got, statErr)
+		}
+	}
+}
+
+func TestMaximumUnicodeVirtualPathResolvesThroughBoundedCanonicalKeys(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2038, 3, 4, 5, 6, 7, 0, time.UTC))
+	engine := openEngine(t, backend, clock, 35, nil)
+	user, _ := domain.ParseUserID("IyMjIyMjIyMjIyMjIyMjIw")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	segment := strings.Repeat("界", 80)
+	parts := make([]string, 16)
+	for index := range parts {
+		parts[index] = segment + string(rune('a'+index))
+		path := domain.MustParseUserPath("/" + strings.Join(parts[:index+1], "/"))
+		if _, err := engine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: path}); err != nil {
+			t.Fatalf("CreateDirectory() at depth %d: %v", index+1, err)
+		}
+	}
+	deepest := domain.MustParseUserPath("/" + strings.Join(parts, "/"))
+	if _, err := engine.Files().Stat(context.Background(), scope, deepest); err != nil {
+		t.Fatalf("Stat() maximum path: %v", err)
+	}
+	for key := range backend.Export() {
+		parsed, err := objectstore.ParseKey(key)
+		if err != nil || len(parsed.String()) > objectstore.MaxKeyBytes {
+			t.Fatalf("canonical key exceeds provider profile: %q, %v", key, err)
 		}
 	}
 }

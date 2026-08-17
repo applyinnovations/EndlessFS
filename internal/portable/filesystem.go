@@ -38,9 +38,11 @@ type directorySnapshot struct {
 	envelope storageformat.Envelope
 	root     storageformat.DirectoryRoot
 	entries  []storageformat.DirectoryEntry
+	pending  bool
 }
 
 type preparedDirectory struct {
+	manifestID    string
 	rootBody      []byte
 	prerequisites []storageformat.MutationObject
 }
@@ -157,6 +159,9 @@ func (s *FileStore) CreateDirectory(ctx context.Context, scope domain.Scope, req
 		if err != nil {
 			return domain.Entry{}, err
 		}
+		if parent.pending {
+			return domain.Entry{}, domain.NewError(domain.ErrorUnavailable, "directory has a pending operation")
+		}
 		path, existing, err := resolveDirectoryDestination(request.Path, conflict, request.ExpectedVersion, parent.entries)
 		if err != nil {
 			return domain.Entry{}, err
@@ -271,14 +276,34 @@ func (s *FileStore) readDirectory(ctx context.Context, scope domain.Scope, direc
 	if err := storageformat.DecodeEnvelope(object.Body, key, directoryRootSchema, &envelope, &root); err != nil {
 		return directorySnapshot{}, err
 	}
-	if root.SchemaVersion != 1 || root.DirectoryID != directoryID || root.ManifestID == "" {
+	if root.SchemaVersion != 1 || root.DirectoryID != directoryID || (root.ManifestID == "" && root.Pending == nil) {
 		return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "invalid directory root")
 	}
-	entries, err := s.readManifestEntries(ctx, scope, directoryID, root.ManifestID)
+	manifestID := root.ManifestID
+	pending := root.Pending != nil
+	if pending {
+		if root.Pending.OperationID == "" || root.Pending.Fence == 0 || root.Pending.PostManifestID == "" || root.Pending.PreManifestID != root.ManifestID {
+			return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "invalid pending directory transition")
+		}
+		operation, operationErr := s.readFileOperation(ctx, scope.UserID(), root.Pending.OperationID)
+		if operationErr != nil {
+			return directorySnapshot{}, operationErr
+		}
+		if operation.Fence < root.Pending.Fence {
+			return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "directory transition fence is invalid")
+		}
+		if operation.State == storageformat.FileOperationCommitted || operation.State == storageformat.FileOperationSucceeded {
+			manifestID = root.Pending.PostManifestID
+		}
+	}
+	if manifestID == "" {
+		return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, pending: pending}, nil
+	}
+	entries, err := s.readManifestEntries(ctx, scope, directoryID, manifestID)
 	if err != nil {
 		return directorySnapshot{}, err
 	}
-	return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, entries: entries}, nil
+	return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, entries: entries, pending: pending}, nil
 }
 
 func (s *FileStore) readManifestEntries(ctx context.Context, scope domain.Scope, directoryID, manifestID string) ([]storageformat.DirectoryEntry, error) {
@@ -364,7 +389,7 @@ func (s *FileStore) prepareDirectory(ctx context.Context, scope domain.Scope, di
 	if err != nil {
 		return preparedDirectory{}, err
 	}
-	return preparedDirectory{rootBody: rootBody, prerequisites: prerequisites}, nil
+	return preparedDirectory{manifestID: manifestID, rootBody: rootBody, prerequisites: prerequisites}, nil
 }
 
 func validateDirectoryEntries(entries []storageformat.DirectoryEntry) error {

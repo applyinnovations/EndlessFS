@@ -10,12 +10,43 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
+	"github.com/applyinnovations/endlessfs/internal/portable"
+	"github.com/applyinnovations/endlessfs/internal/provider/providercontract"
 )
+
+func TestContractPortableProviderOverMemoryBackend(t *testing.T) {
+	providercontract.Run(t, func(t *testing.T) providercontract.Harness {
+		backend := objectmemory.New()
+		server := httptest.NewServer(backend)
+		t.Cleanup(server.Close)
+		clock := domain.NewFixedClock(time.Date(2038, 1, 2, 3, 4, 5, 0, time.UTC))
+		if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(39, 1<<20)))); err != nil {
+			t.Fatal(err)
+		}
+		engine := openEngine(t, backend, clock, 40, nil)
+		return providercontract.Harness{
+			Storage: engine.Files(), Client: server.Client(), Advance: clock.Advance,
+			UploadOffset: func(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) (int64, error) {
+				status, err := engine.Files().UploadStatus(ctx, scope, uploadID)
+				return status.ConfirmedOffset, err
+			},
+			SimulateOffset: func(ctx context.Context, _ domain.Scope, uploadID domain.UploadID, offset int64) error {
+				return backend.SimulateUploadOffset(ctx, string(uploadID), offset)
+			},
+			ByteCounts: func() providercontract.ByteCounts {
+				counts := backend.TransferByteCounts()
+				return providercontract.ByteCounts{Upload: counts.Upload, Download: counts.Download}
+			},
+			ChecksumSHA256: true,
+		}
+	})
+}
 
 func TestPortableDirectUploadPublishesImmutableBlobAndRangeDownload(t *testing.T) {
 	backend := objectmemory.New()
@@ -76,6 +107,75 @@ func TestPortableDirectUploadPublishesImmutableBlobAndRangeDownload(t *testing.T
 	counts := backend.TransferByteCounts()
 	if counts.Upload != int64(len(content)) || counts.Download != 3 {
 		t.Fatalf("data-plane counts = %+v", counts)
+	}
+}
+
+func TestPortableUploadInitiationIsIdempotentAcrossReplicas(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2039, 1, 3, 3, 4, 5, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(90, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	first := openEngine(t, backend, clock, 91, nil)
+	second := openEngine(t, backend, clock, 92, nil)
+	user, _ := domain.ParseUserID("SkpKSkpKSkpKSkpKSkpKSg")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	request := domain.CreateUploadRequest{
+		Path: domain.MustParseUserPath("/idempotent.bin"), Size: 4, MediaType: "application/octet-stream",
+		Resumable: true, IdempotencyKey: "same-upload-initiation",
+	}
+	created, err := first.Files().CreateUpload(context.Background(), scope, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := second.Files().CreateUpload(context.Background(), scope, request)
+	if err != nil || replayed.UploadID != created.UploadID || replayed.URL != created.URL || replayed.Method != created.Method {
+		t.Fatalf("replayed CreateUpload() = %+v, %v; created=%+v", replayed, err, created)
+	}
+	request.Size++
+	if _, err := second.Files().CreateUpload(context.Background(), scope, request); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("changed idempotent CreateUpload() error = %v", err)
+	}
+}
+
+func TestConcurrentReplicaUploadInitiationHasOneIdempotentOutcome(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2039, 1, 4, 3, 4, 5, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(93, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engines := []*portable.Engine{openEngine(t, backend, clock, 94, nil), openEngine(t, backend, clock, 95, nil)}
+	user, _ := domain.ParseUserID("S0tLS0tLS0tLS0tLS0tLSw")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	request := domain.CreateUploadRequest{
+		Path: domain.MustParseUserPath("/concurrent.bin"), Size: 8, MediaType: "application/octet-stream",
+		Resumable: true, IdempotencyKey: "concurrent-upload-initiation",
+	}
+	start := make(chan struct{})
+	results := make([]domain.UploadCapability, len(engines))
+	errorsFound := make([]error, len(engines))
+	var wait sync.WaitGroup
+	for index, engine := range engines {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			results[index], errorsFound[index] = engine.Files().CreateUpload(context.Background(), scope, request)
+		}()
+	}
+	close(start)
+	wait.Wait()
+	for index, err := range errorsFound {
+		if err != nil {
+			t.Fatalf("replica %d CreateUpload() error = %v", index, err)
+		}
+	}
+	if results[0].UploadID != results[1].UploadID || results[0].URL != results[1].URL || results[0].Method != results[1].Method {
+		t.Fatalf("concurrent outcomes differ: %+v and %+v", results[0], results[1])
 	}
 }
 
@@ -173,5 +273,51 @@ func TestCheckpointWaitsForActiveCapabilityThenDrainsItAfterExpiry(t *testing.T)
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusNotFound {
 		t.Fatalf("drained capability status = %d", response.StatusCode)
+	}
+}
+
+func TestUploadCompletionLostSuccessIsIdempotentlyReconciled(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2039, 4, 5, 6, 7, 8, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(47, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	crasher := &stepFailure{}
+	engine := openEngine(t, backend, clock, 48, crasher)
+	user, _ := domain.ParseUserID("RUVFRUVFRUVFRUVFRUVFRQ")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	path := domain.MustParseUserPath("/lost-success.txt")
+	content := []byte("durable")
+	capability, err := engine.Files().CreateUpload(context.Background(), scope, domain.CreateUploadRequest{Path: path, Size: int64(len(content)), MediaType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := http.NewRequest(capability.Method, capability.URL, bytes.NewReader(content))
+	for name, value := range capability.Headers {
+		request.Header.Set(name, value)
+	}
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	crasher.step = portable.StepStateAfterBackend
+	completion := domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(content)), MediaType: "text/plain"}
+	if _, err := engine.Files().CompleteUpload(context.Background(), scope, completion); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("lost-success CompleteUpload() error = %v", err)
+	}
+	visible, err := engine.Files().Stat(context.Background(), scope, path)
+	if err != nil {
+		t.Fatalf("lost-success file was not visible: %v", err)
+	}
+	reconciled, err := engine.Files().CompleteUpload(context.Background(), scope, completion)
+	if err != nil || reconciled.Version != visible.Version {
+		t.Fatalf("reconciled CompleteUpload() = %+v, %v; visible=%+v", reconciled, err, visible)
+	}
+	replayed, err := engine.Files().CompleteUpload(context.Background(), scope, completion)
+	if err != nil || replayed.Version != visible.Version {
+		t.Fatalf("replayed CompleteUpload() = %+v, %v", replayed, err)
 	}
 }

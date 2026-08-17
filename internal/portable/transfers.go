@@ -2,6 +2,8 @@ package portable
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -10,7 +12,10 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
-const uploadRecordSchema = "upload-record-v1"
+const (
+	uploadRecordSchema  = "upload-record-v1"
+	transferLeaseSchema = "transfer-lease-v1"
+)
 
 func (s *FileStore) CreateUpload(ctx context.Context, scope domain.Scope, request domain.CreateUploadRequest) (domain.UploadCapability, error) {
 	if err := validateFileRequest(ctx, scope); err != nil {
@@ -26,6 +31,13 @@ func (s *FileStore) CreateUpload(ctx context.Context, scope domain.Scope, reques
 	conflict, err := domain.NormalizeConflictMode(request.Conflict)
 	if err != nil {
 		return domain.UploadCapability{}, err
+	}
+	if err := validatePortableIdempotencyKey(request.IdempotencyKey); err != nil {
+		return domain.UploadCapability{}, err
+	}
+	fingerprint := storageformat.Digest([]byte(fmt.Sprintf("upload\x00%s\x00%s\x00%d\x00%s\x00%s\x00%s\x00%t", areaName(scope.Area()), request.Path.String(), request.Size, mediaType, conflict, request.ExpectedVersion, request.Resumable)))
+	if replayed, found, err := s.lookupIdempotentUpload(ctx, scope.UserID(), request.IdempotencyKey, fingerprint); found || err != nil {
+		return replayed, err
 	}
 	transfers, err := s.transferBackend()
 	if err != nil {
@@ -45,10 +57,12 @@ func (s *FileStore) CreateUpload(ctx context.Context, scope domain.Scope, reques
 	}
 	operationKey := storageformat.OperationKey(scope.UserID().String(), uploadID)
 	stagingKey := storageformat.StagingKey(scope.UserID().String(), uploadID, "upload")
+	leaseKey := storageformat.LeaseKey(transfers.BackendKind(), uploadID)
 	now := s.engine.clock.Now().UTC()
 	record := storageformat.UploadRecord{
 		SchemaVersion: 1, UploadID: uploadID, UserID: scope.UserID().String(), Area: areaName(scope.Area()),
 		RequestedPath: request.Path.String(), ResolvedPath: resolved.String(), StagingKey: stagingKey.String(),
+		BackendKind: transfers.BackendKind(), LeaseKey: leaseKey.String(),
 		Size: request.Size, MediaType: mediaType, Conflict: conflict, ExpectedVersion: request.ExpectedVersion,
 		TargetExisted: existing != nil, Resumable: request.Resumable, State: storageformat.UploadActive,
 		CreatedAt: now, ExpiresAt: now.Add(s.engine.uploadTTL),
@@ -58,24 +72,202 @@ func (s *FileStore) CreateUpload(ctx context.Context, scope domain.Scope, reques
 		return domain.UploadCapability{}, err
 	}
 	intent := storageformat.MutationIntent{Action: storageformat.MutationCreate, TargetKey: operationKey.String(), TargetBody: body}
+	if request.IdempotencyKey != "" {
+		intent.Prerequisites = []storageformat.MutationObject{{Key: operationKey.String(), Body: body}}
+		idempotencyKey := storageformat.IdempotencyKey(scope.UserID().String(), request.IdempotencyKey)
+		idempotencyBody, encodeErr := storageformat.EncodeEnvelope(idempotencySchema, idempotencyKey, 1, storageformat.IdempotencyRecord{
+			SchemaVersion: 1, UserID: scope.UserID().String(), Kind: "upload",
+			KeyDigest: storageformat.Digest([]byte(request.IdempotencyKey)), Fingerprint: fingerprint, OperationID: uploadID,
+		})
+		if encodeErr != nil {
+			return domain.UploadCapability{}, encodeErr
+		}
+		intent.TargetKey = idempotencyKey.String()
+		intent.TargetBody = idempotencyBody
+		intent.RecoverUploadKey = operationKey.String()
+	}
+	var handle objectstore.UploadHandle
+	var replayed domain.UploadCapability
 	if err := s.engine.withAdmission(ctx, intent, func() error {
-		_, putErr := s.engine.backend.Put(ctx, operationKey, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
-		return putErr
+		if len(intent.Prerequisites) > 0 {
+			if prerequisiteErr := s.engine.ensureMutationPrerequisites(ctx, intent.Prerequisites); prerequisiteErr != nil {
+				return prerequisiteErr
+			}
+		} else if _, putErr := s.engine.backend.Put(ctx, operationKey, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); putErr != nil {
+			return putErr
+		}
+		handle, err = transfers.BeginUpload(ctx, objectstore.UploadRequest{
+			UploadID: uploadID, Key: stagingKey, Size: request.Size, MediaType: mediaType,
+			Resumable: request.Resumable, ExpiresAt: record.ExpiresAt,
+		})
+		if err != nil {
+			return err
+		}
+		leaseBody, encodeErr := storageformat.EncodeEnvelope(transferLeaseSchema, leaseKey, 1, storageformat.TransferLease{
+			SchemaVersion: 1, BackendKind: transfers.BackendKind(), UploadID: uploadID,
+			Ciphertext: append([]byte(nil), handle.Lease...), ExpiresAt: record.ExpiresAt,
+		})
+		if encodeErr != nil {
+			return encodeErr
+		}
+		leaseVersion, putErr := s.engine.backend.Put(ctx, leaseKey, leaseBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
+		if putErr != nil {
+			return putErr
+		}
+		if request.IdempotencyKey == "" {
+			return nil
+		}
+		target := objectstore.MustKey(intent.TargetKey)
+		if _, putErr := s.engine.backend.Put(ctx, target, intent.TargetBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); putErr != nil {
+			if !errors.Is(putErr, domain.ErrConflict) {
+				return putErr
+			}
+			_ = transfers.AbortUpload(ctx, handle.Lease)
+			_ = s.engine.backend.Delete(ctx, leaseKey, objectstore.DeleteCondition{Version: leaseVersion})
+			s.markUploadAborted(ctx, operationKey)
+			existing, found, lookupErr := s.lookupIdempotentUpload(ctx, scope.UserID(), request.IdempotencyKey, fingerprint)
+			if found && lookupErr == nil {
+				replayed = existing
+				return nil
+			}
+			if lookupErr != nil {
+				return lookupErr
+			}
+			return domain.NewError(domain.ErrorConflict, "idempotent upload winner is unavailable")
+		}
+		return nil
 	}); err != nil {
 		return domain.UploadCapability{}, err
 	}
-	capability, err := transfers.BeginUpload(ctx, objectstore.UploadRequest{
-		UploadID: uploadID, Key: stagingKey, Size: request.Size, MediaType: mediaType,
-		Resumable: request.Resumable, ExpiresAt: record.ExpiresAt,
-	})
-	if err != nil {
-		return domain.UploadCapability{}, err
+	if replayed.UploadID != "" {
+		return replayed, nil
 	}
+	capability := handle.Capability
+	return domainUploadCapability(uploadID, capability), nil
+}
+
+func (s *FileStore) markUploadAborted(ctx context.Context, operationKey objectstore.Key) {
+	object, err := s.engine.backend.Get(ctx, operationKey)
+	if err != nil {
+		return
+	}
+	var envelope storageformat.Envelope
+	var record storageformat.UploadRecord
+	if err := storageformat.DecodeEnvelope(object.Body, operationKey, uploadRecordSchema, &envelope, &record); err != nil || record.State != storageformat.UploadActive {
+		return
+	}
+	record.State = storageformat.UploadAborted
+	body, err := storageformat.EncodeEnvelope(uploadRecordSchema, operationKey, envelope.Revision+1, record)
+	if err != nil {
+		return
+	}
+	_, _ = s.engine.backend.Put(ctx, operationKey, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
+}
+
+func domainUploadCapability(uploadID string, capability objectstore.UploadCapability) domain.UploadCapability {
 	return domain.UploadCapability{
 		UploadID: domain.UploadID(uploadID), Protocol: capability.Protocol, URL: capability.URL,
 		Method: capability.Method, Headers: copyHeaders(capability.Headers), ExpiresAt: capability.ExpiresAt, ChunkRules: capability.ChunkRules,
 		Framing: capability.Framing, DeclaredSize: capability.DeclaredSize,
-	}, nil
+	}
+}
+
+func (s *FileStore) lookupIdempotentUpload(ctx context.Context, userID domain.UserID, keyValue, fingerprint string) (domain.UploadCapability, bool, error) {
+	if keyValue == "" {
+		return domain.UploadCapability{}, false, nil
+	}
+	key := storageformat.IdempotencyKey(userID.String(), keyValue)
+	object, err := s.engine.backend.Get(ctx, key)
+	if errors.Is(err, domain.ErrNotFound) {
+		return domain.UploadCapability{}, false, nil
+	}
+	if err != nil {
+		return domain.UploadCapability{}, false, err
+	}
+	var envelope storageformat.Envelope
+	var idempotency storageformat.IdempotencyRecord
+	if err := storageformat.DecodeEnvelope(object.Body, key, idempotencySchema, &envelope, &idempotency); err != nil {
+		return domain.UploadCapability{}, false, err
+	}
+	if idempotency.SchemaVersion != 1 || idempotency.UserID != userID.String() || idempotency.Kind != "upload" || idempotency.KeyDigest != storageformat.Digest([]byte(keyValue)) || idempotency.OperationID == "" {
+		return domain.UploadCapability{}, false, domain.NewError(domain.ErrorConflict, "idempotency key belongs to another operation")
+	}
+	if idempotency.Fingerprint != fingerprint {
+		return domain.UploadCapability{}, false, domain.NewError(domain.ErrorConflict, "idempotency key was used for a different request")
+	}
+	_, _, record, err := s.readUploadRecord(ctx, userID, idempotency.OperationID)
+	if err != nil {
+		return domain.UploadCapability{}, true, err
+	}
+	if record.State != storageformat.UploadActive || !s.engine.clock.Now().Before(record.ExpiresAt) {
+		return domain.UploadCapability{}, true, domain.NewError(domain.ErrorConflict, "idempotent upload is no longer active")
+	}
+	lease, _, err := s.readTransferLease(ctx, record)
+	if err != nil {
+		return domain.UploadCapability{}, true, err
+	}
+	transfers, err := s.transferBackend()
+	if err != nil {
+		return domain.UploadCapability{}, true, err
+	}
+	capability, err := transfers.ResumeUpload(ctx, lease.Ciphertext)
+	if err != nil {
+		return domain.UploadCapability{}, true, err
+	}
+	return domainUploadCapability(record.UploadID, capability), true, nil
+}
+
+func (s *FileStore) recoverUploadLease(ctx context.Context, operationKey objectstore.Key) error {
+	object, err := s.engine.backend.Get(ctx, operationKey)
+	if err != nil {
+		return err
+	}
+	var envelope storageformat.Envelope
+	var record storageformat.UploadRecord
+	if err := storageformat.DecodeEnvelope(object.Body, operationKey, uploadRecordSchema, &envelope, &record); err != nil {
+		return err
+	}
+	if record.SchemaVersion != 1 || record.State != storageformat.UploadActive || record.UploadID == "" || record.StagingKey == "" {
+		return domain.NewError(domain.ErrorInvalid, "invalid recoverable upload")
+	}
+	transfers, err := s.transferBackend()
+	if err != nil {
+		return err
+	}
+	leaseKey := storageformat.LeaseKey(transfers.BackendKind(), record.UploadID)
+	if record.BackendKind != transfers.BackendKind() || record.LeaseKey != leaseKey.String() {
+		return domain.NewError(domain.ErrorPreconditionFailed, "recoverable upload backend does not match")
+	}
+	if _, err := s.engine.backend.Get(ctx, leaseKey); err == nil {
+		return nil
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	if !s.engine.clock.Now().Before(record.ExpiresAt) {
+		return nil
+	}
+	stagingKey, err := objectstore.ParseKey(record.StagingKey)
+	if err != nil {
+		return err
+	}
+	handle, err := transfers.BeginUpload(ctx, objectstore.UploadRequest{
+		UploadID: record.UploadID, Key: stagingKey, Size: record.Size, MediaType: record.MediaType,
+		Resumable: record.Resumable, ExpiresAt: record.ExpiresAt,
+	})
+	if err != nil {
+		return err
+	}
+	body, err := storageformat.EncodeEnvelope(transferLeaseSchema, leaseKey, 1, storageformat.TransferLease{
+		SchemaVersion: 1, BackendKind: transfers.BackendKind(), UploadID: record.UploadID,
+		Ciphertext: append([]byte(nil), handle.Lease...), ExpiresAt: record.ExpiresAt,
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := s.engine.backend.Put(ctx, leaseKey, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil && !errors.Is(err, domain.ErrConflict) {
+		return err
+	}
+	return nil
 }
 
 func (s *FileStore) UploadStatus(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) (domain.UploadStatus, error) {
@@ -96,7 +288,11 @@ func (s *FileStore) UploadStatus(ctx context.Context, scope domain.Scope, upload
 	if err != nil {
 		return domain.UploadStatus{}, err
 	}
-	progress, err := transfers.UploadProgress(ctx, string(uploadID))
+	lease, _, err := s.readTransferLease(ctx, record)
+	if err != nil {
+		return domain.UploadStatus{}, err
+	}
+	progress, err := transfers.UploadProgress(ctx, lease.Ciphertext)
 	if err != nil {
 		return domain.UploadStatus{}, err
 	}
@@ -130,24 +326,11 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 	if err != nil {
 		return domain.Entry{}, err
 	}
-	if record.Area != areaName(scope.Area()) || record.State != storageformat.UploadActive {
+	if record.Area != areaName(scope.Area()) || record.State == storageformat.UploadAborted {
 		return domain.Entry{}, domain.NewError(domain.ErrorNotFound, "upload not found")
 	}
 	if record.RequestedPath != request.Path.String() || record.Size != request.Size || record.MediaType != mediaType {
 		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload constraints do not match initiation")
-	}
-	if !s.engine.clock.Now().Before(record.ExpiresAt) {
-		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload capability expired")
-	}
-	progress, err := transfers.UploadProgress(ctx, string(request.UploadID))
-	if err != nil {
-		return domain.Entry{}, err
-	}
-	if !progress.Complete || progress.Offset != record.Size || progress.Size != record.Size || progress.Version == "" {
-		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload is incomplete")
-	}
-	if request.ChecksumSHA256 != "" && (progress.SHA256 == "" || !strings.EqualFold(request.ChecksumSHA256, progress.SHA256)) {
-		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload checksum does not match")
 	}
 	resolvedPath, err := domain.ParseUserPath(record.ResolvedPath)
 	if err != nil {
@@ -157,7 +340,39 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 	if err != nil {
 		return domain.Entry{}, err
 	}
+	if parent.pending {
+		return domain.Entry{}, domain.NewError(domain.ErrorUnavailable, "upload destination has a pending operation")
+	}
 	current, exists := findDirectoryEntry(parent.entries, resolvedPath.Name())
+	if record.State == storageformat.UploadCompleted {
+		if !exists || !matchesUploadEntry(record, current) {
+			return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "completed upload destination changed")
+		}
+		return domainEntry(resolvedPath, current), nil
+	}
+	if exists && matchesUploadEntry(record, current) {
+		if err := s.finishUpload(ctx, operationObject, operationEnvelope, record); err != nil {
+			return domain.Entry{}, err
+		}
+		return domainEntry(resolvedPath, current), nil
+	}
+	if !s.engine.clock.Now().Before(record.ExpiresAt) {
+		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload capability expired")
+	}
+	lease, _, err := s.readTransferLease(ctx, record)
+	if err != nil {
+		return domain.Entry{}, err
+	}
+	progress, err := transfers.UploadProgress(ctx, lease.Ciphertext)
+	if err != nil {
+		return domain.Entry{}, err
+	}
+	if !progress.Complete || progress.Offset != record.Size || progress.Size != record.Size || progress.Version == "" {
+		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload is incomplete")
+	}
+	if request.ChecksumSHA256 != "" && (progress.SHA256 == "" || !strings.EqualFold(request.ChecksumSHA256, progress.SHA256)) {
+		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload checksum does not match")
+	}
 	if record.TargetExisted {
 		if !exists || domain.Version(current.LogicalVersion) != record.ExpectedVersion {
 			return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload destination changed")
@@ -165,14 +380,11 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 	} else if exists {
 		return domain.Entry{}, domain.NewError(domain.ErrorConflict, "upload destination appeared during transfer")
 	}
-	blobID, err := s.engine.ids.OpaqueID()
-	if err != nil {
-		return domain.Entry{}, err
-	}
+	blobID := record.UploadID
 	blobKey := storageformat.BlobKey(scope.UserID().String(), blobID)
 	entry := storageformat.DirectoryEntry{
 		Name: resolvedPath.Name(), NameDigest: storageformat.NameDigest(resolvedPath.Name()), Kind: domain.EntryFile,
-		BlobID: blobID, Size: record.Size, MediaType: mediaType, SHA256: progress.SHA256, ModifiedAt: s.engine.clock.Now().UTC(),
+		BlobID: blobID, Size: record.Size, MediaType: mediaType, SHA256: progress.SHA256, ModifiedAt: record.CreatedAt,
 	}
 	entry.LogicalVersion, err = directoryEntryVersion(entry)
 	if err != nil {
@@ -219,13 +431,33 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 	if err != nil {
 		return domain.Entry{}, err
 	}
-	record.State = storageformat.UploadCompleted
-	completedBody, encodeErr := storageformat.EncodeEnvelope(uploadRecordSchema, operationObject.Key, operationEnvelope.Revision+1, record)
-	if encodeErr == nil {
-		_, _ = s.engine.backend.Put(ctx, operationObject.Key, completedBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: operationObject.Version})
+	if err := s.finishUpload(ctx, operationObject, operationEnvelope, record); err != nil {
+		return domain.Entry{}, err
 	}
-	_ = transfers.AbortUpload(ctx, string(request.UploadID))
 	return domainEntry(resolvedPath, entry), nil
+}
+
+func matchesUploadEntry(record storageformat.UploadRecord, entry storageformat.DirectoryEntry) bool {
+	return entry.Kind == domain.EntryFile && entry.BlobID == record.UploadID && entry.Size == record.Size && entry.MediaType == record.MediaType
+}
+
+func (s *FileStore) finishUpload(ctx context.Context, object objectstore.Object, envelope storageformat.Envelope, record storageformat.UploadRecord) error {
+	record.State = storageformat.UploadCompleted
+	body, err := storageformat.EncodeEnvelope(uploadRecordSchema, object.Key, envelope.Revision+1, record)
+	if err != nil {
+		return err
+	}
+	intent := storageformat.MutationIntent{
+		Action: storageformat.MutationCAS, TargetKey: object.Key.String(), ExpectedLogicalVersion: envelope.LogicalVersion,
+		TargetBody: body, AbortUploads: []string{record.UploadID},
+	}
+	return s.engine.withAdmission(ctx, intent, func() error {
+		if err := s.engine.ensureUploadAborts(ctx, intent.AbortUploads); err != nil {
+			return err
+		}
+		_, err := s.engine.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
+		return err
+	})
 }
 
 func (s *FileStore) AbortUpload(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) error {
@@ -313,7 +545,7 @@ func (s *FileStore) readUploadRecord(ctx context.Context, userID domain.UserID, 
 	if err := storageformat.DecodeEnvelope(object.Body, key, uploadRecordSchema, &envelope, &record); err != nil {
 		return objectstore.Object{}, storageformat.Envelope{}, storageformat.UploadRecord{}, err
 	}
-	if record.SchemaVersion != 1 || record.UploadID != uploadID || record.UserID != userID.String() || record.Size < 0 || record.StagingKey == "" || record.ExpiresAt.IsZero() || record.CreatedAt.IsZero() || (record.State != storageformat.UploadActive && record.State != storageformat.UploadCompleted && record.State != storageformat.UploadAborted) {
+	if record.SchemaVersion != 1 || record.UploadID != uploadID || record.UserID != userID.String() || record.Size < 0 || record.StagingKey == "" || record.BackendKind == "" || record.LeaseKey == "" || record.ExpiresAt.IsZero() || record.CreatedAt.IsZero() || (record.State != storageformat.UploadActive && record.State != storageformat.UploadCompleted && record.State != storageformat.UploadAborted) {
 		return objectstore.Object{}, storageformat.Envelope{}, storageformat.UploadRecord{}, domain.NewError(domain.ErrorInvalid, "invalid stored upload record")
 	}
 	return object, envelope, record, nil
@@ -325,6 +557,30 @@ func (s *FileStore) transferBackend() (objectstore.DirectTransferBackend, error)
 		return nil, domain.NewError(domain.ErrorPreconditionFailed, "object backend has no direct transfer support")
 	}
 	return transfers, nil
+}
+
+func (s *FileStore) readTransferLease(ctx context.Context, record storageformat.UploadRecord) (storageformat.TransferLease, objectstore.Object, error) {
+	transfers, err := s.transferBackend()
+	if err != nil {
+		return storageformat.TransferLease{}, objectstore.Object{}, err
+	}
+	expected := storageformat.LeaseKey(transfers.BackendKind(), record.UploadID)
+	if record.BackendKind != transfers.BackendKind() || record.LeaseKey != expected.String() {
+		return storageformat.TransferLease{}, objectstore.Object{}, domain.NewError(domain.ErrorPreconditionFailed, "upload lease backend does not match")
+	}
+	object, err := s.engine.backend.Get(ctx, expected)
+	if err != nil {
+		return storageformat.TransferLease{}, objectstore.Object{}, err
+	}
+	var envelope storageformat.Envelope
+	var lease storageformat.TransferLease
+	if err := storageformat.DecodeEnvelope(object.Body, expected, transferLeaseSchema, &envelope, &lease); err != nil {
+		return storageformat.TransferLease{}, objectstore.Object{}, err
+	}
+	if lease.SchemaVersion != 1 || lease.BackendKind != record.BackendKind || lease.UploadID != record.UploadID || lease.ExpiresAt != record.ExpiresAt || len(lease.Ciphertext) == 0 {
+		return storageformat.TransferLease{}, objectstore.Object{}, domain.NewError(domain.ErrorInvalid, "invalid stored transfer lease")
+	}
+	return lease, object, nil
 }
 
 func copyHeaders(headers map[string]string) map[string]string {

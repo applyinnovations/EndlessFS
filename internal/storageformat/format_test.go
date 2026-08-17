@@ -37,13 +37,21 @@ func TestCanonicalEnvelopeAndLogicalVersion(t *testing.T) {
 
 func TestCanonicalKeyLayoutAndBounds(t *testing.T) {
 	for name, key := range map[string]objectstore.Key{
-		"superblock": SuperblockKey(),
-		"writer set": WriterSetKey(),
-		"gate":       WriteGateKey(),
-		"state":      StateKey("sessions", "sessions/dXNlcg/aWQ"),
-		"admission":  AdmissionKey(42, "operation-id"),
-		"staging":    StagingKey("user-id", "operation-id", "artifact-id"),
-		"blob":       BlobKey("user-id", "blob-id"),
+		"superblock":  SuperblockKey(),
+		"writer set":  WriterSetKey(),
+		"gate":        WriteGateKey(),
+		"state":       StateKey("sessions", "sessions/dXNlcg/aWQ"),
+		"state view":  StateVersionKey("sessions", "sessions/dXNlcg/aWQ", "logical-version"),
+		"admission":   AdmissionKey(42, "operation-id"),
+		"staging":     StagingKey("user-id", "operation-id", "artifact-id"),
+		"blob":        BlobKey("user-id", "blob-id"),
+		"directory":   DirectoryRootKey("user-id", "live", RootDirectoryID),
+		"manifest":    DirectoryManifestKey("user-id", "live", RootDirectoryID, "manifest-id"),
+		"page":        DirectoryPageKey("user-id", "live", RootDirectoryID, "page-id"),
+		"operation":   OperationKey("user-id", "operation-id"),
+		"idempotency": IdempotencyKey("user-id", "request-key"),
+		"checkpoint":  CheckpointKey("checkpoint-id"),
+		"lease":       LeaseKey("gcs", "lease-id"),
 	} {
 		if !key.Valid() || len(key.String()) > objectstore.MaxKeyBytes {
 			t.Fatalf("%s key invalid: %q", name, key.String())

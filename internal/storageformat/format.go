@@ -190,6 +190,8 @@ type MutationIntent struct {
 	Prerequisites          []MutationObject `json:"prerequisites,omitempty"`
 	Copies                 []MutationCopy   `json:"copies,omitempty"`
 	AbortUploads           []string         `json:"abortUploads,omitempty"`
+	RecoverOperationKey    string           `json:"recoverOperationKey,omitempty"`
+	RecoverUploadKey       string           `json:"recoverUploadKey,omitempty"`
 }
 
 type MutationObject struct {
@@ -210,10 +212,25 @@ type StateRecord struct {
 	Data          []byte `json:"data"`
 }
 
+type StateVersionRecord struct {
+	SchemaVersion  int    `json:"schemaVersion"`
+	LogicalKey     string `json:"logicalKey"`
+	LogicalVersion string `json:"logicalVersion"`
+	Data           []byte `json:"data"`
+}
+
 type DirectoryRoot struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	DirectoryID   string `json:"directoryID"`
-	ManifestID    string `json:"manifestID"`
+	SchemaVersion int                  `json:"schemaVersion"`
+	DirectoryID   string               `json:"directoryID"`
+	ManifestID    string               `json:"manifestID"`
+	Pending       *DirectoryTransition `json:"pending,omitempty"`
+}
+
+type DirectoryTransition struct {
+	OperationID    string `json:"operationID"`
+	Fence          uint64 `json:"fence"`
+	PreManifestID  string `json:"preManifestID,omitempty"`
+	PostManifestID string `json:"postManifestID"`
 }
 
 type DirectoryManifest struct {
@@ -261,6 +278,8 @@ type UploadRecord struct {
 	RequestedPath   string              `json:"requestedPath"`
 	ResolvedPath    string              `json:"resolvedPath"`
 	StagingKey      string              `json:"stagingKey"`
+	BackendKind     string              `json:"backendKind,omitempty"`
+	LeaseKey        string              `json:"leaseKey,omitempty"`
 	Size            int64               `json:"size"`
 	MediaType       string              `json:"mediaType"`
 	Conflict        domain.ConflictMode `json:"conflict"`
@@ -270,6 +289,60 @@ type UploadRecord struct {
 	State           UploadState         `json:"state"`
 	CreatedAt       time.Time           `json:"createdAt"`
 	ExpiresAt       time.Time           `json:"expiresAt"`
+}
+
+type TransferLease struct {
+	SchemaVersion int       `json:"schemaVersion"`
+	BackendKind   string    `json:"backendKind"`
+	UploadID      string    `json:"uploadID"`
+	Ciphertext    []byte    `json:"ciphertext"`
+	ExpiresAt     time.Time `json:"expiresAt"`
+}
+
+type FileOperationState string
+
+const (
+	FileOperationRunning   FileOperationState = "running"
+	FileOperationCommitted FileOperationState = "committed"
+	FileOperationSucceeded FileOperationState = "succeeded"
+	FileOperationFailed    FileOperationState = "failed"
+)
+
+type FileOperationRoot struct {
+	Key                    string `json:"key"`
+	ExpectedLogicalVersion string `json:"expectedLogicalVersion,omitempty"`
+	PreExisted             bool   `json:"preExisted"`
+	PendingBody            []byte `json:"pendingBody"`
+	FinalBody              []byte `json:"finalBody"`
+	RollbackBody           []byte `json:"rollbackBody,omitempty"`
+}
+
+type FileOperation struct {
+	SchemaVersion    int                 `json:"schemaVersion"`
+	OperationID      string              `json:"operationID"`
+	UserID           string              `json:"userID"`
+	Kind             string              `json:"kind"`
+	State            FileOperationState  `json:"state"`
+	Attempt          uint64              `json:"attempt"`
+	Fence            uint64              `json:"fence"`
+	ReplicaAttemptID string              `json:"replicaAttemptID"`
+	ExpiresAt        time.Time           `json:"expiresAt"`
+	StartedAt        time.Time           `json:"startedAt"`
+	UpdatedAt        time.Time           `json:"updatedAt"`
+	ErrorKind        domain.ErrorKind    `json:"errorKind,omitempty"`
+	Error            string              `json:"error,omitempty"`
+	Roots            []FileOperationRoot `json:"roots"`
+	Prerequisites    []MutationObject    `json:"prerequisites,omitempty"`
+	Copies           []MutationCopy      `json:"copies,omitempty"`
+}
+
+type IdempotencyRecord struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	UserID        string `json:"userID"`
+	Kind          string `json:"kind"`
+	KeyDigest     string `json:"keyDigest"`
+	Fingerprint   string `json:"fingerprint"`
+	OperationID   string `json:"operationID"`
 }
 
 type CheckpointObject struct {

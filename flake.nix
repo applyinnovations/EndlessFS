@@ -652,11 +652,14 @@
                 rg --quiet '(^|/)bin/endlessfs$' image-paths.txt
                 touch "$out"
               '';
-          goCheckWithSource =
-            name: checkSource: command: tools:
+          goCheckWithSourceAfter =
+            name: checkSource: command: tools: prerequisites:
             pkgs.runCommand "endlessfs-${name}"
               {
                 nativeBuildInputs = [ go ] ++ tools;
+                # Keep latency-sensitive checks isolated from other expensive
+                # derivations without disabling parallelism for the whole gate.
+                checkPrerequisites = prerequisites;
               }
               ''
                 # Nix builds otherwise use /homeless-shelter. Chromium needs a
@@ -679,27 +682,45 @@
                 ${command}
                 touch "$out"
               '';
+          goCheckWithSource =
+            name: checkSource: command: tools:
+            goCheckWithSourceAfter name checkSource command tools [ ];
           goCheck =
             name: command: tools:
             goCheckWithSource name testSource command tools;
           testSuite = goCheck "tests" "go test ./..." [ ];
           e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
           coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
-          fullCoverage =
-            goCheck "coverage"
+          formatCheck =
+            goCheckWithSource "format" formatSource
               ''
-                export ENDLESSFS_RUN_E2E=1
-                export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
-                export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
-                profile="$TMPDIR/endlessfs-coverage.out"
-                go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
-                gawk -f tools/coverage.awk "$profile"
+                # goCheck installs the fixed-output module closure at ./vendor for
+                # offline builds. Formatting policy applies only to repository-owned
+                # source; generated third-party modules are immutable build inputs.
+                unformatted="$(find . -path ./vendor -prune -o -type f -name '*.go' -exec gofmt -l {} +)"
+                test -z "$unformatted"
+                nixfmt --check flake.nix
               ''
               [
-                pkgs.gawk
-                headlessBrowser
+                pkgs.findutils
+                pkgs.nixfmt
               ];
-          validationSuite = if pkgs.stdenv.hostPlatform.isLinux then fullCoverage else testSuite;
+          lintCheck =
+            goCheckWithSource "lint" lintSource
+              ''
+                actionlint .github/workflows/*.yml
+                go vet ./...
+                ${sandboxedStaticcheck}
+              ''
+              [
+                pkgs.actionlint
+                pkgs.go-tools
+              ];
+          raceCheck = goCheck "race" "CGO_ENABLED=1 go test -race ./..." [ pkgs.stdenv.cc ];
+          fuzzCheck = goCheck "fuzz" ''
+            fuzztime=1000x
+            ${fuzzSmokeCommand}
+          '' [ ];
           securityCheck =
             goCheckWithSource "security" fullSource
               ''
@@ -717,6 +738,37 @@
                 pkgs.gosec
                 pkgs.govulncheck
               ];
+          repositoryPolicyCheck =
+            goCheckWithSource "repository-policy" policySource "go run ./tools/repository-policy check"
+              [ ];
+          coveragePrerequisites = [
+            self.packages.${system}.default
+            self.packages.${system}.container
+            self.packages.${system}.release
+            containerPolicy
+            formatCheck
+            lintCheck
+            raceCheck
+            fuzzCheck
+            securityCheck
+            repositoryPolicyCheck
+          ];
+          fullCoverage =
+            goCheckWithSourceAfter "coverage" testSource
+              ''
+                export ENDLESSFS_RUN_E2E=1
+                export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
+                export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
+                profile="$TMPDIR/endlessfs-coverage.out"
+                go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
+                gawk -f tools/coverage.awk "$profile"
+              ''
+              [
+                pkgs.gawk
+                headlessBrowser
+              ]
+              coveragePrerequisites;
+          validationSuite = if pkgs.stdenv.hostPlatform.isLinux then fullCoverage else testSuite;
         in
         {
           build = self.packages.${system}.default;
@@ -726,32 +778,9 @@
 
           e2e = if pkgs.stdenv.hostPlatform.isLinux then fullCoverage else e2eCompile;
 
-          format =
-            goCheckWithSource "format" formatSource
-              ''
-                # goCheck installs the fixed-output module closure at ./vendor for
-                # offline builds. Formatting policy applies only to repository-owned
-                # source; generated third-party modules are immutable build inputs.
-                unformatted="$(find . -path ./vendor -prune -o -type f -name '*.go' -exec gofmt -l {} +)"
-                test -z "$unformatted"
-                nixfmt --check flake.nix
-              ''
-              [
-                pkgs.findutils
-                pkgs.nixfmt
-              ];
+          format = formatCheck;
 
-          lint =
-            goCheckWithSource "lint" lintSource
-              ''
-                actionlint .github/workflows/*.yml
-                go vet ./...
-                ${sandboxedStaticcheck}
-              ''
-              [
-                pkgs.actionlint
-                pkgs.go-tools
-              ];
+          lint = lintCheck;
 
           tests = validationSuite;
           integration = validationSuite;
@@ -760,19 +789,14 @@
           portability = validationSuite;
           provider-verify = validationSuite;
           theme = validationSuite;
-          race = goCheck "race" "CGO_ENABLED=1 go test -race ./..." [ pkgs.stdenv.cc ];
+          race = raceCheck;
           coverage = if pkgs.stdenv.hostPlatform.isLinux then fullCoverage else coverageCompile;
-          fuzz = goCheck "fuzz" ''
-            fuzztime=1000x
-            ${fuzzSmokeCommand}
-          '' [ ];
+          fuzz = fuzzCheck;
           offline = validationSuite;
           security = securityCheck;
           dependencies = securityCheck;
 
-          repository-policy =
-            goCheckWithSource "repository-policy" policySource "go run ./tools/repository-policy check"
-              [ ];
+          repository-policy = repositoryPolicyCheck;
         }
       );
 

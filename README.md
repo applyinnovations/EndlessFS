@@ -185,6 +185,8 @@ GitHub Actions contains no project test selection or tool installation logic bey
 - `Release` re-verifies `v*.*.*` tags, publishes version and `latest` images, and creates a GitHub release containing the Nix-built binary/archive, OCI archive, checksums, dependency/license inventory, theme inventory, and release evidence.
 - `Repository Policy` explicitly applies the checked-in branch and tag rulesets.
 
+To run the image against Google Cloud Storage, follow the short [GCS container guide](./docs/gcs-container.md).
+
 Repository rules are external GitHub state, so checking in JSON does not activate them by itself. A repository administrator must:
 
 1. Create a fine-grained token limited to this repository with **Administration: write**.

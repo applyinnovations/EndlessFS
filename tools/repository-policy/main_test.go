@@ -50,6 +50,23 @@ func TestLoadPoliciesAcceptsBypassActors(t *testing.T) {
 	}
 }
 
+func TestLoadPoliciesRejectsInvalidBypassActors(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	writePolicy(t, directory, "invalid.json", `{
+  "name": "Invalid bypass actors",
+  "target": "tag",
+  "enforcement": "active",
+  "bypass_actors": {"actor_id": 7},
+  "conditions": {"ref_name": {"include": ["refs/tags/v*.*.*"], "exclude": []}},
+  "rules": [{"type": "creation"}]
+}`)
+	if _, err := loadPolicies(directory); err == nil || !strings.Contains(err.Error(), "bypass_actors must be an array") {
+		t.Fatalf("loadPolicies() error = %v", err)
+	}
+}
+
 func TestLoadPoliciesRejectsUnknownAndTrailingFields(t *testing.T) {
 	t.Parallel()
 

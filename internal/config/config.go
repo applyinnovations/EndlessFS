@@ -56,7 +56,6 @@ type Config struct {
 	DefaultLightTheme         string
 	DefaultDarkTheme          string
 	LogLevel                  slog.Level
-	MediaBrowserEnabled       bool
 	PreviewProvider           string
 	PreviewAutomatic          bool
 	PreviewFormats            []string
@@ -77,7 +76,6 @@ type PublicConfig struct {
 	MaximumUploadInitializations int      `json:"maximumUploadInitializations"`
 	DefaultTransferConcurrency   int      `json:"defaultTransferConcurrency"`
 	MaximumTransferConcurrency   int      `json:"maximumTransferConcurrency"`
-	MediaBrowserEnabled          bool     `json:"mediaBrowserEnabled"`
 	PreviewConfigured            bool     `json:"previewConfigured"`
 	PreviewAutomatic             bool     `json:"previewAutomatic"`
 	PreviewFormats               []string `json:"previewFormats"`
@@ -237,9 +235,8 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	mediaBrowserEnabled, err := parseBool(lookup, "ENDLESSFS_MEDIA_BROWSER_ENABLED", false)
-	if err != nil {
-		return Config{}, err
+	if _, configured := lookup("ENDLESSFS_MEDIA_BROWSER_ENABLED"); configured {
+		return Config{}, fmt.Errorf("ENDLESSFS_MEDIA_BROWSER_ENABLED: removed because media browsing is always available; configure only generated thumbnails with ENDLESSFS_PREVIEW_PROVIDER")
 	}
 	previewProvider := "disabled"
 	if value, ok := lookup("ENDLESSFS_PREVIEW_PROVIDER"); ok {
@@ -309,7 +306,6 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		DefaultLightTheme:         defaultLightTheme,
 		DefaultDarkTheme:          defaultDarkTheme,
 		LogLevel:                  logLevel,
-		MediaBrowserEnabled:       mediaBrowserEnabled,
 		PreviewProvider:           previewProvider,
 		PreviewAutomatic:          previewAutomatic,
 		PreviewFormats:            previewFormats,
@@ -355,7 +351,6 @@ func (c Config) Public() PublicConfig {
 		MaximumUploadInitializations: 100,
 		DefaultTransferConcurrency:   4,
 		MaximumTransferConcurrency:   8,
-		MediaBrowserEnabled:          c.MediaBrowserEnabled,
 		PreviewConfigured:            c.PreviewProvider != "" && c.PreviewProvider != "disabled",
 		PreviewAutomatic:             c.PreviewAutomatic,
 		PreviewFormats:               append([]string(nil), c.PreviewFormats...),

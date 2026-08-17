@@ -121,7 +121,6 @@ func newDriveHTTPEnvironmentConfigured(t *testing.T, withPreviews bool) driveHTT
 	var handler http.Handler
 	var logOutput bytes.Buffer
 	if withPreviews {
-		cfg.MediaBrowserEnabled = true
 		cfg.PreviewProvider = "mock"
 		cfg.PreviewAutomatic = true
 		cfg.PreviewFormats = []string{"image"}

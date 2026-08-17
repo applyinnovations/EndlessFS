@@ -11,7 +11,7 @@
 
 This document is the normative contract for the feature-complete mock-backed v1.0 baseline. Later feature releases are specified as scoped, independently reviewable extensions:
 
-- [`v1.1-media-preview-specification.md`](./v1.1-media-preview-specification.md) — optional media browsing, virtualized image grids, and built-in generated image previews;
+- [`v1.1-media-preview-specification.md`](./v1.1-media-preview-specification.md) — always-available media browsing and virtualized grids with optional generated image thumbnails;
 - [`v1.2-video-preview-specification.md`](./v1.2-video-preview-specification.md) — separately packaged video poster and metadata generation; and
 - [`v1.3-pdf-preview-specification.md`](./v1.3-pdf-preview-specification.md) — separately packaged PDF first-page preview generation.
 

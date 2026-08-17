@@ -359,7 +359,7 @@
     rows.replaceChildren();
     const visible = filterLoadedEntries(state.entries);
     state.filteredEntries = visible;
-    const gridEnabled = Boolean(state.config && state.config.mediaBrowserEnabled && state.viewMode === "grid");
+    const gridEnabled = state.viewMode === "grid";
     byID("list-presentation").hidden = gridEnabled;
     byID("media-grid").hidden = !gridEnabled;
     if (gridEnabled) renderVirtualGrid(visible);
@@ -510,7 +510,7 @@
   }
 
   function queueGridPreview(entry, frame) {
-    if (!state.config || !state.config.mediaBrowserEnabled || entry.kind !== "file" || state.previewStates.has(entry.path) || state.previewQueued.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
+    if (!state.config || !state.config.previewConfigured || entry.kind !== "file" || state.previewStates.has(entry.path) || state.previewQueued.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
     state.previewQueued.add(entry.path);
     state.previewQueue.push({ entry, frame });
     pumpPreviewQueue();
@@ -815,7 +815,7 @@
   }
 
   async function preview(entry, publicToken = "") {
-    if (!publicToken && state.config && state.config.mediaBrowserEnabled) {
+    if (!publicToken) {
       openMediaViewer(entry);
       return;
     }
@@ -902,6 +902,10 @@
     byID("preview-download").onclick = () => download(entry);
     byID("preview-status").textContent = "Resolving generated preview…";
     showViewerFallback(entry);
+    if (!state.config || !state.config.previewConfigured) {
+      byID("preview-status").textContent = "Generated thumbnails are not configured. The file-type icon is shown; the original remains available on request.";
+      return;
+    }
     try {
       const variant = previewVariant(Math.max(window.innerWidth, window.innerHeight));
       const response = await api("/api/v1/previews/resolve", { method: "POST", body: { items: [{ path: entry.path, version: entry.version, variant }] }, signal: state.viewerController.signal });
@@ -1379,7 +1383,7 @@
 
   async function start() {
     consumePathTokens(); wireEvents();
-    try { state.config = await api("/api/v1/config"); byID("transfer-concurrency").value = String(state.config.defaultTransferConcurrency || 4); byID("file-presentation").hidden = !state.config.mediaBrowserEnabled; byID("metadata-filters").hidden = !state.config.mediaBrowserEnabled; }
+    try { state.config = await api("/api/v1/config"); byID("transfer-concurrency").value = String(state.config.defaultTransferConcurrency || 4); }
     catch (error) { showState("drive-state", friendlyError(error, "EndlessFS configuration is unavailable."), "error"); byID("connection-status").textContent = "Unavailable"; }
     if (state.publicToken) { loadPublicShare(); return; }
     if (["/bootstrap", "/register", "/recover"].includes(location.pathname) || state.inviteToken || state.recoveryToken) { configureRegistration(); showOnly("registration-view"); byID("display-name").focus(); return; }

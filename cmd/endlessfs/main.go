@@ -157,7 +157,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	previewEnabled := cfg.MediaBrowserEnabled || (cfg.PreviewProvider != "" && cfg.PreviewProvider != "disabled")
+	previewEnabled := cfg.PreviewProvider != "" && cfg.PreviewProvider != "disabled"
 	if previewEnabled {
 		if err := validatePreviewCapabilities(cfg.PreviewFormats); err != nil {
 			return err

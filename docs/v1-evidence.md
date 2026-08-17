@@ -4,7 +4,7 @@ This is the release evidence index for the acceptance criteria and feature-compl
 
 ## v1.1 media browsing and generated image previews — complete
 
-The [v1.1 extension specification](./v1.1-media-preview-specification.md) is implemented for the deterministic mock-backed boundary. Image preview artifacts are static WebP only. They live behind an optional artifact-store interface and distinct capability-bearing loopback data origin; original files remain authoritative and ordinary file operations remain available when previews are disabled or unavailable. Video and PDF generation remain deferred to the separate v1.2 and v1.3 specifications.
+The [v1.1 extension specification](./v1.1-media-preview-specification.md) is implemented for the deterministic mock-backed boundary. The virtualized grid, metadata filters, full-screen viewer, and file-type icons are always available. Image thumbnail artifacts are optional static WebP only. They live behind an optional artifact-store interface and distinct capability-bearing loopback data origin; original files remain authoritative and ordinary file operations remain available when previews are disabled or unavailable. Video and PDF generation remain deferred to the separate v1.2 and v1.3 specifications.
 
 | Requirement | Automated evidence |
 |---|---|
@@ -278,7 +278,7 @@ The release coverage command is `nix run .#test-coverage`. CI first runs the cac
 | Criterion | Evidence |
 |---|---|
 | MP-001 | Default configuration tests, disabled-service provider-call instrumentation, and the complete unchanged v1 regression suite. |
-| MP-002 | Browser source assertions and Chromium icon/grid/filter/viewer paths with preview configuration independently disabled in service tests. |
+| MP-002 | Browser/config regression assertions prove grid/filter/viewer availability has no feature flag; `TestE2EMediaBrowserIsAvailableWithoutGeneratedPreviews` proves the icon-only keyboard path and zero preview requests with the provider disabled. |
 | MP-003 | Preview-store contract, runtime loss/revalidation tests, readiness integration, and successful ordinary file listing during preview loss. |
 | MP-004 | Automatic policy exclusion and exact-boundary tests, including source-byte instrumentation. |
 | MP-005 | Explicit generation after age exclusion, regenerate HTTP/browser workflows, and hard-limit/authorization negatives. |

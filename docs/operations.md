@@ -88,7 +88,7 @@ Capability responses and public configuration use `no-store`. Diagnostics omit t
 
 ## Optional v1.1 previews
 
-The media browser and generated-preview store are independent. Leaving both disabled preserves the original v1 runtime. `ENDLESSFS_MEDIA_BROWSER_ENABLED=true` enables grid/viewer/icon behavior without requiring preview storage. `ENDLESSFS_PREVIEW_PROVIDER=mock` enables the separate ephemeral preview store and a third loopback data origin; original-file transfer remains on its existing data origin.
+The media browser is always available. The list/grid choice, metadata filters, full-screen viewer, and file-type icons require no preview storage and never retrieve originals automatically. `ENDLESSFS_PREVIEW_PROVIDER=disabled` keeps generated thumbnails off; `ENDLESSFS_PREVIEW_PROVIDER=mock` enables the separate ephemeral preview store and a third loopback data origin. The removed `ENDLESSFS_MEDIA_BROWSER_ENABLED` variable is a startup error so an obsolete deployment cannot silently hide this behavior. Original-file transfer remains on its existing data origin.
 
 Configured generators and preview-store access are startup requirements. The process self-tests the packaged image codec and creates, reads, fully decodes, commits, retrieves, capability-issues, and capability-serves a fixed one-pixel WebP probe before becoming ready. Configuring `video` or `pdf` in the v1.1 image build is an intentional startup error. Preview-store access loss after startup returns `unavailable`, logs `preview_unavailable` without file/store identity, and makes `/readyz` fail while original listing and file operations continue.
 

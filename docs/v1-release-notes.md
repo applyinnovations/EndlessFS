@@ -16,7 +16,7 @@ No GCP credentials, cloud services, database, external identity provider, contai
 
 ## v1.1 media browsing and generated image previews
 
-v1.1 adds an optional row-virtualized thumbnail grid, loaded-metadata filtering, file-type icon fallback, and a full-screen previous/next viewer. Generated PNG/JPEG/GIF/WebP source previews are static WebP only, preserve the source aspect ratio, remove source metadata, and are served in configured maximum-edge variants. The UI centers those uncropped artifacts inside square grid frames.
+v1.1 adds an always-available row-virtualized thumbnail grid, loaded-metadata filtering, file-type icon fallback, and a full-screen previous/next viewer. Generated thumbnails are optional. When configured, PNG/JPEG/GIF/WebP sources produce static WebP only, preserve the source aspect ratio, remove source metadata, and are served in configured maximum-edge variants. The UI centers those uncropped artifacts inside square grid frames; otherwise it shows the appropriate built-in file-type icon.
 
 Preview artifacts live behind an independent store contract and data origin. Opaque content bindings survive rename, move, trash, and restore, while copy and content replacement receive distinct identities. Automatic age and source-size policies are independently optional and are evaluated before any original read; explicit owner-authorized Generate and Regenerate bypass only those automatic policies.
 

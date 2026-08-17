@@ -112,7 +112,6 @@ func (*alreadyDoneContext) Value(any) any { return nil }
 
 func TestRunValidatesConfiguredPreviewDependenciesBeforeServing(t *testing.T) {
 	cfg := runtimeTestConfig(t)
-	cfg.MediaBrowserEnabled = true
 	cfg.PreviewProvider = "mock"
 	cfg.PreviewAutomatic = true
 	cfg.PreviewFormats = []string{"image"}

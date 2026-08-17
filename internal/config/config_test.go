@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"strconv"
@@ -11,6 +12,22 @@ import (
 )
 
 var testSecret = base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+
+func TestPublicConfigHasNoOptionalMediaBrowserSwitch(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Parse(mapLookup(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(cfg.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "mediaBrowserEnabled") {
+		t.Fatalf("media browsing must be unconditional, public config = %s", encoded)
+	}
+}
 
 func TestParseDefaults(t *testing.T) {
 	t.Parallel()
@@ -40,7 +57,7 @@ func TestParseDefaults(t *testing.T) {
 	if cfg.LogLevel != slog.LevelInfo {
 		t.Fatalf("LogLevel = %v, want info", cfg.LogLevel)
 	}
-	if cfg.MediaBrowserEnabled || cfg.PreviewProvider != "disabled" || cfg.PreviewAutomatic {
+	if cfg.PreviewProvider != "disabled" || cfg.PreviewAutomatic {
 		t.Fatalf("preview defaults = %+v", cfg.Public())
 	}
 	if strings.Join(cfg.PreviewFormats, ",") != "image" || strings.Join(intStrings(cfg.PreviewResolutions), ",") != "256,512,1600" {
@@ -52,7 +69,6 @@ func TestParsePreviewConfiguration(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]string{
-		"ENDLESSFS_MEDIA_BROWSER_ENABLED":         "true",
 		"ENDLESSFS_PREVIEW_PROVIDER":              "mock",
 		"ENDLESSFS_PREVIEW_AUTOMATIC":             "false",
 		"ENDLESSFS_PREVIEW_FORMATS":               "image",
@@ -67,7 +83,7 @@ func TestParsePreviewConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.MediaBrowserEnabled || cfg.PreviewProvider != "mock" || cfg.PreviewAutomatic {
+	if cfg.PreviewProvider != "mock" || cfg.PreviewAutomatic {
 		t.Fatalf("preview switches = %+v", cfg.Public())
 	}
 	if cfg.PreviewAutoMaxAge == nil || *cfg.PreviewAutoMaxAge != 72*time.Hour {
@@ -80,7 +96,7 @@ func TestParsePreviewConfiguration(t *testing.T) {
 		t.Fatalf("preview execution limits = %+v", cfg)
 	}
 	public := cfg.Public()
-	if !public.MediaBrowserEnabled || !public.PreviewConfigured || public.PreviewAutomatic || strings.Join(public.PreviewFormats, ",") != "image" || public.PreviewMaxConcurrency != 4 {
+	if !public.PreviewConfigured || public.PreviewAutomatic || strings.Join(public.PreviewFormats, ",") != "image" || public.PreviewMaxConcurrency != 4 {
 		t.Fatalf("public preview configuration = %+v", public)
 	}
 }
@@ -94,6 +110,7 @@ func TestParseRejectsInvalidPreviewConfiguration(t *testing.T) {
 		value string
 		want  string
 	}{
+		{name: "removed browser switch", field: "ENDLESSFS_MEDIA_BROWSER_ENABLED", value: "false", want: "always available"},
 		{name: "unknown provider", field: "ENDLESSFS_PREVIEW_PROVIDER", value: "s3", want: "disabled or mock"},
 		{name: "unpackaged generator", field: "ENDLESSFS_PREVIEW_FORMATS", value: "video", want: "not packaged"},
 		{name: "unknown generator", field: "ENDLESSFS_PREVIEW_FORMATS", value: "office", want: "unknown"},

@@ -666,6 +666,54 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	member.assertNoExternalRequests(t, harness)
 }
 
+func TestE2EMediaBrowserIsAvailableWithoutGeneratedPreviews(t *testing.T) {
+	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
+		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
+	}
+	harness := newHarnessWithPreviews(t, false)
+	client := newTestBrowser(t)
+	bootstrapBrowser(t, client, harness)
+
+	mediaPath := writeMediaFixture(t, "icon-only.png", 96, 48)
+	if err := chromedp.Run(client.ctx,
+		chromedp.SetUploadFiles("#upload-input", []string{mediaPath}, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("upload icon-only fixture: %v", err)
+	}
+	if err := waitFor(client.ctx, `document.querySelector("#file-rows").textContent.includes("icon-only.png")`, 15*time.Second); err != nil {
+		t.Fatalf("wait for icon-only fixture: %v (%s)", err, browserStatus(client.ctx))
+	}
+	if err := chromedp.Run(client.ctx,
+		chromedp.Focus("#file-view-grid", chromedp.ByQuery),
+		chromedp.KeyEvent(" "),
+		chromedp.Focus(".media-tile-open[aria-label='View file icon-only.png']", chromedp.ByQuery),
+		chromedp.KeyEvent(kb.Enter),
+	); err != nil {
+		t.Fatalf("open icon-only grid and viewer: %v", err)
+	}
+	if err := waitFor(client.ctx, `document.querySelector("#preview-dialog").open && document.querySelector("#preview-content .viewer-fallback-icon") !== null`, 10*time.Second); err != nil {
+		t.Fatalf("wait for icon-only viewer: %v (%s)", err, browserStatus(client.ctx))
+	}
+	var correctBoundary bool
+	if err := chromedp.Run(client.ctx,
+		chromedp.Evaluate(`!document.querySelector("#file-presentation").hidden && !document.querySelector("#metadata-filters").hidden && document.querySelector("#preview-generate").hidden && document.querySelector("#preview-regenerate").hidden && document.querySelector("#preview-status").textContent.includes("not configured")`, &correctBoundary),
+		chromedp.KeyEvent(kb.ArrowLeft),
+		chromedp.KeyEvent(kb.ArrowRight),
+		chromedp.KeyEvent(kb.Escape),
+	); err != nil {
+		t.Fatalf("verify icon-only media browser: %v", err)
+	}
+	if !correctBoundary {
+		t.Fatal("grid, metadata filters, or full-screen icon viewer depended on generated-preview configuration")
+	}
+	for _, request := range client.requestSnapshot() {
+		if strings.Contains(request, "/api/v1/previews/") {
+			t.Fatalf("preview-disabled browser made generated-preview request %q", request)
+		}
+	}
+	client.assertNoExternalRequests(t, harness)
+}
+
 func writeMediaFixture(t *testing.T, name string, width, height int) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
@@ -846,6 +894,10 @@ type harness struct {
 }
 
 func newHarness(t *testing.T) harness {
+	return newHarnessWithPreviews(t, true)
+}
+
+func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
 	t.Helper()
 	controlListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -917,12 +969,18 @@ func newHarness(t *testing.T) harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{BaseURL: origin, AllowedOrigin: origin, Secure: false, AllowRegistration: true, InviteRegistration: true, MediaBrowserEnabled: true, PreviewProvider: "mock", PreviewAutomatic: true, PreviewFormats: []string{"image"}, PreviewResolutions: []int{256, 512, 1600}, PreviewMaxConcurrency: 2}
-	previewService, err := preview.NewService(preview.Options{Automatic: true, Resolutions: cfg.PreviewResolutions, MaxConcurrency: cfg.PreviewMaxConcurrency}, storage, previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, http.DefaultClient, ids, clock)
-	if err != nil {
-		t.Fatal(err)
+	cfg := config.Config{BaseURL: origin, AllowedOrigin: origin, Secure: false, AllowRegistration: true, InviteRegistration: true, PreviewProvider: "disabled", PreviewFormats: []string{"image"}, PreviewResolutions: []int{256, 512, 1600}, PreviewMaxConcurrency: 2}
+	var controlHandler http.Handler = httpapi.NewCompleteApplication(cfg, "e2e", identityService, sessions, driveService, themeManager)
+	if withPreviews {
+		cfg.PreviewProvider = "mock"
+		cfg.PreviewAutomatic = true
+		previewService, serviceErr := preview.NewService(preview.Options{Automatic: true, Resolutions: cfg.PreviewResolutions, MaxConcurrency: cfg.PreviewMaxConcurrency}, storage, previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, http.DefaultClient, ids, clock)
+		if serviceErr != nil {
+			t.Fatal(serviceErr)
+		}
+		controlHandler = httpapi.NewCompleteApplicationWithPreview(cfg, "e2e", identityService, sessions, driveService, previewService, themeManager)
 	}
-	controlServer := &http.Server{Handler: httpapi.NewCompleteApplicationWithPreview(cfg, "e2e", identityService, sessions, driveService, previewService, themeManager)}
+	controlServer := &http.Server{Handler: controlHandler}
 	dataServer := &http.Server{Handler: storage}
 	previewServer := &http.Server{Handler: previewStore}
 	serveErrors := make(chan error, 3)

@@ -62,6 +62,11 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 			t.Errorf("media browser shell is missing %q", required)
 		}
 	}
+	for _, alwaysAvailable := range []string{`<fieldset id="file-presentation" class="presentation-choice" aria-label="File presentation">`, `<div id="metadata-filters" class="metadata-filters">`} {
+		if !strings.Contains(shell, alwaysAvailable) {
+			t.Errorf("media browsing control is not always available: missing %q", alwaysAvailable)
+		}
+	}
 	script := string(mustRead("static/app.js"))
 	for _, required := range []string{
 		"renderVirtualGrid", "IntersectionObserver", "gridOverscanRows = 3", "URL.revokeObjectURL",
@@ -71,6 +76,9 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 		if !strings.Contains(script, required) {
 			t.Errorf("media browser script is missing %q", required)
 		}
+	}
+	if strings.Contains(script, "mediaBrowserEnabled") {
+		t.Error("media browsing is incorrectly gated by optional preview configuration")
 	}
 	stylesheet := string(mustRead("static/app.css"))
 	for _, required := range []string{".media-grid", ".media-tile", "aspect-ratio: 1", "object-fit: contain"} {

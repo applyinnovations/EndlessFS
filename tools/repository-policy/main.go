@@ -22,11 +22,12 @@ import (
 const apiVersion = "2022-11-28"
 
 type ruleset struct {
-	Name        string          `json:"name"`
-	Target      string          `json:"target"`
-	Enforcement string          `json:"enforcement"`
-	Conditions  json.RawMessage `json:"conditions"`
-	Rules       json.RawMessage `json:"rules"`
+	Name         string          `json:"name"`
+	Target       string          `json:"target"`
+	Enforcement  string          `json:"enforcement"`
+	BypassActors json.RawMessage `json:"bypass_actors,omitempty"`
+	Conditions   json.RawMessage `json:"conditions"`
+	Rules        json.RawMessage `json:"rules"`
 }
 
 type remoteRuleset struct {
@@ -124,6 +125,9 @@ func validate(policy ruleset) error {
 	if policy.Enforcement != "active" && policy.Enforcement != "evaluate" && policy.Enforcement != "disabled" {
 		return errors.New("invalid enforcement")
 	}
+	if len(policy.BypassActors) > 0 && !validJSONArray(policy.BypassActors) {
+		return errors.New("bypass_actors must be an array")
+	}
 	if !nonemptyJSONObject(policy.Conditions) {
 		return errors.New("conditions must be a non-empty object")
 	}
@@ -141,6 +145,11 @@ func nonemptyJSONObject(value json.RawMessage) bool {
 func nonemptyJSONArray(value json.RawMessage) bool {
 	var array []json.RawMessage
 	return json.Unmarshal(value, &array) == nil && len(array) > 0
+}
+
+func validJSONArray(value json.RawMessage) bool {
+	var array []json.RawMessage
+	return json.Unmarshal(value, &array) == nil
 }
 
 func ensureEOF(decoder *json.Decoder) error {

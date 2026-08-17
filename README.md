@@ -191,7 +191,7 @@ Repository rules are external GitHub state, so checking in JSON does not activat
 2. Add it as the `REPOSITORY_RULESET_TOKEN` secret in the protected `repository-policy` environment.
 3. Run the `Repository Policy` workflow once, and again after intentionally changing `.github/rulesets/*.json`.
 
-The policy requires one approval, resolved review threads, linear history, and the `Nix checks` and `Fast checks` job contexts; it blocks deletion and force-push of the default branch and protects `v*` release tags from mutation. Review these defaults before the first collaborative merge.
+The policy requires pull requests, resolved review threads, squash-only linear history, the GitHub-Actions-owned `Nix checks` and `Fast checks` contexts, and a one-at-a-time merge queue. While the repository has one maintainer it requires no separate approval; enable final-push and code-owner approval when a second maintainer joins. It blocks deletion and force-push of the default branch, limits `v*.*.*` tag creation to the current release maintainer, and prevents release-tag mutation or deletion.
 
 ## Delivery roadmap
 

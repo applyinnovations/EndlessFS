@@ -532,7 +532,6 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           go = goFor pkgs;
-          headlessBrowser = headlessBrowserFor pkgs;
           src = pkgs.lib.cleanSource ./.;
           sandboxedStaticcheck = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "staticcheck ./...";
           containerPolicy =
@@ -603,16 +602,7 @@
           container-policy = containerPolicy;
           release = self.packages.${system}.release;
 
-          e2e =
-            if pkgs.stdenv.hostPlatform.isLinux then
-              goCheck "e2e" ''
-                export ENDLESSFS_RUN_E2E=1
-                export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
-                export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
-                go test ./internal/e2e -run '^TestE2E' -count=1
-              '' [ headlessBrowser ]
-            else
-              goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
+          e2e = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
 
           format = goCheck "format" ''
             unformatted="$(gofmt -l .)"
@@ -637,22 +627,7 @@
           contract = goCheck "contract" "go test ./... -run '^TestContract'" [ ];
           theme = goCheck "theme" "go test ./internal/theme ./internal/httpapi -run 'Theme'" [ ];
           race = goCheck "race" "CGO_ENABLED=1 go test -race ./..." [ pkgs.stdenv.cc ];
-          coverage =
-            if pkgs.stdenv.hostPlatform.isLinux then
-              goCheck "coverage"
-                ''
-                  export ENDLESSFS_RUN_E2E=1
-                  export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
-                  export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
-                  go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$TMPDIR/coverage.out"
-                  gawk -f tools/coverage.awk "$TMPDIR/coverage.out"
-                ''
-                [
-                  headlessBrowser
-                  pkgs.gawk
-                ]
-            else
-              goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
+          coverage = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
           fuzz = goCheck "fuzz" ''
             go test ./internal/config -run '^$' -fuzz '^FuzzParse$' -fuzztime 1s
             go test ./internal/domain -run '^$' -fuzz '^FuzzParseUserPath$' -fuzztime 1s

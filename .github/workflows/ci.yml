@@ -32,8 +32,11 @@ jobs:
       - name: Restore and save Nix build cache
         uses: DeterminateSystems/magic-nix-cache-action@908b263ff629f4cc17666315b7fd3ec127c6244d # v14
 
-      - name: Run the authoritative gate
+      - name: Run the authoritative Nix gate
         run: nix flake check --print-build-logs --max-jobs 1
+
+      - name: Run the browser and coverage gate
+        run: nix run .#test-coverage
 
   darwin:
     name: Darwin build

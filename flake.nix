@@ -31,6 +31,24 @@
             hash = "sha256-oHIcVMaIkBRI13rZs+x+p8R0cwdV/4kTgukuy5P/LLE=";
           };
         });
+      headlessBrowserFor =
+        pkgs:
+        let
+          component = pkgs.playwright-driver.components."chromium-headless-shell";
+        in
+        pkgs.runCommand "endlessfs-headless-browser"
+          {
+            nativeBuildInputs = [
+              pkgs.findutils
+              pkgs.makeWrapper
+            ];
+          }
+          ''
+            browser="$(find ${component} -type f -name chrome-headless-shell -perm -0100 -print -quit)"
+            test -n "$browser"
+            mkdir -p "$out/bin"
+            makeWrapper "$browser" "$out/bin/chrome-headless-shell"
+          '';
       dependencyPolicyCommand = ''
         dependency_inventory="$(mktemp -t endlessfs-dependencies.XXXXXX)"
         trap 'rm -f "$dependency_inventory"' EXIT
@@ -280,7 +298,7 @@
           lib = pkgs.lib;
           go = goFor pkgs;
           packages = self.packages.${system};
-          headlessBrowser = pkgs.playwright-driver.components."chromium-headless-shell";
+          headlessBrowser = headlessBrowserFor pkgs;
           goTools = [ go ];
           qualityTools = goTools ++ [
             pkgs.actionlint
@@ -380,7 +398,7 @@
               ''
                 export ENDLESSFS_RUN_E2E=1
                 ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-                  export ENDLESSFS_CHROMIUM=${headlessBrowser}/chrome-headless-shell
+                  export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
                   export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
                 ''}
                 exec go test ./internal/e2e -run '^TestE2E' -count=1 "$@"
@@ -392,7 +410,7 @@
               ''
                 export ENDLESSFS_RUN_E2E=1
                 ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-                  export ENDLESSFS_CHROMIUM=${headlessBrowser}/chrome-headless-shell
+                  export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
                   export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
                 ''}
                 profile="''${TMPDIR:-/tmp}/endlessfs-coverage.out"
@@ -514,7 +532,7 @@
         let
           pkgs = nixpkgs.legacyPackages.${system};
           go = goFor pkgs;
-          headlessBrowser = pkgs.playwright-driver.components."chromium-headless-shell";
+          headlessBrowser = headlessBrowserFor pkgs;
           src = pkgs.lib.cleanSource ./.;
           sandboxedStaticcheck = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "staticcheck ./...";
           containerPolicy =
@@ -589,7 +607,7 @@
             if pkgs.stdenv.hostPlatform.isLinux then
               goCheck "e2e" ''
                 export ENDLESSFS_RUN_E2E=1
-                export ENDLESSFS_CHROMIUM=${headlessBrowser}/chrome-headless-shell
+                export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
                 export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
                 go test ./internal/e2e -run '^TestE2E' -count=1
               '' [ headlessBrowser ]
@@ -624,7 +642,7 @@
               goCheck "coverage"
                 ''
                   export ENDLESSFS_RUN_E2E=1
-                  export ENDLESSFS_CHROMIUM=${headlessBrowser}/chrome-headless-shell
+                  export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
                   export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
                   go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$TMPDIR/coverage.out"
                   gawk -f tools/coverage.awk "$TMPDIR/coverage.out"

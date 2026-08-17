@@ -245,6 +245,14 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if previewProvider != "disabled" && previewProvider != "mock" {
 		return Config{}, fmt.Errorf("ENDLESSFS_PREVIEW_PROVIDER: expected exactly disabled or mock")
 	}
+	if previewProvider == "mock" {
+		if storageProvider != "mock" {
+			return Config{}, fmt.Errorf("ENDLESSFS_PREVIEW_PROVIDER: mock previews are available only with mock storage")
+		}
+		if secure || !listenLoopback || !isLoopbackHost(baseURL.Hostname()) {
+			return Config{}, fmt.Errorf("ENDLESSFS_PREVIEW_PROVIDER: mock previews are available only in HTTP loopback development")
+		}
+	}
 	previewAutomatic, err := parseBool(lookup, "ENDLESSFS_PREVIEW_AUTOMATIC", previewProvider != "disabled")
 	if err != nil {
 		return Config{}, err

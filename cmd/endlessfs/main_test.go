@@ -55,6 +55,18 @@ func TestRunStartsAndGracefullyStopsCompleteApplication(t *testing.T) {
 	}
 }
 
+func TestControlWriteTimeoutContainsPreviewOperationDeadline(t *testing.T) {
+	if got := controlWriteTimeout(false, 5*time.Minute); got != 30*time.Second {
+		t.Fatalf("disabled preview write timeout = %s", got)
+	}
+	if got := controlWriteTimeout(true, 20*time.Second); got != 30*time.Second {
+		t.Fatalf("short preview write timeout = %s", got)
+	}
+	if got := controlWriteTimeout(true, 45*time.Second); got != 50*time.Second {
+		t.Fatalf("preview write timeout = %s", got)
+	}
+}
+
 func TestRunRejectsMalformedConfiguredMockProviderURL(t *testing.T) {
 	cfg := runtimeTestConfig(t)
 	cfg.MockProviderURL = "%"

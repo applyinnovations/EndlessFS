@@ -1,7 +1,9 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -254,8 +256,15 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := waitFor(ctx, `document.querySelector("#file-rows").textContent.includes("media-proof.png")`, 10*time.Second); err != nil {
 		t.Fatalf("wait for media fixture: %v (%s)", err, browserStatus(ctx))
 	}
+	gridBinding, gridClaim, gridArtifact := claimConcurrentBrowserPreview(t, harness, domain.MustParseUserPath("/media-proof.png"), mediaPath, 256)
 	if err := chromedp.Run(ctx, chromedp.Focus("#file-view-grid", chromedp.ByQuery), chromedp.KeyEvent(" ")); err != nil {
 		t.Fatalf("switch to media grid: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector(".media-frame[data-path='/media-proof.png']").dataset.previewState === "generating"`, 5*time.Second); err != nil {
+		t.Fatalf("wait for contending grid generation: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := harness.previewStore.Commit(context.Background(), gridBinding, gridClaim, gridArtifact); err != nil {
+		t.Fatalf("complete contending grid generation: %v", err)
 	}
 	if err := waitFor(ctx, `document.querySelector(".media-frame img[alt='Preview of media-proof.png']") !== null`, 15*time.Second); err != nil {
 		var gridState string
@@ -282,8 +291,15 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Generated WebP preview ready") && document.querySelector("#preview-content img") !== null`, 15*time.Second); err != nil {
 		t.Fatalf("wait for full-screen generated preview: %v (%s)", err, browserStatus(ctx))
 	}
+	binding, claim, artifact := claimConcurrentBrowserPreview(t, harness, domain.MustParseUserPath("/media-proof.png"), mediaPath, 1600)
 	if err := chromedp.Run(ctx, chromedp.Click("#preview-regenerate", chromedp.ByQuery)); err != nil {
 		t.Fatalf("regenerate preview: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("generation is running")`, 5*time.Second); err != nil {
+		t.Fatalf("wait for contending preview operation: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := harness.previewStore.Commit(context.Background(), binding, claim, artifact); err != nil {
+		t.Fatalf("complete contending preview generation: %v", err)
 	}
 	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Generated WebP preview ready")`, 15*time.Second); err != nil {
 		t.Fatalf("wait for regenerated preview: %v (%s)", err, browserStatus(ctx))
@@ -394,6 +410,48 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 			t.Errorf("unexpected browser request origin: %s", requestedOrigin)
 		}
 	}
+}
+
+func claimConcurrentBrowserPreview(t *testing.T, harness harness, path domain.UserPath, sourcePath string, variant int) (preview.Binding, preview.GenerationClaim, preview.Artifact) {
+	t.Helper()
+	accounts, err := harness.repository.Accounts(context.Background())
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("resolve browser preview owner: %v, accounts=%d", err, len(accounts))
+	}
+	scope, err := domain.NewScope(accounts[0].UserID, domain.AreaLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := harness.storage.Stat(context.Background(), scope, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := preview.Binding{
+		Owner: accounts[0].UserID, ContentID: entry.ContentID, ContentVersion: entry.ContentVersion,
+		MediaType: entry.MediaType, SourceSize: entry.Size, RecipeID: "image-webp-q80-v1", Variant: variant,
+	}
+	const generationID = "browser-contending-generation"
+	claim, err := harness.previewStore.Claim(context.Background(), binding, generationID, harness.clock.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, err := imagegen.New(imagegen.Options{}).Generate(context.Background(), preview.GenerationRequest{
+		Source: bytes.NewReader(source), SourceSize: int64(len(source)), MediaType: entry.MediaType, Variant: variant,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := generated.Bytes
+	sum := sha256.Sum256(data)
+	artifact := preview.Artifact{
+		GenerationID: generationID, Variant: variant, Width: generated.Width, Height: generated.Height, ContentType: preview.ContentTypeWebP,
+		Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), Bytes: data,
+	}
+	return binding, claim, artifact
 }
 
 func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
@@ -915,6 +973,8 @@ type harness struct {
 	bootstrapToken string
 	repository     *identity.Repository
 	storage        *providermemory.Provider
+	previewStore   *previewmemory.Store
+	clock          domain.Clock
 }
 
 func newHarness(t *testing.T) harness {
@@ -1023,7 +1083,10 @@ func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
 			}
 		}
 	})
-	return harness{origin: origin, dataOrigin: dataOrigin, previewOrigin: previewOrigin, bootstrapToken: bootstrapToken, repository: repository, storage: storage}
+	return harness{
+		origin: origin, dataOrigin: dataOrigin, previewOrigin: previewOrigin, bootstrapToken: bootstrapToken,
+		repository: repository, storage: storage, previewStore: previewStore, clock: clock,
+	}
 }
 
 func seedVirtualFiles(t *testing.T, harness harness, count int) {

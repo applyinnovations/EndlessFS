@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -144,6 +145,34 @@ func TestResolveCoalescesConcurrentGeneration(t *testing.T) {
 	}
 }
 
+func TestResolveBoundsAutomaticGenerationWorkPerBatch(t *testing.T) {
+	env := newPreviewEnvironment(t, preview.Options{Automatic: true})
+	items := make([]preview.ItemRequest, 0, preview.MaxResolveItems)
+	for index := range preview.MaxResolveItems {
+		entry := env.uploadImage(t, fmt.Sprintf("/bounded-%02d.png", index), 8+index, 4)
+		items = append(items, preview.ItemRequest{Path: entry.Path, Version: entry.Version, Variant: 256})
+	}
+
+	result, err := env.service.Resolve(context.Background(), env.owner, preview.ResolveRequest{Items: items})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, missing := 0, 0
+	for _, item := range result.Items {
+		switch item.State {
+		case preview.StateReady:
+			ready++
+		case preview.StateMissing:
+			missing++
+		default:
+			t.Fatalf("bounded Resolve() item = %+v", item)
+		}
+	}
+	if ready != 1 || missing != preview.MaxResolveItems-1 || env.generator.Calls() != 1 {
+		t.Fatalf("bounded Resolve() ready=%d missing=%d generator calls=%d", ready, missing, env.generator.Calls())
+	}
+}
+
 func TestGenerateIdempotencyIsSharedAcrossReplicas(t *testing.T) {
 	env := newPreviewEnvironmentWithoutService(t)
 	entry := env.uploadImage(t, "/replica-idempotency.png", 32, 16)
@@ -231,6 +260,63 @@ func TestGenerateExpiredReplicaLeaseCanBeTakenOverAndFencesOldNode(t *testing.T)
 	}
 	if generator.Calls() != 2 {
 		t.Fatalf("takeover generator calls = %d, want 2 attempts", generator.Calls())
+	}
+}
+
+func TestGenerateDistinctReplicaOperationsConvergeOnSharedClaim(t *testing.T) {
+	env := newPreviewEnvironmentWithoutService(t)
+	entry := env.uploadImage(t, "/replica-shared-claim.png", 32, 16)
+	generator := newLeaseTestGenerator()
+	options := preview.Options{
+		Automatic: true, Resolutions: []int{256}, MaxConcurrency: 1, OperationTimeout: 5 * time.Second,
+		ApplicationState: env.applicationState,
+	}
+	firstService, err := preview.NewService(options, env.source, env.store, []preview.Generator{generator}, env.sourceServer.Client(), env.ids, env.clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondService, err := preview.NewService(options, env.source, env.store, []preview.Generator{generator}, env.sourceServer.Client(), env.ids, env.clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRequest := preview.GenerateRequest{Path: entry.Path, Version: entry.Version, Variant: 256, IdempotencyKey: "preview-replica-shared-claim-first-0001"}
+	firstResult := make(chan preview.Operation, 1)
+	firstError := make(chan error, 1)
+	go func() {
+		operation, generateErr := firstService.Generate(context.Background(), env.owner, firstRequest)
+		firstResult <- operation
+		firstError <- generateErr
+	}()
+	<-generator.firstStarted
+
+	second, err := secondService.Generate(context.Background(), env.owner, preview.GenerateRequest{
+		Path: entry.Path, Version: entry.Version, Variant: 256, IdempotencyKey: "preview-replica-shared-claim-second-0001",
+	})
+	if err != nil || second.State != domain.OperationRunning || second.Result == nil || second.Result.State != preview.StateGenerating {
+		t.Fatalf("contending replica operation = %+v, %v", second, err)
+	}
+	close(generator.releaseFirst)
+	first := <-firstResult
+	if err := <-firstError; err != nil || first.State != domain.OperationSucceeded {
+		t.Fatalf("winning replica operation = %+v, %v", first, err)
+	}
+
+	converged, err := secondService.Operation(context.Background(), env.owner, second.ID)
+	if err != nil || converged.State != domain.OperationSucceeded || converged.Result == nil || converged.Result.State != preview.StateReady || converged.Result.Capability == nil {
+		t.Fatalf("contending operation did not converge = %+v, %v", converged, err)
+	}
+	if converged.Result.Artifact.GenerationID != first.Result.Artifact.GenerationID || generator.Calls() != 1 {
+		t.Fatalf("replicas did not share exact generation: first=%+v second=%+v calls=%d", first.Result.Artifact, converged.Result.Artifact, generator.Calls())
+	}
+	env.clock.Advance(options.OperationTimeout + time.Second)
+	retried, err := secondService.Generate(context.Background(), env.owner, preview.GenerateRequest{
+		Path: entry.Path, Version: entry.Version, Variant: 256, IdempotencyKey: "preview-replica-shared-claim-second-0001",
+	})
+	if err != nil || retried.State != domain.OperationSucceeded || retried.Result == nil || retried.Result.Artifact == nil {
+		t.Fatalf("expired follower retry did not converge = %+v, %v", retried, err)
+	}
+	if retried.Result.Artifact.GenerationID != first.Result.Artifact.GenerationID || generator.Calls() != 1 {
+		t.Fatalf("expired follower retry regenerated: first=%+v retry=%+v calls=%d", first.Result.Artifact, retried.Result.Artifact, generator.Calls())
 	}
 }
 

@@ -401,6 +401,420 @@ func TestObjectFailureAtEveryStateCASAndDeleteBoundaryIsLinearizable(t *testing.
 	}
 }
 
+func TestObjectFailureAtEveryDirectoryCreateBoundaryIsAtomic(t *testing.T) {
+	user, _ := domain.ParseUserID("XV1dXV1dXV1dXV1dXV1dXQ")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	consecutiveSuccesses := 0
+	for failAt := 1; failAt <= 80 && consecutiveSuccesses < 3; failAt++ {
+		backend := objectmemory.New()
+		clock := domain.NewFixedClock(time.Date(2041, 7, 8, 9, 10, 11, 0, time.UTC))
+		faults := &failNthBackend{backend: backend}
+		engine := openFaultEngine(t, faults, clock, byte(180+failAt%70))
+		path := domain.MustParseUserPath("/atomic-directory")
+		faults.arm(failAt)
+		_, createErr := engine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: path})
+		calls := faults.calls
+		faults.disable()
+		if createErr == nil && failAt > calls {
+			consecutiveSuccesses++
+		} else {
+			consecutiveSuccesses = 0
+		}
+		if createErr != nil && !errors.Is(createErr, domain.ErrUnavailable) {
+			t.Fatalf("failure %d returned unsafe error: %v", failAt, createErr)
+		}
+		if _, err := engine.Files().Stat(context.Background(), scope, path); err != nil && !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("failure %d exposed invalid directory state: %v", failAt, err)
+		}
+	}
+	if consecutiveSuccesses < 3 {
+		t.Fatal("fault matrix did not pass every directory-create object boundary")
+	}
+}
+
+func TestObjectFailureAtEveryDirectoryReadBoundaryFailsClosed(t *testing.T) {
+	fixtureBackend := objectmemory.New()
+	fixtureClock := domain.NewFixedClock(time.Date(2041, 8, 9, 10, 11, 12, 0, time.UTC))
+	fixtureEngine := openEngine(t, fixtureBackend, fixtureClock, 191, nil)
+	user, _ := domain.ParseUserID("Xl5eXl5eXl5eXl5eXl5eXg")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	for _, path := range []string{"/folder", "/folder/child"} {
+		if _, err := fixtureEngine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture := fixtureBackend.Export()
+	for _, action := range []string{"list", "stat"} {
+		t.Run(action, func(t *testing.T) {
+			consecutiveSuccesses := 0
+			for failAt := 1; failAt <= 40 && consecutiveSuccesses < 3; failAt++ {
+				backend := objectmemory.New()
+				if err := backend.Import(fixture); err != nil {
+					t.Fatal(err)
+				}
+				faults := &failNthBackend{backend: backend}
+				engine := openFaultEngine(t, faults, domain.NewFixedClock(fixtureClock.Now()), byte(192+failAt%60))
+				faults.arm(failAt)
+				var readErr error
+				if action == "list" {
+					_, readErr = engine.Files().List(context.Background(), scope, domain.ListRequest{Directory: domain.MustParseUserPath("/folder")})
+				} else {
+					_, readErr = engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/folder/child"))
+				}
+				calls := faults.calls
+				if readErr == nil && failAt > calls {
+					consecutiveSuccesses++
+				} else {
+					consecutiveSuccesses = 0
+				}
+				if readErr != nil && !errors.Is(readErr, domain.ErrUnavailable) {
+					t.Fatalf("failure %d returned unsafe error: %v", failAt, readErr)
+				}
+			}
+			if consecutiveSuccesses < 3 {
+				t.Fatalf("fault matrix did not pass every directory %s boundary", action)
+			}
+		})
+	}
+}
+
+func TestObjectFailureAtEveryDeleteBoundaryRecoversAtomically(t *testing.T) {
+	fixtureBackend := objectmemory.New()
+	fixtureClock := domain.NewFixedClock(time.Date(2041, 9, 10, 11, 12, 13, 0, time.UTC))
+	fixtureEngine := openEngine(t, fixtureBackend, fixtureClock, 201, nil)
+	user, _ := domain.ParseUserID("X19fX19fX19fX19fX19fXw")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	path := domain.MustParseUserPath("/victim")
+	if _, err := fixtureEngine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: path}); err != nil {
+		t.Fatal(err)
+	}
+	fixture := fixtureBackend.Export()
+	consecutiveSuccesses := 0
+	for failAt := 1; failAt <= 100 && consecutiveSuccesses < 3; failAt++ {
+		backend := objectmemory.New()
+		if err := backend.Import(fixture); err != nil {
+			t.Fatal(err)
+		}
+		clock := domain.NewFixedClock(fixtureClock.Now())
+		faults := &failNthBackend{backend: backend}
+		engine := openFaultEngine(t, faults, clock, byte(202+failAt%50))
+		faults.arm(failAt)
+		_, deleteErr := engine.Files().Delete(context.Background(), scope, domain.DeleteRequest{Path: path, IdempotencyKey: "delete-fault"})
+		calls := faults.calls
+		faults.disable()
+		if deleteErr == nil && failAt > calls {
+			consecutiveSuccesses++
+		} else {
+			consecutiveSuccesses = 0
+		}
+		if deleteErr != nil && !errors.Is(deleteErr, domain.ErrUnavailable) {
+			t.Fatalf("failure %d returned unsafe error: %v", failAt, deleteErr)
+		}
+		clock.Advance(2 * time.Minute)
+		if _, err := engine.CreateCheckpoint(context.Background(), fmt.Sprintf("delete-fault-%d", failAt)); err != nil {
+			t.Fatalf("failure %d recovery: %v", failAt, err)
+		}
+		if _, err := engine.Files().Stat(context.Background(), scope, path); err != nil && !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("failure %d exposed invalid delete state: %v", failAt, err)
+		}
+	}
+	if consecutiveSuccesses < 3 {
+		t.Fatal("fault matrix did not pass every delete object boundary")
+	}
+}
+
+func TestObjectFailureAtEveryMoveBoundaryRecoversWithoutSplitVisibility(t *testing.T) {
+	fixtureBackend := objectmemory.New()
+	fixtureServer := httptest.NewServer(fixtureBackend)
+	t.Cleanup(fixtureServer.Close)
+	fixtureClock := domain.NewFixedClock(time.Date(2041, 10, 11, 12, 13, 14, 0, time.UTC))
+	if err := fixtureBackend.ConfigureDataPlane(fixtureServer.URL, fixtureClock, domain.NewIDGenerator(bytes.NewReader(deterministic(211, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	fixtureEngine := openEngine(t, fixtureBackend, fixtureClock, 212, nil)
+	user, _ := domain.ParseUserID("YGBgYGBgYGBgYGBgYGBgYA")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	if _, err := fixtureEngine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/source")}); err != nil {
+		t.Fatal(err)
+	}
+	uploadPortableFile(t, fixtureServer.Client(), fixtureEngine.Files(), scope, domain.MustParseUserPath("/source/value.txt"), []byte("move fault matrix"))
+	fixture := fixtureBackend.Export()
+
+	consecutiveSuccesses := 0
+	for failAt := 1; failAt <= 180 && consecutiveSuccesses < 3; failAt++ {
+		backend := objectmemory.New()
+		if err := backend.Import(fixture); err != nil {
+			t.Fatal(err)
+		}
+		clock := domain.NewFixedClock(fixtureClock.Now())
+		faults := &failNthBackend{backend: backend}
+		engine := openFaultEngine(t, faults, clock, byte(213+failAt%40))
+		faults.arm(failAt)
+		_, moveErr := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{
+			Source: domain.MustParseUserPath("/source"), Destination: domain.MustParseUserPath("/destination"),
+			IdempotencyKey: "fault-move",
+		})
+		calls := faults.calls
+		faults.disable()
+		if moveErr == nil && failAt > calls {
+			consecutiveSuccesses++
+		} else {
+			consecutiveSuccesses = 0
+		}
+		if moveErr != nil && !errors.Is(moveErr, domain.ErrUnavailable) {
+			t.Fatalf("failure %d returned unsafe error: %v", failAt, moveErr)
+		}
+		clock.Advance(2 * time.Minute)
+		if _, err := engine.CreateCheckpoint(context.Background(), fmt.Sprintf("move-fault-%d", failAt)); err != nil {
+			t.Fatalf("failure %d recovery: %v", failAt, err)
+		}
+		sourceEntry, sourceErr := engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/source/value.txt"))
+		destinationEntry, destinationErr := engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/destination/value.txt"))
+		if sourceErr == nil && destinationErr == nil {
+			t.Fatalf("failure %d duplicated moved file: source=%+v destination=%+v", failAt, sourceEntry, destinationEntry)
+		}
+		if sourceErr != nil && !errors.Is(sourceErr, domain.ErrNotFound) {
+			t.Fatalf("failure %d source status: %v", failAt, sourceErr)
+		}
+		if destinationErr != nil && !errors.Is(destinationErr, domain.ErrNotFound) {
+			t.Fatalf("failure %d destination status: %v", failAt, destinationErr)
+		}
+		if sourceErr != nil && destinationErr != nil {
+			t.Fatalf("failure %d lost moved file", failAt)
+		}
+	}
+	if consecutiveSuccesses < 3 {
+		t.Fatal("fault matrix did not pass every recursive-move object boundary")
+	}
+}
+
+func TestObjectFailureAtEveryStateReadListAndCreateBoundaryFailsClosed(t *testing.T) {
+	fixtureBackend := objectmemory.New()
+	fixtureClock := domain.NewFixedClock(time.Date(2041, 11, 12, 13, 14, 15, 0, time.UTC))
+	fixtureEngine := openEngine(t, fixtureBackend, fixtureClock, 221, nil)
+	existing := state.MustKey(state.NamespaceAccounts, "read-fault")
+	if _, err := fixtureEngine.Create(context.Background(), existing, []byte("existing")); err != nil {
+		t.Fatal(err)
+	}
+	fixture := fixtureBackend.Export()
+	for _, action := range []string{"get", "list", "create"} {
+		t.Run(action, func(t *testing.T) {
+			consecutiveSuccesses := 0
+			for failAt := 1; failAt <= 80 && consecutiveSuccesses < 3; failAt++ {
+				backend := objectmemory.New()
+				if err := backend.Import(fixture); err != nil {
+					t.Fatal(err)
+				}
+				faults := &failNthBackend{backend: backend}
+				engine := openFaultEngine(t, faults, domain.NewFixedClock(fixtureClock.Now()), byte(222+failAt%30))
+				faults.arm(failAt)
+				var actionErr error
+				switch action {
+				case "get":
+					_, actionErr = engine.Get(context.Background(), existing)
+				case "list":
+					_, actionErr = engine.List(context.Background(), state.MustPrefix(state.NamespaceAccounts), state.PageRequest{Limit: 1})
+				case "create":
+					_, actionErr = engine.Create(context.Background(), state.MustKey(state.NamespaceAccounts, fmt.Sprintf("create-fault-%d", failAt)), []byte("new"))
+				}
+				calls := faults.calls
+				faults.disable()
+				if actionErr == nil && failAt > calls {
+					consecutiveSuccesses++
+				} else {
+					consecutiveSuccesses = 0
+				}
+				if actionErr != nil && !errors.Is(actionErr, domain.ErrUnavailable) {
+					t.Fatalf("failure %d returned unsafe error: %v", failAt, actionErr)
+				}
+				if value, err := engine.Get(context.Background(), existing); err != nil || string(value.Data) != "existing" {
+					t.Fatalf("failure %d damaged existing state: %+v, %v", failAt, value, err)
+				}
+			}
+			if consecutiveSuccesses < 3 {
+				t.Fatalf("fault matrix did not pass every state %s boundary", action)
+			}
+		})
+	}
+}
+
+func TestObjectFailureAtEveryEmptyGateTransitionBoundaryIsRetrySafe(t *testing.T) {
+	for _, action := range []string{"close", "open"} {
+		t.Run(action, func(t *testing.T) {
+			consecutiveSuccesses := 0
+			for failAt := 1; failAt <= 100 && consecutiveSuccesses < 3; failAt++ {
+				backend := objectmemory.New()
+				clock := domain.NewFixedClock(time.Date(2041, 12, 13, 14, 15, 16, 0, time.UTC))
+				faults := &failNthBackend{backend: backend}
+				engine := openFaultEngine(t, faults, clock, byte(231+failAt%20))
+				checkpointID := fmt.Sprintf("gate-fault-%d", failAt)
+				if action == "open" {
+					if _, err := engine.CreateCheckpoint(context.Background(), checkpointID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				faults.arm(failAt)
+				var transitionErr error
+				if action == "close" {
+					transitionErr = engine.CloseWrites(context.Background(), checkpointID)
+				} else {
+					transitionErr = engine.OpenWrites(context.Background(), checkpointID)
+				}
+				calls := faults.calls
+				faults.disable()
+				if transitionErr == nil && failAt > calls {
+					consecutiveSuccesses++
+				} else {
+					consecutiveSuccesses = 0
+				}
+				if transitionErr != nil && !errors.Is(transitionErr, domain.ErrUnavailable) {
+					t.Fatalf("failure %d returned unsafe error: %v", failAt, transitionErr)
+				}
+				if transitionErr != nil {
+					if action == "close" {
+						if err := engine.CloseWrites(context.Background(), checkpointID); err != nil {
+							t.Fatalf("failure %d close retry: %v", failAt, err)
+						}
+					} else if err := engine.OpenWrites(context.Background(), checkpointID); err != nil {
+						t.Fatalf("failure %d open retry: %v", failAt, err)
+					}
+				}
+				gate, err := engine.GateStatus(context.Background())
+				if err != nil || (action == "close" && gate.Mode != "closed") || (action == "open" && gate.Mode != "open") {
+					t.Fatalf("failure %d final gate = %+v, %v", failAt, gate, err)
+				}
+			}
+			if consecutiveSuccesses < 3 {
+				t.Fatalf("fault matrix did not pass every gate %s boundary", action)
+			}
+		})
+	}
+}
+
+func TestObjectFailureAtEveryAdmittedMutationRecoveryBoundaryIsRetrySafe(t *testing.T) {
+	fixtureBackend := objectmemory.New()
+	fixtureClock := domain.NewFixedClock(time.Date(2042, 1, 2, 3, 4, 5, 0, time.UTC))
+	crashed := false
+	crasher := portable.SchedulerFunc(func(_ context.Context, step string) error {
+		if step == portable.StepStateAfterAdmitted && !crashed {
+			crashed = true
+			return domain.NewError(domain.ErrorUnavailable, "injected replica loss")
+		}
+		return nil
+	})
+	fixtureEngine := openEngine(t, fixtureBackend, fixtureClock, 241, crasher)
+	key := state.MustKey(state.NamespaceAccounts, "recovery-fault")
+	if _, err := fixtureEngine.Create(context.Background(), key, []byte("recovered")); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("crashed Create() error = %v", err)
+	}
+	fixture := fixtureBackend.Export()
+	consecutiveSuccesses := 0
+	for failAt := 1; failAt <= 140 && consecutiveSuccesses < 3; failAt++ {
+		backend := objectmemory.New()
+		if err := backend.Import(fixture); err != nil {
+			t.Fatal(err)
+		}
+		clock := domain.NewFixedClock(fixtureClock.Now().Add(2 * time.Minute))
+		faults := &failNthBackend{backend: backend}
+		engine := openFaultEngine(t, faults, clock, byte(242+failAt%10))
+		checkpointID := fmt.Sprintf("admitted-recovery-fault-%d", failAt)
+		faults.arm(failAt)
+		_, checkpointErr := engine.CreateCheckpoint(context.Background(), checkpointID)
+		calls := faults.calls
+		faults.disable()
+		if checkpointErr == nil && failAt > calls {
+			consecutiveSuccesses++
+		} else {
+			consecutiveSuccesses = 0
+		}
+		if checkpointErr != nil && !errors.Is(checkpointErr, domain.ErrUnavailable) {
+			t.Fatalf("failure %d returned unsafe error: %v", failAt, checkpointErr)
+		}
+		if checkpointErr != nil {
+			clock.Advance(2 * time.Minute)
+			if _, err := engine.CreateCheckpoint(context.Background(), checkpointID); err != nil {
+				t.Fatalf("failure %d retry: %v", failAt, err)
+			}
+		}
+		value, err := engine.Get(context.Background(), key)
+		if err != nil || string(value.Data) != "recovered" {
+			t.Fatalf("failure %d recovered value = %+v, %v", failAt, value, err)
+		}
+	}
+	if consecutiveSuccesses < 3 {
+		t.Fatal("fault matrix did not pass every admitted-mutation recovery boundary")
+	}
+}
+
+func TestObjectFailureAtEveryPreparedFileOperationRecoveryBoundaryIsRetrySafe(t *testing.T) {
+	fixtureBackend := objectmemory.New()
+	fixtureServer := httptest.NewServer(fixtureBackend)
+	t.Cleanup(fixtureServer.Close)
+	fixtureClock := domain.NewFixedClock(time.Date(2042, 2, 3, 4, 5, 6, 0, time.UTC))
+	if err := fixtureBackend.ConfigureDataPlane(fixtureServer.URL, fixtureClock, domain.NewIDGenerator(bytes.NewReader(deterministic(251, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	crashed := false
+	crasher := portable.SchedulerFunc(func(_ context.Context, step string) error {
+		if step == portable.StepOperationAfterPrepared && !crashed {
+			crashed = true
+			return domain.NewError(domain.ErrorUnavailable, "injected replica loss")
+		}
+		return nil
+	})
+	fixtureEngine := openEngine(t, fixtureBackend, fixtureClock, 252, crasher)
+	user, _ := domain.ParseUserID("ZmZmZmZmZmZmZmZmZmZmZg")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	for _, path := range []string{"/source", "/destination"} {
+		if _, err := fixtureEngine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uploadPortableFile(t, fixtureServer.Client(), fixtureEngine.Files(), scope, domain.MustParseUserPath("/source/value.txt"), []byte("recovery"))
+	if _, err := fixtureEngine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{Source: domain.MustParseUserPath("/source/value.txt"), Destination: domain.MustParseUserPath("/destination/value.txt"), IdempotencyKey: "prepared-recovery"}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("crashed Move() error = %v", err)
+	}
+	fixture := fixtureBackend.Export()
+	consecutiveSuccesses := 0
+	for failAt := 1; failAt <= 180 && consecutiveSuccesses < 3; failAt++ {
+		backend := objectmemory.New()
+		if err := backend.Import(fixture); err != nil {
+			t.Fatal(err)
+		}
+		clock := domain.NewFixedClock(fixtureClock.Now().Add(2 * time.Minute))
+		faults := &failNthBackend{backend: backend}
+		engine := openFaultEngine(t, faults, clock, byte(253+failAt%3))
+		checkpointID := fmt.Sprintf("prepared-recovery-fault-%d", failAt)
+		faults.arm(failAt)
+		_, checkpointErr := engine.CreateCheckpoint(context.Background(), checkpointID)
+		calls := faults.calls
+		faults.disable()
+		if checkpointErr == nil && failAt > calls {
+			consecutiveSuccesses++
+		} else {
+			consecutiveSuccesses = 0
+		}
+		if checkpointErr != nil && !errors.Is(checkpointErr, domain.ErrUnavailable) {
+			t.Fatalf("failure %d returned unsafe error: %v", failAt, checkpointErr)
+		}
+		if checkpointErr != nil {
+			clock.Advance(2 * time.Minute)
+			if _, err := engine.CreateCheckpoint(context.Background(), checkpointID); err != nil {
+				t.Fatalf("failure %d retry: %v", failAt, err)
+			}
+		}
+		if _, err := engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/source/value.txt")); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("failure %d recovered source remains: %v", failAt, err)
+		}
+		if _, err := engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/destination/value.txt")); err != nil {
+			t.Fatalf("failure %d recovered destination missing: %v", failAt, err)
+		}
+	}
+	if consecutiveSuccesses < 3 {
+		t.Fatal("fault matrix did not pass every prepared-operation recovery boundary")
+	}
+}
+
 func TestPortablePublicMethodsRejectInvalidAndCrossOwnerRequests(t *testing.T) {
 	backend := objectmemory.New()
 	clock := domain.NewFixedClock(time.Date(2041, 3, 4, 5, 6, 7, 0, time.UTC))

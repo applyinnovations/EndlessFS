@@ -22,6 +22,7 @@ import (
 
 const (
 	MaxResolveItems       = 64
+	maxAutomaticPerBatch  = 1
 	defaultHardMaxSize    = int64(128 << 20)
 	operationIndexShards  = 16
 	maxOperationsPerShard = 128
@@ -71,6 +72,7 @@ type ItemResult struct {
 	Reason     string                     `json:"reason,omitempty"`
 	Artifact   *ArtifactMetadata          `json:"artifact,omitempty"`
 	Capability *domain.DownloadCapability `json:"capability,omitempty"`
+	waitingFor string
 }
 
 type ResolveResponse struct {
@@ -116,8 +118,9 @@ type Generator interface {
 }
 
 type generationCall struct {
-	done chan struct{}
-	err  error
+	done       chan struct{}
+	waitingFor string
+	err        error
 }
 
 type userLimit struct {
@@ -148,6 +151,7 @@ type operationRecord struct {
 	IdempotencyDigest string    `json:"idempotencyDigest"`
 	LeaseEpoch        uint64    `json:"leaseEpoch"`
 	LeaseExpiresAt    time.Time `json:"leaseExpiresAt,omitempty"`
+	WaitGenerationID  string    `json:"waitGenerationID,omitempty"`
 	ExpiresAt         time.Time `json:"expiresAt"`
 	Operation         Operation `json:"operation"`
 }
@@ -258,13 +262,23 @@ func (s *Service) Resolve(ctx context.Context, owner domain.UserID, request Reso
 		return ResolveResponse{}, domain.NewError(domain.ErrorInvalid, "preview resolve must contain 1 to 64 items")
 	}
 	response := ResolveResponse{Items: make([]ItemResult, 0, len(request.Items))}
+	automaticRemaining := maxAutomaticPerBatch
 	for _, item := range request.Items {
 		if err := s.validateItem(item); err != nil {
 			return ResolveResponse{}, err
 		}
-		result, err := s.resolveItem(ctx, owner, item, s.options.Automatic, false, false)
+		result, err := s.resolveItem(ctx, owner, item, false, false, false)
 		if err != nil {
 			return ResolveResponse{}, err
+		}
+		if result.State == StateMissing && s.options.Automatic && automaticRemaining > 0 {
+			result, err = s.resolveItem(ctx, owner, item, true, false, false)
+			if err != nil {
+				return ResolveResponse{}, err
+			}
+			if result.State != StateIneligible {
+				automaticRemaining--
+			}
 		}
 		response.Items = append(response.Items, result)
 	}
@@ -289,7 +303,7 @@ func (s *Service) Generate(ctx context.Context, owner domain.UserID, request Gen
 		if replayErr != nil {
 			return operation, replayErr
 		}
-		return s.hydrateOperation(ctx, owner, operation)
+		return s.operationResponse(ctx, owner, claim.record, operation)
 	}
 	operation := claim.record.Operation
 	executionContext, executionCancel := context.WithTimeout(ctx, s.options.OperationTimeout)
@@ -305,6 +319,7 @@ func (s *Service) Generate(ctx context.Context, owner domain.UserID, request Gen
 	} else if result.State == StateGenerating {
 		operation.State = domain.OperationRunning
 		operation.Result = &result
+		claim.record.WaitGenerationID = result.waitingFor
 	} else {
 		operation.State = domain.OperationFailed
 		operation.ErrorKind = stateErrorKind(result.State)
@@ -317,7 +332,7 @@ func (s *Service) Generate(ctx context.Context, owner domain.UserID, request Gen
 	if resolveErr != nil && (errors.Is(resolveErr, domain.ErrInvalid) || errors.Is(resolveErr, domain.ErrUnauthorized) || errors.Is(resolveErr, domain.ErrNotFound) || errors.Is(resolveErr, domain.ErrPreconditionFailed)) {
 		return operation, resolveErr
 	}
-	return s.hydrateOperation(ctx, owner, operation)
+	return s.operationResponse(ctx, owner, claim.record, operation)
 }
 
 func (s *Service) Operation(ctx context.Context, owner domain.UserID, operationID domain.OperationID) (Operation, error) {
@@ -331,7 +346,7 @@ func (s *Service) Operation(ctx context.Context, owner domain.UserID, operationI
 	if !s.clock.Now().Before(record.ExpiresAt) {
 		return Operation{}, domain.NewError(domain.ErrorNotFound, "preview operation expired")
 	}
-	return s.hydrateOperation(ctx, owner, record.Operation)
+	return s.operationResponse(ctx, owner, record, record.Operation)
 }
 
 func (s *Service) claimOperation(ctx context.Context, owner domain.UserID, idempotencyKey, fingerprint string) (operationClaim, error) {
@@ -346,7 +361,7 @@ func (s *Service) claimOperation(ctx context.Context, owner domain.UserID, idemp
 		if record.Fingerprint != fingerprint {
 			return operationClaim{}, domain.NewError(domain.ErrorConflict, "idempotency key was already used for another preview request")
 		}
-		claim, claimErr := s.claimExistingOperation(ctx, owner, idempotencyStateKey, existing.Version, record)
+		claim, claimErr := s.claimExistingOperation(ctx, owner, idempotencyStateKey, existing.Version, idempotencyDigest, record)
 		if errors.Is(claimErr, domain.ErrNotFound) {
 			_ = s.state.Delete(ctx, idempotencyStateKey, existing.Version)
 			return s.claimOperation(ctx, owner, idempotencyKey, fingerprint)
@@ -395,7 +410,7 @@ func (s *Service) claimOperation(ctx context.Context, owner domain.UserID, idemp
 	return operationClaim{record: operationRecordValue, operationKey: operationStateKey, operationVersion: operationVersion, claimed: true}, nil
 }
 
-func (s *Service) claimExistingOperation(ctx context.Context, owner domain.UserID, idempotencyKey state.Key, idempotencyVersion state.Version, idempotency idempotencyRecord) (operationClaim, error) {
+func (s *Service) claimExistingOperation(ctx context.Context, owner domain.UserID, idempotencyKey state.Key, idempotencyVersion state.Version, idempotencyDigest string, idempotency idempotencyRecord) (operationClaim, error) {
 	now := s.clock.Now().UTC()
 	if !now.Before(idempotency.ExpiresAt) {
 		_ = s.state.Delete(ctx, idempotencyKey, idempotencyVersion)
@@ -404,6 +419,9 @@ func (s *Service) claimExistingOperation(ctx context.Context, owner domain.UserI
 	record, version, err := s.readOperation(ctx, owner, idempotency.OperationID)
 	if err != nil {
 		return operationClaim{}, err
+	}
+	if record.Fingerprint != idempotency.Fingerprint || record.IdempotencyDigest != idempotencyDigest || !record.ExpiresAt.Equal(idempotency.ExpiresAt) {
+		return operationClaim{}, domain.NewError(domain.ErrorInvalid, "preview idempotency state does not match its operation")
 	}
 	claim := operationClaim{record: record, operationKey: previewOperationKey(owner, idempotency.OperationID), operationVersion: version}
 	if record.Operation.State != domain.OperationRunning || now.Before(record.LeaseExpiresAt) {
@@ -442,6 +460,7 @@ func (s *Service) finishOperation(ctx context.Context, claim operationClaim, ope
 	claim.record.Operation = persisted
 	if operation.State != domain.OperationRunning {
 		claim.record.LeaseExpiresAt = time.Time{}
+		claim.record.WaitGenerationID = ""
 	}
 	body, err := state.EncodeJSON(claim.record)
 	if err != nil {
@@ -461,6 +480,77 @@ func (s *Service) finishOperation(ctx context.Context, claim operationClaim, ope
 		return Operation{}, err
 	}
 	return operation, nil
+}
+
+func (s *Service) operationResponse(ctx context.Context, owner domain.UserID, record operationRecord, operation Operation) (Operation, error) {
+	if operation.State == domain.OperationRunning && operation.Result != nil && operation.Result.State == StateGenerating && record.WaitGenerationID != "" {
+		result, ready, err := s.resultForExactGeneration(ctx, owner, *operation.Result, record.WaitGenerationID)
+		if err != nil {
+			return Operation{}, err
+		}
+		if ready {
+			operation.State = domain.OperationSucceeded
+			operation.ErrorKind = ""
+			operation.UpdatedAt = s.clock.Now().UTC()
+			operation.Result = &result
+			return operation, nil
+		}
+	}
+	return s.hydrateOperation(ctx, owner, operation)
+}
+
+func (s *Service) resultForExactGeneration(ctx context.Context, owner domain.UserID, result ItemResult, generationID string) (ItemResult, bool, error) {
+	item := ItemRequest{Path: result.Path, Version: result.Version, Variant: result.Variant}
+	binding, err := s.bindingForItem(ctx, owner, item)
+	if err != nil {
+		return ItemResult{}, false, err
+	}
+	artifact, err := s.store.Read(ctx, binding, generationID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return result, false, nil
+	}
+	if err != nil {
+		return ItemResult{}, false, err
+	}
+	if !artifact.ValidFor(binding) {
+		return ItemResult{}, false, domain.NewError(domain.ErrorInvalid, "invalid preview artifact")
+	}
+	capability, err := s.store.CreateDownload(ctx, binding, generationID)
+	if err != nil {
+		return ItemResult{}, false, err
+	}
+	metadata := artifact.Metadata()
+	result.State, result.Artifact, result.Capability = StateReady, &metadata, &capability
+	return result, true, nil
+}
+
+func (s *Service) bindingForItem(ctx context.Context, owner domain.UserID, item ItemRequest) (Binding, error) {
+	if err := s.validateItem(item); err != nil {
+		return Binding{}, err
+	}
+	scope, err := domain.NewScope(owner, domain.AreaLive)
+	if err != nil {
+		return Binding{}, err
+	}
+	entry, err := s.source.Stat(ctx, scope, item.Path)
+	if err != nil {
+		return Binding{}, err
+	}
+	if entry.Kind != domain.EntryFile || entry.Version != item.Version {
+		return Binding{}, domain.NewError(domain.ErrorPreconditionFailed, "preview source version does not match")
+	}
+	generator := s.generatorFor(entry.MediaType)
+	if generator == nil {
+		return Binding{}, domain.NewError(domain.ErrorPreconditionFailed, "preview source format is no longer supported")
+	}
+	binding := Binding{
+		Owner: owner, ContentID: entry.ContentID, ContentVersion: entry.ContentVersion, MediaType: entry.MediaType,
+		SourceSize: entry.Size, RecipeID: generator.RecipeID(), Variant: item.Variant,
+	}
+	if !binding.Valid() {
+		return Binding{}, domain.NewError(domain.ErrorInvalid, "invalid preview source binding")
+	}
+	return binding, nil
 }
 
 func (s *Service) hydrateOperation(ctx context.Context, owner domain.UserID, operation Operation) (Operation, error) {
@@ -599,8 +689,47 @@ func validIdempotencyRecord(record idempotencyRecord) bool {
 
 func validOperationRecord(record operationRecord, owner domain.UserID, operationID domain.OperationID) bool {
 	capabilitySafe := record.Operation.Result == nil || record.Operation.Result.Capability == nil
-	return capabilitySafe && record.SchemaVersion == 1 && record.OwnerID == owner.String() && record.Fingerprint != "" && record.IdempotencyDigest != "" && record.LeaseEpoch > 0 &&
-		!record.ExpiresAt.IsZero() && record.Operation.ID == operationID && !record.Operation.StartedAt.IsZero() && !record.Operation.UpdatedAt.IsZero()
+	if !capabilitySafe || record.SchemaVersion != 1 || record.OwnerID != owner.String() || record.Fingerprint == "" || record.IdempotencyDigest == "" || record.LeaseEpoch == 0 ||
+		record.ExpiresAt.IsZero() || record.Operation.ID != operationID || record.Operation.StartedAt.IsZero() || record.Operation.UpdatedAt.IsZero() ||
+		record.Operation.UpdatedAt.Before(record.Operation.StartedAt) || !record.Operation.UpdatedAt.Before(record.ExpiresAt) || !validSHA256Digest(record.IdempotencyDigest) {
+		return false
+	}
+	result := record.Operation.Result
+	switch record.Operation.State {
+	case domain.OperationRunning:
+		if record.LeaseExpiresAt.IsZero() || !record.Operation.UpdatedAt.Before(record.LeaseExpiresAt) || record.Operation.ErrorKind != "" {
+			return false
+		}
+		if result == nil {
+			return record.WaitGenerationID == ""
+		}
+		return result.State == StateGenerating && result.Path.Valid() && !result.Path.IsRoot() && result.Version != "" && result.Variant > 0 && validGenerationID(record.WaitGenerationID)
+	case domain.OperationSucceeded:
+		return record.LeaseExpiresAt.IsZero() && record.WaitGenerationID == "" && record.Operation.ErrorKind == "" && result != nil && result.State == StateReady && result.Artifact != nil
+	case domain.OperationFailed:
+		return record.LeaseExpiresAt.IsZero() && record.WaitGenerationID == "" && validOperationErrorKind(record.Operation.ErrorKind) && (result == nil || result.State != StateReady && result.State != StateGenerating)
+	default:
+		return false
+	}
+}
+
+func validGenerationID(value string) bool {
+	return value != "" && len(value) <= 128 && !strings.ContainsAny(value, "\r\n\x00/")
+}
+
+func validSHA256Digest(value string) bool {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && base64.RawURLEncoding.EncodeToString(decoded) == value
+}
+
+func validOperationErrorKind(kind domain.ErrorKind) bool {
+	switch kind {
+	case domain.ErrorInvalid, domain.ErrorUnauthenticated, domain.ErrorUnauthorized, domain.ErrorNotFound, domain.ErrorConflict,
+		domain.ErrorPreconditionFailed, domain.ErrorRateLimited, domain.ErrorUnavailable, domain.ErrorInternal:
+		return true
+	default:
+		return false
+	}
 }
 
 func validOperationIndex(record operationIndexRecord) bool {
@@ -704,13 +833,15 @@ func (s *Service) resolveItem(ctx context.Context, owner domain.UserID, item Ite
 			return result, nil
 		}
 	}
-	if err := s.generateOnce(ctx, scope, entry, binding, generator, force); err != nil {
-		if errors.Is(err, domain.ErrUnavailable) {
+	waitingFor, generationErr := s.generateOnce(ctx, scope, entry, binding, generator, force)
+	if generationErr != nil {
+		if errors.Is(generationErr, domain.ErrUnavailable) {
 			result.State = StateUnavailable
 			return result, nil
 		}
-		if errors.Is(err, domain.ErrConflict) {
+		if errors.Is(generationErr, domain.ErrConflict) {
 			result.State = StateGenerating
+			result.waitingFor = waitingFor
 			return result, nil
 		}
 		result.State = StateFailed
@@ -752,60 +883,60 @@ func (s *Service) readyResult(ctx context.Context, binding Binding, result ItemR
 	return result, true, nil
 }
 
-func (s *Service) generateOnce(ctx context.Context, scope domain.Scope, entry domain.Entry, binding Binding, generator Generator, force bool) error {
+func (s *Service) generateOnce(ctx context.Context, scope domain.Scope, entry domain.Entry, binding Binding, generator Generator, force bool) (string, error) {
 	key := generationKey(binding)
 	s.mu.Lock()
 	if call, found := s.inflight[key]; found {
 		s.mu.Unlock()
 		select {
 		case <-ctx.Done():
-			return domain.WrapError(domain.ErrorUnavailable, "preview generation canceled", ctx.Err())
+			return "", domain.WrapError(domain.ErrorUnavailable, "preview generation canceled", ctx.Err())
 		case <-call.done:
-			return call.err
+			return call.waitingFor, call.err
 		}
 	}
 	call := &generationCall{done: make(chan struct{})}
 	s.inflight[key] = call
 	s.mu.Unlock()
 
-	call.err = s.generate(ctx, scope, entry, binding, generator, force)
+	call.waitingFor, call.err = s.generate(ctx, scope, entry, binding, generator, force)
 	s.mu.Lock()
 	delete(s.inflight, key)
 	close(call.done)
 	s.mu.Unlock()
-	return call.err
+	return call.waitingFor, call.err
 }
 
-func (s *Service) generate(ctx context.Context, scope domain.Scope, entry domain.Entry, binding Binding, generator Generator, force bool) error {
+func (s *Service) generate(ctx context.Context, scope domain.Scope, entry domain.Entry, binding Binding, generator Generator, force bool) (string, error) {
 	operationContext, cancel := context.WithTimeout(ctx, s.options.OperationTimeout)
 	defer cancel()
 	release, err := s.acquire(operationContext, scope.UserID())
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer release()
 	if !force {
 		if _, err := s.store.Latest(operationContext, binding); err == nil {
-			return nil
+			return "", nil
 		} else if !errors.Is(err, domain.ErrNotFound) {
-			return err
+			return "", err
 		}
 	}
 	generationID, err := s.ids.OpaqueID()
 	if err != nil {
-		return err
+		return "", err
 	}
 	claim, err := s.store.Claim(operationContext, binding, generationID, s.clock.Now().UTC().Add(s.options.OperationTimeout))
 	if errors.Is(err, domain.ErrConflict) {
 		if !force {
 			if _, latestErr := s.store.Latest(operationContext, binding); latestErr == nil {
-				return nil
+				return "", nil
 			}
 		}
-		return err
+		return claim.ID, err
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	committed := false
 	defer func() {
@@ -817,36 +948,36 @@ func (s *Service) generate(ctx context.Context, scope domain.Scope, entry domain
 	}()
 	capability, err := s.source.CreateDownload(operationContext, scope, domain.CreateDownloadRequest{Path: entry.Path, Version: entry.Version, Disposition: domain.DispositionInline})
 	if err != nil {
-		return err
+		return "", err
 	}
 	request, err := http.NewRequestWithContext(operationContext, capability.Method, capability.URL, nil)
 	if err != nil {
-		return domain.WrapError(domain.ErrorInternal, "could not construct preview source request", err)
+		return "", domain.WrapError(domain.ErrorInternal, "could not construct preview source request", err)
 	}
 	for name, value := range capability.Headers {
 		request.Header.Set(name, value)
 	}
 	response, err := s.client.Do(request)
 	if err != nil {
-		return domain.WrapError(domain.ErrorUnavailable, "preview source unavailable", err)
+		return "", domain.WrapError(domain.ErrorUnavailable, "preview source unavailable", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return domain.NewError(domain.ErrorUnavailable, "preview source unavailable")
+		return "", domain.NewError(domain.ErrorUnavailable, "preview source unavailable")
 	}
 	sourceBytes, err := io.ReadAll(io.LimitReader(response.Body, s.options.HardMaxSourceBytes+1))
 	if err != nil {
-		return domain.WrapError(domain.ErrorUnavailable, "preview source unavailable", err)
+		return "", domain.WrapError(domain.ErrorUnavailable, "preview source unavailable", err)
 	}
 	if int64(len(sourceBytes)) > s.options.HardMaxSourceBytes || int64(len(sourceBytes)) != entry.Size {
-		return domain.NewError(domain.ErrorInvalid, "preview source exceeds hard limits")
+		return "", domain.NewError(domain.ErrorInvalid, "preview source exceeds hard limits")
 	}
 	generated, err := generator.Generate(operationContext, GenerationRequest{Source: bytes.NewReader(sourceBytes), SourceSize: entry.Size, MediaType: entry.MediaType, Variant: binding.Variant})
 	if err != nil {
 		if operationContext.Err() != nil {
-			return domain.WrapError(domain.ErrorUnavailable, "preview generation timed out", operationContext.Err())
+			return "", domain.WrapError(domain.ErrorUnavailable, "preview generation timed out", operationContext.Err())
 		}
-		return domain.NewError(domain.ErrorInvalid, "preview generator rejected source")
+		return "", domain.NewError(domain.ErrorInvalid, "preview generator rejected source")
 	}
 	sum := sha256.Sum256(generated.Bytes)
 	artifact := Artifact{
@@ -854,13 +985,13 @@ func (s *Service) generate(ctx context.Context, scope domain.Scope, entry domain
 		ContentType: ContentTypeWebP, Size: int64(len(generated.Bytes)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), Bytes: generated.Bytes,
 	}
 	if !artifact.ValidFor(binding) {
-		return domain.NewError(domain.ErrorInvalid, "preview generator produced invalid artifact")
+		return "", domain.NewError(domain.ErrorInvalid, "preview generator produced invalid artifact")
 	}
 	if err := s.store.Commit(operationContext, binding, claim, artifact); err != nil {
-		return err
+		return "", err
 	}
 	committed = true
-	return nil
+	return "", nil
 }
 
 func (s *Service) acquire(ctx context.Context, owner domain.UserID) (func(), error) {

@@ -24,14 +24,15 @@ import (
 )
 
 type Options struct {
-	Clock           domain.Clock
-	IDs             *domain.IDGenerator
-	Key             secret.Value
-	CapabilityTTL   time.Duration
-	AllowedOrigin   string
-	MaxGenerations  int
-	MaxCapabilities int
-	MaxBindings     int
+	Clock            domain.Clock
+	IDs              *domain.IDGenerator
+	Key              secret.Value
+	CapabilityTTL    time.Duration
+	AllowedOrigin    string
+	MaxGenerations   int
+	MaxCapabilities  int
+	MaxBindings      int
+	MaxArtifactBytes int64
 }
 
 type capability struct {
@@ -43,20 +44,22 @@ type capability struct {
 type Store struct {
 	mu sync.Mutex
 
-	clock           domain.Clock
-	ids             *domain.IDGenerator
-	key             []byte
-	capabilityTTL   time.Duration
-	allowedOrigin   string
-	baseURL         string
-	available       bool
-	ready           bool
-	artifacts       map[string][]preview.Artifact
-	claims          map[string]preview.GenerationClaim
-	capabilities    map[[sha256.Size]byte]capability
-	maxGenerations  int
-	maxCapabilities int
-	maxBindings     int
+	clock            domain.Clock
+	ids              *domain.IDGenerator
+	key              []byte
+	capabilityTTL    time.Duration
+	allowedOrigin    string
+	baseURL          string
+	available        bool
+	ready            bool
+	artifacts        map[string][]preview.Artifact
+	claims           map[string]preview.GenerationClaim
+	capabilities     map[[sha256.Size]byte]capability
+	maxGenerations   int
+	maxCapabilities  int
+	maxBindings      int
+	maxArtifactBytes int64
+	artifactBytes    int64
 }
 
 func New(options Options) (*Store, error) {
@@ -78,7 +81,10 @@ func New(options Options) (*Store, error) {
 	if options.MaxBindings == 0 {
 		options.MaxBindings = 4096
 	}
-	if !secret.ValidBearerToken(options.Key.Reveal()) || options.CapabilityTTL <= 0 || options.CapabilityTTL > 10*time.Minute || options.MaxGenerations < 1 || options.MaxGenerations > 32 || options.MaxCapabilities < 1 || options.MaxCapabilities > 65536 || options.MaxBindings < 1 || options.MaxBindings > 65536 {
+	if options.MaxArtifactBytes == 0 {
+		options.MaxArtifactBytes = 512 << 20
+	}
+	if !secret.ValidBearerToken(options.Key.Reveal()) || options.CapabilityTTL <= 0 || options.CapabilityTTL > 10*time.Minute || options.MaxGenerations < 1 || options.MaxGenerations > 32 || options.MaxCapabilities < 1 || options.MaxCapabilities > 65536 || options.MaxBindings < 1 || options.MaxBindings > 65536 || options.MaxArtifactBytes < int64(len(preview.OnePixelWebP())) || options.MaxArtifactBytes > 4<<30 {
 		return nil, domain.NewError(domain.ErrorInvalid, "invalid preview store configuration")
 	}
 	key, err := base64.RawURLEncoding.DecodeString(options.Key.Reveal())
@@ -88,7 +94,7 @@ func New(options Options) (*Store, error) {
 	return &Store{
 		clock: options.Clock, ids: options.IDs, key: key, capabilityTTL: options.CapabilityTTL,
 		allowedOrigin: options.AllowedOrigin, available: true, artifacts: make(map[string][]preview.Artifact), claims: make(map[string]preview.GenerationClaim),
-		maxGenerations: options.MaxGenerations, maxCapabilities: options.MaxCapabilities, maxBindings: options.MaxBindings,
+		maxGenerations: options.MaxGenerations, maxCapabilities: options.MaxCapabilities, maxBindings: options.MaxBindings, maxArtifactBytes: options.MaxArtifactBytes,
 		capabilities: make(map[[sha256.Size]byte]capability),
 	}, nil
 }
@@ -137,15 +143,12 @@ func (s *Store) Validate(ctx context.Context) error {
 		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: access")
 	}
 	s.mu.Unlock()
-	owner, _ := domain.ParseUserID("AAAAAAAAAAAAAAAAAAAAAA")
-	binding := preview.Binding{
-		Owner: owner, ContentID: "startup-probe-content", ContentVersion: "startup-probe-version",
-		MediaType: "image/webp", SourceSize: 1, RecipeID: "startup-probe-v1", Variant: 64,
-	}
 	generationID, err := s.ids.OpaqueID()
 	if err != nil {
 		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: create")
 	}
+	binding := validationBinding(generationID)
+	defer s.cleanupValidationProbe(binding, generationID)
 	data := preview.OnePixelWebP()
 	sum := sha256.Sum256(data)
 	artifact := preview.Artifact{
@@ -184,7 +187,26 @@ func (s *Store) Validate(ctx context.Context) error {
 		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: capability")
 	}
 	s.mu.Lock()
+	s.ready = true
+	s.mu.Unlock()
+	return nil
+}
+
+func validationBinding(generationID string) preview.Binding {
+	owner, _ := domain.ParseUserID("AAAAAAAAAAAAAAAAAAAAAA")
+	return preview.Binding{
+		Owner: owner, ContentID: domain.ContentID("startup-probe-" + generationID), ContentVersion: "startup-probe-version",
+		MediaType: "image/webp", SourceSize: 1, RecipeID: "startup-probe-v1", Variant: 64,
+	}
+}
+
+func (s *Store) cleanupValidationProbe(binding preview.Binding, generationID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	key := s.bindingKey(binding)
+	for _, artifact := range s.artifacts[key] {
+		s.artifactBytes -= artifact.Size
+	}
 	delete(s.artifacts, key)
 	delete(s.claims, key)
 	for token, value := range s.capabilities {
@@ -192,9 +214,6 @@ func (s *Store) Validate(ctx context.Context) error {
 			delete(s.capabilities, token)
 		}
 	}
-	s.ready = true
-	s.mu.Unlock()
-	return nil
 }
 
 func (s *Store) Check(ctx context.Context) error {
@@ -225,7 +244,7 @@ func (s *Store) Claim(ctx context.Context, binding preview.Binding, claimID stri
 	key := s.bindingKey(binding)
 	current, knownBinding := s.claims[key]
 	if current.Valid() && s.clock.Now().Before(current.ExpiresAt) {
-		return preview.GenerationClaim{}, domain.NewError(domain.ErrorConflict, "preview generation is already claimed")
+		return current, domain.NewError(domain.ErrorConflict, "preview generation is already claimed")
 	}
 	if _, exists := s.artifacts[key]; !exists && !knownBinding && s.bindingCountLocked() >= s.maxBindings {
 		return preview.GenerationClaim{}, domain.NewError(domain.ErrorUnavailable, "preview binding capacity reached")
@@ -279,7 +298,11 @@ func (s *Store) Commit(ctx context.Context, binding preview.Binding, claim previ
 	if !s.makeArtifactCapacityLocked(key) {
 		return domain.NewError(domain.ErrorUnavailable, "preview generation retention capacity reached")
 	}
+	if s.artifactBytes > s.maxArtifactBytes-artifact.Size {
+		return domain.NewError(domain.ErrorUnavailable, "preview artifact byte capacity reached")
+	}
 	s.artifacts[key] = append(s.artifacts[key], cloneArtifact(artifact))
+	s.artifactBytes += artifact.Size
 	s.claims[key] = preview.GenerationClaim{Epoch: claim.Epoch}
 	return nil
 }
@@ -383,18 +406,20 @@ func (s *Store) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.requireAvailableLocked(); err != nil {
+		s.mu.Unlock()
 		http.Error(writer, "preview unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	capability, found := s.capabilities[tokenHash(parts[2])]
 	if !found {
+		s.mu.Unlock()
 		http.NotFound(writer, request)
 		return
 	}
 	if !s.clock.Now().Before(capability.expiresAt) {
 		delete(s.capabilities, tokenHash(parts[2]))
+		s.mu.Unlock()
 		http.Error(writer, "capability unavailable", http.StatusGone)
 		return
 	}
@@ -402,12 +427,16 @@ func (s *Store) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		if artifact.GenerationID != capability.generationID {
 			continue
 		}
+		body := append([]byte(nil), artifact.Bytes...)
+		size := artifact.Size
+		s.mu.Unlock()
 		writer.Header().Set("Content-Type", preview.ContentTypeWebP)
-		writer.Header().Set("Content-Length", strconv.FormatInt(artifact.Size, 10))
+		writer.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		writer.WriteHeader(http.StatusOK)
-		_, _ = writer.Write(artifact.Bytes)
+		_, _ = writer.Write(body)
 		return
 	}
+	s.mu.Unlock()
 	http.NotFound(writer, request)
 }
 
@@ -444,10 +473,12 @@ func (s *Store) makeArtifactCapacityLocked(key string) bool {
 	}
 	retained := make([]preview.Artifact, 0, len(items))
 	removed := false
+	var removedSize int64
 	for _, item := range items {
 		if !removed {
 			if _, exists := protected[item.GenerationID]; !exists {
 				removed = true
+				removedSize = item.Size
 				continue
 			}
 		}
@@ -455,6 +486,7 @@ func (s *Store) makeArtifactCapacityLocked(key string) bool {
 	}
 	if removed {
 		s.artifacts[key] = retained
+		s.artifactBytes -= removedSize
 	}
 	return removed
 }

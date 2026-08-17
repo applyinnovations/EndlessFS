@@ -1,7 +1,9 @@
 package storageformat
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,17 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 )
+
+type failingCanonicalValue struct{}
+
+func (failingCanonicalValue) MarshalJSON() ([]byte, error) { return nil, errors.New("encode failure") }
+
+type decodeThenFailCanonicalValue struct{}
+
+func (*decodeThenFailCanonicalValue) UnmarshalJSON([]byte) error { return nil }
+func (decodeThenFailCanonicalValue) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("encode failure")
+}
 
 type v1DirectoryEntryWithoutPreviewFields struct {
 	Name           string           `json:"name"`
@@ -131,5 +144,117 @@ func TestStrictEnvelopeRejectsCorruption(t *testing.T) {
 	var gate WriteGate
 	if err := DecodeEnvelope(tampered, key, "write-gate-v1", &envelope, &gate); err == nil {
 		t.Fatal("tampered logical version accepted")
+	}
+}
+
+func TestCanonicalFormatFailureAndValidationMatrix(t *testing.T) {
+	key := WriteGateKey()
+	if _, err := EncodeCanonical(failingCanonicalValue{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("canonical encoder failure = %v", err)
+	}
+	if _, err := EncodeCanonical(strings.Repeat("x", MaxCanonicalBytes)); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("oversized canonical value error = %v", err)
+	}
+	for _, test := range []struct {
+		schema   string
+		key      objectstore.Key
+		revision uint64
+	}{
+		{key: key, revision: 1},
+		{schema: "schema", revision: 1},
+		{schema: "schema", key: key},
+	} {
+		if _, err := EncodeEnvelope(test.schema, test.key, test.revision, WriteGate{}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid envelope input error = %v", err)
+		}
+	}
+	if _, err := EncodeEnvelope("schema", key, 1, failingCanonicalValue{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("envelope payload error = %v", err)
+	}
+
+	valid, err := EncodeEnvelope("schema", key, 1, WriteGate{SchemaVersion: 1, Epoch: 1, Mode: GateOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope Envelope
+	var gate WriteGate
+	for _, decode := range []func() error{
+		func() error { return DecodeEnvelope(valid, key, "schema", nil, &gate) },
+		func() error { return DecodeEnvelope(valid, key, "schema", &envelope, nil) },
+		func() error { return DecodeEnvelope(valid, objectstore.Key{}, "schema", &envelope, &gate) },
+		func() error { return DecodeEnvelope(valid, key, "", &envelope, &gate) },
+	} {
+		if err := decode(); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid decode destination error = %v", err)
+		}
+	}
+	badFields := [][]byte{
+		[]byte(`{"schema":"wrong","revision":1,"logicalVersion":"version","payload":{}}`),
+		[]byte(`{"schema":"schema","revision":1,"logicalVersion":"version","payload":{"unknown":true}}`),
+	}
+	for _, body := range badFields {
+		envelope = Envelope{}
+		gate = WriteGate{}
+		if err := DecodeEnvelope(body, key, "schema", &envelope, &gate); err == nil {
+			t.Fatalf("invalid canonical envelope accepted: %s", body)
+		}
+	}
+	envelope = Envelope{}
+	if err := DecodeEnvelope(valid, key, "schema", &envelope, &decodeThenFailCanonicalValue{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("canonical payload re-encode error = %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(valid, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["payload"] = json.RawMessage("{ \"schemaVersion\":1,\"epoch\":1,\"mode\":\"open\"}")
+	noncanonicalPayload, _ := json.Marshal(raw)
+	if err := DecodeEnvelope(noncanonicalPayload, key, "schema", &envelope, &gate); err == nil {
+		t.Fatal("non-canonical payload encoding was accepted")
+	}
+	if bytes.Equal(valid, append(valid, ' ')) {
+		t.Fatal("invalid test fixture")
+	}
+	if err := DecodeEnvelope(append(valid, ' '), key, "schema", &envelope, &gate); err == nil {
+		t.Fatal("non-canonical envelope encoding was accepted")
+	}
+
+	for _, invalid := range []WriteGate{{}, {SchemaVersion: 1, Epoch: 1, Mode: "unknown"}} {
+		if err := ValidateGate(invalid); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid gate error = %v", err)
+		}
+	}
+	if err := ValidateGate(WriteGate{SchemaVersion: 1, Epoch: 1, Mode: GateClosed}); err != nil {
+		t.Fatal(err)
+	}
+	for _, namespace := range []string{"", "Upper", "under_score"} {
+		if err := ValidateNamespace(namespace); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid namespace %q error = %v", namespace, err)
+		}
+	}
+	if err := ValidateNamespace("valid-namespace"); err != nil {
+		t.Fatal(err)
+	}
+	if !SortedUnique(nil) || !SortedUnique([]string{"a", "b"}) || SortedUnique([]string{"a", "a"}) || SortedUnique([]string{"b", "a"}) {
+		t.Fatal("SortedUnique boundary mismatch")
+	}
+}
+
+func TestCanonicalKeyNamespacePanicsFailClosed(t *testing.T) {
+	for _, function := range []func(){
+		func() { StateKey("INVALID", "key") },
+		func() { StatePrefix("INVALID") },
+		func() { StateVersionKey("INVALID", "key", "version") },
+		func() { LeaseKey("INVALID", "lease") },
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("invalid canonical namespace did not panic")
+				}
+			}()
+			function()
+		}()
 	}
 }

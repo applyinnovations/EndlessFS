@@ -153,7 +153,7 @@ func TestGenerateFailureIsolationMatrix(t *testing.T) {
 				source:  &scriptedStorage{download: test.download, downloadErr: test.downloadErr}, store: &scriptedStore{},
 				client: client, ids: ids, clock: domain.SystemClock{}, global: make(chan struct{}, 1), perUser: make(map[string]*userLimit),
 			}
-			if err := service.generate(context.Background(), scope, entry, binding, generator, true); err == nil {
+			if _, err := service.generate(context.Background(), scope, entry, binding, generator, true); err == nil {
 				t.Fatal("generate failure path returned success")
 			}
 		})
@@ -161,13 +161,13 @@ func TestGenerateFailureIsolationMatrix(t *testing.T) {
 
 	t.Run("latest lookup", func(t *testing.T) {
 		service := internalGenerationService(&scriptedStore{latestErr: domain.ErrUnavailable}, scriptedGenerator{})
-		if err := service.generate(context.Background(), scope, entry, binding, service.generators[0], false); !errors.Is(err, domain.ErrUnavailable) {
+		if _, err := service.generate(context.Background(), scope, entry, binding, service.generators[0], false); !errors.Is(err, domain.ErrUnavailable) {
 			t.Fatalf("latest lookup error = %v", err)
 		}
 	})
 	t.Run("claim", func(t *testing.T) {
 		service := internalGenerationService(&scriptedStore{claimErr: domain.ErrUnavailable}, scriptedGenerator{})
-		if err := service.generate(context.Background(), scope, entry, binding, service.generators[0], true); !errors.Is(err, domain.ErrUnavailable) {
+		if _, err := service.generate(context.Background(), scope, entry, binding, service.generators[0], true); !errors.Is(err, domain.ErrUnavailable) {
 			t.Fatalf("claim error = %v", err)
 		}
 	})
@@ -183,14 +183,14 @@ func TestGenerateFailureIsolationMatrix(t *testing.T) {
 			}
 			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(sourceBytes)), Header: make(http.Header)}, nil
 		})
-		if err := service.generate(context.Background(), scope, entry, binding, service.generators[0], true); !errors.Is(err, domain.ErrUnavailable) {
+		if _, err := service.generate(context.Background(), scope, entry, binding, service.generators[0], true); !errors.Is(err, domain.ErrUnavailable) {
 			t.Fatalf("commit error = %v", err)
 		}
 	})
 	t.Run("hard timeout", func(t *testing.T) {
 		service := internalGenerationService(&scriptedStore{}, cancelGenerator{})
 		service.options.OperationTimeout = time.Millisecond
-		if err := service.generate(context.Background(), scope, entry, binding, service.generators[0], true); !errors.Is(err, domain.ErrUnavailable) {
+		if _, err := service.generate(context.Background(), scope, entry, binding, service.generators[0], true); !errors.Is(err, domain.ErrUnavailable) {
 			t.Fatalf("timeout error = %v", err)
 		}
 	})
@@ -289,6 +289,48 @@ func TestDurableOperationStateRejectsCorruptionAndInvalidIndexes(t *testing.T) {
 	}
 	if validOperationIndex(operationIndexRecord{SchemaVersion: 1, Entries: []operationIndexEntry{{}}}) {
 		t.Fatal("invalid durable operation index entry was accepted")
+	}
+
+	operationID := domain.OperationID("semantic-operation")
+	digestValue := sha256.Sum256([]byte("semantic-idempotency"))
+	base := operationRecord{
+		SchemaVersion: 1, OwnerID: binding.Owner.String(), Fingerprint: "fingerprint", IdempotencyDigest: base64.RawURLEncoding.EncodeToString(digestValue[:]),
+		LeaseEpoch: 1, LeaseExpiresAt: service.clock.Now().Add(time.Minute), ExpiresAt: service.clock.Now().Add(time.Hour),
+		Operation: Operation{ID: operationID, State: domain.OperationRunning, StartedAt: service.clock.Now(), UpdatedAt: service.clock.Now()},
+	}
+	if !validOperationRecord(base, binding.Owner, operationID) {
+		t.Fatal("valid running operation record was rejected")
+	}
+	tests := []struct {
+		name   string
+		mutate func(*operationRecord)
+	}{
+		{name: "noncanonical digest", mutate: func(record *operationRecord) { record.IdempotencyDigest = "digest" }},
+		{name: "unknown state", mutate: func(record *operationRecord) { record.Operation.State = "unknown" }},
+		{name: "running without lease", mutate: func(record *operationRecord) { record.LeaseExpiresAt = time.Time{} }},
+		{name: "running lease before update", mutate: func(record *operationRecord) { record.LeaseExpiresAt = record.Operation.UpdatedAt }},
+		{name: "running result without generation", mutate: func(record *operationRecord) {
+			record.Operation.Result = &ItemResult{Path: domain.MustParseUserPath("/source.png"), Version: "version", Variant: 256, State: StateGenerating}
+		}},
+		{name: "terminal with lease", mutate: func(record *operationRecord) {
+			record.Operation.State = domain.OperationFailed
+			record.Operation.ErrorKind = domain.ErrorInvalid
+		}},
+		{name: "unknown failure kind", mutate: func(record *operationRecord) {
+			record.Operation.State = domain.OperationFailed
+			record.Operation.ErrorKind = "unknown"
+			record.LeaseExpiresAt = time.Time{}
+		}},
+		{name: "updated after expiry", mutate: func(record *operationRecord) { record.Operation.UpdatedAt = record.ExpiresAt }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := base
+			test.mutate(&candidate)
+			if validOperationRecord(candidate, binding.Owner, operationID) {
+				t.Fatalf("corrupt operation record was accepted: %+v", candidate)
+			}
+		})
 	}
 }
 
@@ -436,6 +478,52 @@ func TestHydrateOperationReauthorizesExactGenerationAndRejectsDrift(t *testing.T
 	}
 }
 
+func TestAwaitedGenerationFailsClosedAtEveryBoundary(t *testing.T) {
+	binding := internalBinding(t)
+	entry := domain.Entry{
+		Path: domain.MustParseUserPath("/source.png"), Kind: domain.EntryFile, Version: "source-version",
+		Size: binding.SourceSize, MediaType: binding.MediaType, ContentID: binding.ContentID, ContentVersion: binding.ContentVersion,
+	}
+	result := ItemResult{Path: entry.Path, Version: entry.Version, Variant: binding.Variant, State: StateGenerating}
+	artifact := internalArtifact("generation", binding.Variant)
+	newService := func() *Service {
+		return &Service{
+			options: Options{Resolutions: []int{binding.Variant}}, source: &scriptedStorage{stat: entry},
+			store: &scriptedStore{latest: artifact}, generators: []Generator{scriptedGenerator{}},
+		}
+	}
+	base := newService()
+	if ready, found, err := base.resultForExactGeneration(context.Background(), binding.Owner, result, artifact.GenerationID); err != nil || !found || ready.State != StateReady {
+		t.Fatalf("ready awaited generation = %+v, %v, %v", ready, found, err)
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*Service, *ItemResult)
+		wantErr error
+	}{
+		{name: "invalid item", mutate: func(_ *Service, result *ItemResult) { result.Path = domain.MustParseUserPath("/") }, wantErr: domain.ErrInvalid},
+		{name: "artifact unavailable", mutate: func(service *Service, _ *ItemResult) {
+			service.store = &scriptedStore{latestErr: domain.ErrUnavailable}
+		}, wantErr: domain.ErrUnavailable},
+		{name: "artifact corrupt", mutate: func(service *Service, _ *ItemResult) {
+			service.store = &scriptedStore{latest: Artifact{GenerationID: artifact.GenerationID}}
+		}, wantErr: domain.ErrInvalid},
+		{name: "capability unavailable", mutate: func(service *Service, _ *ItemResult) {
+			service.store = &scriptedStore{latest: artifact, capabilityErr: domain.ErrUnavailable}
+		}, wantErr: domain.ErrUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := newService()
+			candidate := result
+			test.mutate(service, &candidate)
+			if _, _, err := service.resultForExactGeneration(context.Background(), binding.Owner, candidate, artifact.GenerationID); !errors.Is(err, test.wantErr) {
+				t.Fatalf("resultForExactGeneration() error = %v, want %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestServiceReadinessRevalidationPaths(t *testing.T) {
 	if !(&Service{}).Revalidate(context.Background()) {
 		t.Fatal("disabled preview was not ready")
@@ -489,6 +577,25 @@ func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
 	}
 	if _, err := service.claimOperation(context.Background(), owner, idempotencyKey, "different"); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("durable fingerprint conflict error = %v", err)
+	}
+	mismatchedStore := state.NewMemoryStore()
+	seedDurableOperation(t, mismatchedStore, owner, idempotencyKey, record)
+	mismatchedKey := state.MustKey(state.NamespaceIdempotency, "preview", owner.String(), digest)
+	mismatchedValue, err := mismatchedStore.Get(context.Background(), mismatchedKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatchedBody, err := state.EncodeJSON(idempotencyRecord{
+		SchemaVersion: 1, Fingerprint: fingerprint, OperationID: operationID, ExpiresAt: record.ExpiresAt.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mismatchedStore.CompareAndSwap(context.Background(), mismatchedKey, mismatchedValue.Version, mismatchedBody); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newService(mismatchedStore).claimOperation(context.Background(), owner, idempotencyKey, fingerprint); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("cross-record mismatch error = %v", err)
 	}
 
 	clock.Advance(2 * time.Minute)

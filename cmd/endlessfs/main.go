@@ -245,12 +245,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if previewService != nil {
 		applicationHandler = httpapi.NewCompleteApplicationWithPreviewAndLogger(cfg, version, identityService, sessions, driveService, previewService, logger, themeManager)
 	}
+	writeTimeout := controlWriteTimeout(previewEnabled, cfg.PreviewOperationTimeout)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           applicationHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		WriteTimeout:      writeTimeout,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    32 << 10,
 	}
@@ -295,6 +296,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 		logger.Info("server_stopped", "result", "graceful")
 		return nil
 	}
+}
+
+func controlWriteTimeout(previewEnabled bool, operationTimeout time.Duration) time.Duration {
+	baseline := 30 * time.Second
+	if previewEnabled && operationTimeout+5*time.Second > baseline {
+		return operationTimeout + 5*time.Second
+	}
+	return baseline
 }
 
 func deriveKey(label string, material []byte) []byte {

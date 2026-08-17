@@ -1,9 +1,12 @@
 package portable
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +14,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
+	"github.com/applyinnovations/endlessfs/internal/state"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
@@ -300,6 +304,820 @@ func TestCreateUploadRequiresDirectTransferBackend(t *testing.T) {
 	if _, err := engine.Files().CreateUpload(context.Background(), scope, domain.CreateUploadRequest{Path: domain.MustParseUserPath("/file.txt"), Size: 1, MediaType: "text/plain"}); !errors.Is(err, domain.ErrPreconditionFailed) {
 		t.Fatalf("CreateUpload() error = %v", err)
 	}
+}
+
+func TestPortableStateCorruptionAndCursorMatrixFailsClosed(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2045, 1, 2, 3, 4, 5, 0, time.UTC))
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("r", 1<<20)))
+	key := state.MustKey(state.NamespaceAccounts, "corruption")
+	version, err := engine.Create(context.Background(), key, []byte("value"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	objectKey := canonicalStateKey(key)
+	original, err := backend.Get(context.Background(), objectKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceInternalObject(t, backend, objectKey, original.Version, []byte("not-json"))
+	if _, err := engine.Get(context.Background(), key); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Get(corrupt) error = %v", err)
+	}
+	if _, err := engine.CompareAndSwap(context.Background(), key, version, []byte("updated")); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("CompareAndSwap(corrupt) error = %v", err)
+	}
+	if err := engine.Delete(context.Background(), key, version); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Delete(corrupt) error = %v", err)
+	}
+	if _, err := engine.List(context.Background(), state.MustPrefix(state.NamespaceAccounts), state.PageRequest{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("List(corrupt) error = %v", err)
+	}
+
+	backend = objectmemory.New()
+	engine = openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("s", 1<<20)))
+	key = state.MustKey(state.NamespaceAccounts, "collision")
+	objectKey = canonicalStateKey(key)
+	body, err := storageformat.EncodeEnvelope(stateRecordSchema, objectKey, 1, storageformat.StateRecord{SchemaVersion: 1, LogicalKey: state.MustKey(state.NamespaceAccounts, "other").String(), Data: []byte("value")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Put(context.Background(), objectKey, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Get(context.Background(), key); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Get(collision) error = %v", err)
+	}
+	if _, err := engine.List(context.Background(), state.MustPrefix(state.NamespaceAccounts), state.PageRequest{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("List(collision) error = %v", err)
+	}
+
+	validRecord := storageformat.StateVersionRecord{SchemaVersion: 1, LogicalKey: key.String(), LogicalVersion: "version", Data: []byte("snapshot")}
+	validSnapshotKey := storageformat.StateVersionKey("accounts", key.String(), validRecord.LogicalVersion)
+	validSnapshotBody, err := storageformat.EncodeEnvelope(stateVersionSchema, validSnapshotKey, 1, validRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Put(context.Background(), validSnapshotKey, validSnapshotBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	baseCursor := stateListCursor{SchemaVersion: 1, Prefix: "accounts/", Limit: 1, Index: 0, GateEpoch: 1, GateVersion: "gate", ExpiresAt: clock.Now().Add(time.Minute), Snapshots: []string{validSnapshotKey.String()}}
+	for name, cursor := range map[string]stateListCursor{
+		"invalid-key": withStateCursor(baseCursor, func(value *stateListCursor) { value.Snapshots[0] = "INVALID" }),
+		"missing": withStateCursor(baseCursor, func(value *stateListCursor) {
+			value.Snapshots[0] = storageformat.StateVersionKey("accounts", "accounts/bWlzc2luZw", "version").String()
+		}),
+		"bad-envelope": withStateCursor(baseCursor, func(value *stateListCursor) {
+			value.Snapshots[0] = storageformat.StateVersionKey("accounts", "accounts/YmFk", "version").String()
+		}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if name == "bad-envelope" {
+				badKey := objectstore.MustKey(cursor.Snapshots[0])
+				if _, err := backend.Put(context.Background(), badKey, []byte("not-json"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := engine.stateCursorPage(context.Background(), cursor); !errors.Is(err, domain.ErrInvalid) && !errors.Is(err, domain.ErrNotFound) {
+				t.Fatalf("stateCursorPage() error = %v", err)
+			}
+		})
+	}
+
+	invalidRecordKey := storageformat.StateVersionKey("accounts", key.String(), "invalid")
+	invalidRecordBody, err := storageformat.EncodeEnvelope(stateVersionSchema, invalidRecordKey, 1, storageformat.StateVersionRecord{SchemaVersion: 2, LogicalKey: key.String(), LogicalVersion: "invalid", Data: []byte("snapshot")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Put(context.Background(), invalidRecordKey, invalidRecordBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	invalidCursor := baseCursor
+	invalidCursor.Snapshots = []string{invalidRecordKey.String()}
+	if _, err := engine.stateCursorPage(context.Background(), invalidCursor); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid snapshot error = %v", err)
+	}
+
+	encoded, err := engine.encodeStateListCursor(baseCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.decodeStateListCursor(encoded); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed[len(sealed)-1] ^= 1
+	if _, err := engine.decodeStateListCursor(base64.RawURLEncoding.EncodeToString(sealed)); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("tampered cursor error = %v", err)
+	}
+	if _, err := engine.decodeStateListCursor("%"); err == nil {
+		t.Fatal("invalid base64 cursor succeeded")
+	}
+	invalidCursorBody, err := storageformat.EncodeCanonical(withStateCursor(baseCursor, func(value *stateListCursor) { value.SchemaVersion = 2 }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := bytes.Repeat([]byte{0x33}, engine.cursorAEAD.NonceSize())
+	invalidCursorSealed := engine.cursorAEAD.Seal(append([]byte(nil), nonce...), nonce, invalidCursorBody, []byte("endlessfs-state-cursor-v1"))
+	if _, err := engine.decodeStateListCursor(base64.RawURLEncoding.EncodeToString(invalidCursorSealed)); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid cursor schema error = %v", err)
+	}
+	engine.ids = domain.NewIDGenerator(strings.NewReader("short"))
+	if _, err := engine.encodeStateListCursor(baseCursor); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("cursor randomness error = %v", err)
+	}
+	if err := validateStateMutation(key, bytes.Repeat([]byte("x"), state.MaxRecordBytes+1)); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("oversized state mutation error = %v", err)
+	}
+	if _, err := parseExistingStateKey("accounts/%"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid stored key error = %v", err)
+	}
+}
+
+func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2045, 2, 3, 4, 5, 6, 0, time.UTC))
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("d", 1<<20)))
+	user, _ := domain.ParseUserID("ZGRkZGRkZGRkZGRkZGRkZA")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	if _, err := engine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/child")}); err != nil {
+		t.Fatal(err)
+	}
+	fixture := backend.Export()
+	rootKey := storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID)
+	var rootEnvelope storageformat.Envelope
+	var root storageformat.DirectoryRoot
+	if err := storageformat.DecodeEnvelope(fixture[rootKey.String()], rootKey, directoryRootSchema, &rootEnvelope, &root); err != nil {
+		t.Fatal(err)
+	}
+	manifestKey := storageformat.DirectoryManifestKey(user.String(), "live", storageformat.RootDirectoryID, root.ManifestID)
+	var manifestEnvelope storageformat.Envelope
+	var manifest storageformat.DirectoryManifest
+	if err := storageformat.DecodeEnvelope(fixture[manifestKey.String()], manifestKey, directoryManifestSchema, &manifestEnvelope, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	pageKey := storageformat.DirectoryPageKey(user.String(), "live", storageformat.RootDirectoryID, manifest.PageIDs[0])
+	var pageEnvelope storageformat.Envelope
+	var page storageformat.DirectoryPage
+	if err := storageformat.DecodeEnvelope(fixture[pageKey.String()], pageKey, directoryPageSchema, &pageEnvelope, &page); err != nil {
+		t.Fatal(err)
+	}
+
+	corruptions := map[string]func(map[string][]byte){
+		"root-envelope": func(objects map[string][]byte) { objects[rootKey.String()] = []byte("not-json") },
+		"root-fields": func(objects map[string][]byte) {
+			invalid := root
+			invalid.DirectoryID = "other"
+			objects[rootKey.String()] = encodeInternalEnvelope(t, directoryRootSchema, rootKey, rootEnvelope.Revision, invalid)
+		},
+		"pending-fields": func(objects map[string][]byte) {
+			invalid := root
+			invalid.Pending = &storageformat.DirectoryTransition{OperationID: "", Fence: 0, PreManifestID: root.ManifestID, PostManifestID: "post"}
+			objects[rootKey.String()] = encodeInternalEnvelope(t, directoryRootSchema, rootKey, rootEnvelope.Revision, invalid)
+		},
+		"pending-operation": func(objects map[string][]byte) {
+			invalid := root
+			invalid.Pending = &storageformat.DirectoryTransition{OperationID: "missing", Fence: 1, PreManifestID: root.ManifestID, PostManifestID: "post"}
+			objects[rootKey.String()] = encodeInternalEnvelope(t, directoryRootSchema, rootKey, rootEnvelope.Revision, invalid)
+		},
+		"manifest-envelope": func(objects map[string][]byte) { objects[manifestKey.String()] = []byte("not-json") },
+		"manifest-fields": func(objects map[string][]byte) {
+			invalid := manifest
+			invalid.EntryCount = -1
+			objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, invalid)
+		},
+		"missing-page":  func(objects map[string][]byte) { delete(objects, pageKey.String()) },
+		"page-envelope": func(objects map[string][]byte) { objects[pageKey.String()] = []byte("not-json") },
+		"page-fields": func(objects map[string][]byte) {
+			invalid := page
+			invalid.DirectoryID = "other"
+			objects[pageKey.String()] = encodeInternalEnvelope(t, directoryPageSchema, pageKey, pageEnvelope.Revision, invalid)
+		},
+		"entry-count": func(objects map[string][]byte) {
+			invalid := manifest
+			invalid.EntryCount++
+			objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, invalid)
+		},
+		"entry-value": func(objects map[string][]byte) {
+			invalid := page
+			invalid.Entries = append([]storageformat.DirectoryEntry(nil), page.Entries...)
+			invalid.Entries[0].LogicalVersion = "wrong"
+			objects[pageKey.String()] = encodeInternalEnvelope(t, directoryPageSchema, pageKey, pageEnvelope.Revision, invalid)
+		},
+		"entry-name": func(objects map[string][]byte) {
+			invalid := page
+			invalid.Entries = append([]storageformat.DirectoryEntry(nil), page.Entries...)
+			invalid.Entries[0].Name = "/"
+			invalid.Entries[0].NameDigest = storageformat.NameDigest("/")
+			invalid.Entries[0].LogicalVersion, _ = directoryEntryVersion(invalid.Entries[0])
+			objects[pageKey.String()] = encodeInternalEnvelope(t, directoryPageSchema, pageKey, pageEnvelope.Revision, invalid)
+		},
+	}
+	for name, corrupt := range corruptions {
+		t.Run(name, func(t *testing.T) {
+			objects := cloneInternalObjects(fixture)
+			corrupt(objects)
+			candidateBackend := objectmemory.New()
+			if err := candidateBackend.Import(objects); err != nil {
+				t.Fatal(err)
+			}
+			candidate := openInternalTestEngine(t, candidateBackend, clock, strings.NewReader(strings.Repeat(name, 1<<16)))
+			_, err := candidate.Files().List(context.Background(), scope, domain.ListRequest{Directory: domain.MustParseUserPath("/")})
+			if err == nil {
+				t.Fatal("corrupted directory unexpectedly listed")
+			}
+			if !errors.Is(err, domain.ErrInvalid) && !errors.Is(err, domain.ErrNotFound) {
+				t.Fatalf("corruption error = %v", err)
+			}
+		})
+	}
+
+	missingManifestCursor, err := encodeListCursor(listCursor{SchemaVersion: 1, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: "missing", PageSize: 200, Sort: domain.SortName, Index: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Files().List(context.Background(), scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), Cursor: missingManifestCursor}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing cursor manifest error = %v", err)
+	}
+	offsetCursor, err := encodeListCursor(listCursor{SchemaVersion: 1, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Files().List(context.Background(), scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), Cursor: offsetCursor}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("cursor offset error = %v", err)
+	}
+	endCursor, err := encodeListCursor(listCursor{SchemaVersion: 1, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page, err := engine.Files().List(context.Background(), scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), Cursor: endCursor}); err != nil || len(page.Entries) != 0 {
+		t.Fatalf("terminal cursor page = %+v, %v", page, err)
+	}
+	if _, err := engine.Files().List(context.Background(), domain.Scope{}, domain.ListRequest{Directory: domain.MustParseUserPath("/")}); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("List(invalid scope) error = %v", err)
+	}
+	if _, err := engine.Files().Stat(context.Background(), domain.Scope{}, domain.MustParseUserPath("/")); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("Stat(invalid scope) error = %v", err)
+	}
+
+	if _, err := engine.Get(context.Background(), state.Key{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Get(invalid key) error = %v", err)
+	}
+	if _, err := engine.CompareAndSwap(context.Background(), state.Key{}, "version", nil); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("CompareAndSwap(invalid key) error = %v", err)
+	}
+	if err := engine.Delete(context.Background(), state.Key{}, "version"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Delete(invalid key) error = %v", err)
+	}
+	if _, err := engine.List(context.Background(), state.MustPrefix(state.NamespaceAccounts), state.PageRequest{Limit: 1001}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("List(invalid limit) error = %v", err)
+	}
+
+	for name, random := range map[string]string{"child-id": "", "parent-manifest-id": strings.Repeat("x", 16), "parent-page-id": strings.Repeat("x", 32), "child-manifest-id": strings.Repeat("x", 48)} {
+		t.Run(name, func(t *testing.T) {
+			candidateBackend := objectmemory.New()
+			candidate := openInternalTestEngine(t, candidateBackend, clock, strings.NewReader(strings.Repeat("i", 4096)))
+			candidate.ids = domain.NewIDGenerator(strings.NewReader(random))
+			if _, err := candidate.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/failure")}); !errors.Is(err, domain.ErrInternal) {
+				t.Fatalf("CreateDirectory() randomness error = %v", err)
+			}
+		})
+	}
+
+	fileBackend := objectmemory.New()
+	fileEngine := openInternalTestEngine(t, fileBackend, clock, strings.NewReader(strings.Repeat("f", 1<<20)))
+	fileEntry := storageformat.DirectoryEntry{Name: "file", NameDigest: storageformat.NameDigest("file"), Kind: domain.EntryFile, BlobID: "blob", Size: 1, MediaType: "text/plain", ModifiedAt: clock.Now()}
+	fileEntry.LogicalVersion, _ = directoryEntryVersion(fileEntry)
+	prepared, err := fileEngine.Files().prepareDirectory(context.Background(), scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{fileEntry}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prerequisite := range prepared.prerequisites {
+		if _, err := fileBackend.Put(context.Background(), objectstore.MustKey(prerequisite.Key), prerequisite.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := fileBackend.Put(context.Background(), storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID), prepared.rootBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fileEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/file/child")); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("Stat(under file) error = %v", err)
+	}
+	if _, err := fileEngine.Files().List(context.Background(), scope, domain.ListRequest{Directory: domain.MustParseUserPath("/file")}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("List(file as directory) error = %v", err)
+	}
+	if _, err := fileEngine.Files().prepareDirectory(context.Background(), scope, "invalid", []storageformat.DirectoryEntry{{}}, 1); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("prepareDirectory(invalid entry) error = %v", err)
+	}
+	largeEntries := make([]storageformat.DirectoryEntry, 0, 2)
+	for _, name := range []string{"large-a", "large-b"} {
+		entry := storageformat.DirectoryEntry{Name: name, NameDigest: storageformat.NameDigest(name), Kind: domain.EntryFile, BlobID: name, Size: 1, MediaType: strings.Repeat("x", storageformat.MaxCanonicalBytes/2+1024), ModifiedAt: clock.Now()}
+		entry.LogicalVersion, err = directoryEntryVersion(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		largeEntries = replaceDirectoryEntry(largeEntries, nil, entry)
+	}
+	if _, err := fileEngine.Files().prepareDirectory(context.Background(), scope, "large", largeEntries, 1); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("prepareDirectory(oversized page) error = %v", err)
+	}
+	tooLargeEntry := fileEntry
+	tooLargeEntry.MediaType = strings.Repeat("x", storageformat.MaxCanonicalBytes+1)
+	if _, err := directoryEntryVersion(tooLargeEntry); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("directoryEntryVersion(oversized) error = %v", err)
+	}
+
+	entries := make([]storageformat.DirectoryEntry, 0, 10_000)
+	for index := 1; index <= 10_000; index++ {
+		entries = append(entries, storageformat.DirectoryEntry{Name: fmt.Sprintf("name (%d).txt", index)})
+	}
+	if _, err := availableDirectoryName(domain.MustParseUserPath("/name.txt"), entries); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("exhausted rename error = %v", err)
+	}
+	existing := storageformat.DirectoryEntry{Name: "old", NameDigest: "old"}
+	if replaced := replaceDirectoryEntry([]storageformat.DirectoryEntry{existing}, &existing, storageformat.DirectoryEntry{Name: "new", NameDigest: "new"}); len(replaced) != 1 || replaced[0].Name != "new" {
+		t.Fatalf("replacement = %+v", replaced)
+	}
+	same := []domain.Entry{
+		{Path: domain.MustParseUserPath("/b"), Name: "same", Kind: domain.EntryFile, Size: 1, ModifiedAt: clock.Now()},
+		{Path: domain.MustParseUserPath("/a"), Name: "same", Kind: domain.EntryFile, Size: 1, ModifiedAt: clock.Now()},
+	}
+	for _, field := range []domain.SortField{domain.SortModified, domain.SortSize, domain.SortKind, domain.SortName} {
+		values := append([]domain.Entry(nil), same...)
+		sortDomainEntries(values, field, true)
+	}
+	longPath := domain.MustParseUserPath("/" + strings.Repeat("x", 250) + ".txt")
+	if renamed, err := availableDirectoryName(longPath, nil); err != nil || len(renamed.Name()) > 255 {
+		t.Fatalf("truncated rename = %q, %v", renamed.String(), err)
+	}
+	equalDigest := "same"
+	_ = replaceDirectoryEntry([]storageformat.DirectoryEntry{{Name: "b", NameDigest: equalDigest}}, nil, storageformat.DirectoryEntry{Name: "a", NameDigest: equalDigest})
+	if _, err := decodeListCursor(base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":2}`))); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid list cursor schema error = %v", err)
+	}
+	if err := decodeCanonicalValue([]byte("not-json"), &listCursor{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid canonical value error = %v", err)
+	}
+}
+
+func TestPortableTransferDurableRecordAndCapabilityMatrix(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2045, 3, 4, 5, 6, 7, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(strings.NewReader(strings.Repeat("p", 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("u", 1<<20)))
+	user, _ := domain.ParseUserID("ZWVlZWVlZWVlZWVlZWVlZQ")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	request := domain.CreateUploadRequest{Path: domain.MustParseUserPath("/file.bin"), Size: 4, MediaType: "application/octet-stream", Resumable: true, IdempotencyKey: "durable-upload"}
+	capability, err := engine.Files().CreateUpload(context.Background(), scope, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadID := string(capability.UploadID)
+	operationKey := storageformat.OperationKey(user.String(), uploadID)
+	leaseKey := storageformat.LeaseKey(backend.BackendKind(), uploadID)
+	operationObject, err := backend.Get(context.Background(), operationKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var operationEnvelope storageformat.Envelope
+	var record storageformat.UploadRecord
+	if err := storageformat.DecodeEnvelope(operationObject.Body, operationKey, uploadRecordSchema, &operationEnvelope, &record); err != nil {
+		t.Fatal(err)
+	}
+	leaseObject, err := backend.Get(context.Background(), leaseKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var leaseEnvelope storageformat.Envelope
+	var lease storageformat.TransferLease
+	if err := storageformat.DecodeEnvelope(leaseObject.Body, leaseKey, transferLeaseSchema, &leaseEnvelope, &lease); err != nil {
+		t.Fatal(err)
+	}
+	fixture := backend.Export()
+
+	if _, err := engine.Files().CreateUpload(context.Background(), domain.Scope{}, request); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("CreateUpload(invalid scope) error = %v", err)
+	}
+	invalid := request
+	invalid.MediaType = "bad media type"
+	if _, err := engine.Files().CreateUpload(context.Background(), scope, invalid); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("CreateUpload(invalid media type) error = %v", err)
+	}
+	invalid = request
+	invalid.Conflict = "unknown"
+	if _, err := engine.Files().CreateUpload(context.Background(), scope, invalid); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("CreateUpload(invalid conflict) error = %v", err)
+	}
+	invalid = request
+	invalid.IdempotencyKey = strings.Repeat("x", 129)
+	if _, err := engine.Files().CreateUpload(context.Background(), scope, invalid); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("CreateUpload(invalid idempotency key) error = %v", err)
+	}
+	engine.ids = domain.NewIDGenerator(strings.NewReader("short"))
+	withoutIdempotency := request
+	withoutIdempotency.IdempotencyKey = ""
+	if _, err := engine.Files().CreateUpload(context.Background(), scope, withoutIdempotency); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("CreateUpload(randomness failure) error = %v", err)
+	}
+	engine.ids = domain.NewIDGenerator(strings.NewReader(strings.Repeat("v", 1<<20)))
+	missingParent := request
+	missingParent.Path = domain.MustParseUserPath("/missing/file.bin")
+	missingParent.IdempotencyKey = ""
+	if _, err := engine.Files().CreateUpload(context.Background(), scope, missingParent); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("CreateUpload(missing parent) error = %v", err)
+	}
+
+	for name, mutate := range map[string]func(*storageformat.UploadRecord){
+		"schema": func(value *storageformat.UploadRecord) { value.SchemaVersion = 2 },
+		"upload": func(value *storageformat.UploadRecord) { value.UploadID = "other" },
+		"state":  func(value *storageformat.UploadRecord) { value.State = "unknown" },
+	} {
+		t.Run("record-"+name, func(t *testing.T) {
+			objects := cloneInternalObjects(fixture)
+			invalidRecord := record
+			mutate(&invalidRecord)
+			objects[operationKey.String()] = encodeInternalEnvelope(t, uploadRecordSchema, operationKey, operationEnvelope.Revision, invalidRecord)
+			candidateBackend, candidate := openInternalTransferFixture(t, objects, clock, name)
+			_ = candidateBackend
+			if _, _, _, err := candidate.Files().readUploadRecord(context.Background(), user, uploadID); !errors.Is(err, domain.ErrInvalid) {
+				t.Fatalf("readUploadRecord() error = %v", err)
+			}
+		})
+	}
+
+	objects := cloneInternalObjects(fixture)
+	objects[operationKey.String()] = []byte("not-json")
+	_, candidate := openInternalTransferFixture(t, objects, clock, "bad-record")
+	if _, _, _, err := candidate.Files().readUploadRecord(context.Background(), user, uploadID); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("malformed upload record error = %v", err)
+	}
+
+	for name, mutate := range map[string]func(*storageformat.TransferLease, *storageformat.UploadRecord){
+		"backend-binding": func(_ *storageformat.TransferLease, value *storageformat.UploadRecord) { value.BackendKind = "other" },
+		"lease-schema":    func(value *storageformat.TransferLease, _ *storageformat.UploadRecord) { value.SchemaVersion = 2 },
+		"lease-upload":    func(value *storageformat.TransferLease, _ *storageformat.UploadRecord) { value.UploadID = "other" },
+		"lease-expiry": func(value *storageformat.TransferLease, _ *storageformat.UploadRecord) {
+			value.ExpiresAt = value.ExpiresAt.Add(time.Second)
+		},
+		"lease-empty": func(value *storageformat.TransferLease, _ *storageformat.UploadRecord) { value.Ciphertext = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			objects := cloneInternalObjects(fixture)
+			invalidLease, invalidRecord := lease, record
+			mutate(&invalidLease, &invalidRecord)
+			objects[operationKey.String()] = encodeInternalEnvelope(t, uploadRecordSchema, operationKey, operationEnvelope.Revision, invalidRecord)
+			if name != "backend-binding" {
+				objects[leaseKey.String()] = encodeInternalEnvelope(t, transferLeaseSchema, leaseKey, leaseEnvelope.Revision, invalidLease)
+			}
+			_, candidate := openInternalTransferFixture(t, objects, clock, name)
+			_, _, err := candidate.Files().readTransferLease(context.Background(), invalidRecord)
+			if err == nil {
+				t.Fatal("corrupt transfer lease unexpectedly succeeded")
+			}
+		})
+	}
+	objects = cloneInternalObjects(fixture)
+	objects[leaseKey.String()] = []byte("not-json")
+	_, candidate = openInternalTransferFixture(t, objects, clock, "bad-lease")
+	if _, _, err := candidate.Files().readTransferLease(context.Background(), record); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("malformed transfer lease error = %v", err)
+	}
+
+	for name, mutate := range map[string]func(map[string][]byte, *storageformat.UploadRecord){
+		"missing-record": func(values map[string][]byte, _ *storageformat.UploadRecord) { delete(values, operationKey.String()) },
+		"malformed-record": func(values map[string][]byte, _ *storageformat.UploadRecord) {
+			values[operationKey.String()] = []byte("not-json")
+		},
+		"invalid-record":   func(values map[string][]byte, value *storageformat.UploadRecord) { value.State = "unknown" },
+		"backend-mismatch": func(values map[string][]byte, value *storageformat.UploadRecord) { value.BackendKind = "other" },
+		"existing-lease":   func(values map[string][]byte, _ *storageformat.UploadRecord) {},
+		"expired": func(values map[string][]byte, value *storageformat.UploadRecord) {
+			delete(values, leaseKey.String())
+			value.ExpiresAt = clock.Now().Add(-time.Second)
+		},
+		"bad-staging": func(values map[string][]byte, value *storageformat.UploadRecord) {
+			delete(values, leaseKey.String())
+			value.StagingKey = "INVALID"
+		},
+		"begin-failure": func(values map[string][]byte, value *storageformat.UploadRecord) {
+			delete(values, leaseKey.String())
+			value.MediaType = ""
+		},
+	} {
+		t.Run("recover-"+name, func(t *testing.T) {
+			values := cloneInternalObjects(fixture)
+			candidateRecord := record
+			mutate(values, &candidateRecord)
+			if _, found := values[operationKey.String()]; found && name != "malformed-record" {
+				values[operationKey.String()] = encodeInternalEnvelope(t, uploadRecordSchema, operationKey, operationEnvelope.Revision, candidateRecord)
+			}
+			_, candidate := openInternalTransferFixture(t, values, clock, "recover-"+name)
+			err := candidate.Files().recoverUploadLease(context.Background(), operationKey)
+			if name == "existing-lease" || name == "expired" {
+				if err != nil {
+					t.Fatalf("recoverUploadLease() error = %v", err)
+				}
+			} else if err == nil {
+				t.Fatal("invalid recovery unexpectedly succeeded")
+			}
+		})
+	}
+	values := cloneInternalObjects(fixture)
+	delete(values, leaseKey.String())
+	rebuiltBackend, rebuilt := openInternalTransferFixture(t, values, clock, "recover-success")
+	if err := rebuilt.Files().recoverUploadLease(context.Background(), operationKey); err != nil {
+		t.Fatalf("recoverUploadLease(missing lease) error = %v", err)
+	}
+	if _, err := rebuiltBackend.Get(context.Background(), leaseKey); err != nil {
+		t.Fatalf("recoverUploadLease did not persist lease: %v", err)
+	}
+
+	fingerprint := storageformat.Digest([]byte(fmt.Sprintf("upload\x00%s\x00%s\x00%d\x00%s\x00%s\x00%s\x00%t", "live", request.Path.String(), request.Size, request.MediaType, domain.ConflictFail, request.ExpectedVersion, request.Resumable)))
+	if _, found, err := engine.Files().lookupIdempotentUpload(context.Background(), user, request.IdempotencyKey, "different"); found || !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("changed idempotent lookup = found %v, error %v", found, err)
+	}
+	if replayed, found, err := engine.Files().lookupIdempotentUpload(context.Background(), user, request.IdempotencyKey, fingerprint); err != nil || !found || replayed.UploadID != capability.UploadID {
+		t.Fatalf("valid idempotent lookup = %+v, found %v, error %v", replayed, found, err)
+	}
+	idempotencyKey := storageformat.IdempotencyKey(user.String(), request.IdempotencyKey)
+	idempotencyObject, err := backend.Get(context.Background(), idempotencyKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idempotencyEnvelope storageformat.Envelope
+	var idempotency storageformat.IdempotencyRecord
+	if err := storageformat.DecodeEnvelope(idempotencyObject.Body, idempotencyKey, idempotencySchema, &idempotencyEnvelope, &idempotency); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(map[string][]byte, *storageformat.IdempotencyRecord, *storageformat.UploadRecord){
+		"malformed": func(values map[string][]byte, _ *storageformat.IdempotencyRecord, _ *storageformat.UploadRecord) {
+			values[idempotencyKey.String()] = []byte("not-json")
+		},
+		"binding": func(_ map[string][]byte, value *storageformat.IdempotencyRecord, _ *storageformat.UploadRecord) {
+			value.Kind = "other"
+		},
+		"record-missing": func(values map[string][]byte, _ *storageformat.IdempotencyRecord, _ *storageformat.UploadRecord) {
+			delete(values, operationKey.String())
+		},
+		"record-inactive": func(_ map[string][]byte, _ *storageformat.IdempotencyRecord, value *storageformat.UploadRecord) {
+			value.State = storageformat.UploadAborted
+		},
+		"lease-missing": func(values map[string][]byte, _ *storageformat.IdempotencyRecord, _ *storageformat.UploadRecord) {
+			delete(values, leaseKey.String())
+		},
+	} {
+		t.Run("idempotency-"+name, func(t *testing.T) {
+			values := cloneInternalObjects(fixture)
+			candidateID, candidateRecord := idempotency, record
+			mutate(values, &candidateID, &candidateRecord)
+			if name != "malformed" {
+				values[idempotencyKey.String()] = encodeInternalEnvelope(t, idempotencySchema, idempotencyKey, idempotencyEnvelope.Revision, candidateID)
+			}
+			if _, found := values[operationKey.String()]; found {
+				values[operationKey.String()] = encodeInternalEnvelope(t, uploadRecordSchema, operationKey, operationEnvelope.Revision, candidateRecord)
+			}
+			_, candidate := openInternalTransferFixture(t, values, clock, "idempotency-"+name)
+			if _, found, err := candidate.Files().lookupIdempotentUpload(context.Background(), user, request.IdempotencyKey, fingerprint); err == nil {
+				t.Fatalf("lookupIdempotentUpload() = found %v, error %v", found, err)
+			}
+		})
+	}
+	_, imported := openInternalTransferFixture(t, fixture, clock, "resume-missing-session")
+	if _, found, err := imported.Files().lookupIdempotentUpload(context.Background(), user, request.IdempotencyKey, fingerprint); !found || !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("imported idempotent lookup = found %v, error %v", found, err)
+	}
+
+	metadataEngine, err := Open(context.Background(), Options{
+		Backend: metadataOnlyBackend{Backend: backend}, Clock: clock, IDs: domain.NewIDGenerator(strings.NewReader(strings.Repeat("m", 1<<20))),
+		Writer:   WriterConfiguration{WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"}},
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x44}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := metadataEngine.Files().UploadStatus(context.Background(), scope, capability.UploadID); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("metadata-only UploadStatus() error = %v", err)
+	}
+	if _, err := metadataEngine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size, MediaType: request.MediaType}); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("metadata-only CompleteUpload() error = %v", err)
+	}
+	if err := metadataEngine.Files().recoverUploadLease(context.Background(), operationKey); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("metadata-only recoverUploadLease() error = %v", err)
+	}
+	if _, _, err := metadataEngine.Files().readTransferLease(context.Background(), record); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("metadata-only readTransferLease() error = %v", err)
+	}
+
+	if _, err := engine.Files().UploadStatus(context.Background(), scope, ""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("UploadStatus(empty) error = %v", err)
+	}
+	if _, err := engine.Files().UploadStatus(context.Background(), domain.Scope{}, capability.UploadID); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("UploadStatus(invalid scope) error = %v", err)
+	}
+	if err := engine.Files().AbortUpload(context.Background(), scope, ""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("AbortUpload(empty) error = %v", err)
+	}
+	if err := engine.Files().AbortUpload(context.Background(), domain.Scope{}, capability.UploadID); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("AbortUpload(invalid scope) error = %v", err)
+	}
+	if _, err := engine.Files().CompleteUpload(context.Background(), domain.Scope{}, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size, MediaType: request.MediaType}); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("CompleteUpload(invalid scope) error = %v", err)
+	}
+	if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size, MediaType: "bad media type"}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("CompleteUpload(invalid media) error = %v", err)
+	}
+	if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size + 1, MediaType: request.MediaType}); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("CompleteUpload(mismatched constraints) error = %v", err)
+	}
+
+	currentOperationVersion := operationObject.Version
+	for name, mutate := range map[string]func(*storageformat.UploadRecord){
+		"status-area":            func(value *storageformat.UploadRecord) { value.Area = "trash" },
+		"status-path":            func(value *storageformat.UploadRecord) { value.RequestedPath = "INVALID" },
+		"completion-destination": func(value *storageformat.UploadRecord) { value.ResolvedPath = "INVALID" },
+		"completion-state":       func(value *storageformat.UploadRecord) { value.State = storageformat.UploadCompleted },
+	} {
+		mutated := record
+		mutate(&mutated)
+		currentOperationVersion = replaceInternalObject(t, backend, operationKey, currentOperationVersion, encodeInternalEnvelope(t, uploadRecordSchema, operationKey, operationEnvelope.Revision, mutated))
+		switch name {
+		case "status-area":
+			if _, err := engine.Files().UploadStatus(context.Background(), scope, capability.UploadID); !errors.Is(err, domain.ErrNotFound) {
+				t.Fatalf("UploadStatus(wrong area) error = %v", err)
+			}
+			if err := engine.Files().AbortUpload(context.Background(), scope, capability.UploadID); !errors.Is(err, domain.ErrNotFound) {
+				t.Fatalf("AbortUpload(wrong area) error = %v", err)
+			}
+			if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size, MediaType: request.MediaType}); !errors.Is(err, domain.ErrNotFound) {
+				t.Fatalf("CompleteUpload(wrong area) error = %v", err)
+			}
+		case "status-path":
+			if _, err := engine.Files().UploadStatus(context.Background(), scope, capability.UploadID); !errors.Is(err, domain.ErrInvalid) {
+				t.Fatalf("UploadStatus(invalid stored path) error = %v", err)
+			}
+		case "completion-destination":
+			if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size, MediaType: request.MediaType}); !errors.Is(err, domain.ErrInvalid) {
+				t.Fatalf("CompleteUpload(invalid destination) error = %v", err)
+			}
+		case "completion-state":
+			if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size, MediaType: request.MediaType}); !errors.Is(err, domain.ErrPreconditionFailed) {
+				t.Fatalf("CompleteUpload(changed completed destination) error = %v", err)
+			}
+		}
+		currentOperationVersion = replaceInternalObject(t, backend, operationKey, currentOperationVersion, operationObject.Body)
+	}
+
+	values = cloneInternalObjects(fixture)
+	delete(values, leaseKey.String())
+	_, candidate = openInternalTransferFixture(t, values, clock, "status-missing-lease")
+	if _, err := candidate.Files().UploadStatus(context.Background(), scope, capability.UploadID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("UploadStatus(missing lease) error = %v", err)
+	}
+	_, candidate = openInternalTransferFixture(t, fixture, clock, "status-missing-session")
+	if _, err := candidate.Files().UploadStatus(context.Background(), scope, capability.UploadID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("UploadStatus(missing session) error = %v", err)
+	}
+	expiredValues := cloneInternalObjects(fixture)
+	expiredRecord := record
+	expiredRecord.ExpiresAt = clock.Now().Add(-time.Second)
+	expiredValues[operationKey.String()] = encodeInternalEnvelope(t, uploadRecordSchema, operationKey, operationEnvelope.Revision, expiredRecord)
+	_, candidate = openInternalTransferFixture(t, expiredValues, clock, "expired-completion")
+	if _, err := candidate.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size, MediaType: request.MediaType}); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("CompleteUpload(expired) error = %v", err)
+	}
+	if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size, MediaType: request.MediaType}); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("incomplete CompleteUpload() error = %v", err)
+	}
+	if err := backend.SimulateUploadOffset(context.Background(), uploadID, request.Size); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size, MediaType: request.MediaType, ChecksumSHA256: "required"}); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("checksum CompleteUpload() error = %v", err)
+	}
+	invalidRecord := record
+	invalidRecord.StagingKey = "INVALID"
+	updatedVersion := replaceInternalObject(t, backend, operationKey, currentOperationVersion, encodeInternalEnvelope(t, uploadRecordSchema, operationKey, operationEnvelope.Revision, invalidRecord))
+	if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size, MediaType: request.MediaType}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid staging CompleteUpload() error = %v", err)
+	}
+	replaceInternalObject(t, backend, operationKey, updatedVersion, operationObject.Body)
+
+	if _, err := engine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: request.Path}); err != nil {
+		t.Fatal(err)
+	}
+	conflictingUpload := request
+	conflictingUpload.IdempotencyKey = "another-upload"
+	if _, err := engine.Files().CreateUpload(context.Background(), scope, conflictingUpload); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("CreateUpload(existing destination) error = %v", err)
+	}
+	if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size, MediaType: request.MediaType}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("appeared destination CompleteUpload() error = %v", err)
+	}
+	if _, err := engine.Files().CreateDownload(context.Background(), domain.Scope{}, domain.CreateDownloadRequest{Path: request.Path}); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("CreateDownload(invalid scope) error = %v", err)
+	}
+	if _, err := engine.Files().CreateDownload(context.Background(), scope, domain.CreateDownloadRequest{Path: request.Path, Disposition: "unknown"}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("CreateDownload(invalid disposition) error = %v", err)
+	}
+	if _, err := engine.Files().CreateDownload(context.Background(), scope, domain.CreateDownloadRequest{Path: request.Path, Version: "version"}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("CreateDownload(directory) error = %v", err)
+	}
+
+	downloadBackend := objectmemory.New()
+	downloadServer := httptest.NewServer(downloadBackend)
+	t.Cleanup(downloadServer.Close)
+	if err := downloadBackend.ConfigureDataPlane(downloadServer.URL, clock, domain.NewIDGenerator(strings.NewReader(strings.Repeat("w", 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	downloadEngine := openInternalTestEngine(t, downloadBackend, clock, strings.NewReader(strings.Repeat("x", 1<<20)))
+	downloadEntry := storageformat.DirectoryEntry{Name: "missing.bin", NameDigest: storageformat.NameDigest("missing.bin"), Kind: domain.EntryFile, BlobID: "missing-blob", Size: 4, MediaType: "application/octet-stream", ModifiedAt: clock.Now()}
+	downloadEntry.LogicalVersion, _ = directoryEntryVersion(downloadEntry)
+	prepared, err := downloadEngine.Files().prepareDirectory(context.Background(), scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{downloadEntry}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prerequisite := range prepared.prerequisites {
+		if _, err := downloadBackend.Put(context.Background(), objectstore.MustKey(prerequisite.Key), prerequisite.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rootKey := storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID)
+	if _, err := downloadBackend.Put(context.Background(), rootKey, prepared.rootBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	downloadPath := domain.MustParseUserPath("/missing.bin")
+	if _, err := downloadEngine.Files().CreateDownload(context.Background(), scope, domain.CreateDownloadRequest{Path: downloadPath, Version: "stale"}); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("CreateDownload(stale version) error = %v", err)
+	}
+	if _, err := downloadEngine.Files().CreateDownload(context.Background(), scope, domain.CreateDownloadRequest{Path: downloadPath, Version: domain.Version(downloadEntry.LogicalVersion)}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("CreateDownload(missing blob) error = %v", err)
+	}
+}
+
+func openInternalTransferFixture(t *testing.T, objects map[string][]byte, clock *domain.FixedClock, seed string) (*objectmemory.Backend, *Engine) {
+	t.Helper()
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(strings.NewReader(strings.Repeat(seed, 1<<16)))); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.Import(objects); err != nil {
+		t.Fatal(err)
+	}
+	return backend, openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat(seed, 1<<16)))
+}
+
+func openInternalTestEngine(t *testing.T, backend objectstore.Backend, clock *domain.FixedClock, random *strings.Reader) *Engine {
+	t.Helper()
+	engine, err := Open(context.Background(), Options{
+		Backend: backend, Clock: clock, IDs: domain.NewIDGenerator(random),
+		Writer:   WriterConfiguration{WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"}},
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x44}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return engine
+}
+
+func replaceInternalObject(t *testing.T, backend *objectmemory.Backend, key objectstore.Key, version objectstore.NativeVersion, body []byte) objectstore.NativeVersion {
+	t.Helper()
+	updated, err := backend.Put(context.Background(), key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return updated
+}
+
+func withStateCursor(cursor stateListCursor, mutate func(*stateListCursor)) stateListCursor {
+	cursor.Snapshots = append([]string(nil), cursor.Snapshots...)
+	mutate(&cursor)
+	return cursor
+}
+
+func cloneInternalObjects(objects map[string][]byte) map[string][]byte {
+	clone := make(map[string][]byte, len(objects))
+	for key, body := range objects {
+		clone[key] = append([]byte(nil), body...)
+	}
+	return clone
+}
+
+func encodeInternalEnvelope(t *testing.T, schema string, key objectstore.Key, revision uint64, value any) []byte {
+	t.Helper()
+	body, err := storageformat.EncodeEnvelope(schema, key, revision, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
 
 func withEntry(entry storageformat.DirectoryEntry, mutate func(*storageformat.DirectoryEntry)) storageformat.DirectoryEntry {

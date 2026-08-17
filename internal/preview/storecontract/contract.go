@@ -154,8 +154,9 @@ func Run(t *testing.T, factory Factory) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := harness.Store.Claim(context.Background(), binding, "concurrent-claim", harness.Now().Add(time.Hour)); !errors.Is(err, domain.ErrConflict) {
-			t.Fatalf("concurrent Claim() error = %v", err)
+		contended, err := harness.Store.Claim(context.Background(), binding, "concurrent-claim", harness.Now().Add(time.Hour))
+		if !errors.Is(err, domain.ErrConflict) || contended != first {
+			t.Fatalf("concurrent Claim() = %+v, %v; want current claim %+v", contended, err, first)
 		}
 		harness.Advance(2 * time.Hour)
 		second, err := harness.Store.Claim(context.Background(), binding, "takeover-claim", harness.Now().Add(time.Hour))

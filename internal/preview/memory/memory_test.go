@@ -313,6 +313,36 @@ func TestMemoryPreviewStoreClaimsRetentionAndCapacityBoundaries(t *testing.T) {
 	}
 }
 
+func TestMemoryPreviewStoreBoundsTotalArtifactBytes(t *testing.T) {
+	clock := domain.NewFixedClock(time.Date(2046, 1, 2, 3, 4, 5, 0, time.UTC))
+	artifact := memoryTestArtifact("bounded-generation", 256)
+	store, err := previewmemory.New(previewmemory.Options{
+		Clock: clock, IDs: domain.NewIDGenerator(bytes.NewReader(deterministicBytes(1 << 20))), Key: secret.Value(testBearer(0x46)),
+		MaxArtifactBytes: artifact.Size,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(store)
+	t.Cleanup(server.Close)
+	if err := store.SetDataPlaneBaseURL(server.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Validate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	binding := memoryTestBinding(t)
+	if err := store.Commit(context.Background(), binding, memoryClaim(t, store, binding, artifact.GenerationID, clock.Now()), artifact); err != nil {
+		t.Fatal(err)
+	}
+	other := binding
+	other.ContentID = "other-content"
+	otherArtifact := memoryTestArtifact("other-generation", 256)
+	if err := store.Commit(context.Background(), other, memoryClaim(t, store, other, otherArtifact.GenerationID, clock.Now()), otherArtifact); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("artifact byte capacity error = %v", err)
+	}
+}
+
 func memoryClaim(t *testing.T, store *previewmemory.Store, binding preview.Binding, claimID string, now time.Time) preview.GenerationClaim {
 	t.Helper()
 	claim, err := store.Claim(context.Background(), binding, claimID, now.Add(time.Hour))

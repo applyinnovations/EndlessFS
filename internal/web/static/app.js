@@ -26,6 +26,9 @@
     previewActive: 0,
     previewControllers: new Map(),
     previewObjectURLs: new Map(),
+    previewRetryAttempts: new Map(),
+    previewRetryTimers: new Map(),
+    previewGenerationRequests: new Map(),
     gridObserver: null,
     gridRenderFrame: 0,
     viewerEntries: [],
@@ -37,6 +40,8 @@
   };
 
   const gridOverscanRows = 3;
+  const previewRetryDelays = [250, 500, 1000, 2000, 4000, 5000];
+  const maximumPreviewPolls = 14;
 
   class APIError extends Error {
     constructor(response, problem) {
@@ -69,6 +74,18 @@
   const csrf = () => cookie("__Host-endlessfs_csrf") || cookie("endlessfs_csrf_dev");
   const idempotencyKey = () => crypto.randomUUID();
   const isMutation = (method) => !["GET", "HEAD"].includes(method);
+
+  function wait(delay, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal && signal.aborted) { reject(new DOMException("Aborted", "AbortError")); return; }
+      const onAbort = () => { window.clearTimeout(timer); reject(new DOMException("Aborted", "AbortError")); };
+      const timer = window.setTimeout(() => {
+        if (signal) signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, delay);
+      if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
 
   async function api(path, options = {}) {
     const method = options.method || "GET";
@@ -511,7 +528,7 @@
 
   function queueGridPreview(entry, frame) {
     const known = state.previewStates.get(entry.path);
-    if (!state.config || !state.config.previewConfigured || entry.kind !== "file" || (known && known.state !== "ready") || state.previewQueued.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
+    if (!state.config || !state.config.previewConfigured || entry.kind !== "file" || (known && known.state !== "ready" && known.state !== "generating") || state.previewQueued.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
     state.previewQueued.add(entry.path);
     state.previewQueue.push({ entry, frame });
     pumpPreviewQueue();
@@ -544,9 +561,12 @@
       let currentFrame = connectedGridFrame(entry.path) || frame;
       if (currentFrame.isConnected) currentFrame.dataset.previewState = result.state;
       if (result.state !== "ready" || !result.capability) {
+        if (result.state === "generating") scheduleGridPreviewRetry(entry, currentFrame);
+        else clearGridPreviewRetry(entry.path);
         if (byID("filter-preview").value) renderFiles();
         return;
       }
+      clearGridPreviewRetry(entry.path);
       const artifactResponse = await fetch(result.capability.url, { method: result.capability.method || "GET", headers: result.capability.headers || {}, signal: controller.signal, credentials: "omit" });
       if (!artifactResponse.ok || artifactResponse.headers.get("Content-Type") !== "image/webp") throw new Error("Invalid preview artifact response");
       const blob = await artifactResponse.blob();
@@ -562,8 +582,37 @@
         const result = { state: "unavailable" };
         state.previewStates.set(entry.path, result);
         frame.dataset.previewState = result.state;
+        clearGridPreviewRetry(entry.path);
       }
     }
+  }
+
+  function scheduleGridPreviewRetry(entry, frame) {
+    clearGridPreviewRetry(entry.path, false);
+    const attempt = state.previewRetryAttempts.get(entry.path) || 0;
+    if (attempt >= maximumPreviewPolls) {
+      const failed = { state: "failed" };
+      state.previewStates.set(entry.path, failed);
+      if (frame && frame.isConnected) frame.dataset.previewState = failed.state;
+      state.previewRetryAttempts.delete(entry.path);
+      return;
+    }
+    state.previewRetryAttempts.set(entry.path, attempt + 1);
+    const delay = previewRetryDelays[Math.min(attempt, previewRetryDelays.length - 1)];
+    const timer = window.setTimeout(() => {
+      state.previewRetryTimers.delete(entry.path);
+      const currentFrame = connectedGridFrame(entry.path);
+      if (!currentFrame || !currentFrame.isConnected || state.previewStates.get(entry.path)?.state !== "generating") return;
+      queueGridPreview(entry, currentFrame);
+    }, delay);
+    state.previewRetryTimers.set(entry.path, timer);
+  }
+
+  function clearGridPreviewRetry(path, resetAttempts = true) {
+    const timer = state.previewRetryTimers.get(path);
+    if (timer) window.clearTimeout(timer);
+    state.previewRetryTimers.delete(path);
+    if (resetAttempts) state.previewRetryAttempts.delete(path);
   }
 
   function connectedGridFrame(path) {
@@ -599,6 +648,9 @@
         state.previewObjectURLs.delete(path);
         if (state.previewStates.get(path) && state.previewStates.get(path).state === "ready") state.previewStates.delete(path);
       }
+    }
+    for (const path of state.previewRetryTimers.keys()) {
+      if (!activePaths.has(path)) clearGridPreviewRetry(path);
     }
   }
 
@@ -980,16 +1032,47 @@
     byID("preview-status").textContent = `${regenerate ? "Regenerating" : "Generating"} preview…`;
     try {
       const variant = previewVariant(Math.max(window.innerWidth, window.innerHeight));
-      const operation = await api("/api/v1/previews/generations", { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: { path: entry.path, version: entry.version, variant, action } });
-      if (operation.state === "succeeded" && operation.result) await displayViewerResult(entry, operation.result, new AbortController().signal);
-      else {
-        byID("preview-status").textContent = "Preview generation did not complete.";
+      const requestIdentity = `${entry.path}\u0000${entry.version}\u0000${variant}\u0000${action}`;
+      let pending = state.previewGenerationRequests.get(requestIdentity);
+      if (!pending) {
+        if (state.previewGenerationRequests.size >= 64) state.previewGenerationRequests.delete(state.previewGenerationRequests.keys().next().value);
+        pending = { idempotencyKey: idempotencyKey(), body: { path: entry.path, version: entry.version, variant, action } };
+        state.previewGenerationRequests.set(requestIdentity, pending);
+      }
+      const postGeneration = () => api("/api/v1/previews/generations", {
+        method: "POST", headers: { "Idempotency-Key": pending.idempotencyKey }, body: pending.body, signal: state.viewerController.signal,
+      });
+      let operation = await postGeneration();
+      if (operation.state === "running") byID("preview-status").textContent = "Preview generation is running and will be recovered safely if its replica stops.";
+      operation = await waitForPreviewOperation(operation, postGeneration, state.viewerController.signal);
+      if (operation.state === "succeeded" && operation.result) {
+        state.previewGenerationRequests.delete(requestIdentity);
+        await displayViewerResult(entry, operation.result, state.viewerController.signal);
+      } else if (operation.state === "failed") {
+        state.previewGenerationRequests.delete(requestIdentity);
+        byID("preview-status").textContent = "Preview generation failed. You can try again.";
+        showViewerFallback(entry);
+      } else {
+        byID("preview-status").textContent = "Preview generation is still running. Choose Generate again to resume this operation.";
         showViewerFallback(entry);
       }
     } catch (error) {
-      byID("preview-status").textContent = friendlyError(error, "Preview generation did not complete.");
-      showViewerFallback(entry);
+      if (error.name !== "AbortError") {
+        byID("preview-status").textContent = friendlyError(error, "Preview generation did not complete. Choose Generate again to safely retry it.");
+        showViewerFallback(entry);
+      }
     }
+  }
+
+  async function waitForPreviewOperation(initial, retryMutation, signal) {
+    let operation = initial;
+    for (let attempt = 0; attempt < maximumPreviewPolls && operation.state === "running"; attempt += 1) {
+      const delay = previewRetryDelays[Math.min(attempt, previewRetryDelays.length - 1)];
+      await wait(delay, signal);
+      if (attempt >= 12 && attempt % 2 === 0) operation = await retryMutation();
+      else operation = await api(`/api/v1/previews/operations/${encodeURIComponent(operation.id)}`, { signal });
+    }
+    return operation;
   }
 
   function navigateViewer(offset) {

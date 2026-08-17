@@ -131,6 +131,8 @@ func (a Artifact) ValidFor(binding Binding) bool {
 type Store interface {
 	Validate(context.Context) error
 	Check(context.Context) error
+	// Claim returns the current unexpired claim together with ErrConflict so a
+	// durable follower operation can await that exact immutable generation.
 	Claim(context.Context, Binding, string, time.Time) (GenerationClaim, error)
 	Release(context.Context, Binding, GenerationClaim) error
 	Commit(context.Context, Binding, GenerationClaim, Artifact) error

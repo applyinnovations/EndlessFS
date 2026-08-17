@@ -7,6 +7,20 @@
 
 ---
 
+## Versioned extension specifications
+
+This document is the normative contract for the feature-complete mock-backed v1.0 baseline. Later feature releases are specified as scoped, independently reviewable extensions:
+
+- [`v1.1-media-preview-specification.md`](./v1.1-media-preview-specification.md) — optional media browsing, virtualized image grids, and built-in generated image previews;
+- [`v1.2-video-preview-specification.md`](./v1.2-video-preview-specification.md) — separately packaged video poster and metadata generation; and
+- [`v1.3-pdf-preview-specification.md`](./v1.3-pdf-preview-specification.md) — separately packaged PDF first-page preview generation.
+
+An approved extension inherits this document and supersedes it only where the extension explicitly says so. Completion of v1.0 remains defined solely by this document. A later release cannot claim an extension merely because the base behavior falls back safely; it must satisfy that extension's acceptance criteria and release evidence.
+
+Search remains a future feature with its own eventual specification. The preview extensions do not implement search and do not constrain its future product direction beyond preserving the existing security and provider-independence boundaries.
+
+---
+
 ## 1. Executive contract
 
 EndlessFS is an open-source, provider-agnostic, security-first, private, self-hostable cloud drive. It provides a fast browser interface over cloud object storage while separating the application control plane from the file data plane.
@@ -192,9 +206,9 @@ The following are not part of v1:
 - Content-addressed deduplication or cross-user deduplication.
 - End-to-end or client-side file encryption.
 - File version history beyond the opaque version used for concurrency control.
-- Full-drive indexed search, document-content search, or OCR.
+- Full-drive indexed search, document-content search, or OCR. Search remains a future feature; it is not required for the v1.0 baseline or the v1.1–v1.3 preview deliverables.
 - Favorites, comments, activity feeds, notification delivery, or email.
-- Antivirus scanning, data-loss prevention, media transcoding, thumbnails generated server-side, or archive creation.
+- Antivirus scanning, data-loss prevention, media transcoding, generated thumbnails, or archive creation in the v1.0 baseline. The versioned preview specifications explicitly introduce bounded disposable raster generation without adding playable-media transcoding.
 - Anonymous uploads, writeable shares, user-to-user collaboration ACLs, teams, or groups.
 - Billing, quotas, subscriptions, telemetry, or an EndlessFS-hosted control service.
 - Automated account recovery without an administrator.
@@ -1077,7 +1091,7 @@ Security rules:
 - Preview responses use `X-Content-Type-Options: nosniff` and a restrictive CSP.
 - Image/PDF capability origins are explicitly allowlisted in CSP configuration.
 - A failed preview falls back to metadata and download.
-- No server-side transcoding or thumbnail service is introduced.
+- No server-side transcoding or thumbnail service is introduced in the v1.0 baseline. The v1.1–v1.3 extension specifications supersede this sentence only for their bounded, optional, disposable preview artifacts.
 
 ### 11.7 Public shares
 

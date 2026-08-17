@@ -1,6 +1,6 @@
 # Contributing to EndlessFS
 
-EndlessFS is implementing the normative contract in `docs/v1-specification.md`. Start with `AGENTS.md`, identify the next incomplete acceptance behavior in the current milestone, and keep the pull request small enough that its security boundaries are reviewable.
+EndlessFS implements the normative baseline in `docs/v1-specification.md` and may target an approved versioned extension specification. Start with `AGENTS.md`, identify the next incomplete acceptance behavior in the applicable specification, and keep the pull request small enough that its security boundaries are reviewable.
 
 All development and checks run through Nix:
 

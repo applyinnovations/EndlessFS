@@ -7,6 +7,8 @@ EndlessFS is an open-source, provider-neutral, security-first private cloud driv
 
 The normative implementation contract is [docs/v1-specification.md](./docs/v1-specification.md). The credential-free GCS suite models the documented JSON/XML, generation, signing, CORS, checksum, range, resumable-session, cancellation, and failure behavior on loopback. It qualifies the integration layer locally; only the separate opt-in live qualification described by the specification can establish real-service interoperability.
 
+The [v1.1 media browsing and image preview specification](./docs/v1.1-media-preview-specification.md) is approved for implementation but is not yet part of the implemented-v1 claim. The [v1.2 video](./docs/v1.2-video-preview-specification.md) and [v1.3 PDF](./docs/v1.3-pdf-preview-specification.md) preview drafts are deferred for revision after v1.1 implementation. Their unchecked acceptance criteria are plans, not current release evidence.
+
 ## Why EndlessFS
 
 - Passkey-only, usernameless identity with no password, email identity, or OAuth path.

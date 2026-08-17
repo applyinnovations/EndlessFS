@@ -1,10 +1,11 @@
 # EndlessFS implementation guide
 
-This file applies to the entire repository. `docs/v1-specification.md` is normative; when this guide and the spec appear to differ, follow the spec and correct this guide in the same change.
+This file applies to the entire repository. `docs/v1-specification.md` is normative for the feature-complete v1.0 baseline. Approved versioned extension specifications inherit it and are normative only for their declared release scope. When this guide and an applicable specification differ, follow the specification and correct this guide in the same change.
 
 ## Mission and current state
 
 Maintain and extend the provider-portable v1 implementation without weakening its security or reproducibility requirements. Milestones 0–7 provide the reproducible foundation, application-facing provider/state contracts, passkey identity, file/trash/preview/share control plane, closed data-only theme system, complete accessible browser workflows, adversarial hardening, and release proof.
+The v1.1 media-preview extension is approved for implementation but remains incomplete until its own evidence is recorded. The v1.2 video and v1.3 PDF drafts are deferred for revision after v1.1 implementation. Never present an unimplemented placeholder, graceful fallback, skipped path, or empty test selection as evidence that an optional extension itself is complete.
 
 The clarified provider-agnostic v1 contract requires the canonical provider-independent single-/split-bucket storage-set format, portable logical versions, one portable storage engine over thin object-store backends, safe multi-replica write admission/fencing/recovery, and verified quiescent raw-copy portability in spec sections 5, 8, 9, 18, 21, 22.3, and 22.4. Implemented claims still require evidence for every relevant checklist item; the repository MUST NOT be described as v1 feature complete while any required item remains unchecked. These are clarifications of v1, not a new specification or post-v1 milestone.
 
@@ -78,7 +79,7 @@ The canonical format package alone constructs bounded provider-independent objec
 
 Expected v1 package responsibilities are described in spec section 5.3. Add them as their milestone begins; avoid speculative abstractions with no tested behavior.
 
-The production artifact is one Go application binary with all frontend and validated theme assets embedded. Helper commands used only for development/policy may exist under `tools`, but they must not enter the production image.
+The base production artifact is one Go application binary with all frontend and validated theme assets embedded. Helper commands used only for development/policy may exist under `tools`, but they must not enter the base production image. An approved specialized media profile may add only the pinned, inventoried codec/renderer runtime expressly allowed by its specification; those dependencies must remain absent from profiles that do not declare the capability.
 
 ## Security invariants
 

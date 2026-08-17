@@ -430,15 +430,12 @@ func (p *Provider) newEntryLocked(path domain.UserPath, kind domain.EntryKind, s
 	}
 }
 
-func (p *Provider) newFileEntryLocked(path domain.UserPath, size int64, mediaType string, existing domain.PreviewContentIdentity) (domain.Entry, error) {
-	contentID := existing.ContentID
-	if contentID == "" {
-		value, err := p.ids.OpaqueID()
-		if err != nil {
-			return domain.Entry{}, err
-		}
-		contentID = domain.ContentID(value)
+func (p *Provider) newFileEntryLocked(path domain.UserPath, size int64, mediaType string) (domain.Entry, error) {
+	value, err := p.ids.OpaqueID()
+	if err != nil {
+		return domain.Entry{}, err
 	}
+	contentID := domain.ContentID(value)
 	contentVersion, err := p.ids.OpaqueID()
 	if err != nil {
 		return domain.Entry{}, err

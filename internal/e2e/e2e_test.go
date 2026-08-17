@@ -332,6 +332,30 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if loaded != 10_002 || renderedTiles > 64 || resolveRequestsAfterScale-resolveRequestsBeforeScale > 32 {
 		t.Fatalf("virtual grid bounds: logical=%d rendered=%d previewRequests=%d", loaded, renderedTiles, resolveRequestsAfterScale-resolveRequestsBeforeScale)
 	}
+	if err := waitFor(ctx, `document.querySelector(".media-frame img[alt='Preview of media-proof.png']") !== null`, 15*time.Second); err != nil {
+		t.Fatalf("wait for preview before virtual eviction: %v (%s)", err, browserStatus(ctx))
+	}
+	mu.Lock()
+	resolveRequestsBeforeEviction := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
+	mu.Unlock()
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => { const grid = document.querySelector("#media-grid"); grid.scrollTop = grid.scrollHeight; grid.dispatchEvent(new Event("scroll")); })()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitFor(ctx, `document.querySelector(".media-frame[data-path='/media-proof.png']") === null`, 10*time.Second); err != nil {
+		t.Fatalf("preview tile was not virtually evicted: %v", err)
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => { const grid = document.querySelector("#media-grid"); grid.scrollTop = 0; grid.dispatchEvent(new Event("scroll")); })()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitFor(ctx, `document.querySelector(".media-frame img[alt='Preview of media-proof.png']") !== null`, 15*time.Second); err != nil {
+		t.Fatalf("evicted preview was not reacquired: %v (%s)", err, browserStatus(ctx))
+	}
+	mu.Lock()
+	resolveRequestsAfterEviction := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
+	mu.Unlock()
+	if resolveRequestsAfterEviction <= resolveRequestsBeforeEviction {
+		t.Fatalf("evicted preview reused a revoked object URL: requests before=%d after=%d", resolveRequestsBeforeEviction, resolveRequestsAfterEviction)
+	}
 
 	var fitsMobile bool
 	var namedControls bool
@@ -974,7 +998,7 @@ func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
 	if withPreviews {
 		cfg.PreviewProvider = "mock"
 		cfg.PreviewAutomatic = true
-		previewService, serviceErr := preview.NewService(preview.Options{Automatic: true, Resolutions: cfg.PreviewResolutions, MaxConcurrency: cfg.PreviewMaxConcurrency}, storage, previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, http.DefaultClient, ids, clock)
+		previewService, serviceErr := preview.NewService(preview.Options{Automatic: true, Resolutions: cfg.PreviewResolutions, MaxConcurrency: cfg.PreviewMaxConcurrency, ApplicationState: store}, storage, previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, http.DefaultClient, ids, clock)
 		if serviceErr != nil {
 			t.Fatal(serviceErr)
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"hash/crc32"
 	"image"
 	"image/color"
@@ -11,13 +12,46 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/preview"
 	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
 	"github.com/deepteams/webp"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("ENDLESSFS_TEST_BLOCK_PREVIEW_WORKER") == "1" {
+		time.Sleep(time.Hour)
+		os.Exit(1)
+	}
+	if imagegen.IsWorkerInvocation() {
+		if err := imagegen.RunWorker(os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func TestWorkerGeneratorRunsCodecOutOfProcessAndHonorsCancellation(t *testing.T) {
+	worker, err := imagegen.NewWorker(imagegen.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := encodePNG(t, image.NewNRGBA(image.Rect(0, 0, 32, 16)))
+	generated, err := worker.Generate(context.Background(), preview.GenerationRequest{Source: bytes.NewReader(input), SourceSize: int64(len(input)), MediaType: "image/png", Variant: 64})
+	if err != nil || generated.Width != 32 || generated.Height != 16 {
+		t.Fatalf("worker Generate() = %+v, %v", generated, err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := worker.Generate(canceled, preview.GenerationRequest{Source: bytes.NewReader(input), SourceSize: int64(len(input)), MediaType: "image/png", Variant: 64}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled worker error = %v", err)
+	}
+}
 
 func TestGeneratorProducesStaticWebPAtSourceAspectRatio(t *testing.T) {
 	generator := imagegen.New(imagegen.Options{})

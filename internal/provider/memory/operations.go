@@ -111,11 +111,12 @@ func (p *Provider) copyOrMove(ctx context.Context, operationName string, move bo
 		entry := p.newEntryLocked(newPath, item.entry.Kind, item.entry.Size, item.entry.MediaType)
 		if item.entry.Kind == domain.EntryFile {
 			if move {
+				entry.ModifiedAt = item.entry.ModifiedAt
 				entry.ContentID = item.entry.ContentID
 				entry.ContentVersion = item.entry.ContentVersion
 				entry.ContentModifiedAt = item.entry.ContentModifiedAt
 			} else {
-				entry, err = p.newFileEntryLocked(newPath, item.entry.Size, item.entry.MediaType, domain.PreviewContentIdentity{})
+				entry, err = p.newFileEntryLocked(newPath, item.entry.Size, item.entry.MediaType)
 				if err != nil {
 					return domain.Operation{}, err
 				}

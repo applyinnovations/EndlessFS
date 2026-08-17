@@ -1,5 +1,5 @@
-// Package imagegen implements the closed v1.1 raster-image generator. It has
-// no runtime codec process or library dependency and emits static WebP only.
+// Package imagegen implements the closed v1.1 raster-image generator and its
+// one-shot, hard-cancelable worker protocol. It emits static WebP only.
 package imagegen
 
 import (

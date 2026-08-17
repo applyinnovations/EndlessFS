@@ -38,6 +38,12 @@ import (
 var version = "dev"
 
 func main() {
+	if imagegen.IsWorkerInvocation() {
+		if err := imagegen.RunWorker(os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		endlesslogging.NewJSON(os.Stdout, slog.LevelInfo).Error("process_stopped", "result", "error", "error", err.Error())
@@ -201,6 +207,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	}
 	var previewService *preview.Service
 	if previewEnabled {
+		imageGenerator, workerErr := imagegen.NewWorker(imagegen.Options{})
+		if workerErr != nil {
+			return domain.NewError(domain.ErrorUnavailable, "preview generator worker is unavailable")
+		}
 		previewService, err = preview.NewService(preview.Options{
 			Automatic:        cfg.PreviewAutomatic,
 			MaxAge:           cfg.PreviewAutoMaxAge,
@@ -209,7 +219,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 			MaxConcurrency:   cfg.PreviewMaxConcurrency,
 			OperationTimeout: cfg.PreviewOperationTimeout,
 			StartupTimeout:   cfg.PreviewStartupTimeout,
-		}, storage, previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, http.DefaultClient, ids, clock)
+			ApplicationState: store,
+		}, storage, previewStore, []preview.Generator{imageGenerator}, http.DefaultClient, ids, clock)
 		if err != nil {
 			return err
 		}

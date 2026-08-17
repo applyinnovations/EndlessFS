@@ -4,9 +4,31 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 )
+
+type v1DirectoryEntryWithoutPreviewFields struct {
+	Name           string           `json:"name"`
+	NameDigest     string           `json:"nameDigest"`
+	Kind           domain.EntryKind `json:"kind"`
+	DirectoryID    string           `json:"directoryID,omitempty"`
+	BlobID         string           `json:"blobID,omitempty"`
+	Size           int64            `json:"size"`
+	MediaType      string           `json:"mediaType,omitempty"`
+	SHA256         string           `json:"sha256,omitempty"`
+	ModifiedAt     time.Time        `json:"modifiedAt"`
+	LogicalVersion string           `json:"logicalVersion"`
+}
+
+type v1DirectoryPageWithoutPreviewFields struct {
+	SchemaVersion int                                    `json:"schemaVersion"`
+	DirectoryID   string                                 `json:"directoryID"`
+	PageID        string                                 `json:"pageID"`
+	Entries       []v1DirectoryEntryWithoutPreviewFields `json:"entries"`
+}
 
 func TestCanonicalEnvelopeAndLogicalVersion(t *testing.T) {
 	key := objectstore.MustKey("endlessfs/v1/control/write-gate.json")
@@ -32,6 +54,32 @@ func TestCanonicalEnvelopeAndLogicalVersion(t *testing.T) {
 	changed, _ := EncodeEnvelope("write-gate-v1", key, 4, payload)
 	if string(changed) == string(first) {
 		t.Fatal("revision change did not change canonical envelope")
+	}
+}
+
+func TestCanonicalDirectoryPageRemainsReadableWithoutFormatMigration(t *testing.T) {
+	key := DirectoryPageKey("AAAAAAAAAAAAAAAAAAAAAA", "live", RootDirectoryID, "legacy-page")
+	payload := v1DirectoryPageWithoutPreviewFields{
+		SchemaVersion: 1,
+		DirectoryID:   RootDirectoryID,
+		PageID:        "legacy-page",
+		Entries: []v1DirectoryEntryWithoutPreviewFields{{
+			Name: "image.png", NameDigest: NameDigest("image.png"), Kind: domain.EntryFile,
+			BlobID: "blob-id", Size: 4, MediaType: "image/png", SHA256: "digest",
+			ModifiedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), LogicalVersion: "version",
+		}},
+	}
+	body, err := EncodeEnvelope("directory-page-v1", key, 1, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope Envelope
+	var decoded DirectoryPage
+	if err := DecodeEnvelope(body, key, "directory-page-v1", &envelope, &decoded); err != nil {
+		t.Fatalf("pre-preview canonical directory page became unreadable: %v", err)
+	}
+	if len(decoded.Entries) != 1 || decoded.Entries[0].BlobID != "blob-id" {
+		t.Fatalf("decoded directory page = %+v", decoded)
 	}
 }
 

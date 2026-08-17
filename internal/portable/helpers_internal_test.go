@@ -18,7 +18,7 @@ func TestPortableDirectoryEntryValidationMatrix(t *testing.T) {
 	now := time.Date(2043, 1, 2, 3, 4, 5, 0, time.UTC)
 	validDirectory := storageformat.DirectoryEntry{Name: "dir", NameDigest: storageformat.NameDigest("dir"), Kind: domain.EntryDirectory, DirectoryID: "directory", ModifiedAt: now}
 	validDirectory.LogicalVersion, _ = directoryEntryVersion(validDirectory)
-	validFile := storageformat.DirectoryEntry{Name: "file", NameDigest: storageformat.NameDigest("file"), Kind: domain.EntryFile, BlobID: "blob", Size: 3, MediaType: "text/plain", ContentID: "content", ContentVersion: "version", ContentModifiedAt: now, ModifiedAt: now}
+	validFile := storageformat.DirectoryEntry{Name: "file", NameDigest: storageformat.NameDigest("file"), Kind: domain.EntryFile, BlobID: "blob", Size: 3, MediaType: "text/plain", ModifiedAt: now}
 	validFile.LogicalVersion, _ = directoryEntryVersion(validFile)
 	legacyFile := storageformat.DirectoryEntry{Name: "legacy", NameDigest: storageformat.NameDigest("legacy"), Kind: domain.EntryFile, BlobID: "legacy-blob", Size: 3, MediaType: "text/plain", ModifiedAt: now}
 	legacyFile.LogicalVersion, _ = directoryEntryVersion(legacyFile)
@@ -30,10 +30,8 @@ func TestPortableDirectoryEntryValidationMatrix(t *testing.T) {
 		t.Fatalf("pre-v1.1 canonical entry error = %v", err)
 	}
 	legacyIdentity := domainEntry(domain.MustParseUserPath("/legacy"), legacyFile).PreviewContentIdentity()
-	materializePreviewContentIdentity(&legacyFile)
 	legacyFile.Name = "renamed"
 	legacyFile.NameDigest = storageformat.NameDigest(legacyFile.Name)
-	legacyFile.ModifiedAt = now.Add(time.Hour)
 	legacyFile.LogicalVersion, _ = directoryEntryVersion(legacyFile)
 	if renamed := domainEntry(domain.MustParseUserPath("/renamed"), legacyFile).PreviewContentIdentity(); renamed != legacyIdentity || renamed.ContentID == "" || renamed.ContentVersion == "" || renamed.ContentModifiedAt.IsZero() {
 		t.Fatalf("derived legacy identity changed on rename: before=%+v after=%+v", legacyIdentity, renamed)
@@ -50,14 +48,6 @@ func TestPortableDirectoryEntryValidationMatrix(t *testing.T) {
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.BlobID = "" }),
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.DirectoryID = "directory" }),
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.MediaType = "" }),
-		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.ContentID = "" }),
-		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.ContentVersion = "" }),
-		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.ContentModifiedAt = time.Time{} }),
-		withEntry(validFile, func(entry *storageformat.DirectoryEntry) {
-			entry.ContentID = ""
-			entry.ContentVersion = ""
-		}),
-		withEntry(validDirectory, func(entry *storageformat.DirectoryEntry) { entry.ContentID = "content" }),
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.Kind = "link" }),
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.LogicalVersion = "wrong" }),
 	}
@@ -76,7 +66,7 @@ func TestPortableDirectoryEntryValidationMatrix(t *testing.T) {
 
 func TestPortableDirectoryAndCursorHelpers(t *testing.T) {
 	now := time.Date(2043, 1, 2, 3, 4, 5, 0, time.UTC)
-	entry := storageformat.DirectoryEntry{Name: "report.txt", NameDigest: storageformat.NameDigest("report.txt"), Kind: domain.EntryFile, BlobID: "blob", Size: 5, MediaType: "text/plain", ContentID: "content", ContentVersion: "version", ContentModifiedAt: now, ModifiedAt: now}
+	entry := storageformat.DirectoryEntry{Name: "report.txt", NameDigest: storageformat.NameDigest("report.txt"), Kind: domain.EntryFile, BlobID: "blob", Size: 5, MediaType: "text/plain", ModifiedAt: now}
 	entry.LogicalVersion, _ = directoryEntryVersion(entry)
 	path := domain.MustParseUserPath("/report.txt")
 

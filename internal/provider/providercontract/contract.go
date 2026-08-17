@@ -408,7 +408,7 @@ func Run(t *testing.T, factory Factory) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if replacement.ContentID != restored.ContentID || replacement.ContentVersion == restored.ContentVersion || !replacement.ContentModifiedAt.After(restored.ContentModifiedAt) {
+		if replacement.ContentID == restored.ContentID || replacement.ContentVersion == restored.ContentVersion || !replacement.ContentModifiedAt.After(restored.ContentModifiedAt) {
 			t.Fatalf("replacement identity = %+v, previous = %+v", replacement.PreviewContentIdentity(), restored.PreviewContentIdentity())
 		}
 	})

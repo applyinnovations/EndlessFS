@@ -6,13 +6,16 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/provider"
+	"github.com/applyinnovations/endlessfs/internal/state"
 )
 
 func TestContentBindingAndArtifactValidationFailures(t *testing.T) {
@@ -69,6 +72,7 @@ func TestReadyResultAndConcurrencyFailureMapping(t *testing.T) {
 		wantError bool
 	}{
 		{name: "latest error", store: &scriptedStore{latestErr: domain.NewError(domain.ErrorInvalid, "bad manifest")}, wantState: StateFailed},
+		{name: "latest unavailable", store: &scriptedStore{latestErr: domain.ErrUnavailable}, wantState: StateUnavailable},
 		{name: "capability unavailable", store: &scriptedStore{latest: internalArtifact("one", binding.Variant), capabilityErr: domain.NewError(domain.ErrorUnavailable, "offline")}, wantState: StateUnavailable},
 		{name: "capability invalid", store: &scriptedStore{latest: internalArtifact("two", binding.Variant), capabilityErr: domain.NewError(domain.ErrorInvalid, "bad capability")}, wantError: true},
 	}
@@ -85,15 +89,15 @@ func TestReadyResultAndConcurrencyFailureMapping(t *testing.T) {
 		t.Fatal("preview state error mapping changed")
 	}
 	owner := binding.Owner
-	globalBlocked := &Service{global: make(chan struct{}, 1), perUser: make(map[string]chan struct{})}
+	globalBlocked := &Service{global: make(chan struct{}, 1), perUser: make(map[string]*userLimit)}
 	globalBlocked.global <- struct{}{}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := globalBlocked.acquire(canceled, owner); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("global canceled acquire error = %v", err)
 	}
-	userBlocked := &Service{global: make(chan struct{}, 1), perUser: map[string]chan struct{}{owner.String(): make(chan struct{}, 1)}}
-	userBlocked.perUser[owner.String()] <- struct{}{}
+	userBlocked := &Service{global: make(chan struct{}, 1), perUser: map[string]*userLimit{owner.String(): {semaphore: make(chan struct{}, 1)}}}
+	userBlocked.perUser[owner.String()].semaphore <- struct{}{}
 	if _, err := userBlocked.acquire(canceled, owner); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("per-user canceled acquire error = %v", err)
 	}
@@ -147,12 +151,82 @@ func TestGenerateFailureIsolationMatrix(t *testing.T) {
 			service := &Service{
 				options: Options{OperationTimeout: time.Second, HardMaxSourceBytes: 1024},
 				source:  &scriptedStorage{download: test.download, downloadErr: test.downloadErr}, store: &scriptedStore{},
-				client: client, ids: ids, clock: domain.SystemClock{}, global: make(chan struct{}, 1), perUser: make(map[string]chan struct{}),
+				client: client, ids: ids, clock: domain.SystemClock{}, global: make(chan struct{}, 1), perUser: make(map[string]*userLimit),
 			}
 			if err := service.generate(context.Background(), scope, entry, binding, generator, true); err == nil {
 				t.Fatal("generate failure path returned success")
 			}
 		})
+	}
+
+	t.Run("latest lookup", func(t *testing.T) {
+		service := internalGenerationService(&scriptedStore{latestErr: domain.ErrUnavailable}, scriptedGenerator{})
+		if err := service.generate(context.Background(), scope, entry, binding, service.generators[0], false); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("latest lookup error = %v", err)
+		}
+	})
+	t.Run("claim", func(t *testing.T) {
+		service := internalGenerationService(&scriptedStore{claimErr: domain.ErrUnavailable}, scriptedGenerator{})
+		if err := service.generate(context.Background(), scope, entry, binding, service.generators[0], true); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("claim error = %v", err)
+		}
+	})
+	t.Run("commit and capability headers", func(t *testing.T) {
+		store := &scriptedStore{commitErr: domain.ErrUnavailable}
+		service := internalGenerationService(store, scriptedGenerator{generated: GeneratedArtifact{Bytes: OnePixelWebP(), Width: 1, Height: 1}})
+		service.source = &scriptedStorage{download: domain.DownloadCapability{
+			URL: "http://127.0.0.1:1234/source", Method: http.MethodGet, Headers: map[string]string{"X-Preview-Test": "bound"},
+		}}
+		service.client = internalClient(func(request *http.Request) (*http.Response, error) {
+			if request.Header.Get("X-Preview-Test") != "bound" {
+				t.Fatal("source capability header was not bound to the request")
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(sourceBytes)), Header: make(http.Header)}, nil
+		})
+		if err := service.generate(context.Background(), scope, entry, binding, service.generators[0], true); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("commit error = %v", err)
+		}
+	})
+	t.Run("hard timeout", func(t *testing.T) {
+		service := internalGenerationService(&scriptedStore{}, cancelGenerator{})
+		service.options.OperationTimeout = time.Millisecond
+		if err := service.generate(context.Background(), scope, entry, binding, service.generators[0], true); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("timeout error = %v", err)
+		}
+	})
+}
+
+func TestGenerateDurableRunningFailureAndReplayTransitions(t *testing.T) {
+	binding := internalBinding(t)
+	entry := domain.Entry{
+		Path: domain.MustParseUserPath("/source.png"), Name: "source.png", Kind: domain.EntryFile,
+		Size: binding.SourceSize, MediaType: binding.MediaType, Version: "source-version",
+		ContentID: binding.ContentID, ContentVersion: binding.ContentVersion, ContentModifiedAt: time.Now(),
+	}
+	request := GenerateRequest{Path: entry.Path, Version: entry.Version, Variant: binding.Variant, IdempotencyKey: "preview-durable-running-0001"}
+	newService := func(source *scriptedStorage, store *scriptedStore) *Service {
+		return &Service{
+			options: Options{Automatic: true, Resolutions: []int{binding.Variant}, OperationTimeout: time.Second, OperationRetention: time.Hour, HardMaxSourceBytes: 1024},
+			source:  source, store: store, generators: []Generator{scriptedGenerator{}},
+			client: internalResponseClient(http.StatusOK, io.NopCloser(bytes.NewReader([]byte("source")))),
+			ids:    domain.NewIDGenerator(bytes.NewReader(make([]byte, 4096))), clock: domain.SystemClock{}, state: state.NewMemoryStore(),
+			global: make(chan struct{}, 1), perUser: make(map[string]*userLimit), inflight: make(map[string]*generationCall),
+		}
+	}
+	runningService := newService(&scriptedStorage{stat: entry}, &scriptedStore{latestErr: domain.ErrNotFound, claimErr: domain.ErrConflict})
+	operation, err := runningService.Generate(context.Background(), binding.Owner, request)
+	if err != nil || operation.State != domain.OperationRunning || operation.Result == nil || operation.Result.State != StateGenerating {
+		t.Fatalf("running operation = %+v, %v", operation, err)
+	}
+
+	failedService := newService(&scriptedStorage{statErr: domain.ErrNotFound}, &scriptedStore{latestErr: domain.ErrNotFound})
+	request.IdempotencyKey = "preview-durable-failed-0001"
+	operation, err = failedService.Generate(context.Background(), binding.Owner, request)
+	if !errors.Is(err, domain.ErrNotFound) || operation.State != domain.OperationFailed {
+		t.Fatalf("failed operation = %+v, %v", operation, err)
+	}
+	if replayed, replayErr := replayedOperation(Operation{State: domain.OperationFailed, ErrorKind: domain.ErrorInvalid}); !errors.Is(replayErr, domain.ErrInvalid) || replayed.State != domain.OperationFailed {
+		t.Fatalf("failed replay = %+v, %v", replayed, replayErr)
 	}
 }
 
@@ -165,9 +239,16 @@ func TestServiceRejectsInvalidRegistryAndGenerationRequests(t *testing.T) {
 			t.Fatalf("invalid generator registry error = %v", err)
 		}
 	}
+	if _, err := NewService(Options{}, &scriptedStorage{}, &scriptedStore{}, nil, http.DefaultClient, domain.NewIDGenerator(bytes.NewReader(make([]byte, 64))), domain.SystemClock{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("missing application state error = %v", err)
+	}
+	manifest := BuildCapabilityManifest("coverage-version")
+	if manifest.ApplicationVersion != "coverage-version" || len(manifest.PackagedCapabilities) != 1 {
+		t.Fatalf("capability manifest = %+v", manifest)
+	}
 	service := &Service{
 		options: options, ids: domain.NewIDGenerator(bytes.NewReader(nil)), clock: domain.SystemClock{},
-		operations: make(map[string]map[domain.OperationID]Operation), idempotent: make(map[string]idempotentOperation),
+		state: state.NewMemoryStore(),
 	}
 	if _, err := service.Generate(context.Background(), binding.Owner, GenerateRequest{
 		Path: domain.MustParseUserPath("/source.png"), Version: "version", Variant: 512, IdempotencyKey: "preview-invalid-item-0001",
@@ -178,6 +259,322 @@ func TestServiceRejectsInvalidRegistryAndGenerationRequests(t *testing.T) {
 		Path: domain.MustParseUserPath("/source.png"), Version: "version", Variant: 256, IdempotencyKey: "preview-exhausted-id-0001",
 	}); err == nil {
 		t.Fatal("exhausted operation ID source returned success")
+	}
+}
+
+func TestDurableOperationStateRejectsCorruptionAndInvalidIndexes(t *testing.T) {
+	binding := internalBinding(t)
+	store := state.NewMemoryStore()
+	service := &Service{
+		state: store, ids: domain.NewIDGenerator(bytes.NewReader(make([]byte, 128))),
+		clock:   domain.NewFixedClock(time.Date(2044, 2, 3, 4, 5, 6, 0, time.UTC)),
+		options: Options{OperationTimeout: time.Minute, OperationRetention: time.Hour},
+	}
+	idempotencyKey := "preview-corrupt-state-0001"
+	digest := sha256.Sum256([]byte(binding.Owner.String() + "\x00" + idempotencyKey))
+	key := state.MustKey(state.NamespaceIdempotency, "preview", binding.Owner.String(), base64.RawURLEncoding.EncodeToString(digest[:]))
+	if _, err := store.Create(context.Background(), key, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.claimOperation(context.Background(), binding.Owner, idempotencyKey, "fingerprint"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("corrupt durable idempotency error = %v", err)
+	}
+	expires := service.clock.Now().Add(time.Hour)
+	entry := operationIndexEntry{OperationID: "operation", IdempotencyDigest: "digest", ExpiresAt: expires}
+	if validOperationIndex(operationIndexRecord{SchemaVersion: 1, Entries: []operationIndexEntry{entry, entry}}) {
+		t.Fatal("duplicate durable operation index was accepted")
+	}
+	if validOperationIndex(operationIndexRecord{SchemaVersion: 2}) {
+		t.Fatal("unknown durable operation index schema was accepted")
+	}
+	if validOperationIndex(operationIndexRecord{SchemaVersion: 1, Entries: []operationIndexEntry{{}}}) {
+		t.Fatal("invalid durable operation index entry was accepted")
+	}
+}
+
+func TestDurableOperationIndexCleansExpiredRecordsAndBoundsContention(t *testing.T) {
+	owner := internalBinding(t).Owner
+	clock := domain.NewFixedClock(time.Date(2045, 3, 4, 5, 6, 7, 0, time.UTC))
+	store := state.NewMemoryStore()
+	service := &Service{state: store, clock: clock}
+	firstID, secondID := operationIDsInSameShard()
+	first := operationIndexEntry{OperationID: firstID, IdempotencyDigest: "expired-digest", ExpiresAt: clock.Now().Add(time.Minute)}
+	if err := service.registerOperation(context.Background(), owner, first); err != nil {
+		t.Fatal(err)
+	}
+	operationKey := previewOperationKey(owner, firstID)
+	if _, err := store.Create(context.Background(), operationKey, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	idempotencyKey := state.MustKey(state.NamespaceIdempotency, "preview", owner.String(), first.IdempotencyDigest)
+	idempotencyBody, err := state.EncodeJSON(idempotencyRecord{SchemaVersion: 1, Fingerprint: "fingerprint", OperationID: firstID, ExpiresAt: first.ExpiresAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(context.Background(), idempotencyKey, idempotencyBody); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(2 * time.Minute)
+	second := operationIndexEntry{OperationID: secondID, IdempotencyDigest: "new-digest", ExpiresAt: clock.Now().Add(time.Hour)}
+	if err := service.registerOperation(context.Background(), owner, second); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.registerOperation(context.Background(), owner, second); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("operation identity collision error = %v", err)
+	}
+	if err := (&Service{state: &getFailureStore{Store: store, err: domain.ErrUnavailable}, clock: clock}).registerOperation(context.Background(), owner, second); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("operation index read error = %v", err)
+	}
+	third := operationIndexEntry{OperationID: operationIDForShard(operationShard(second.OperationID), "store-error"), IdempotencyDigest: "store-error", ExpiresAt: clock.Now().Add(time.Hour)}
+	if err := (&Service{state: &compareAndSwapErrorStore{Store: store, err: domain.ErrUnavailable}, clock: clock}).registerOperation(context.Background(), owner, third); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("operation index write error = %v", err)
+	}
+	if _, err := store.Get(context.Background(), operationKey); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expired operation cleanup error = %v", err)
+	}
+	if _, err := store.Get(context.Background(), idempotencyKey); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expired idempotency cleanup error = %v", err)
+	}
+
+	corruptStore := state.NewMemoryStore()
+	corruptService := &Service{state: corruptStore, clock: clock}
+	shard := operationShard(secondID)
+	indexKey := state.MustKey(state.NamespaceOperations, "preview-index", owner.String(), shard)
+	if _, err := corruptStore.Create(context.Background(), indexKey, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := corruptService.registerOperation(context.Background(), owner, second); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("corrupt operation index error = %v", err)
+	}
+
+	capacityStore := state.NewMemoryStore()
+	entries := make([]operationIndexEntry, maxOperationsPerShard)
+	for index := range entries {
+		entries[index] = operationIndexEntry{OperationID: domain.OperationID(fmt.Sprintf("operation-%03d", index)), IdempotencyDigest: fmt.Sprintf("digest-%03d", index), ExpiresAt: clock.Now().Add(time.Hour)}
+	}
+	capacityBody, err := state.EncodeJSON(operationIndexRecord{SchemaVersion: 1, Entries: entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := capacityStore.Create(context.Background(), indexKey, capacityBody); err != nil {
+		t.Fatal(err)
+	}
+	capacityService := &Service{state: capacityStore, clock: clock}
+	if err := capacityService.registerOperation(context.Background(), owner, second); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("operation index capacity error = %v", err)
+	}
+
+	contentionStore := &compareAndSwapFailureStore{Store: store}
+	contentionService := &Service{state: contentionStore, clock: clock}
+	thirdID := operationIDForShard(shard, "contention")
+	if err := contentionService.registerOperation(context.Background(), owner, operationIndexEntry{OperationID: thirdID, IdempotencyDigest: "contention", ExpiresAt: clock.Now().Add(time.Hour)}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("operation index contention error = %v", err)
+	}
+}
+
+func TestHydrateOperationReauthorizesExactGenerationAndRejectsDrift(t *testing.T) {
+	binding := internalBinding(t)
+	entry := domain.Entry{
+		Path: domain.MustParseUserPath("/source.png"), Kind: domain.EntryFile, Version: "source-version",
+		Size: binding.SourceSize, MediaType: binding.MediaType, ContentID: binding.ContentID, ContentVersion: binding.ContentVersion,
+	}
+	metadata := internalArtifact("generation", binding.Variant).Metadata()
+	base := Operation{ID: "operation", State: domain.OperationSucceeded, Result: &ItemResult{
+		Path: entry.Path, Version: entry.Version, Variant: binding.Variant, State: StateReady, Artifact: &metadata,
+	}}
+	service := &Service{
+		options: Options{Resolutions: []int{binding.Variant}}, source: &scriptedStorage{stat: entry},
+		store: &scriptedStore{}, generators: []Generator{scriptedGenerator{}},
+	}
+	hydrated, err := service.hydrateOperation(context.Background(), binding.Owner, base)
+	if err != nil || hydrated.Result.Capability == nil {
+		t.Fatalf("hydrated operation = %+v, %v", hydrated, err)
+	}
+	if unchanged, err := service.hydrateOperation(context.Background(), binding.Owner, Operation{State: domain.OperationRunning}); err != nil || unchanged.State != domain.OperationRunning {
+		t.Fatalf("nonterminal hydration = %+v, %v", unchanged, err)
+	}
+
+	tests := []struct {
+		name    string
+		mutate  func(*Service, *Operation)
+		wantErr error
+	}{
+		{name: "invalid item", mutate: func(_ *Service, operation *Operation) { operation.Result.Path = domain.MustParseUserPath("/") }, wantErr: domain.ErrInvalid},
+		{name: "stat failure", mutate: func(service *Service, _ *Operation) { service.source = &scriptedStorage{statErr: domain.ErrNotFound} }, wantErr: domain.ErrNotFound},
+		{name: "version drift", mutate: func(service *Service, _ *Operation) {
+			changed := entry
+			changed.Version = "changed"
+			service.source = &scriptedStorage{stat: changed}
+		}, wantErr: domain.ErrPreconditionFailed},
+		{name: "format removed", mutate: func(service *Service, _ *Operation) { service.generators = nil }, wantErr: domain.ErrPreconditionFailed},
+		{name: "metadata corruption", mutate: func(_ *Service, operation *Operation) { operation.Result.Artifact.Width = 0 }, wantErr: domain.ErrInvalid},
+		{name: "capability unavailable", mutate: func(service *Service, _ *Operation) {
+			service.store = &scriptedStore{capabilityErr: domain.ErrUnavailable}
+		}, wantErr: domain.ErrUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidateService := &Service{
+				options: service.options, source: service.source, store: service.store,
+				generators: append([]Generator(nil), service.generators...),
+			}
+			candidate := base
+			result := *base.Result
+			artifact := *base.Result.Artifact
+			result.Artifact = &artifact
+			candidate.Result = &result
+			test.mutate(candidateService, &candidate)
+			if _, err := candidateService.hydrateOperation(context.Background(), binding.Owner, candidate); !errors.Is(err, test.wantErr) {
+				t.Fatalf("hydrateOperation() error = %v, want %v", err, test.wantErr)
+			}
+		})
+	}
+	unsafe := operationRecord{SchemaVersion: 1, OwnerID: binding.Owner.String(), Fingerprint: "fingerprint", IdempotencyDigest: "digest", LeaseEpoch: 1, ExpiresAt: time.Now().Add(time.Hour), Operation: hydrated}
+	unsafe.Operation.StartedAt, unsafe.Operation.UpdatedAt = time.Now(), time.Now()
+	if validOperationRecord(unsafe, binding.Owner, hydrated.ID) {
+		t.Fatal("persisted bearer capability was accepted")
+	}
+}
+
+func TestServiceReadinessRevalidationPaths(t *testing.T) {
+	if !(&Service{}).Revalidate(context.Background()) {
+		t.Fatal("disabled preview was not ready")
+	}
+	ready := &readinessStore{ready: true}
+	service := &Service{store: ready, options: Options{StartupTimeout: time.Second}}
+	if !service.Revalidate(context.Background()) || ready.checks != 1 {
+		t.Fatal("ready store was not checked")
+	}
+	ready.checkErr = domain.ErrUnavailable
+	if service.Revalidate(context.Background()) {
+		t.Fatal("failed ready-store check remained ready")
+	}
+	recovering := &readinessStore{}
+	service.store = recovering
+	if !service.Revalidate(context.Background()) || recovering.validations != 1 {
+		t.Fatal("unready store did not revalidate")
+	}
+	recovering.validateErr = domain.ErrUnavailable
+	if service.Revalidate(context.Background()) {
+		t.Fatal("failed store revalidation became ready")
+	}
+}
+
+func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
+	binding := internalBinding(t)
+	owner := binding.Owner
+	clock := domain.NewFixedClock(time.Date(2047, 4, 5, 6, 7, 8, 0, time.UTC))
+	newService := func(store state.Store) *Service {
+		return &Service{
+			state: store, clock: clock, ids: domain.NewIDGenerator(bytes.NewReader(make([]byte, 4096))),
+			options: Options{OperationTimeout: time.Minute, OperationRetention: time.Hour},
+		}
+	}
+	store := state.NewMemoryStore()
+	service := newService(store)
+	idempotencyKey := "preview-durable-lease-0001"
+	fingerprint := "fingerprint"
+	operationID := domain.OperationID("durable-operation")
+	digestBytes := sha256.Sum256([]byte(owner.String() + "\x00" + idempotencyKey))
+	digest := base64.RawURLEncoding.EncodeToString(digestBytes[:])
+	record := operationRecord{
+		SchemaVersion: 1, OwnerID: owner.String(), Fingerprint: fingerprint, IdempotencyDigest: digest, LeaseEpoch: 1,
+		LeaseExpiresAt: clock.Now().Add(time.Minute), ExpiresAt: clock.Now().Add(time.Hour),
+		Operation: Operation{ID: operationID, State: domain.OperationRunning, StartedAt: clock.Now(), UpdatedAt: clock.Now()},
+	}
+	seedDurableOperation(t, store, owner, idempotencyKey, record)
+	claim, err := service.claimOperation(context.Background(), owner, idempotencyKey, fingerprint)
+	if err != nil || claim.claimed || claim.record.Operation.ID != operationID {
+		t.Fatalf("unexpired durable claim = %+v, %v", claim, err)
+	}
+	if _, err := service.claimOperation(context.Background(), owner, idempotencyKey, "different"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("durable fingerprint conflict error = %v", err)
+	}
+
+	clock.Advance(2 * time.Minute)
+	preconditionService := newService(&compareAndSwapFailureStore{Store: store})
+	claim, err = preconditionService.claimOperation(context.Background(), owner, idempotencyKey, fingerprint)
+	if err != nil || claim.claimed {
+		t.Fatalf("lost durable takeover race = %+v, %v", claim, err)
+	}
+	unavailableService := newService(&compareAndSwapErrorStore{Store: store, err: domain.ErrUnavailable})
+	if _, err := unavailableService.claimOperation(context.Background(), owner, idempotencyKey, fingerprint); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("durable takeover store error = %v", err)
+	}
+
+	expiredStore := state.NewMemoryStore()
+	expiredService := newService(expiredStore)
+	expiredKey := "preview-expired-idempotency-0001"
+	expiredDigestBytes := sha256.Sum256([]byte(owner.String() + "\x00" + expiredKey))
+	expiredDigest := base64.RawURLEncoding.EncodeToString(expiredDigestBytes[:])
+	expiredStateKey := state.MustKey(state.NamespaceIdempotency, "preview", owner.String(), expiredDigest)
+	expiredBody, err := state.EncodeJSON(idempotencyRecord{SchemaVersion: 1, Fingerprint: fingerprint, OperationID: "expired-operation", ExpiresAt: clock.Now().Add(-time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := expiredStore.Create(context.Background(), expiredStateKey, expiredBody); err != nil {
+		t.Fatal(err)
+	}
+	claim, err = expiredService.claimOperation(context.Background(), owner, expiredKey, fingerprint)
+	if err != nil || !claim.claimed || claim.record.Operation.ID == "expired-operation" {
+		t.Fatalf("expired idempotency replacement = %+v, %v", claim, err)
+	}
+
+	corruptStore := state.NewMemoryStore()
+	corruptKey := previewOperationKey(owner, "corrupt-operation")
+	if _, err := corruptStore.Create(context.Background(), corruptKey, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := newService(corruptStore).readOperation(context.Background(), owner, "corrupt-operation"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("corrupt operation read error = %v", err)
+	}
+	if _, _, err := newService(&getFailureStore{Store: corruptStore, err: domain.ErrUnavailable}).readOperation(context.Background(), owner, "corrupt-operation"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unavailable operation read error = %v", err)
+	}
+	if _, err := newService(&getFailureStore{Store: corruptStore, err: domain.ErrUnavailable}).claimOperation(context.Background(), owner, "preview-state-error-0001", fingerprint); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unavailable idempotency read error = %v", err)
+	}
+
+	operationValue, err := store.Get(context.Background(), previewOperationKey(owner, operationID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishClaim := operationClaim{record: record, operationKey: previewOperationKey(owner, operationID), operationVersion: operationValue.Version, claimed: true}
+	if _, err := newService(&compareAndSwapErrorStore{Store: store, err: domain.ErrUnavailable}).finishOperation(context.Background(), finishClaim, record.Operation); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("finish operation store error = %v", err)
+	}
+	invalidOwnerClaim := finishClaim
+	invalidOwnerClaim.record.OwnerID = "invalid"
+	if _, err := newService(&compareAndSwapFailureStore{Store: store}).finishOperation(context.Background(), invalidOwnerClaim, record.Operation); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("finish operation owner error = %v", err)
+	}
+	readFailureStore := &getFailureStore{Store: &compareAndSwapFailureStore{Store: store}, err: domain.ErrUnavailable}
+	if _, err := newService(readFailureStore).finishOperation(context.Background(), finishClaim, record.Operation); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("finish operation concurrent read error = %v", err)
+	}
+
+	for failAt := 2; failAt <= 3; failAt++ {
+		failureStore := &nthCreateFailureStore{Store: state.NewMemoryStore(), failAt: failAt}
+		failureService := newService(failureStore)
+		if _, err := failureService.claimOperation(context.Background(), owner, fmt.Sprintf("preview-create-failure-%04d", failAt), fingerprint); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("create failure %d error = %v", failAt, err)
+		}
+	}
+	idFailureService := newService(state.NewMemoryStore())
+	idFailureService.ids = domain.NewIDGenerator(bytes.NewReader(nil))
+	if _, err := idFailureService.claimOperation(context.Background(), owner, "preview-id-failure-0001", fingerprint); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("operation ID failure error = %v", err)
+	}
+
+	expiredRecord := record
+	expiredRecord.Operation.ID = "expired-visible-operation"
+	expiredRecord.ExpiresAt = clock.Now().Add(-time.Second)
+	expiredRecord.LeaseExpiresAt = time.Time{}
+	expiredRecord.Operation.State = domain.OperationFailed
+	expiredRecord.Operation.ErrorKind = domain.ErrorInvalid
+	seedOperationRecord(t, store, owner, expiredRecord)
+	if _, err := service.Operation(context.Background(), owner, expiredRecord.Operation.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expired Operation() error = %v", err)
 	}
 }
 
@@ -196,7 +593,7 @@ func TestResolveGenerationFailureStates(t *testing.T) {
 			store:   &scriptedStore{latestErr: domain.ErrNotFound}, generators: []Generator{generator},
 			client: internalResponseClient(http.StatusOK, io.NopCloser(bytes.NewReader([]byte("source")))),
 			ids:    domain.NewIDGenerator(bytes.NewReader(make([]byte, 1024))), clock: domain.SystemClock{},
-			global: make(chan struct{}, 1), perUser: make(map[string]chan struct{}), inflight: make(map[string]*generationCall),
+			global: make(chan struct{}, 1), perUser: make(map[string]*userLimit), inflight: make(map[string]*generationCall),
 		}
 	}
 	if _, err := newService(scriptedGenerator{}).resolveItem(context.Background(), domain.UserID{}, item, true, false, false); err == nil {
@@ -226,14 +623,26 @@ type scriptedStore struct {
 	latest        Artifact
 	latestErr     error
 	capabilityErr error
+	claimErr      error
+	commitErr     error
 }
 
-func (*scriptedStore) Validate(context.Context) error                  { return nil }
-func (*scriptedStore) Commit(context.Context, Binding, Artifact) error { return nil }
-func (s *scriptedStore) Latest(context.Context, Binding) (Artifact, error) {
+func (*scriptedStore) Validate(context.Context) error { return nil }
+func (*scriptedStore) Check(context.Context) error    { return nil }
+func (s *scriptedStore) Claim(context.Context, Binding, string, time.Time) (GenerationClaim, error) {
+	return GenerationClaim{ID: "claim", Epoch: 1, ExpiresAt: time.Now().Add(time.Hour)}, s.claimErr
+}
+func (*scriptedStore) Release(context.Context, Binding, GenerationClaim) error { return nil }
+func (s *scriptedStore) Commit(context.Context, Binding, GenerationClaim, Artifact) error {
+	return s.commitErr
+}
+func (s *scriptedStore) Latest(context.Context, Binding) (ArtifactMetadata, error) {
+	return s.latest.Metadata(), s.latestErr
+}
+func (s *scriptedStore) Read(context.Context, Binding, string) (Artifact, error) {
 	return s.latest, s.latestErr
 }
-func (s *scriptedStore) CreateDownload(context.Context, Binding) (domain.DownloadCapability, error) {
+func (s *scriptedStore) CreateDownload(context.Context, Binding, string) (domain.DownloadCapability, error) {
 	return domain.DownloadCapability{URL: "http://127.0.0.1:1234/preview", Method: http.MethodGet}, s.capabilityErr
 }
 func (*scriptedStore) Ready() bool        { return true }
@@ -260,6 +669,17 @@ type scriptedGenerator struct {
 	err       error
 }
 
+type cancelGenerator struct{}
+
+func (cancelGenerator) Capability() string             { return "image" }
+func (cancelGenerator) RecipeID() string               { return "image-webp-q80-v1" }
+func (cancelGenerator) Supports(string) bool           { return true }
+func (cancelGenerator) SelfTest(context.Context) error { return nil }
+func (cancelGenerator) Generate(ctx context.Context, _ GenerationRequest) (GeneratedArtifact, error) {
+	<-ctx.Done()
+	return GeneratedArtifact{}, ctx.Err()
+}
+
 func (scriptedGenerator) Capability() string             { return "image" }
 func (scriptedGenerator) RecipeID() string               { return "image-webp-q80-v1" }
 func (scriptedGenerator) Supports(string) bool           { return true }
@@ -282,6 +702,17 @@ func internalResponseClient(status int, body io.ReadCloser) *http.Client {
 	})
 }
 
+func internalGenerationService(store *scriptedStore, generator Generator) *Service {
+	return &Service{
+		options: Options{OperationTimeout: time.Second, StartupTimeout: time.Second, HardMaxSourceBytes: 1024},
+		source:  &scriptedStorage{download: domain.DownloadCapability{URL: "http://127.0.0.1:1234/source", Method: http.MethodGet}},
+		store:   store, generators: []Generator{generator},
+		client: internalResponseClient(http.StatusOK, io.NopCloser(bytes.NewReader([]byte("source")))),
+		ids:    domain.NewIDGenerator(bytes.NewReader(make([]byte, 1024))), clock: domain.SystemClock{},
+		global: make(chan struct{}, 1), perUser: make(map[string]*userLimit), inflight: make(map[string]*generationCall),
+	}
+}
+
 type errorReadCloser struct{}
 
 func (errorReadCloser) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
@@ -300,4 +731,105 @@ func internalArtifact(generationID string, variant int) Artifact {
 	data := OnePixelWebP()
 	sum := sha256.Sum256(data)
 	return Artifact{GenerationID: generationID, Variant: variant, Width: 1, Height: 1, ContentType: ContentTypeWebP, Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), Bytes: data}
+}
+
+func operationIDsInSameShard() (domain.OperationID, domain.OperationID) {
+	first := domain.OperationID("same-shard-first")
+	return first, operationIDForShard(operationShard(first), "same-shard-second")
+}
+
+func operationIDForShard(shard, prefix string) domain.OperationID {
+	for index := 0; ; index++ {
+		candidate := domain.OperationID(fmt.Sprintf("%s-%d", prefix, index))
+		if operationShard(candidate) == shard {
+			return candidate
+		}
+	}
+}
+
+func operationShard(operationID domain.OperationID) string {
+	digest := sha256.Sum256([]byte(operationID))
+	return strconv.Itoa(int(digest[0]) % operationIndexShards)
+}
+
+type compareAndSwapFailureStore struct{ state.Store }
+
+func (*compareAndSwapFailureStore) CompareAndSwap(context.Context, state.Key, state.Version, []byte) (state.Version, error) {
+	return "", domain.NewError(domain.ErrorPreconditionFailed, "injected contention")
+}
+
+type compareAndSwapErrorStore struct {
+	state.Store
+	err error
+}
+
+func (s *compareAndSwapErrorStore) CompareAndSwap(context.Context, state.Key, state.Version, []byte) (state.Version, error) {
+	return "", s.err
+}
+
+type getFailureStore struct {
+	state.Store
+	err error
+}
+
+type nthCreateFailureStore struct {
+	state.Store
+	failAt  int
+	creates int
+}
+
+func (s *nthCreateFailureStore) Create(ctx context.Context, key state.Key, body []byte) (state.Version, error) {
+	s.creates++
+	if s.creates == s.failAt {
+		return "", domain.NewError(domain.ErrorUnavailable, "injected create failure")
+	}
+	return s.Store.Create(ctx, key, body)
+}
+
+func (s *getFailureStore) Get(context.Context, state.Key) (state.Value, error) {
+	return state.Value{}, s.err
+}
+
+func seedDurableOperation(t *testing.T, store state.Store, owner domain.UserID, idempotencyKey string, record operationRecord) {
+	t.Helper()
+	seedOperationRecord(t, store, owner, record)
+	digestBytes := sha256.Sum256([]byte(owner.String() + "\x00" + idempotencyKey))
+	digest := base64.RawURLEncoding.EncodeToString(digestBytes[:])
+	body, err := state.EncodeJSON(idempotencyRecord{SchemaVersion: 1, Fingerprint: record.Fingerprint, OperationID: record.Operation.ID, ExpiresAt: record.ExpiresAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(context.Background(), state.MustKey(state.NamespaceIdempotency, "preview", owner.String(), digest), body); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedOperationRecord(t *testing.T, store state.Store, owner domain.UserID, record operationRecord) {
+	t.Helper()
+	body, err := state.EncodeJSON(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(context.Background(), previewOperationKey(owner, record.Operation.ID), body); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type readinessStore struct {
+	scriptedStore
+	ready       bool
+	checkErr    error
+	validateErr error
+	checks      int
+	validations int
+}
+
+func (s *readinessStore) Ready() bool { return s.ready }
+func (s *readinessStore) Check(context.Context) error {
+	s.checks++
+	return s.checkErr
+}
+func (s *readinessStore) Validate(context.Context) error {
+	s.validations++
+	return s.validateErr
 }

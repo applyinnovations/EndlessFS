@@ -174,20 +174,16 @@ func (p *Provider) CompleteUpload(ctx context.Context, scope domain.Scope, reque
 		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload checksum does not match")
 	}
 	current, exists := p.scopeObjectsLocked(scope)[session.path.String()]
-	existingIdentity := domain.PreviewContentIdentity{}
 	if session.targetExisted {
 		if !exists || current.entry.Version != session.expectedVersion {
 			return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload destination changed")
-		}
-		if current.entry.Kind == domain.EntryFile {
-			existingIdentity = current.entry.PreviewContentIdentity()
 		}
 	} else if exists {
 		return domain.Entry{}, domain.NewError(domain.ErrorConflict, "upload destination appeared during transfer")
 	}
 	data := append([]byte(nil), session.data...)
 	storedMediaType := trustedMediaType(session.mediaType, data, session.materialized)
-	entry, err := p.newFileEntryLocked(session.path, session.size, storedMediaType, existingIdentity)
+	entry, err := p.newFileEntryLocked(session.path, session.size, storedMediaType)
 	if err != nil {
 		return domain.Entry{}, err
 	}

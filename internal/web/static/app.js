@@ -510,7 +510,8 @@
   }
 
   function queueGridPreview(entry, frame) {
-    if (!state.config || !state.config.previewConfigured || entry.kind !== "file" || state.previewStates.has(entry.path) || state.previewQueued.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
+    const known = state.previewStates.get(entry.path);
+    if (!state.config || !state.config.previewConfigured || entry.kind !== "file" || (known && known.state !== "ready") || state.previewQueued.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
     state.previewQueued.add(entry.path);
     state.previewQueue.push({ entry, frame });
     pumpPreviewQueue();
@@ -526,7 +527,7 @@
       const controller = new AbortController();
       state.previewControllers.set(queued.entry.path, controller);
       resolveGridPreview(queued.entry, queued.frame, controller).finally(() => {
-        state.previewControllers.delete(queued.entry.path);
+        if (state.previewControllers.get(queued.entry.path) === controller) state.previewControllers.delete(queued.entry.path);
         state.previewActive -= 1;
         pumpPreviewQueue();
       });
@@ -538,8 +539,10 @@
       const variant = previewVariant(frame.getBoundingClientRect().width || 96);
       const response = await api("/api/v1/previews/resolve", { method: "POST", body: { items: [{ path: entry.path, version: entry.version, variant }] }, signal: controller.signal });
       const result = response.items[0];
+      if (controller.signal.aborted) return;
       state.previewStates.set(entry.path, result);
-      frame.dataset.previewState = result.state;
+      let currentFrame = connectedGridFrame(entry.path) || frame;
+      if (currentFrame.isConnected) currentFrame.dataset.previewState = result.state;
       if (result.state !== "ready" || !result.capability) {
         if (byID("filter-preview").value) renderFiles();
         return;
@@ -547,12 +550,13 @@
       const artifactResponse = await fetch(result.capability.url, { method: result.capability.method || "GET", headers: result.capability.headers || {}, signal: controller.signal, credentials: "omit" });
       if (!artifactResponse.ok || artifactResponse.headers.get("Content-Type") !== "image/webp") throw new Error("Invalid preview artifact response");
       const blob = await artifactResponse.blob();
-      if (blob.type !== "image/webp" || !frame.isConnected) return;
+      if (blob.type !== "image/webp" || controller.signal.aborted) return;
       const objectURL = URL.createObjectURL(blob);
       const previous = state.previewObjectURLs.get(entry.path);
       if (previous) URL.revokeObjectURL(previous);
       state.previewObjectURLs.set(entry.path, objectURL);
-      if (frame.isConnected) setPreviewImage(frame, entry, objectURL, result);
+      currentFrame = connectedGridFrame(entry.path) || frame;
+      if (currentFrame.isConnected) setPreviewImage(currentFrame, entry, objectURL, result);
     } catch (error) {
       if (error.name !== "AbortError") {
         const result = { state: "unavailable" };
@@ -560,6 +564,10 @@
         frame.dataset.previewState = result.state;
       }
     }
+  }
+
+  function connectedGridFrame(path) {
+    return Array.from(byID("media-grid-content").querySelectorAll(".media-frame")).find((candidate) => candidate.dataset.path === path) || null;
   }
 
   function setPreviewImage(frame, entry, objectURL, result) {
@@ -577,12 +585,20 @@
   function cleanupGridMedia(activePaths) {
     if (state.gridObserver) { state.gridObserver.disconnect(); state.gridObserver = null; }
     for (const [path, controller] of state.previewControllers) {
-      if (!activePaths.has(path)) { controller.abort(); state.previewControllers.delete(path); }
+      if (!activePaths.has(path)) {
+        controller.abort();
+        state.previewControllers.delete(path);
+        if (state.previewStates.get(path) && state.previewStates.get(path).state === "ready") state.previewStates.delete(path);
+      }
     }
     state.previewQueue = state.previewQueue.filter((item) => activePaths.has(item.entry.path));
     state.previewQueued = new Set(state.previewQueue.map((item) => item.entry.path));
     for (const [path, objectURL] of state.previewObjectURLs) {
-      if (!activePaths.has(path)) { URL.revokeObjectURL(objectURL); state.previewObjectURLs.delete(path); }
+      if (!activePaths.has(path)) {
+        URL.revokeObjectURL(objectURL);
+        state.previewObjectURLs.delete(path);
+        if (state.previewStates.get(path) && state.previewStates.get(path).state === "ready") state.previewStates.delete(path);
+      }
     }
   }
 

@@ -33,7 +33,7 @@ func TestContractMemoryPreviewStore(t *testing.T) {
 		if err := store.SetDataPlaneBaseURL(server.URL); err != nil {
 			t.Fatal(err)
 		}
-		return storecontract.Harness{Store: store, Client: server.Client(), SetAvailable: store.SetAvailable, Advance: clock.Advance}
+		return storecontract.Harness{Store: store, Client: server.Client(), SetAvailable: store.SetAvailable, Advance: clock.Advance, Now: clock.Now}
 	})
 }
 
@@ -44,8 +44,9 @@ func TestMemoryPreviewStoreBoundaryFailures(t *testing.T) {
 	if _, err := previewmemory.New(previewmemory.Options{Key: secret.Value(testBearer(0x31)), CapabilityTTL: 11 * time.Minute}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("long TTL error = %v", err)
 	}
+	clock := domain.NewFixedClock(time.Date(2035, 1, 2, 3, 4, 5, 0, time.UTC))
 	store, err := previewmemory.New(previewmemory.Options{
-		Clock: domain.NewFixedClock(time.Date(2035, 1, 2, 3, 4, 5, 0, time.UTC)),
+		Clock: clock,
 		IDs:   domain.NewIDGenerator(bytes.NewReader(deterministicBytes(1 << 20))), Key: secret.Value(testBearer(0x32)),
 		AllowedOrigin: "https://drive.example.test",
 	})
@@ -61,7 +62,7 @@ func TestMemoryPreviewStoreBoundaryFailures(t *testing.T) {
 		t.Fatalf("Validate without origin error = %v", err)
 	}
 	binding := memoryTestBinding(t)
-	if _, err := store.CreateDownload(context.Background(), binding); !errors.Is(err, domain.ErrUnavailable) {
+	if _, err := store.CreateDownload(context.Background(), binding, "missing"); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("CreateDownload without origin error = %v", err)
 	}
 	server := httptest.NewServer(store)
@@ -69,10 +70,13 @@ func TestMemoryPreviewStoreBoundaryFailures(t *testing.T) {
 	if err := store.SetDataPlaneBaseURL(server.URL); err != nil {
 		t.Fatal(err)
 	}
+	if store.DataOrigin() != server.URL {
+		t.Fatalf("DataOrigin() = %q", store.DataOrigin())
+	}
 	if err := store.Validate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CreateDownload(context.Background(), binding); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := store.CreateDownload(context.Background(), binding, "missing"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("missing CreateDownload error = %v", err)
 	}
 	canceled, cancel := context.WithCancel(context.Background())
@@ -81,28 +85,29 @@ func TestMemoryPreviewStoreBoundaryFailures(t *testing.T) {
 		t.Fatalf("canceled Validate error = %v", err)
 	}
 	artifact := memoryTestArtifact("boundary-generation", 256)
-	if err := store.Commit(canceled, binding, artifact); !errors.Is(err, domain.ErrUnavailable) {
+	claim := memoryClaim(t, store, binding, artifact.GenerationID, clock.Now())
+	if err := store.Commit(canceled, binding, claim, artifact); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("canceled Commit error = %v", err)
 	}
 	if _, err := store.Latest(canceled, binding); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("canceled Latest error = %v", err)
 	}
-	if _, err := store.CreateDownload(canceled, binding); !errors.Is(err, domain.ErrUnavailable) {
+	if _, err := store.CreateDownload(canceled, binding, artifact.GenerationID); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("canceled CreateDownload error = %v", err)
 	}
-	if err := store.Commit(context.Background(), preview.Binding{}, artifact); !errors.Is(err, domain.ErrInvalid) {
+	if err := store.Commit(context.Background(), preview.Binding{}, claim, artifact); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid Commit error = %v", err)
 	}
 	if _, err := store.Latest(context.Background(), preview.Binding{}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid Latest error = %v", err)
 	}
-	if _, err := store.CreateDownload(context.Background(), preview.Binding{}); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := store.CreateDownload(context.Background(), preview.Binding{}, artifact.GenerationID); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid CreateDownload error = %v", err)
 	}
-	if err := store.Commit(context.Background(), binding, artifact); err != nil {
+	if err := store.Commit(context.Background(), binding, claim, artifact); err != nil {
 		t.Fatal(err)
 	}
-	capability, err := store.CreateDownload(context.Background(), binding)
+	capability, err := store.CreateDownload(context.Background(), binding, artifact.GenerationID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +138,7 @@ func TestMemoryPreviewStoreBoundaryFailures(t *testing.T) {
 		}
 	}
 	store.SetAvailable(false)
-	if _, err := store.CreateDownload(context.Background(), binding); !errors.Is(err, domain.ErrUnavailable) {
+	if _, err := store.CreateDownload(context.Background(), binding, artifact.GenerationID); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("unavailable CreateDownload error = %v", err)
 	}
 	unavailableResponse, err := server.Client().Get(capability.URL)
@@ -164,12 +169,157 @@ func TestMemoryPreviewStoreBoundaryFailures(t *testing.T) {
 	if err := exhaustedIDs.Validate(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if err := exhaustedIDs.Commit(context.Background(), binding, artifact); err != nil {
+	exhaustedClaim, err := exhaustedIDs.Claim(context.Background(), binding, artifact.GenerationID, domain.SystemClock{}.Now().Add(time.Hour))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := exhaustedIDs.CreateDownload(context.Background(), binding); !errors.Is(err, domain.ErrInternal) {
+	if err := exhaustedIDs.Commit(context.Background(), binding, exhaustedClaim, artifact); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exhaustedIDs.CreateDownload(context.Background(), binding, artifact.GenerationID); !errors.Is(err, domain.ErrInternal) {
 		t.Fatalf("capability randomness error = %v", err)
 	}
+}
+
+func TestMemoryPreviewStoreClaimsRetentionAndCapacityBoundaries(t *testing.T) {
+	clock := domain.NewFixedClock(time.Date(2046, 1, 2, 3, 4, 5, 0, time.UTC))
+	store, err := previewmemory.New(previewmemory.Options{
+		Clock: clock, IDs: domain.NewIDGenerator(bytes.NewReader(deterministicBytes(1 << 20))), Key: secret.Value(testBearer(0x45)),
+		CapabilityTTL: time.Minute, MaxGenerations: 1, MaxCapabilities: 1, MaxBindings: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.Check(canceled); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled Check() error = %v", err)
+	}
+	if err := store.Check(context.Background()); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unconfigured Check() error = %v", err)
+	}
+	server := httptest.NewServer(store)
+	t.Cleanup(server.Close)
+	if err := store.SetDataPlaneBaseURL(server.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Validate(context.Background()); err != nil || store.Check(context.Background()) != nil {
+		t.Fatalf("validated Check() error = %v", err)
+	}
+
+	binding := memoryTestBinding(t)
+	if _, err := store.Claim(canceled, binding, "claim", clock.Now().Add(time.Hour)); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled Claim() error = %v", err)
+	}
+	for _, request := range []struct {
+		binding preview.Binding
+		id      string
+		expires time.Time
+	}{{preview.Binding{}, "claim", clock.Now().Add(time.Hour)}, {binding, "", clock.Now().Add(time.Hour)}, {binding, "claim", clock.Now()}} {
+		if _, err := store.Claim(context.Background(), request.binding, request.id, request.expires); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid Claim(%q) error = %v", request.id, err)
+		}
+	}
+	firstClaim := memoryClaim(t, store, binding, "first-claim", clock.Now())
+	releasedEpoch := firstClaim.Epoch
+	if _, err := store.Claim(context.Background(), binding, "concurrent-claim", clock.Now().Add(time.Hour)); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("concurrent Claim() error = %v", err)
+	}
+	if err := store.Release(canceled, binding, firstClaim); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled Release() error = %v", err)
+	}
+	if err := store.Release(context.Background(), preview.Binding{}, firstClaim); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid Release() error = %v", err)
+	}
+	staleClaim := firstClaim
+	staleClaim.Epoch++
+	if err := store.Release(context.Background(), binding, staleClaim); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("stale Release() error = %v", err)
+	}
+	store.SetAvailable(false)
+	if err := store.Release(context.Background(), binding, firstClaim); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unavailable Release() error = %v", err)
+	}
+	if _, err := store.Read(context.Background(), binding, "missing"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unavailable Read() error = %v", err)
+	}
+	store.SetAvailable(true)
+	if err := store.Release(context.Background(), binding, firstClaim); err != nil {
+		t.Fatal(err)
+	}
+
+	firstArtifact := memoryTestArtifact("first-generation", 256)
+	firstClaim = memoryClaim(t, store, binding, firstArtifact.GenerationID, clock.Now())
+	if firstClaim.Epoch <= releasedEpoch {
+		t.Fatalf("claim epoch did not advance after release: %d", firstClaim.Epoch)
+	}
+	if err := store.Commit(context.Background(), binding, firstClaim, firstArtifact); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Read(canceled, binding, firstArtifact.GenerationID); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled Read() error = %v", err)
+	}
+	if _, err := store.Read(context.Background(), preview.Binding{}, firstArtifact.GenerationID); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid Read() error = %v", err)
+	}
+	if _, err := store.Read(context.Background(), binding, "missing"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing Read() error = %v", err)
+	}
+	if _, err := store.CreateDownload(context.Background(), binding, firstArtifact.GenerationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateDownload(context.Background(), binding, firstArtifact.GenerationID); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("capability capacity error = %v", err)
+	}
+
+	duplicateClaim := memoryClaim(t, store, binding, "duplicate-claim", clock.Now())
+	if duplicateClaim.Epoch <= firstClaim.Epoch {
+		t.Fatalf("claim epoch did not advance after commit: %d", duplicateClaim.Epoch)
+	}
+	if err := store.Commit(context.Background(), binding, duplicateClaim, firstArtifact); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("duplicate Commit() error = %v", err)
+	}
+	if err := store.Release(context.Background(), binding, duplicateClaim); err != nil {
+		t.Fatal(err)
+	}
+	secondArtifact := memoryTestArtifact("second-generation", 256)
+	secondClaim := memoryClaim(t, store, binding, secondArtifact.GenerationID, clock.Now())
+	if err := store.Commit(context.Background(), binding, secondClaim, secondArtifact); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("protected retention Commit() error = %v", err)
+	}
+	if err := store.Release(context.Background(), binding, secondClaim); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Minute + time.Second)
+	secondClaim = memoryClaim(t, store, binding, secondArtifact.GenerationID, clock.Now())
+	if err := store.Commit(context.Background(), binding, secondClaim, secondArtifact); err != nil {
+		t.Fatal(err)
+	}
+	if latest, err := store.Latest(context.Background(), binding); err != nil || latest.GenerationID != secondArtifact.GenerationID {
+		t.Fatalf("retained Latest() = %+v, %v", latest, err)
+	}
+	if _, err := store.Read(context.Background(), binding, firstArtifact.GenerationID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("pruned Read() error = %v", err)
+	}
+
+	other := binding
+	other.ContentID = "other-content"
+	if _, err := store.Claim(context.Background(), other, "other-claim", clock.Now().Add(time.Hour)); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("binding capacity error = %v", err)
+	}
+	expiredClaim := preview.GenerationClaim{ID: "expired", Epoch: 1, ExpiresAt: clock.Now()}
+	if err := store.Commit(context.Background(), binding, expiredClaim, secondArtifact); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("expired Commit() error = %v", err)
+	}
+}
+
+func memoryClaim(t *testing.T, store *previewmemory.Store, binding preview.Binding, claimID string, now time.Time) preview.GenerationClaim {
+	t.Helper()
+	claim, err := store.Claim(context.Background(), binding, claimID, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return claim
 }
 
 func memoryTestBinding(t *testing.T) preview.Binding {

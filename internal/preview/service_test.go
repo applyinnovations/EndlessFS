@@ -22,6 +22,7 @@ import (
 	previewmemory "github.com/applyinnovations/endlessfs/internal/preview/memory"
 	providermemory "github.com/applyinnovations/endlessfs/internal/provider/memory"
 	"github.com/applyinnovations/endlessfs/internal/secret"
+	"github.com/applyinnovations/endlessfs/internal/state"
 )
 
 func TestResolveAutomaticPolicyExclusionsReadNoOriginalBytes(t *testing.T) {
@@ -143,6 +144,96 @@ func TestResolveCoalescesConcurrentGeneration(t *testing.T) {
 	}
 }
 
+func TestGenerateIdempotencyIsSharedAcrossReplicas(t *testing.T) {
+	env := newPreviewEnvironmentWithoutService(t)
+	entry := env.uploadImage(t, "/replica-idempotency.png", 32, 16)
+	generator := newLeaseTestGenerator()
+	options := preview.Options{
+		Automatic: true, Resolutions: []int{256}, MaxConcurrency: 1, OperationTimeout: 5 * time.Second,
+		ApplicationState: env.applicationState,
+	}
+	firstService, err := preview.NewService(options, env.source, env.store, []preview.Generator{generator}, env.sourceServer.Client(), env.ids, env.clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondService, err := preview.NewService(options, env.source, env.store, []preview.Generator{generator}, env.sourceServer.Client(), env.ids, env.clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := preview.GenerateRequest{Path: entry.Path, Version: entry.Version, Variant: 256, IdempotencyKey: "preview-replica-idempotency-0001"}
+	firstResult := make(chan preview.Operation, 1)
+	firstError := make(chan error, 1)
+	go func() {
+		operation, generateErr := firstService.Generate(context.Background(), env.owner, request)
+		firstResult <- operation
+		firstError <- generateErr
+	}()
+	<-generator.firstStarted
+	replayed, err := secondService.Generate(context.Background(), env.owner, request)
+	if err != nil || replayed.State != domain.OperationRunning {
+		t.Fatalf("replica replay = %+v, %v", replayed, err)
+	}
+	close(generator.releaseFirst)
+	first := <-firstResult
+	if err := <-firstError; err != nil || first.State != domain.OperationSucceeded || replayed.ID != first.ID {
+		t.Fatalf("replica operations = first %+v replay %+v error %v", first, replayed, err)
+	}
+	stored, err := secondService.Operation(context.Background(), env.owner, first.ID)
+	if err != nil || stored.State != domain.OperationSucceeded || stored.Result == nil || stored.Result.Capability == nil {
+		t.Fatalf("durable replica operation = %+v, %v", stored, err)
+	}
+	durable, err := env.applicationState.Get(context.Background(), state.MustKey(state.NamespaceOperations, "preview", env.owner.String(), string(first.ID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(durable.Data, []byte(`"capability"`)) || bytes.Contains(durable.Data, []byte("/cap/preview/")) {
+		t.Fatalf("durable operation persisted a bearer capability: %s", durable.Data)
+	}
+	if generator.Calls() != 1 {
+		t.Fatalf("replica generator calls = %d, want 1", generator.Calls())
+	}
+}
+
+func TestGenerateExpiredReplicaLeaseCanBeTakenOverAndFencesOldNode(t *testing.T) {
+	env := newPreviewEnvironmentWithoutService(t)
+	entry := env.uploadImage(t, "/replica-takeover.png", 32, 16)
+	generator := newLeaseTestGenerator()
+	options := preview.Options{
+		Automatic: true, Resolutions: []int{256}, MaxConcurrency: 1, OperationTimeout: 5 * time.Second,
+		ApplicationState: env.applicationState,
+	}
+	firstService, err := preview.NewService(options, env.source, env.store, []preview.Generator{generator}, env.sourceServer.Client(), env.ids, env.clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondService, err := preview.NewService(options, env.source, env.store, []preview.Generator{generator}, env.sourceServer.Client(), env.ids, env.clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := preview.GenerateRequest{Path: entry.Path, Version: entry.Version, Variant: 256, IdempotencyKey: "preview-replica-takeover-0001"}
+	firstResult := make(chan preview.Operation, 1)
+	firstError := make(chan error, 1)
+	go func() {
+		operation, generateErr := firstService.Generate(context.Background(), env.owner, request)
+		firstResult <- operation
+		firstError <- generateErr
+	}()
+	<-generator.firstStarted
+	env.clock.Advance(options.OperationTimeout + time.Second)
+	takenOver, err := secondService.Generate(context.Background(), env.owner, request)
+	if err != nil || takenOver.State != domain.OperationSucceeded {
+		t.Fatalf("takeover operation = %+v, %v", takenOver, err)
+	}
+	close(generator.releaseFirst)
+	stale := <-firstResult
+	if err := <-firstError; err != nil || stale.ID != takenOver.ID || stale.State != domain.OperationSucceeded {
+		t.Fatalf("fenced stale replica = %+v, %v; takeover %+v", stale, err, takenOver)
+	}
+	if generator.Calls() != 2 {
+		t.Fatalf("takeover generator calls = %d, want 2 attempts", generator.Calls())
+	}
+}
+
 func TestResolveCopyAndReplacementRequireDistinctArtifacts(t *testing.T) {
 	env := newPreviewEnvironment(t, preview.Options{Automatic: true})
 	original := env.uploadImage(t, "/identity.png", 12, 6)
@@ -211,7 +302,7 @@ func TestResolveDisabledManualUnsupportedAndStalePaths(t *testing.T) {
 func TestPreviewStoreOperatesIndependentlyOfMediaBrowser(t *testing.T) {
 	env := newPreviewEnvironmentWithoutService(t)
 	service, err := preview.NewService(preview.Options{
-		Automatic: false, Resolutions: []int{256}, MaxConcurrency: 1, OperationTimeout: time.Second,
+		Automatic: false, Resolutions: []int{256}, MaxConcurrency: 1, OperationTimeout: time.Second, ApplicationState: env.applicationState,
 	}, env.source, env.store, []preview.Generator{env.generator}, env.sourceServer.Client(), env.ids, env.clock)
 	if err != nil {
 		t.Fatal(err)
@@ -232,12 +323,12 @@ func TestPreviewStoreOperatesIndependentlyOfMediaBrowser(t *testing.T) {
 func TestNewServiceFailsFastForGeneratorAndStoreMisconfiguration(t *testing.T) {
 	env := newPreviewEnvironmentWithoutService(t)
 	failing := &fakeGenerator{selfTestError: domain.NewError(domain.ErrorUnavailable, "private decoder path")}
-	_, err := preview.NewService(preview.Options{Automatic: true, Resolutions: []int{256}, OperationTimeout: time.Second, MaxConcurrency: 1}, env.source, env.store, []preview.Generator{failing}, env.sourceServer.Client(), env.ids, env.clock)
+	_, err := preview.NewService(preview.Options{Automatic: true, Resolutions: []int{256}, OperationTimeout: time.Second, MaxConcurrency: 1, ApplicationState: env.applicationState}, env.source, env.store, []preview.Generator{failing}, env.sourceServer.Client(), env.ids, env.clock)
 	if err == nil || bytes.Contains([]byte(err.Error()), []byte("private decoder path")) || !bytes.Contains([]byte(err.Error()), []byte("generator integrity")) {
 		t.Fatalf("generator startup error = %v", err)
 	}
 	env.store.SetAvailable(false)
-	_, err = preview.NewService(preview.Options{Automatic: true, Resolutions: []int{256}, OperationTimeout: time.Second, MaxConcurrency: 1}, env.source, env.store, []preview.Generator{&fakeGenerator{}}, env.sourceServer.Client(), env.ids, env.clock)
+	_, err = preview.NewService(preview.Options{Automatic: true, Resolutions: []int{256}, OperationTimeout: time.Second, MaxConcurrency: 1, ApplicationState: env.applicationState}, env.source, env.store, []preview.Generator{&fakeGenerator{}}, env.sourceServer.Client(), env.ids, env.clock)
 	if err == nil || !bytes.Contains([]byte(err.Error()), []byte("preview store access")) {
 		t.Fatalf("store startup error = %v", err)
 	}
@@ -321,16 +412,17 @@ func TestPreviewServiceRejectsInvalidAssemblyOptions(t *testing.T) {
 }
 
 type previewEnvironment struct {
-	service      *preview.Service
-	source       *providermemory.Provider
-	store        *previewmemory.Store
-	sourceServer *httptest.Server
-	storeServer  *httptest.Server
-	generator    *fakeGenerator
-	clock        *domain.FixedClock
-	ids          *domain.IDGenerator
-	owner        domain.UserID
-	scope        domain.Scope
+	service          *preview.Service
+	source           *providermemory.Provider
+	store            *previewmemory.Store
+	sourceServer     *httptest.Server
+	storeServer      *httptest.Server
+	generator        *fakeGenerator
+	clock            *domain.FixedClock
+	ids              *domain.IDGenerator
+	applicationState state.Store
+	owner            domain.UserID
+	scope            domain.Scope
 }
 
 func newPreviewEnvironment(t *testing.T, options preview.Options) previewEnvironment {
@@ -345,6 +437,7 @@ func newPreviewEnvironment(t *testing.T, options preview.Options) previewEnviron
 	if options.MaxConcurrency == 0 {
 		options.MaxConcurrency = 2
 	}
+	options.ApplicationState = env.applicationState
 	var err error
 	env.service, err = preview.NewService(options, env.source, env.store, []preview.Generator{env.generator}, env.sourceServer.Client(), env.ids, env.clock)
 	if err != nil {
@@ -391,7 +484,7 @@ func newPreviewEnvironmentWithoutService(t *testing.T) previewEnvironment {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return previewEnvironment{source: source, store: store, sourceServer: sourceServer, storeServer: storeServer, generator: &fakeGenerator{}, clock: clock, ids: ids, owner: owner, scope: scope}
+	return previewEnvironment{source: source, store: store, sourceServer: sourceServer, storeServer: storeServer, generator: &fakeGenerator{}, clock: clock, ids: ids, applicationState: state.NewMemoryStore(), owner: owner, scope: scope}
 }
 
 func (e previewEnvironment) uploadImage(t *testing.T, pathValue string, width, height int) domain.Entry {
@@ -449,6 +542,44 @@ type fakeGenerator struct {
 	mu            sync.Mutex
 	calls         int
 	selfTestError error
+}
+
+type leaseTestGenerator struct {
+	mu           sync.Mutex
+	calls        int
+	firstStarted chan struct{}
+	releaseFirst chan struct{}
+}
+
+func newLeaseTestGenerator() *leaseTestGenerator {
+	return &leaseTestGenerator{firstStarted: make(chan struct{}), releaseFirst: make(chan struct{})}
+}
+
+func (*leaseTestGenerator) Capability() string             { return "image" }
+func (*leaseTestGenerator) RecipeID() string               { return "image-webp-q80-v1" }
+func (*leaseTestGenerator) Supports(string) bool           { return true }
+func (*leaseTestGenerator) SelfTest(context.Context) error { return nil }
+func (g *leaseTestGenerator) Generate(ctx context.Context, request preview.GenerationRequest) (preview.GeneratedArtifact, error) {
+	g.mu.Lock()
+	g.calls++
+	call := g.calls
+	if call == 1 {
+		close(g.firstStarted)
+	}
+	g.mu.Unlock()
+	if call == 1 {
+		select {
+		case <-g.releaseFirst:
+		case <-ctx.Done():
+			return preview.GeneratedArtifact{}, ctx.Err()
+		}
+	}
+	return imagegen.New(imagegen.Options{}).Generate(ctx, request)
+}
+func (g *leaseTestGenerator) Calls() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.calls
 }
 
 func (g *fakeGenerator) Capability() string { return "image" }

@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -44,7 +45,7 @@ func NewCompleteApplicationWithPreview(cfg config.Config, version string, identi
 	if len(themeManagers) != 0 {
 		api.themes = themeManagers[0]
 	}
-	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), previewService.DataOrigin(), api, nil, previewService.Ready)
+	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), previewService.DataOrigin(), api, nil, previewService.Revalidate)
 }
 
 // NewCompleteApplicationWithLogger constructs the complete control plane with
@@ -64,14 +65,14 @@ func NewCompleteApplicationWithPreviewAndLogger(cfg config.Config, version strin
 	if len(themeManagers) != 0 {
 		api.themes = themeManagers[0]
 	}
-	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), previewService.DataOrigin(), api, logger, previewService.Ready)
+	return newHandler(cfg.Public(), version, cfg.Secure, driveService.DataOrigin(), previewService.DataOrigin(), api, logger, previewService.Revalidate)
 }
 
-func newHandler(cfg config.PublicConfig, version string, secure bool, dataOrigin, previewOrigin string, api *identityAPI, logger *slog.Logger, ready func() bool) http.Handler {
+func newHandler(cfg config.PublicConfig, version string, secure bool, dataOrigin, previewOrigin string, api *identityAPI, logger *slog.Logger, ready func(context.Context) bool) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", textStatus(http.StatusOK, "ok\n"))
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if ready != nil && !ready() {
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, request *http.Request) {
+		if ready != nil && !ready(request.Context()) {
 			textStatus(http.StatusServiceUnavailable, "not ready\n")(w, nil)
 			return
 		}

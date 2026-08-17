@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,8 +14,19 @@ import (
 
 	"github.com/applyinnovations/endlessfs/internal/config"
 	endlesslogging "github.com/applyinnovations/endlessfs/internal/logging"
+	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 )
+
+func TestMain(m *testing.M) {
+	if imagegen.IsWorkerInvocation() {
+		if err := imagegen.RunWorker(os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func runtimeTestConfig(t *testing.T) config.Config {
 	t.Helper()

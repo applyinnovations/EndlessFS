@@ -24,11 +24,14 @@ import (
 )
 
 type Options struct {
-	Clock         domain.Clock
-	IDs           *domain.IDGenerator
-	Key           secret.Value
-	CapabilityTTL time.Duration
-	AllowedOrigin string
+	Clock           domain.Clock
+	IDs             *domain.IDGenerator
+	Key             secret.Value
+	CapabilityTTL   time.Duration
+	AllowedOrigin   string
+	MaxGenerations  int
+	MaxCapabilities int
+	MaxBindings     int
 }
 
 type capability struct {
@@ -40,16 +43,20 @@ type capability struct {
 type Store struct {
 	mu sync.Mutex
 
-	clock         domain.Clock
-	ids           *domain.IDGenerator
-	key           []byte
-	capabilityTTL time.Duration
-	allowedOrigin string
-	baseURL       string
-	available     bool
-	ready         bool
-	artifacts     map[string][]preview.Artifact
-	capabilities  map[[sha256.Size]byte]capability
+	clock           domain.Clock
+	ids             *domain.IDGenerator
+	key             []byte
+	capabilityTTL   time.Duration
+	allowedOrigin   string
+	baseURL         string
+	available       bool
+	ready           bool
+	artifacts       map[string][]preview.Artifact
+	claims          map[string]preview.GenerationClaim
+	capabilities    map[[sha256.Size]byte]capability
+	maxGenerations  int
+	maxCapabilities int
+	maxBindings     int
 }
 
 func New(options Options) (*Store, error) {
@@ -62,7 +69,16 @@ func New(options Options) (*Store, error) {
 	if options.CapabilityTTL == 0 {
 		options.CapabilityTTL = time.Minute
 	}
-	if !secret.ValidBearerToken(options.Key.Reveal()) || options.CapabilityTTL <= 0 || options.CapabilityTTL > 10*time.Minute {
+	if options.MaxGenerations == 0 {
+		options.MaxGenerations = 4
+	}
+	if options.MaxCapabilities == 0 {
+		options.MaxCapabilities = 4096
+	}
+	if options.MaxBindings == 0 {
+		options.MaxBindings = 4096
+	}
+	if !secret.ValidBearerToken(options.Key.Reveal()) || options.CapabilityTTL <= 0 || options.CapabilityTTL > 10*time.Minute || options.MaxGenerations < 1 || options.MaxGenerations > 32 || options.MaxCapabilities < 1 || options.MaxCapabilities > 65536 || options.MaxBindings < 1 || options.MaxBindings > 65536 {
 		return nil, domain.NewError(domain.ErrorInvalid, "invalid preview store configuration")
 	}
 	key, err := base64.RawURLEncoding.DecodeString(options.Key.Reveal())
@@ -71,7 +87,8 @@ func New(options Options) (*Store, error) {
 	}
 	return &Store{
 		clock: options.Clock, ids: options.IDs, key: key, capabilityTTL: options.CapabilityTTL,
-		allowedOrigin: options.AllowedOrigin, available: true, artifacts: make(map[string][]preview.Artifact),
+		allowedOrigin: options.AllowedOrigin, available: true, artifacts: make(map[string][]preview.Artifact), claims: make(map[string]preview.GenerationClaim),
+		maxGenerations: options.MaxGenerations, maxCapabilities: options.MaxCapabilities, maxBindings: options.MaxBindings,
 		capabilities: make(map[[sha256.Size]byte]capability),
 	}, nil
 }
@@ -138,14 +155,22 @@ func (s *Store) Validate(ctx context.Context) error {
 	if !artifact.ValidFor(binding) {
 		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: read")
 	}
-	if err := s.Commit(ctx, binding, artifact); err != nil {
+	claim, err := s.Claim(ctx, binding, generationID, s.clock.Now().Add(time.Minute))
+	if err != nil {
+		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: claim")
+	}
+	if err := s.Commit(ctx, binding, claim, artifact); err != nil {
 		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: create")
 	}
-	stored, err := s.Latest(ctx, binding)
+	latest, err := s.Latest(ctx, binding)
+	if err != nil || latest.GenerationID != generationID {
+		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: manifest")
+	}
+	stored, err := s.Read(ctx, binding, generationID)
 	if err != nil || !stored.ValidFor(binding) || !bytes.Equal(stored.Bytes, data) {
 		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: read")
 	}
-	capability, err := s.CreateDownload(ctx, binding)
+	capability, err := s.CreateDownload(ctx, binding, generationID)
 	if err != nil {
 		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: capability")
 	}
@@ -159,16 +184,82 @@ func (s *Store) Validate(ctx context.Context) error {
 		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: capability")
 	}
 	s.mu.Lock()
+	key := s.bindingKey(binding)
+	delete(s.artifacts, key)
+	delete(s.claims, key)
+	for token, value := range s.capabilities {
+		if value.key == key && value.generationID == generationID {
+			delete(s.capabilities, token)
+		}
+	}
 	s.ready = true
 	s.mu.Unlock()
 	return nil
 }
 
-func (s *Store) Commit(ctx context.Context, binding preview.Binding, artifact preview.Artifact) error {
+func (s *Store) Check(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return domain.WrapError(domain.ErrorUnavailable, "preview store check timed out", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.available || s.baseURL == "" {
+		s.ready = false
+		return domain.NewError(domain.ErrorUnavailable, "preview store unavailable")
+	}
+	return nil
+}
+
+func (s *Store) Claim(ctx context.Context, binding preview.Binding, claimID string, expiresAt time.Time) (preview.GenerationClaim, error) {
+	if err := ctx.Err(); err != nil {
+		return preview.GenerationClaim{}, domain.WrapError(domain.ErrorUnavailable, "preview store request canceled", err)
+	}
+	if !binding.Valid() || claimID == "" || len(claimID) > 128 || strings.ContainsAny(claimID, "\r\n\x00/") || !s.clock.Now().Before(expiresAt) {
+		return preview.GenerationClaim{}, domain.NewError(domain.ErrorInvalid, "invalid preview generation claim")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requireAvailableLocked(); err != nil {
+		return preview.GenerationClaim{}, err
+	}
+	key := s.bindingKey(binding)
+	current, knownBinding := s.claims[key]
+	if current.Valid() && s.clock.Now().Before(current.ExpiresAt) {
+		return preview.GenerationClaim{}, domain.NewError(domain.ErrorConflict, "preview generation is already claimed")
+	}
+	if _, exists := s.artifacts[key]; !exists && !knownBinding && s.bindingCountLocked() >= s.maxBindings {
+		return preview.GenerationClaim{}, domain.NewError(domain.ErrorUnavailable, "preview binding capacity reached")
+	}
+	claim := preview.GenerationClaim{ID: claimID, Epoch: current.Epoch + 1, ExpiresAt: expiresAt.UTC()}
+	s.claims[key] = claim
+	return claim, nil
+}
+
+func (s *Store) Release(ctx context.Context, binding preview.Binding, claim preview.GenerationClaim) error {
 	if err := ctx.Err(); err != nil {
 		return domain.WrapError(domain.ErrorUnavailable, "preview store request canceled", err)
 	}
-	if !binding.Valid() || !artifact.ValidFor(binding) {
+	if !binding.Valid() || !claim.Valid() {
+		return domain.NewError(domain.ErrorInvalid, "invalid preview generation claim")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requireAvailableLocked(); err != nil {
+		return err
+	}
+	key := s.bindingKey(binding)
+	if s.claims[key] != claim {
+		return domain.NewError(domain.ErrorPreconditionFailed, "preview generation claim changed")
+	}
+	s.claims[key] = preview.GenerationClaim{Epoch: claim.Epoch}
+	return nil
+}
+
+func (s *Store) Commit(ctx context.Context, binding preview.Binding, claim preview.GenerationClaim, artifact preview.Artifact) error {
+	if err := ctx.Err(); err != nil {
+		return domain.WrapError(domain.ErrorUnavailable, "preview store request canceled", err)
+	}
+	if !binding.Valid() || !claim.Valid() || !artifact.ValidFor(binding) {
 		return domain.NewError(domain.ErrorInvalid, "invalid preview artifact")
 	}
 	s.mu.Lock()
@@ -177,39 +268,66 @@ func (s *Store) Commit(ctx context.Context, binding preview.Binding, artifact pr
 		return err
 	}
 	key := s.bindingKey(binding)
+	if s.claims[key] != claim || !s.clock.Now().Before(claim.ExpiresAt) {
+		return domain.NewError(domain.ErrorPreconditionFailed, "preview generation claim changed or expired")
+	}
 	for _, existing := range s.artifacts[key] {
 		if existing.GenerationID == artifact.GenerationID {
 			return domain.NewError(domain.ErrorConflict, "preview generation already exists")
 		}
 	}
+	if !s.makeArtifactCapacityLocked(key) {
+		return domain.NewError(domain.ErrorUnavailable, "preview generation retention capacity reached")
+	}
 	s.artifacts[key] = append(s.artifacts[key], cloneArtifact(artifact))
+	s.claims[key] = preview.GenerationClaim{Epoch: claim.Epoch}
 	return nil
 }
 
-func (s *Store) Latest(ctx context.Context, binding preview.Binding) (preview.Artifact, error) {
+func (s *Store) Latest(ctx context.Context, binding preview.Binding) (preview.ArtifactMetadata, error) {
+	if err := ctx.Err(); err != nil {
+		return preview.ArtifactMetadata{}, domain.WrapError(domain.ErrorUnavailable, "preview store request canceled", err)
+	}
+	if !binding.Valid() {
+		return preview.ArtifactMetadata{}, domain.NewError(domain.ErrorInvalid, "invalid preview binding")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requireAvailableLocked(); err != nil {
+		return preview.ArtifactMetadata{}, err
+	}
+	items := s.artifacts[s.bindingKey(binding)]
+	if len(items) == 0 {
+		return preview.ArtifactMetadata{}, domain.NewError(domain.ErrorNotFound, "preview artifact not found")
+	}
+	return items[len(items)-1].Metadata(), nil
+}
+
+func (s *Store) Read(ctx context.Context, binding preview.Binding, generationID string) (preview.Artifact, error) {
 	if err := ctx.Err(); err != nil {
 		return preview.Artifact{}, domain.WrapError(domain.ErrorUnavailable, "preview store request canceled", err)
 	}
-	if !binding.Valid() {
-		return preview.Artifact{}, domain.NewError(domain.ErrorInvalid, "invalid preview binding")
+	if !binding.Valid() || generationID == "" {
+		return preview.Artifact{}, domain.NewError(domain.ErrorInvalid, "invalid preview artifact selection")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.requireAvailableLocked(); err != nil {
 		return preview.Artifact{}, err
 	}
-	items := s.artifacts[s.bindingKey(binding)]
-	if len(items) == 0 {
-		return preview.Artifact{}, domain.NewError(domain.ErrorNotFound, "preview artifact not found")
+	for _, artifact := range s.artifacts[s.bindingKey(binding)] {
+		if artifact.GenerationID == generationID {
+			return cloneArtifact(artifact), nil
+		}
 	}
-	return cloneArtifact(items[len(items)-1]), nil
+	return preview.Artifact{}, domain.NewError(domain.ErrorNotFound, "preview artifact not found")
 }
 
-func (s *Store) CreateDownload(ctx context.Context, binding preview.Binding) (domain.DownloadCapability, error) {
+func (s *Store) CreateDownload(ctx context.Context, binding preview.Binding, generationID string) (domain.DownloadCapability, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.DownloadCapability{}, domain.WrapError(domain.ErrorUnavailable, "preview store request canceled", err)
 	}
-	if !binding.Valid() {
+	if !binding.Valid() || generationID == "" {
 		return domain.DownloadCapability{}, domain.NewError(domain.ErrorInvalid, "invalid preview binding")
 	}
 	s.mu.Lock()
@@ -222,15 +340,23 @@ func (s *Store) CreateDownload(ctx context.Context, binding preview.Binding) (do
 	}
 	key := s.bindingKey(binding)
 	items := s.artifacts[key]
-	if len(items) == 0 {
+	found := false
+	for _, artifact := range items {
+		found = found || artifact.GenerationID == generationID
+	}
+	if !found {
 		return domain.DownloadCapability{}, domain.NewError(domain.ErrorNotFound, "preview artifact not found")
+	}
+	s.cleanupCapabilitiesLocked()
+	if len(s.capabilities) >= s.maxCapabilities {
+		return domain.DownloadCapability{}, domain.NewError(domain.ErrorUnavailable, "preview capability capacity reached")
 	}
 	token, err := s.ids.BearerToken()
 	if err != nil {
 		return domain.DownloadCapability{}, err
 	}
 	expiresAt := s.clock.Now().Add(s.capabilityTTL)
-	s.capabilities[tokenHash(token)] = capability{key: key, generationID: items[len(items)-1].GenerationID, expiresAt: expiresAt}
+	s.capabilities[tokenHash(token)] = capability{key: key, generationID: generationID, expiresAt: expiresAt}
 	return domain.DownloadCapability{URL: s.baseURL + "/cap/preview/" + token, Method: http.MethodGet, ExpiresAt: expiresAt}, nil
 }
 
@@ -268,6 +394,7 @@ func (s *Store) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if !s.clock.Now().Before(capability.expiresAt) {
+		delete(s.capabilities, tokenHash(parts[2]))
 		http.Error(writer, "capability unavailable", http.StatusGone)
 		return
 	}
@@ -282,6 +409,54 @@ func (s *Store) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	http.NotFound(writer, request)
+}
+
+func (s *Store) cleanupCapabilitiesLocked() {
+	now := s.clock.Now()
+	for token, value := range s.capabilities {
+		if !now.Before(value.expiresAt) {
+			delete(s.capabilities, token)
+		}
+	}
+}
+
+func (s *Store) bindingCountLocked() int {
+	count := len(s.artifacts)
+	for key := range s.claims {
+		if _, exists := s.artifacts[key]; !exists {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *Store) makeArtifactCapacityLocked(key string) bool {
+	items := s.artifacts[key]
+	if len(items) < s.maxGenerations {
+		return true
+	}
+	s.cleanupCapabilitiesLocked()
+	protected := make(map[string]struct{})
+	for _, value := range s.capabilities {
+		if value.key == key {
+			protected[value.generationID] = struct{}{}
+		}
+	}
+	retained := make([]preview.Artifact, 0, len(items))
+	removed := false
+	for _, item := range items {
+		if !removed {
+			if _, exists := protected[item.GenerationID]; !exists {
+				removed = true
+				continue
+			}
+		}
+		retained = append(retained, item)
+	}
+	if removed {
+		s.artifacts[key] = retained
+	}
+	return removed
 }
 
 func (s *Store) requireAvailableLocked() error {

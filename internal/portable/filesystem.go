@@ -399,13 +399,11 @@ func validateDirectoryEntries(entries []storageformat.DirectoryEntry) error {
 			return domain.NewError(domain.ErrorInvalid, "invalid directory entry")
 		}
 		if entry.Kind == domain.EntryDirectory {
-			if entry.DirectoryID == "" || entry.BlobID != "" || entry.Size != 0 || entry.MediaType != "" || entry.ContentID != "" || entry.ContentVersion != "" || !entry.ContentModifiedAt.IsZero() {
+			if entry.DirectoryID == "" || entry.BlobID != "" || entry.Size != 0 || entry.MediaType != "" {
 				return domain.NewError(domain.ErrorInvalid, "invalid directory entry target")
 			}
 		} else if entry.Kind == domain.EntryFile {
-			hasAnyPreviewIdentity := entry.ContentID != "" || entry.ContentVersion != "" || !entry.ContentModifiedAt.IsZero()
-			hasCompletePreviewIdentity := entry.ContentID != "" && entry.ContentVersion != "" && !entry.ContentModifiedAt.IsZero()
-			if entry.BlobID == "" || entry.DirectoryID != "" || entry.MediaType == "" || hasAnyPreviewIdentity != hasCompletePreviewIdentity {
+			if entry.BlobID == "" || entry.DirectoryID != "" || entry.MediaType == "" {
 				return domain.NewError(domain.ErrorInvalid, "invalid file entry target")
 			}
 		} else {
@@ -530,29 +528,14 @@ func previewContentIdentity(entry storageformat.DirectoryEntry) domain.PreviewCo
 	if entry.Kind != domain.EntryFile {
 		return domain.PreviewContentIdentity{}
 	}
-	if entry.ContentID != "" && entry.ContentVersion != "" && !entry.ContentModifiedAt.IsZero() {
-		return domain.PreviewContentIdentity{
-			ContentID: domain.ContentID(entry.ContentID), ContentVersion: domain.ContentVersion(entry.ContentVersion), ContentModifiedAt: entry.ContentModifiedAt,
-		}
-	}
-	contentID := storageformat.Digest([]byte("endlessfs-preview-content-id-upgrade-v1\x00" + entry.BlobID))
+	contentID := storageformat.Digest([]byte("endlessfs-preview-content-id-v1\x00" + entry.BlobID))
 	contentVersion := storageformat.Digest([]byte(fmt.Sprintf(
-		"endlessfs-preview-content-version-upgrade-v1\x00%s\x00%s\x00%d\x00%s",
+		"endlessfs-preview-content-version-v1\x00%s\x00%s\x00%d\x00%s",
 		entry.BlobID, entry.SHA256, entry.Size, entry.MediaType,
 	)))
 	return domain.PreviewContentIdentity{
-		ContentID: domain.ContentID(contentID), ContentVersion: domain.ContentVersion(contentVersion), ContentModifiedAt: entry.ModifiedAt,
+		ContentID: domain.ContentID(contentID), ContentVersion: domain.ContentVersion(contentVersion), ContentModifiedAt: entry.ModifiedAt.UTC(),
 	}
-}
-
-func materializePreviewContentIdentity(entry *storageformat.DirectoryEntry) {
-	if entry == nil || entry.Kind != domain.EntryFile || entry.ContentID != "" {
-		return
-	}
-	identity := previewContentIdentity(*entry)
-	entry.ContentID = string(identity.ContentID)
-	entry.ContentVersion = string(identity.ContentVersion)
-	entry.ContentModifiedAt = identity.ContentModifiedAt
 }
 
 func validateFileRequest(ctx context.Context, scope domain.Scope) error {

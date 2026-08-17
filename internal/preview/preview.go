@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"strings"
+	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/deepteams/webp"
@@ -77,6 +78,16 @@ type ArtifactMetadata struct {
 	SHA256       string `json:"sha256"`
 }
 
+type GenerationClaim struct {
+	ID        string
+	Epoch     uint64
+	ExpiresAt time.Time
+}
+
+func (c GenerationClaim) Valid() bool {
+	return c.ID != "" && len(c.ID) <= 128 && !strings.ContainsAny(c.ID, "\r\n\x00/") && c.Epoch > 0 && !c.ExpiresAt.IsZero()
+}
+
 func (a Artifact) Metadata() ArtifactMetadata {
 	return ArtifactMetadata{
 		GenerationID: a.GenerationID, Variant: a.Variant, Width: a.Width, Height: a.Height,
@@ -84,10 +95,18 @@ func (a Artifact) Metadata() ArtifactMetadata {
 	}
 }
 
-func (a Artifact) ValidFor(binding Binding) bool {
+func (a ArtifactMetadata) ValidFor(binding Binding) bool {
 	if !binding.Valid() || a.GenerationID == "" || len(a.GenerationID) > 128 || strings.ContainsAny(a.GenerationID, "\r\n\x00/") ||
 		a.Variant != binding.Variant || a.Width < 1 || a.Height < 1 || a.Width > binding.Variant || a.Height > binding.Variant ||
-		a.ContentType != ContentTypeWebP || a.Size != int64(len(a.Bytes)) || len(a.Bytes) < 12 ||
+		a.ContentType != ContentTypeWebP || a.Size < 12 {
+		return false
+	}
+	digest, err := base64.RawURLEncoding.DecodeString(a.SHA256)
+	return err == nil && len(digest) == sha256.Size
+}
+
+func (a Artifact) ValidFor(binding Binding) bool {
+	if !a.Metadata().ValidFor(binding) || a.Size != int64(len(a.Bytes)) ||
 		string(a.Bytes[:4]) != "RIFF" || string(a.Bytes[8:12]) != "WEBP" {
 		return false
 	}
@@ -111,9 +130,13 @@ func (a Artifact) ValidFor(binding Binding) bool {
 // receives a virtual path or original-file provider key.
 type Store interface {
 	Validate(context.Context) error
-	Commit(context.Context, Binding, Artifact) error
-	Latest(context.Context, Binding) (Artifact, error)
-	CreateDownload(context.Context, Binding) (domain.DownloadCapability, error)
+	Check(context.Context) error
+	Claim(context.Context, Binding, string, time.Time) (GenerationClaim, error)
+	Release(context.Context, Binding, GenerationClaim) error
+	Commit(context.Context, Binding, GenerationClaim, Artifact) error
+	Latest(context.Context, Binding) (ArtifactMetadata, error)
+	Read(context.Context, Binding, string) (Artifact, error)
+	CreateDownload(context.Context, Binding, string) (domain.DownloadCapability, error)
 	Ready() bool
 	DataOrigin() string
 }

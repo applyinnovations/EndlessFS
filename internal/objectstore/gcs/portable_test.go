@@ -157,7 +157,7 @@ func TestIntegrationGeneratedPreviewReadsPortableGCSSource(t *testing.T) {
 	if err := previewStore.SetDataPlaneBaseURL(previewServer.URL); err != nil {
 		t.Fatal(err)
 	}
-	service, err := preview.NewService(preview.Options{Automatic: true, Resolutions: []int{256}, MaxConcurrency: 1}, engine.Files(), previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, server.Client(), previewIDs, clock)
+	service, err := preview.NewService(preview.Options{Automatic: true, Resolutions: []int{256}, MaxConcurrency: 1, ApplicationState: engine}, engine.Files(), previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, server.Client(), previewIDs, clock)
 	if err != nil {
 		t.Fatal(err)
 	}

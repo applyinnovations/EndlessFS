@@ -125,7 +125,7 @@ func newDriveHTTPEnvironmentConfigured(t *testing.T, withPreviews bool) driveHTT
 		cfg.PreviewAutomatic = true
 		cfg.PreviewFormats = []string{"image"}
 		cfg.PreviewResolutions = []int{256, 512, 1600}
-		previewService, err = preview.NewService(preview.Options{Automatic: true, Resolutions: cfg.PreviewResolutions}, storage, previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, data.Client(), ids, clock)
+		previewService, err = preview.NewService(preview.Options{Automatic: true, Resolutions: cfg.PreviewResolutions, ApplicationState: store}, storage, previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, data.Client(), ids, clock)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -378,9 +378,6 @@ func TestIntegrationPreviewRuntimeLossFailsReadinessButNotFileListing(t *testing
 		t.Fatalf("authoritative listing during preview loss = %d %s", listing.Code, listing.Body.String())
 	}
 	env.previewStore.SetAvailable(true)
-	if err := env.previewStore.Validate(context.Background()); err != nil {
-		t.Fatal(err)
-	}
 	ready = performRequest(t, env.handler, http.MethodGet, "/readyz", "", "", nil, nil)
 	if ready.Code != http.StatusOK {
 		t.Fatalf("readiness after revalidation = %d %s", ready.Code, ready.Body.String())

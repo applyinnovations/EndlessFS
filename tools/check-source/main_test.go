@@ -81,6 +81,29 @@ func TestCheckRejectsForbiddenIdentityConceptsAndMissingRoot(t *testing.T) {
 	}
 }
 
+func TestCheckRejectsWallClockFuzzSmokeBudgets(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "flake.nix")
+	content := `
+fuzztime="''${ENDLESSFS_FUZZTIME:-2s}"
+go test ./internal/logging -fuzz '^FuzzStructuredLogRedaction$' -fuzztime 1s
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	violations, err := check(root)
+	if err != nil {
+		t.Fatalf("check() error = %v", err)
+	}
+	joined := strings.Join(violations, "\n")
+	if !strings.Contains(joined, "fuzz smoke budgets must use an iteration count") {
+		t.Fatalf("violations %q do not reject wall-clock fuzzing", joined)
+	}
+}
+
 func writeFixture(t *testing.T, root, name string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(name))

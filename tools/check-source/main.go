@@ -7,9 +7,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
+
+var wallClockFuzzBudget = regexp.MustCompile(`(?:-fuzztime\s+|ENDLESSFS_FUZZTIME:-)[0-9]+(?:ns|us|µs|ms|s|m|h)\b`)
 
 var forbiddenNames = map[string]string{
 	"docker-compose.yml":  "Docker Compose is not a required project tool",
@@ -94,6 +97,15 @@ func check(root string) ([]string, error) {
 				if strings.Contains(lower, forbidden) {
 					violations = append(violations, fmt.Sprintf("%s: identity surface contains forbidden %s concept", relative, forbidden))
 				}
+			}
+		}
+		if relative == "flake.nix" {
+			content, readErr := fs.ReadFile(rootFS.FS(), path)
+			if readErr != nil {
+				return readErr
+			}
+			if wallClockFuzzBudget.Match(content) {
+				violations = append(violations, "flake.nix: fuzz smoke budgets must use an iteration count")
 			}
 		}
 

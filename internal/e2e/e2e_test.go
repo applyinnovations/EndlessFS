@@ -53,8 +53,8 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		chromedp.Flag("no-first-run", true),
 		chromedp.Flag("no-default-browser-check", true),
 	)
-	if os.Getenv("ENDLESSFS_CHROMIUM_DISABLE_SETUID_SANDBOX") == "1" {
-		options = append(options, chromedp.Flag("disable-setuid-sandbox", true), chromedp.CombinedOutput(os.Stderr))
+	if os.Getenv("ENDLESSFS_CHROMIUM_NO_SANDBOX") == "1" {
+		options = append(options, chromedp.NoSandbox, chromedp.CombinedOutput(os.Stderr))
 	}
 	allocator, cancelAllocator := chromedp.NewExecAllocator(context.Background(), options...)
 	t.Cleanup(cancelAllocator)
@@ -537,8 +537,8 @@ func newTestBrowser(t *testing.T) *testBrowser {
 		chromedp.Flag("disable-background-networking", true), chromedp.Flag("disable-default-apps", true),
 		chromedp.Flag("disable-sync", true), chromedp.Flag("no-first-run", true), chromedp.Flag("no-default-browser-check", true),
 	)
-	if os.Getenv("ENDLESSFS_CHROMIUM_DISABLE_SETUID_SANDBOX") == "1" {
-		options = append(options, chromedp.Flag("disable-setuid-sandbox", true), chromedp.CombinedOutput(os.Stderr))
+	if os.Getenv("ENDLESSFS_CHROMIUM_NO_SANDBOX") == "1" {
+		options = append(options, chromedp.NoSandbox, chromedp.CombinedOutput(os.Stderr))
 	}
 	allocator, cancelAllocator := chromedp.NewExecAllocator(context.Background(), options...)
 	ctx, cancelBrowser := chromedp.NewContext(allocator)

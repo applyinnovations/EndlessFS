@@ -236,6 +236,11 @@ func (b *Backend) AbortUpload(ctx context.Context, sealed []byte) error {
 	if err != nil {
 		return err
 	}
+	key := objectstore.MustKey(lease.Key)
+	materialized, err := b.deleteMaterializedUpload(ctx, key, lease.Size)
+	if err != nil || materialized {
+		return err
+	}
 	if lease.SessionURL != "" {
 		request, requestErr := http.NewRequestWithContext(ctx, http.MethodDelete, lease.SessionURL, http.NoBody)
 		if requestErr != nil {
@@ -248,24 +253,32 @@ func (b *Backend) AbortUpload(ctx context.Context, sealed []byte) error {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		_ = response.Body.Close()
 		if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotFound && response.StatusCode != http.StatusGone && response.StatusCode != 499 {
+			materialized, err := b.deleteMaterializedUpload(ctx, key, lease.Size)
+			if err != nil || materialized {
+				return err
+			}
 			return classifyHTTPStatus("GCS resumable cancellation failed", response.StatusCode)
 		}
 	}
-	key := objectstore.MustKey(lease.Key)
+	_, err = b.deleteMaterializedUpload(ctx, key, lease.Size)
+	return err
+}
+
+func (b *Backend) deleteMaterializedUpload(ctx context.Context, key objectstore.Key, size int64) (bool, error) {
 	info, err := b.Head(ctx, key)
 	if errors.Is(err, domain.ErrNotFound) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	if info.Size != lease.Size {
-		return domain.NewError(domain.ErrorPreconditionFailed, "GCS upload abort target mismatch")
+	if info.Size != size {
+		return true, domain.NewError(domain.ErrorPreconditionFailed, "GCS upload abort target mismatch")
 	}
 	if err := b.Delete(ctx, key, objectstore.DeleteCondition{Version: info.Version}); err != nil && !errors.Is(err, domain.ErrNotFound) {
-		return err
+		return true, err
 	}
-	return nil
+	return true, nil
 }
 
 func (b *Backend) CreateDownload(ctx context.Context, request objectstore.DownloadRequest) (objectstore.DownloadCapability, error) {

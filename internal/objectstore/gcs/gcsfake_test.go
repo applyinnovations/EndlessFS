@@ -50,7 +50,10 @@ type fakeGCS struct {
 	wrongNextMetadataSizeBy   int
 	baseURL                   string
 	sessions                  map[string]*fakeResumableSession
+	completedSessions         map[string]struct{}
 	nextSession               int64
+	sessionDeleteAttempts     int
+	rejectCompletedDelete     bool
 	clock                     domain.Clock
 	uploadBytes               int64
 	downloadBytes             int64
@@ -66,7 +69,10 @@ func newGCSServer(t *testing.T) *httptest.Server {
 
 func newGCSServerWithFake(t *testing.T) (*httptest.Server, *fakeGCS) {
 	t.Helper()
-	fake := &fakeGCS{t: t, objects: make(map[string]fakeObject), sessions: make(map[string]*fakeResumableSession), nextGeneration: 100, clock: domain.SystemClock{}}
+	fake := &fakeGCS{
+		t: t, objects: make(map[string]fakeObject), sessions: make(map[string]*fakeResumableSession),
+		completedSessions: make(map[string]struct{}), nextGeneration: 100, clock: domain.SystemClock{},
+	}
 	server := httptest.NewServer(fake)
 	fake.baseURL = server.URL
 	t.Cleanup(server.Close)
@@ -276,8 +282,15 @@ func (f *fakeGCS) signedGet(writer http.ResponseWriter, request *http.Request, n
 func (f *fakeGCS) resumable(writer http.ResponseWriter, request *http.Request, id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if request.Method == http.MethodDelete {
+		f.sessionDeleteAttempts++
+	}
 	session, exists := f.sessions[id]
 	if !exists {
+		if _, completed := f.completedSessions[id]; completed && request.Method == http.MethodDelete && f.rejectCompletedDelete {
+			f.problem(writer, http.StatusMethodNotAllowed, "methodNotAllowed")
+			return
+		}
 		f.problem(writer, http.StatusNotFound, "notFound")
 		return
 	}
@@ -301,6 +314,7 @@ func (f *fakeGCS) resumable(writer http.ResponseWriter, request *http.Request, i
 		if total == 0 {
 			f.nextGeneration++
 			f.objects[session.name] = fakeObject{body: []byte{}, generation: f.nextGeneration, metageneration: 1}
+			f.completedSessions[id] = struct{}{}
 			delete(f.sessions, id)
 			writer.WriteHeader(http.StatusOK)
 			return
@@ -335,6 +349,7 @@ func (f *fakeGCS) resumable(writer http.ResponseWriter, request *http.Request, i
 	}
 	f.nextGeneration++
 	f.objects[session.name] = fakeObject{body: append([]byte(nil), session.body...), generation: f.nextGeneration, metageneration: 1}
+	f.completedSessions[id] = struct{}{}
 	delete(f.sessions, id)
 	writer.WriteHeader(http.StatusOK)
 }

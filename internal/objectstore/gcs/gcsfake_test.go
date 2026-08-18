@@ -55,6 +55,7 @@ type fakeGCS struct {
 	uploadBytes               int64
 	downloadBytes             int64
 	allowedOrigin             string
+	signedGetCacheControl     string
 	unavailable               bool
 }
 
@@ -239,7 +240,11 @@ func (f *fakeGCS) signedGet(writer http.ResponseWriter, request *http.Request, n
 	}
 	writer.Header().Set("Content-Type", request.URL.Query().Get("response-content-type"))
 	writer.Header().Set("Content-Disposition", request.URL.Query().Get("response-content-disposition"))
-	writer.Header().Set("Cache-Control", object.cacheControl)
+	cacheControl := object.cacheControl
+	if f.signedGetCacheControl != "" {
+		cacheControl = f.signedGetCacheControl
+	}
+	writer.Header().Set("Cache-Control", cacheControl)
 	size := fakeObjectSize(object)
 	if rangeHeader := request.Header.Get("Range"); rangeHeader != "" {
 		start, end, ok := parseFakeRange(rangeHeader, size)

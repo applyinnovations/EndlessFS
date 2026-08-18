@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/applyinnovations/endlessfs/internal/cachecontrol"
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	gcstransport "github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	"github.com/applyinnovations/endlessfs/internal/portable"
@@ -86,6 +87,7 @@ func TestContractDurablePreviewStoreOverGCSProtocolFake(t *testing.T) {
 		clock := domain.NewFixedClock(time.Now().UTC().Truncate(time.Second))
 		fake.clock = clock
 		fake.allowedOrigin = "https://drive.example.test"
+		fake.signedGetCacheControl = "no-cache, no-store, max-age=0"
 		backend, err := gcstransport.NewWithTransfers(protocolClient(t, server), "endlessfs-test", gcstransport.TransferOptions{
 			HTTPClient: server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
 			SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x5a}, 256), nil },
@@ -217,7 +219,7 @@ func TestIntegrationGeneratedPreviewReadsPortableGCSSource(t *testing.T) {
 	}
 	artifact, _ := io.ReadAll(artifactResponse.Body)
 	_ = artifactResponse.Body.Close()
-	if artifactResponse.StatusCode != http.StatusOK || artifactResponse.Header.Get("Access-Control-Allow-Origin") != previewFake.allowedOrigin || artifactResponse.Header.Get("Content-Type") != preview.ContentTypeWebP || artifactResponse.Header.Get("Cache-Control") != "no-store" || len(artifact) < 12 || string(artifact[:4]) != "RIFF" || string(artifact[8:12]) != "WEBP" {
+	if artifactResponse.StatusCode != http.StatusOK || artifactResponse.Header.Get("Access-Control-Allow-Origin") != previewFake.allowedOrigin || artifactResponse.Header.Get("Content-Type") != preview.ContentTypeWebP || !cachecontrol.HasNoStore(artifactResponse.Header) || len(artifact) < 12 || string(artifact[:4]) != "RIFF" || string(artifact[8:12]) != "WEBP" {
 		t.Fatalf("preview artifact = status %d type %q bytes %d", artifactResponse.StatusCode, artifactResponse.Header.Get("Content-Type"), len(artifact))
 	}
 	deniedRequest, _ := http.NewRequest(http.MethodGet, resolved.Items[0].Capability.URL, http.NoBody)

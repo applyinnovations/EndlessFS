@@ -43,6 +43,20 @@ func TestLostUploadSuccessIsUnavailableAndNotRetried(t *testing.T) {
 	}
 }
 
+func TestServerWrittenObjectsSetNoStoreMetadata(t *testing.T) {
+	backend, fake := newProtocolBackend(t)
+	key := objectstore.MustKey("endlessfs/v1/state/users/cache-policy.json")
+	if _, err := backend.Put(context.Background(), key, []byte("private"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	cacheControl := fake.objects[key.String()].cacheControl
+	fake.mu.Unlock()
+	if cacheControl != "no-store" {
+		t.Fatalf("server-written object cache control = %q", cacheControl)
+	}
+}
+
 func TestProtocolErrorsMapToStableSafeKinds(t *testing.T) {
 	backend, fake := newProtocolBackend(t)
 	tests := []struct {

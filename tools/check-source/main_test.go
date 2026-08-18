@@ -81,6 +81,57 @@ func TestCheckRejectsForbiddenIdentityConceptsAndMissingRoot(t *testing.T) {
 	}
 }
 
+func TestCheckRejectsWallClockFuzzSmokeBudgets(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "flake.nix")
+	content := `
+fuzztime="''${ENDLESSFS_FUZZTIME:-2s}"
+go test ./internal/logging -fuzz '^FuzzStructuredLogRedaction$' -fuzztime 1s
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	violations, err := check(root)
+	if err != nil {
+		t.Fatalf("check() error = %v", err)
+	}
+	joined := strings.Join(violations, "\n")
+	if !strings.Contains(joined, "fuzz smoke budgets must use an iteration count") {
+		t.Fatalf("violations %q do not reject wall-clock fuzzing", joined)
+	}
+}
+
+func TestCheckRejectsBrowserRuntimeInsideFlakeChecks(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "flake.nix")
+	content := `
+checks = forAllSystems (system: {
+  e2e = pkgs.runCommand "e2e" { } ''
+    export ENDLESSFS_RUN_E2E=1
+    go test ./internal/e2e
+  '';
+});
+devShells = forAllSystems (system: { });
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	violations, err := check(root)
+	if err != nil {
+		t.Fatalf("check() error = %v", err)
+	}
+	joined := strings.Join(violations, "\n")
+	if !strings.Contains(joined, "browser runtime gate must run outside the Nix build sandbox") {
+		t.Fatalf("violations %q do not reject sandboxed browser execution", joined)
+	}
+}
+
 func writeFixture(t *testing.T, root, name string) {
 	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(name))

@@ -122,7 +122,7 @@ The Milestone 5 checkpoint implements specification section 13’s core Drive wo
 | Responsive 320 CSS-pixel layout and reduced-motion handling | Chromium viewport assertion in `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; `TestApplicationShellExposesCompleteAccessibleWorkspaces` |
 | No external runtime origin and no browser persistence of tokens or capabilities | Chromium request-origin assertion; `TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML` |
 | Selected validated theme stylesheet in the initial HTML response, with safe fallback | `TestIntegrationThemeHTTPMetadataPreferenceAssetsAndSafeFallback`, `TestThemeResolverCanOnlyInjectValidatedSameOriginStylesheet` |
-| Linux CI uses Nix-pinned Chromium; macOS contributors use the same Go driver with installed Chrome | `nix run .#test-e2e`; Linux `checks.e2e` derivation |
+| Linux CI uses Nix-pinned Chromium; macOS contributors use the same Go driver with installed Chrome | `nix run .#test-e2e`; CI's host-side Nix browser/coverage gate |
 
 The browser source creates every untrusted filename and display name through text nodes, keeps bearer material in short-lived closures, removes capability-bearing preview DOM on close, extracts invite/recovery tokens before the first request, and records no sensitive client-side storage.
 
@@ -150,7 +150,7 @@ Browser network diagnostics retain only request methods and paths: credential ce
 | Every private file/share/trash/operation family rejects another owner's paths, versions, cursor, upload/trash/share/operation IDs, and mutation intent | `TestIntegrationCrossUserPrivateEndpointMatrix`, `TestIntegrationDirectTransfersAndIsolation`, `TestIntegrationCopyMoveTrashRestoreAndDelete` |
 | Raw, encoded, double-encoded, Unicode-normalized, slash/backslash, dot, NUL/control, reserved, and overlong paths fail before provider access | `TestReservedNamespaceAndEncodingCorpusFailsBeforeProviderAccess`, `TestFileHTTPRejectsProviderFieldsBodiesAndTraversalBeforeProvider`, `FuzzParseUserPath`, `FuzzParseUserPathEncodingBoundary` |
 | Structured logs remain secret-safe at every configured level and request logs use route templates | `TestJSONLoggerRedactsSensitiveFieldsAtEveryLevel`, `TestJSONLoggerHonorsConfiguredLevelAndKeepsSafeFields`, `TestRequestLoggingUsesRouteTemplatesAndOmitsSensitiveMaterial`, `FuzzStructuredLogRedaction` |
-| Every required parser/security boundary has a bounded fuzz target | `nix run .#test-fuzz`: configuration/origin, path, percent encoding, JSON records, cursors, WebAuthn responses, share subtrees, ranges/dispositions, logging, and the complete theme boundary |
+| Every required parser/security boundary has a bounded fuzz target | `nix run .#test-fuzz`: fixed 1,000-input CI campaigns for configuration/origin, path, percent encoding, JSON records, cursors, WebAuthn responses, share subtrees, ranges/dispositions, logging, and the complete theme boundary; `TestCheckRejectsWallClockFuzzSmokeBudgets` prevents timing-dependent defaults |
 | Race-sensitive identity, state, provider, transfer, trash, idempotency, and final-admin behavior is clean | `nix run .#test-race`; explicit concurrent tests and both reusable contracts |
 | Threats, runtime behavior, shutdown, ephemeral state, and absence of a v1 backup claim are reviewed | [Implemented threat model](./threat-model.md), [operations guide](./operations.md), and `TestRunStartsAndGracefullyStopsCompleteApplication` |
 | Static, vulnerability, dependency-license, source, configuration, and OCI policies pass with pinned inputs | `nix run .#security`, `nix run .#dependency-check`, `checks.security`, `checks.dependencies`, `checks.container-policy` |
@@ -158,7 +158,7 @@ Browser network diagnostics retain only request methods and paths: credential ce
 
 ### Coverage result
 
-The release coverage command is `nix run .#test-coverage`. It executes all Go packages plus real Chromium E2E coverage, de-duplicates the shared `-coverpkg=./...` profile, and fails below any threshold.
+The release coverage command is `nix run .#test-coverage`. CI first runs the cacheable `nix flake check` umbrella, whose overlapping named test-layer checks resolve to one derivation, then executes the real Chromium E2E and all-package coverage gate through a Nix app outside the build sandbox. The app consumes the fixed-output vendored module closure, performs no module downloads, and fails below any threshold.
 
 | Boundary | Statements | Result | Required |
 |---|---:|---:|---:|
@@ -237,9 +237,9 @@ The release coverage command is `nix run .#test-coverage`. It executes all Go pa
 | AC-063 | Header/cookie/origin/CSRF/strict-body/page/batch/rate/expiry tests cover valid and denied paths. |
 | AC-064 | Structured redaction unit/fuzz tests and route-template request-log integration. |
 | AC-065 | Nix race gate, explicit concurrency tests, deterministic provider faults, and leak-free E2E cleanup. |
-| AC-070 | The clean `nix flake check` umbrella contains build, format, lint, all test layers, race, fuzz, coverage, dependency, security, policy, offline, OCI, and release checks. |
+| AC-070 | The clean `nix flake check` umbrella contains build, format, lint, all non-browser test layers, E2E/coverage compilation, race, fuzz, dependency, security, policy, offline, OCI, and release checks; CI then runs real Chromium E2E and enforced coverage through `nix run .#test-coverage`. |
 | AC-071 | Enforced statement results are recorded in the coverage table above. |
-| AC-072 | Confirmed fixes for same-folder generated-name copy, duplicate-trash prevalidation, CR/LF-safe disposition fallback, reverse-domain theme IDs, and request status recording each landed with regression coverage. |
+| AC-072 | Confirmed fixes for same-folder generated-name copy, duplicate-trash prevalidation, CR/LF-safe disposition fallback, reverse-domain theme IDs, request status recording, and timing-dependent fuzz smoke budgets each landed with regression coverage. |
 | AC-073 | The release output records source/input/artifact hashes, locked dependencies/licenses, check/coverage results, themes, and limitations. |
 | AC-074 | README, release notes, operations, threat model, inventory, and this record distinguish provider-portable local qualification from live GCS interoperability and production readiness. |
 | AC-080 | Independent two-replica state/filesystem/operation/upload tests plus `TestEightReplicaConcurrentCASHasOneWinner`; no engine coordination is process-local. |

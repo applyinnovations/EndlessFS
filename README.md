@@ -97,7 +97,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#test-e2e` | Run Go-controlled Chromium passkey and core Drive workflows. Nix supplies Chromium on Linux. |
 | `nix run .#test-coverage` | Run the complete suite and enforce 85% repository plus 95% security-boundary statement coverage. |
 | `nix run .#test-race` | Run the suite with Go's race detector. |
-| `nix run .#test-fuzz` | Run bounded path, encoding, JSON, cursor, share, capability, WebAuthn, logging, and theme fuzz smoke targets. |
+| `nix run .#test-fuzz` | Run fixed-iteration path, encoding, JSON, cursor, share, capability, WebAuthn, logging, and theme fuzz smoke targets. |
 | `nix run .#security` | Run pinned static, vulnerability, configuration, dependency, source-policy, and OCI checks. |
 | `nix run .#dependency-check` | Verify the locked module inventory and retained dependency licenses. |
 | `nix run .#container` | Build the local OCI archive through Nix. |
@@ -105,7 +105,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#theme-preview -- PATH` | Serve the application-owned responsive component/state conformance fixture on loopback. |
 | `nix run .#test-theme` | Run theme schema, compiler, inheritance, media, archive, contrast, preference, and HTTP tests. |
 
-Longer fuzz campaigns can set `ENDLESSFS_FUZZTIME`, for example:
+The default fuzz smoke campaign executes 1,000 generated inputs per target. Longer fuzz campaigns can set `ENDLESSFS_FUZZTIME`, for example:
 
 ```console
 ENDLESSFS_FUZZTIME=2m nix run .#test-fuzz
@@ -179,9 +179,9 @@ Direct dependency rationale is recorded in [docs/dependencies.md](./docs/depende
 
 GitHub Actions contains no project test selection or tool installation logic beyond bootstrapping Nix. Actions are pinned to immutable revisions, Nix build outputs are cached, full checks use a standard Ubuntu runner, and a bounded macOS job proves contributor-platform compatibility.
 
-- `CI` runs the authoritative Nix gate on pull requests, merge groups, and `main`, plus a Darwin build/unit smoke test.
-- `PR` provides the fast format, lint, and source-policy status used by the default-branch ruleset.
-- `Container` publishes `sha-<commit>` and `edge` images to `ghcr.io/applyinnovations/endlessfs` after changes reach `main`.
+- `CI` runs the authoritative Nix gate and host-side Chromium coverage through Nix on pull requests and merge groups, plus a Darwin build/unit smoke test on pull requests. Coverage reuses the fixed-output vendored module closure instead of downloading modules.
+- `PR` provides early format, lint, and source-policy feedback while the live required-check policy transitions to the single authoritative gate.
+- `Container` publishes `sha-<commit>` and `edge` images to `ghcr.io/applyinnovations/endlessfs` after merge-queue-verified changes reach `main`; it does not repeat the gate.
 - `Release` re-verifies `v*.*.*` tags, publishes version and `latest` images, and creates a GitHub release containing the Nix-built binary/archive, OCI archive, checksums, dependency/license inventory, theme inventory, and release evidence.
 - `Repository Policy` explicitly applies the checked-in branch and tag rulesets.
 
@@ -193,7 +193,7 @@ Repository rules are external GitHub state, so checking in JSON does not activat
 2. Add it as the `REPOSITORY_RULESET_TOKEN` secret in the protected `repository-policy` environment.
 3. Run the `Repository Policy` workflow once, and again after intentionally changing `.github/rulesets/*.json`.
 
-The policy requires pull requests, resolved review threads, squash-only linear history, the GitHub-Actions-owned `Nix checks` and `Fast checks` contexts, and a one-at-a-time merge queue. While the repository has one maintainer it requires no separate approval; enable final-push and code-owner approval when a second maintainer joins. It blocks deletion and force-push of the default branch, limits `v*.*.*` tag creation to the current release maintainer, and prevents release-tag mutation or deletion.
+The policy requires pull requests, resolved review threads, squash-only linear history, the GitHub-Actions-owned `Nix checks` context, and a one-at-a-time merge queue. While the repository has one maintainer it requires no separate approval; enable final-push and code-owner approval when a second maintainer joins. It blocks deletion and force-push of the default branch, limits `v*.*.*` tag creation to the current release maintainer, and prevents release-tag mutation or deletion.
 
 ## Delivery roadmap
 

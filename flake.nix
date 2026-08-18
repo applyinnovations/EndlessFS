@@ -64,6 +64,19 @@
         done < "$dependency_inventory"
         echo "dependency policy: $(wc -l < "$dependency_inventory" | tr -d ' ') locked modules with licenses"
       '';
+      fuzzSmokeCommand = ''
+        go test ./internal/config -run '^$' -fuzz '^FuzzParse$' -fuzztime "$fuzztime"
+        go test ./internal/domain -run '^$' -fuzz '^FuzzParseUserPath$' -fuzztime "$fuzztime"
+        go test ./internal/domain -run '^$' -fuzz '^FuzzParseUserPathEncodingBoundary$' -fuzztime "$fuzztime"
+        go test ./internal/state -run '^$' -fuzz '^FuzzStrictJSONDecoder$' -fuzztime "$fuzztime"
+        go test ./internal/state -run '^$' -fuzz '^FuzzPaginationCursorBoundary$' -fuzztime "$fuzztime"
+        go test ./internal/model -run '^$' -fuzz '^FuzzPersistenceRecordDecoders$' -fuzztime "$fuzztime"
+        go test ./internal/auth -run '^$' -fuzz '^FuzzWebAuthnResponseBoundary$' -fuzztime "$fuzztime"
+        go test ./internal/drive -run '^$' -fuzz '^FuzzShareSubtreeResolution$' -fuzztime "$fuzztime"
+        go test ./internal/provider/memory -run '^$' -fuzz '^FuzzRangeAndContentDisposition$' -fuzztime "$fuzztime"
+        go test ./internal/logging -run '^$' -fuzz '^FuzzStructuredLogRedaction$' -fuzztime "$fuzztime"
+        go test ./internal/theme -run '^$' -fuzz '^FuzzThemeBoundaries$' -fuzztime "$fuzztime"
+      '';
     in
     {
       packages = forAllSystems (
@@ -115,6 +128,11 @@
               src = goSource;
               subPackages = [ "cmd/endlessfs" ];
               vendorHash = "sha256-VKX45eWoUXXVtAWI6DQ/SF3kofBHXEgGiezYbXpSRpk=";
+              # Keep the fixed-output dependency closure address stable when the
+              # source revision changes without changing go.mod/go.sum.
+              overrideModAttrs = _final: _previous: {
+                name = "endlessfs-go-modules";
+              };
               inherit go;
               doCheck = false;
               env.CGO_ENABLED = 0;
@@ -302,6 +320,23 @@
           go = goFor pkgs;
           packages = self.packages.${system};
           headlessBrowser = headlessBrowserFor pkgs;
+          relativePath = path: lib.removePrefix (toString ./. + "/") (toString path);
+          coverageSource = lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: _type:
+              let
+                relative = relativePath path;
+              in
+              relative == "go.mod"
+              || relative == "go.sum"
+              || relative == "cmd"
+              || lib.hasPrefix "cmd/" relative
+              || relative == "internal"
+              || lib.hasPrefix "internal/" relative
+              || relative == "tools"
+              || lib.hasPrefix "tools/" relative;
+          };
           goTools = [ go ];
           qualityTools = goTools ++ [
             pkgs.actionlint
@@ -427,7 +462,18 @@
                   export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
                   export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
                 ''}
-                profile="''${TMPDIR:-/tmp}/endlessfs-coverage.out"
+                coverage_root="$(mktemp -d "''${TMPDIR:-/tmp}/endlessfs-coverage.XXXXXX")"
+                cleanup() {
+                  chmod -R u+w "$coverage_root"
+                  rm -rf "$coverage_root"
+                }
+                trap cleanup EXIT
+                cp -R ${coverageSource} "$coverage_root/source"
+                chmod -R u+w "$coverage_root/source"
+                cp -R ${packages.default.goModules} "$coverage_root/source/vendor"
+                cd "$coverage_root/source"
+                export GOFLAGS=-mod=vendor
+                profile="$coverage_root/endlessfs-coverage.out"
                 go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
                 gawk -f tools/coverage.awk "$profile"
               '';
@@ -438,18 +484,8 @@
           '';
 
           test-fuzz = goTask "endlessfs-test-fuzz" ''
-            fuzztime="''${ENDLESSFS_FUZZTIME:-2s}"
-            go test ./internal/config -run '^$' -fuzz '^FuzzParse$' -fuzztime "$fuzztime"
-            go test ./internal/domain -run '^$' -fuzz '^FuzzParseUserPath$' -fuzztime "$fuzztime"
-            go test ./internal/domain -run '^$' -fuzz '^FuzzParseUserPathEncodingBoundary$' -fuzztime "$fuzztime"
-            go test ./internal/state -run '^$' -fuzz '^FuzzStrictJSONDecoder$' -fuzztime "$fuzztime"
-            go test ./internal/state -run '^$' -fuzz '^FuzzPaginationCursorBoundary$' -fuzztime "$fuzztime"
-            go test ./internal/model -run '^$' -fuzz '^FuzzPersistenceRecordDecoders$' -fuzztime "$fuzztime"
-            go test ./internal/auth -run '^$' -fuzz '^FuzzWebAuthnResponseBoundary$' -fuzztime "$fuzztime"
-            go test ./internal/drive -run '^$' -fuzz '^FuzzShareSubtreeResolution$' -fuzztime "$fuzztime"
-            go test ./internal/provider/memory -run '^$' -fuzz '^FuzzRangeAndContentDisposition$' -fuzztime "$fuzztime"
-            go test ./internal/logging -run '^$' -fuzz '^FuzzStructuredLogRedaction$' -fuzztime "$fuzztime"
-            go test ./internal/theme -run '^$' -fuzz '^FuzzThemeBoundaries$' -fuzztime "$fuzztime"
+            fuzztime="''${ENDLESSFS_FUZZTIME:-1000x}"
+            ${fuzzSmokeCommand}
           '';
 
           test-theme = goTask "endlessfs-test-theme" ''
@@ -549,9 +585,65 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          lib = pkgs.lib;
           go = goFor pkgs;
-          src = pkgs.lib.cleanSource ./.;
-          sandboxedStaticcheck = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "staticcheck ./...";
+          headlessBrowser = headlessBrowserFor pkgs;
+          relativePath = path: lib.removePrefix (toString ./. + "/") (toString path);
+          isGoTestSource =
+            relative:
+            relative == "go.mod"
+            || relative == "go.sum"
+            || relative == "cmd"
+            || lib.hasPrefix "cmd/" relative
+            || relative == "internal"
+            || lib.hasPrefix "internal/" relative
+            || relative == "tools"
+            || lib.hasPrefix "tools/" relative;
+          isWorkflowSource =
+            relative:
+            relative == ".github"
+            || relative == ".github/workflows"
+            || lib.hasPrefix ".github/workflows/" relative;
+          testSource = lib.cleanSourceWith {
+            src = ./.;
+            filter = path: _type: isGoTestSource (relativePath path);
+          };
+          formatSource = lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: _type:
+              let
+                relative = relativePath path;
+              in
+              isGoTestSource relative || relative == "flake.nix";
+          };
+          lintSource = lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: _type:
+              let
+                relative = relativePath path;
+              in
+              isGoTestSource relative || isWorkflowSource relative;
+          };
+          policySource = lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: _type:
+              let
+                relative = relativePath path;
+              in
+              relative == "go.mod"
+              || relative == "go.sum"
+              || relative == "tools"
+              || relative == "tools/repository-policy"
+              || lib.hasPrefix "tools/repository-policy/" relative
+              || relative == ".github"
+              || relative == ".github/rulesets"
+              || lib.hasPrefix ".github/rulesets/" relative;
+          };
+          fullSource = lib.cleanSource ./.;
+          sandboxedStaticcheck = lib.optionalString pkgs.stdenv.hostPlatform.isLinux "staticcheck ./...";
           containerPolicy =
             pkgs.runCommand "endlessfs-container-policy"
               {
@@ -588,8 +680,8 @@
                 rg --quiet '(^|/)bin/endlessfs$' image-paths.txt
                 touch "$out"
               '';
-          goCheck =
-            name: command: tools:
+          goCheckWithSource =
+            name: checkSource: command: tools:
             pkgs.runCommand "endlessfs-${name}"
               {
                 nativeBuildInputs = [ go ] ++ tools;
@@ -607,7 +699,7 @@
                 mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
                 chmod 700 "$XDG_RUNTIME_DIR"
                 export CGO_ENABLED=0
-                cp -R ${src} source
+                cp -R ${checkSource} source
                 chmod -R u+w source
                 cp -R ${self.packages.${system}.default.goModules} source/vendor
                 cd source
@@ -615,17 +707,14 @@
                 ${command}
                 touch "$out"
               '';
-        in
-        {
-          build = self.packages.${system}.default;
-          container = self.packages.${system}.container;
-          container-policy = containerPolicy;
-          release = self.packages.${system}.release;
-
-          e2e = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
-
-          format =
-            goCheck "format"
+          goCheck =
+            name: command: tools:
+            goCheckWithSource name testSource command tools;
+          testSuite = goCheck "tests" "go test ./..." [ ];
+          e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
+          coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
+          formatCheck =
+            goCheckWithSource "format" formatSource
               ''
                 # goCheck installs the fixed-output module closure at ./vendor for
                 # offline builds. Formatting policy applies only to repository-owned
@@ -638,9 +727,8 @@
                 pkgs.findutils
                 pkgs.nixfmt
               ];
-
-          lint =
-            goCheck "lint"
+          lintCheck =
+            goCheckWithSource "lint" lintSource
               ''
                 actionlint .github/workflows/*.yml
                 go vet ./...
@@ -650,39 +738,13 @@
                 pkgs.actionlint
                 pkgs.go-tools
               ];
-
-          tests = goCheck "tests" "go test ./..." [ ];
-          integration = goCheck "integration" "go test ./... -run '^TestIntegration'" [ ];
-          contract = goCheck "contract" "go test ./... -run '^TestContract'" [ ];
-          replica =
-            goCheck "replica"
-              "go test ./internal/portable ./internal/objectstore/gcs -run '(Replica|CandidateCannot|Superseded|GenerationConditionsFence|LostMutation)' -count=1"
-              [ ];
-          portability =
-            goCheck "portability"
-              "go test ./internal/storageformat ./internal/objectstore/... ./internal/portable -run '(Portab|Checkpoint|ContractGCSProtocol|GCSResumableCapability)' -count=1"
-              [ ];
-          provider-verify = goCheck "provider-verify" "go test ./tools/provider-verify -count=1" [ ];
-          theme = goCheck "theme" "go test ./internal/theme ./internal/httpapi -run 'Theme'" [ ];
-          race = goCheck "race" "CGO_ENABLED=1 go test -race ./..." [ pkgs.stdenv.cc ];
-          coverage = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
-          fuzz = goCheck "fuzz" ''
-            go test ./internal/config -run '^$' -fuzz '^FuzzParse$' -fuzztime 1s
-            go test ./internal/domain -run '^$' -fuzz '^FuzzParseUserPath$' -fuzztime 1s
-            go test ./internal/domain -run '^$' -fuzz '^FuzzParseUserPathEncodingBoundary$' -fuzztime 1s
-            go test ./internal/state -run '^$' -fuzz '^FuzzStrictJSONDecoder$' -fuzztime 1s
-            go test ./internal/state -run '^$' -fuzz '^FuzzPaginationCursorBoundary$' -fuzztime 1s
-            go test ./internal/model -run '^$' -fuzz '^FuzzPersistenceRecordDecoders$' -fuzztime 1s
-            go test ./internal/auth -run '^$' -fuzz '^FuzzWebAuthnResponseBoundary$' -fuzztime 1s
-            go test ./internal/drive -run '^$' -fuzz '^FuzzShareSubtreeResolution$' -fuzztime 1s
-            go test ./internal/provider/memory -run '^$' -fuzz '^FuzzRangeAndContentDisposition$' -fuzztime 1s
-            go test ./internal/logging -run '^$' -fuzz '^FuzzStructuredLogRedaction$' -fuzztime 1s
-            go test ./internal/theme -run '^$' -fuzz '^FuzzThemeBoundaries$' -fuzztime 1s
+          raceCheck = goCheck "race" "CGO_ENABLED=1 go test -race ./..." [ pkgs.stdenv.cc ];
+          fuzzCheck = goCheck "fuzz" ''
+            fuzztime=1000x
+            ${fuzzSmokeCommand}
           '' [ ];
-          offline = goCheck "offline" "go test ./..." [ ];
-
-          security =
-            goCheck "security"
+          securityCheck =
+            goCheckWithSource "security" fullSource
               ''
                 actionlint .github/workflows/*.yml
                 gosec -quiet -nosec-require-justification -nosec-require-rules ./...
@@ -698,16 +760,37 @@
                 pkgs.gosec
                 pkgs.govulncheck
               ];
+          repositoryPolicyCheck =
+            goCheckWithSource "repository-policy" policySource "go run ./tools/repository-policy check"
+              [ ];
+        in
+        {
+          build = self.packages.${system}.default;
+          container = self.packages.${system}.container;
+          container-policy = containerPolicy;
+          release = self.packages.${system}.release;
 
-          dependencies =
-            goCheck "dependencies" (dependencyPolicyCommand self.packages.${system}.default.goModules)
-              [
-                pkgs.findutils
-                pkgs.gawk
-                pkgs.gnugrep
-              ];
+          e2e = e2eCompile;
 
-          repository-policy = goCheck "repository-policy" "go run ./tools/repository-policy check" [ ];
+          format = formatCheck;
+
+          lint = lintCheck;
+
+          tests = testSuite;
+          integration = testSuite;
+          contract = testSuite;
+          replica = testSuite;
+          portability = testSuite;
+          provider-verify = testSuite;
+          theme = testSuite;
+          race = raceCheck;
+          coverage = coverageCompile;
+          fuzz = fuzzCheck;
+          offline = testSuite;
+          security = securityCheck;
+          dependencies = securityCheck;
+
+          repository-policy = repositoryPolicyCheck;
         }
       );
 

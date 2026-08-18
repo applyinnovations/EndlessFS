@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/applyinnovations/endlessfs/internal/cachecontrol"
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"github.com/applyinnovations/endlessfs/internal/preview"
@@ -213,7 +214,7 @@ func (s *Store) Validate(ctx context.Context) error {
 	if dispositionErr != nil || disposition != string(domain.DispositionInline) || parameters["filename"] != "preview.webp" {
 		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: capability disposition")
 	}
-	if response.Header.Get("Cache-Control") != "no-store" {
+	if !cachecontrol.HasNoStore(response.Header) {
 		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: capability cache control")
 	}
 	if !bytes.Equal(body, data) {

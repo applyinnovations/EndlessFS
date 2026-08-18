@@ -288,7 +288,7 @@ The release coverage command is `nix run .#test-coverage`. CI first runs the cac
 | MP-008 | Chromium 10,002-entry proof: at most 64 rendered tiles and at most 32 new resolve requests, with square-frame and 96×48 intrinsic-image assertions. |
 | MP-009 | Keyboard viewer workflows in the default desktop path and dark 320-pixel path; semantic controls and focus restoration in embedded-browser tests. |
 | MP-010 | `.#container-images`, `.#release-images`, OCI policy, `CAPABILITIES.json`, dependency inventories, and the full offline flake gate. |
-| MP-011 | Configuration, service assembly, store access-probe, and process-startup fail-fast tests with sanitized errors. |
+| MP-011 | Configuration, service assembly, store access-probe, and process-startup fail-fast tests with sanitized errors. `TestDurableStartupAcceptsEffectiveNoStoreCachePolicy`, `TestHasNoStoreAcceptsEffectivePolicies`, and the corresponding malformed-policy denial matrix cover provider-equivalent Cache-Control formatting without weakening the required `no-store` directive. |
 | MP-012 | Provider lifecycle contract plus rename reuse and copy/replacement distinct-generation service tests. |
 | MP-013 | Store/service/HTTP negative matrices, preview CSP and origin tests, safe runtime-loss logging, fuzz, race, and security gates. |
 | MP-014 | Loaded-metadata browser filters, no search API/index, and documentation that preserves search as a future feature. |

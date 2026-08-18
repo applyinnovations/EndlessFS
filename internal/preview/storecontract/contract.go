@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/applyinnovations/endlessfs/internal/cachecontrol"
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/preview"
 )
@@ -66,7 +67,7 @@ func Run(t *testing.T, factory Factory) {
 			t.Fatalf("artifact response body errors = read %v, close %v", readErr, closeErr)
 		}
 		disposition, parameters, dispositionErr := mime.ParseMediaType(response.Header.Get("Content-Disposition"))
-		if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/webp" || response.Header.Get("Cache-Control") != "no-store" || dispositionErr != nil || disposition != "inline" || parameters["filename"] != "preview.webp" || !bytes.Equal(body, artifact.Bytes) {
+		if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/webp" || !cachecontrol.HasNoStore(response.Header) || dispositionErr != nil || disposition != "inline" || parameters["filename"] != "preview.webp" || !bytes.Equal(body, artifact.Bytes) {
 			t.Fatalf("artifact response = %d %q %v", response.StatusCode, body, response.Header)
 		}
 		second := testArtifact("generation-two", 256, preview.OnePixelWebP())

@@ -624,6 +624,29 @@ func TestDurableStartupCleanupUsesBoundedContext(t *testing.T) {
 	}
 }
 
+func TestDurableStartupAcceptsEffectiveNoStoreCachePolicy(t *testing.T) {
+	for name, cacheControl := range map[string][]string{
+		"additional directives": {"no-cache, no-store, max-age=0"},
+		"separate fields":       {"private", "max-age=0, No-Store"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			options := internalOptions(t, nil, 4)
+			options.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				response := validationHTTPResponse(io.NopCloser(bytes.NewReader(preview.OnePixelWebP())))
+				response.Header["Cache-Control"] = cacheControl
+				return response, nil
+			})}
+			store, err := New(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Validate(context.Background()); err != nil || !store.Ready() {
+				t.Fatalf("Validate() = %v, ready=%v", err, store.Ready())
+			}
+		})
+	}
+}
+
 func validationHTTPResponse(body io.ReadCloser) *http.Response {
 	return &http.Response{
 		StatusCode: http.StatusOK,

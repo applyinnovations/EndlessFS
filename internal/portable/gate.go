@@ -144,7 +144,7 @@ func (e *Engine) drainActiveUploads(ctx context.Context) error {
 		if !expired(e.clock.Now(), upload.ExpiresAt) {
 			return domain.NewError(domain.ErrorUnavailable, "active upload prevents write-gate closure")
 		}
-		transfers, ok := e.backend.(objectstore.DirectTransferBackend)
+		transfers, ok := e.fileBackend.(objectstore.DirectTransferBackend)
 		if !ok {
 			return domain.NewError(domain.ErrorPreconditionFailed, "active upload cannot be drained")
 		}
@@ -416,7 +416,7 @@ func (e *Engine) ensureUploadAborts(ctx context.Context, uploadIDs []string) err
 	if len(uploadIDs) == 0 {
 		return nil
 	}
-	transfers, ok := e.backend.(objectstore.DirectTransferBackend)
+	transfers, ok := e.fileBackend.(objectstore.DirectTransferBackend)
 	if !ok {
 		return domain.NewError(domain.ErrorPreconditionFailed, "object backend has no direct transfer support")
 	}
@@ -467,7 +467,7 @@ func (e *Engine) ensureMutationCopies(ctx context.Context, copies []storageforma
 		if err != nil {
 			return err
 		}
-		if existing, headErr := e.backend.Head(ctx, destination); headErr == nil {
+		if existing, headErr := e.fileBackend.Head(ctx, destination); headErr == nil {
 			if existing.Size != copyIntent.Size {
 				return domain.NewError(domain.ErrorInvalid, "mutation copy destination collision")
 			}
@@ -476,19 +476,19 @@ func (e *Engine) ensureMutationCopies(ctx context.Context, copies []storageforma
 		} else if !errors.Is(headErr, domain.ErrNotFound) {
 			return headErr
 		}
-		sourceInfo, err := e.backend.Head(ctx, source)
+		sourceInfo, err := e.fileBackend.Head(ctx, source)
 		if err != nil {
 			return err
 		}
 		if sourceInfo.Size != copyIntent.Size {
 			return domain.NewError(domain.ErrorPreconditionFailed, "mutation copy source size changed")
 		}
-		_, err = e.backend.Copy(ctx, source, destination, objectstore.CopyCondition{SourceVersion: sourceInfo.Version, Destination: objectstore.PutCondition{Mode: objectstore.PutCreateOnly}})
+		_, err = e.fileBackend.Copy(ctx, source, destination, objectstore.CopyCondition{SourceVersion: sourceInfo.Version, Destination: objectstore.PutCondition{Mode: objectstore.PutCreateOnly}})
 		if err != nil {
 			if !errors.Is(err, domain.ErrConflict) {
 				return err
 			}
-			winner, headErr := e.backend.Head(ctx, destination)
+			winner, headErr := e.fileBackend.Head(ctx, destination)
 			if headErr != nil || winner.Size != copyIntent.Size {
 				return domain.NewError(domain.ErrorInvalid, "mutation copy destination collision")
 			}

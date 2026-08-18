@@ -13,7 +13,7 @@ The normative implementation contract is [docs/v1-specification.md](./docs/v1-sp
 - Strict logical user isolation and deny-by-default authorization.
 - Direct browser-to-provider uploads and provider-to-browser downloads; the control plane does not proxy file bodies.
 - One provider-independent canonical format and portable engine, with logical state independent of GCS generations, S3 version IDs, Azure ETags, bucket names, and provider metadata.
-- Durable admission, fencing, takeover, operation, and checkpoint protocols for multiple replicas sharing one bucket.
+- Durable admission, fencing, takeover, operation, and checkpoint protocols for multiple replicas sharing one single- or split-bucket storage set.
 - One Go binary with embedded HTML, application CSS, vanilla JavaScript, and validated theme media.
 - Data-only themes: typed tokens and allowlisted static assets, never theme CSS, HTML, JavaScript, or remote code.
 - No required SQL database, cache, queue, external identity service, analytics service, or persistent application filesystem.
@@ -93,7 +93,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#test-contract` | Run reusable provider and state-store contract suites. |
 | `nix run .#test-replica` | Run deterministic multi-replica admission, fencing, takeover, and recovery tests. |
 | `nix run .#test-portability` | Run canonical-format, checkpoint, raw-copy/reopen, and continued-mutation tests. |
-| `nix run .#provider-verify -- check CONFIG` | Strictly read and verify a closed checkpoint on a configured memory fixture or GCS bucket. |
+| `nix run .#provider-verify -- check CONFIG` | Strictly read and verify a closed checkpoint on configured single- or split-backend memory fixtures/GCS buckets. |
 | `nix run .#test-e2e` | Run Go-controlled Chromium passkey and core Drive workflows. Nix supplies Chromium on Linux. |
 | `nix run .#test-coverage` | Run the complete suite and enforce 85% repository plus 95% security-boundary statement coverage. |
 | `nix run .#test-race` | Run the suite with Go's race detector. |
@@ -121,7 +121,8 @@ Only settings that have validation and tests are parsed by the current binary:
 | `ENDLESSFS_LISTEN_ADDR` | `127.0.0.1:8080` | Loopback for HTTP development; non-loopback requires a coherent HTTPS base URL. |
 | `ENDLESSFS_STORAGE_PROVIDER` | `mock` | Exact `mock` or `gcs`. The mock is ephemeral; GCS uses ADC and the same portable engine. |
 | `ENDLESSFS_MOCK_PROVIDER_URL` | Ephemeral loopback origin | Optional explicit HTTP loopback origin/port for the separate capability data plane. |
-| `ENDLESSFS_GCS_BUCKET` | Unset | Required with `gcs`; private bucket name, never embedded in canonical state. |
+| `ENDLESSFS_GCS_FILE_BUCKET` | Unset | Required with `gcs`; private file bucket for immutable blobs and upload staging, also used for state by default. |
+| `ENDLESSFS_GCS_STATE_BUCKET` | `ENDLESSFS_GCS_FILE_BUCKET` | Optional private state/metadata bucket. Set it to a distinct bucket for policy/cost isolation or to the file bucket for explicit single-bucket mode. |
 | `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` | ADC discovery | Optional lowercase service-account email used by the official client for keyless IAM `signBlob` signed URLs. |
 | `ENDLESSFS_WRITER_SET_ID` | Local mock identifier | Stable canonical base64url identifier of at least 128 bits; required with `gcs` and identical across all replicas and provider cutovers. |
 | `ALLOW_REGISTRATION` | `false` | Exact `true` or `false`; exposed as non-secret public policy. |
@@ -163,7 +164,7 @@ internal/web/            embedded HTML, CSS, and vanilla JavaScript
 internal/e2e/            Go-controlled Chromium passkey, Drive, responsive, and privacy workflows
 tools/check-source/      forbidden dependency/source policy check
 tools/generate-secret/   operator-directed 256-bit environment-secret generator
-tools/provider-verify/   read-only closed-checkpoint verifier for copied buckets
+tools/provider-verify/   read-only closed-checkpoint verifier for copied storage sets
 tools/theme/             theme validation, generated API inventory, build embedding, and preview fixture
 tools/repository-policy/ checked-in GitHub ruleset validator/applier
 tools/coverage.awk       repository and security-boundary coverage policy
@@ -205,7 +206,7 @@ The policy requires pull requests, resolved review threads, squash-only linear h
 - **Milestone 5 — implemented baseline:** accessible browser drive, confirmed-offset transfers, previews, trash, theme UX, and real Chromium coverage.
 - **Milestone 6 — implemented baseline:** public-share management, invite onboarding, profile/passkey settings, account administration, disable/enable behavior, recovery, and a second full Chromium journey.
 - **Milestone 7 — implemented baseline:** exhaustive cross-user and traversal matrices, fuzz/race/coverage gates, structured-log redaction, dependency/vulnerability policy, OCI inspection, threat/operations review, and release evidence.
-- **v1 portability clarification — implemented:** canonical bucket format, one portable engine, multi-replica admission/fencing/recovery, quiescent checkpoint/raw-copy verification, and credential-free GCS protocol qualification.
+- **v1 portability clarification — implemented:** canonical single-/split-bucket storage-set format, one portable engine, multi-replica admission/fencing/recovery, quiescent checkpoint/raw-copy verification, and credential-free GCS protocol qualification.
 
 Every claimed acceptance criterion in specification section 21 is indexed in the evidence record and `nix flake check` remains the clean, network-denied release gate. “Locally qualified GCS” means the documented protocol and shared contracts passed without credentials; it never means a live deployment is production-ready.
 

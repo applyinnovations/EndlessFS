@@ -35,7 +35,8 @@ type Config struct {
 	Secure                bool
 	StorageProvider       string
 	MockProviderURL       string
-	GCSBucket             string
+	GCSFileBucket         string
+	GCSStateBucket        string
 	GCSSigningAccount     string
 	WriterSetID           string
 	AllowRegistration     bool
@@ -121,9 +122,13 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		}
 		mockProviderURL = strings.TrimSuffix(parsed.String(), "/")
 	}
-	gcsBucket := ""
-	if value, ok := lookup("ENDLESSFS_GCS_BUCKET"); ok {
-		gcsBucket = strings.TrimSpace(value)
+	gcsFileBucket := ""
+	if value, ok := lookup("ENDLESSFS_GCS_FILE_BUCKET"); ok {
+		gcsFileBucket = strings.TrimSpace(value)
+	}
+	gcsStateBucket := ""
+	if value, ok := lookup("ENDLESSFS_GCS_STATE_BUCKET"); ok {
+		gcsStateBucket = strings.TrimSpace(value)
 	}
 	gcsSigningAccount := ""
 	if value, ok := lookup("ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT"); ok {
@@ -137,8 +142,11 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		writerSetID = strings.TrimSpace(value)
 	}
 	if storageProvider == "gcs" {
-		if gcsBucket == "" {
-			return Config{}, fmt.Errorf("ENDLESSFS_GCS_BUCKET: required for GCS")
+		if gcsFileBucket == "" {
+			return Config{}, fmt.Errorf("ENDLESSFS_GCS_FILE_BUCKET: required for GCS")
+		}
+		if gcsStateBucket == "" {
+			gcsStateBucket = gcsFileBucket
 		}
 		if _, configured := lookup("ENDLESSFS_WRITER_SET_ID"); !configured {
 			return Config{}, fmt.Errorf("ENDLESSFS_WRITER_SET_ID: required for GCS")
@@ -146,7 +154,7 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		if mockProviderURL != "" {
 			return Config{}, fmt.Errorf("ENDLESSFS_MOCK_PROVIDER_URL: unavailable with GCS")
 		}
-	} else if gcsBucket != "" || gcsSigningAccount != "" {
+	} else if gcsFileBucket != "" || gcsStateBucket != "" || gcsSigningAccount != "" {
 		return Config{}, fmt.Errorf("GCS configuration is unavailable with mock storage")
 	}
 	if !validRandomIdentifier(writerSetID) {
@@ -214,7 +222,8 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		Secure:                secure,
 		StorageProvider:       storageProvider,
 		MockProviderURL:       mockProviderURL,
-		GCSBucket:             gcsBucket,
+		GCSFileBucket:         gcsFileBucket,
+		GCSStateBucket:        gcsStateBucket,
 		GCSSigningAccount:     gcsSigningAccount,
 		WriterSetID:           writerSetID,
 		AllowRegistration:     allowRegistration,

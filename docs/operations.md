@@ -4,9 +4,9 @@ This guide covers the provider-portable, multi-replica v1 runtime and its locall
 
 ## Runtime model
 
-EndlessFS runs one Go control-plane binary. Application use cases always use one portable storage engine; only the thin atomic-object backend changes. The `mock` backend holds canonical records in memory and starts empty after a restart. The `gcs` backend stores the same canonical keys and bodies in a private GCS bucket.
+EndlessFS runs one Go control-plane binary. Application use cases always use one portable storage engine; only the thin atomic-object backends change. The `mock` backend holds canonical records in memory and starts empty after a restart. The `gcs` backend stores the same canonical keys and bodies in a private state/file storage set. By default both roles use one bucket. `ENDLESSFS_GCS_STATE_BUCKET` can select a distinct bucket for state, filesystem metadata, operations, leases, and checkpoints; immutable blobs and upload staging remain in `ENDLESSFS_GCS_FILE_BUCKET`.
 
-Several replicas may share one bucket. They must use the same base URL/RP identity, registration policy, session-secret-derived keyring identity, stable writer-set ID, writer protocol, and canonical features. Startup rejects an incompatible replica before it serves bucket-backed requests. There is no leader or process-local lock: every mutation uses a durable candidate/admitted ticket, canonical operation intent, conditional object updates, and a monotonically increasing fence.
+Several replicas may share one storage set. They must use the same state/file bucket pairing, base URL/RP identity, registration policy, session-secret-derived keyring identity, stable writer-set ID, writer protocol, and canonical features. Startup rejects an incompatible writer before it serves bucket-backed requests. There is no leader or process-local lock: every mutation uses a durable state-bucket candidate/admitted ticket, canonical operation intent, conditional object updates, and a monotonically increasing fence.
 
 If a replica disappears while it owns a mutation, the durable operation remains. The affected resource can be temporarily unavailable until the lease expires. One competing replica wins the takeover CAS, increments the fence, reconciles any ambiguous provider result, and resumes the same intent. A returning stale replica cannot commit, unlock, or replace the recovered result; its old fence and object preconditions fail.
 
@@ -22,16 +22,22 @@ Select GCS with:
 
 ```console
 export ENDLESSFS_STORAGE_PROVIDER=gcs
-export ENDLESSFS_GCS_BUCKET=endlessfs-private
+export ENDLESSFS_GCS_FILE_BUCKET=endlessfs-files
+# Optional; omit for single-bucket mode or set equal to ENDLESSFS_GCS_FILE_BUCKET.
+export ENDLESSFS_GCS_STATE_BUCKET=endlessfs-state
 export ENDLESSFS_WRITER_SET_ID="$(nix run .#generate-secret)"
 export ENDLESSFS_BASE_URL=https://drive.example
 ```
 
 The runtime uses [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials). Prefer a dedicated application service account attached through the platform workload identity mechanism. For workloads outside Google Cloud, follow Google's [Workload Identity Federation best practices](https://cloud.google.com/iam/docs/best-practices-for-using-workload-identity-federation) with a narrowly matched external principal and service-account impersonation; do not deploy service-account JSON keys or HMAC keys.
 
-Grant only the bucket object permissions the adapter needs. `roles/storage.objectUser` scoped to the one bucket is the standard predefined starting role. Keep public access prevention and uniform bucket-level access enabled where policy permits. The service account used for [signed URLs](https://cloud.google.com/storage/docs/access-control/signed-urls) must also have `iam.serviceAccounts.signBlob` on itself (normally `roles/iam.serviceAccountTokenCreator`) and the IAM Service Account Credentials API must be enabled. Set `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` to that service-account email when automatic ADC identity discovery is unavailable; this is an identifier, not a credential.
+Grant only the bucket object permissions the adapter needs. `roles/storage.objectUser` scoped to each configured bucket is the standard predefined starting role. Keep public access prevention and uniform bucket-level access enabled where policy permits. The service account used for [signed URLs](https://cloud.google.com/storage/docs/access-control/signed-urls) must also have `iam.serviceAccounts.signBlob` on itself (normally `roles/iam.serviceAccountTokenCreator`) and the IAM Service Account Credentials API must be enabled. Set `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` to that service-account email when automatic ADC identity discovery is unavailable; this is an identifier, not a credential.
 
-The browser needs [exact-origin bucket CORS](https://cloud.google.com/storage/docs/configuring-cors) for `GET`, `HEAD`, and `PUT`, request headers `Content-Type`, `Content-Range`, and `Range`, and exposed response headers `Content-Length`, `Content-Range`, `Range`, and `X-Goog-Generation`. Do not use a wildcard origin. Signed URLs and [resumable session URLs](https://cloud.google.com/storage/docs/performing-resumable-uploads) are short-lived bearer capabilities and must never be logged.
+The browser needs [exact-origin bucket CORS](https://cloud.google.com/storage/docs/configuring-cors) on the file bucket for `GET`, `HEAD`, and `PUT`, request headers `Content-Type`, `Content-Range`, and `Range`, and exposed response headers `Content-Length`, `Content-Range`, `Range`, and `X-Goog-Generation`. A distinct state bucket needs no browser CORS. Do not use a wildcard origin. Signed URLs and [resumable session URLs](https://cloud.google.com/storage/docs/performing-resumable-uploads) are short-lived bearer capabilities and must never be logged.
+
+State and file buckets may use different storage classes, billing boundaries, encryption settings, retention policies, and backup schedules. Those policies must preserve live canonical objects and the required strong read/list/conditional-operation behavior. Do not configure lifecycle deletion of state records, committed blobs, or other live objects outside EndlessFS. Retrieval-delayed file storage classes can make interactive downloads unavailable and require separate qualification.
+
+Choose the layout before first initialization when possible. On an existing single-bucket deployment, setting `ENDLESSFS_GCS_STATE_BUCKET` alone does not move blobs and will make the new pairing incomplete. Change layouts only through the closed-gate checkpoint procedure below: copy blob keys to the file-bucket role, retain every other authoritative key in the state-bucket role, verify the combined destination, and only then reopen writes.
 
 Bucket creation, IAM, CORS, lifecycle, retention, monitoring, regional design, and deployment remain explicit operator responsibilities. The deterministic gate does not mutate cloud policy and no live GCS deployment has been qualified by this repository.
 
@@ -41,9 +47,9 @@ Canonical state deliberately contains no bucket/account identifier, GCS generati
 
 1. Close the canonical write gate. Every replica stops admitting new mutations.
 2. Allow fenced recovery to finish admitted operations and drain or abort live data-plane capabilities and native leases. A crashed operation may delay closure; do not delete its lock or force the gate closed.
-3. Create the closed-gate checkpoint and copy exactly its sorted authoritative key/body inventory plus the checkpoint object. Do not copy admissions, staging garbage, or backend leases.
-4. Copy each key and body unchanged. Destination-native versions and metadata may differ and are not preserved.
-5. Run the read-only destination verifier. Missing, extra-authoritative, corrupt, mixed-version, or unsupported objects fail closed.
+3. Create the closed-gate checkpoint and copy exactly its sorted authoritative key/body inventory plus the state-bucket checkpoint object. Do not copy admissions, staging garbage, or backend leases.
+4. Copy each key and body unchanged to its destination role: blob keys to the file bucket and all other authoritative keys to the state bucket. In single-bucket mode both roles name the same destination. Destination-native versions and metadata may differ and are not preserved.
+5. Run the read-only destination verifier against both configured roles. Missing, extra-authoritative, misplaced, corrupt, mixed-version, or unsupported objects fail closed.
 6. Reconfigure compatible replicas to the destination while retaining the same provider-independent application secrets and writer-set identity. Verify the checkpoint, increment/open the destination gate epoch, and continue mutations.
 
 The source remains closed. Online dual writes and reconciliation of mutations made outside EndlessFS are not supported. A pre-copy may reduce downtime, but the final checkpoint-authorized copy must be taken after quiescence.
@@ -53,7 +59,8 @@ The verifier configuration is strict JSON. For GCS:
 ```json
 {
   "provider": "gcs",
-  "bucket": "endlessfs-destination",
+  "fileBucket": "endlessfs-files-destination",
+  "stateBucket": "endlessfs-state-destination",
   "checkpointID": "cutover-2026-08-17",
   "writerSetID": "BASE64URL_WRITER_SET_ID",
   "configurationDigest": "EXPECTED_CONFIGURATION_DIGEST",

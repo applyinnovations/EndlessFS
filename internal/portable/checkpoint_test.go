@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,6 +115,104 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 	}
 }
 
+func TestPortabilityRawCopyPreservesSplitStateAndFileBackends(t *testing.T) {
+	clock := domain.NewFixedClock(time.Date(2037, 2, 4, 4, 5, 6, 0, time.UTC))
+	writer := portable.WriterConfiguration{
+		WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1",
+		KeyringIdentifiers: []string{"session-v1"},
+	}
+	sourceState := objectmemory.New()
+	sourceFiles := objectmemory.New()
+	sourceServer := httptest.NewServer(sourceFiles)
+	t.Cleanup(sourceServer.Close)
+	if err := sourceFiles.ConfigureDataPlane(sourceServer.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(151, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	source, err := portable.Open(context.Background(), portable.Options{
+		Backend: sourceState, FileBackend: sourceFiles, Clock: clock,
+		IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(152, 1<<20))), Writer: writer,
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateKey := state.MustKey(state.NamespaceAccounts, "split-portability")
+	if _, err := source.Create(context.Background(), stateKey, []byte("portable state")); err != nil {
+		t.Fatal(err)
+	}
+	user, _ := domain.ParseUserID("VFRUVFRUVFRUVFRUVFRUVA")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	path := domain.MustParseUserPath("/portable.txt")
+	content := []byte("portable split bytes")
+	uploadPortableFile(t, sourceServer.Client(), source.Files(), scope, path, content)
+	checkpoint, err := source.CreateCheckpoint(context.Background(), "split-portability")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	destinationState := objectmemory.New()
+	destinationFiles := objectmemory.New()
+	stateCopy := make(map[string][]byte)
+	fileCopy := make(map[string][]byte)
+	sourceStateObjects := sourceState.Export()
+	sourceFileObjects := sourceFiles.Export()
+	for _, object := range checkpoint.Objects {
+		if strings.Contains(object.Key, "/blobs/") {
+			fileCopy[object.Key] = append([]byte(nil), sourceFileObjects[object.Key]...)
+		} else {
+			stateCopy[object.Key] = append([]byte(nil), sourceStateObjects[object.Key]...)
+		}
+	}
+	checkpointKey := storageformat.CheckpointKey(checkpoint.CheckpointID).String()
+	stateCopy[checkpointKey] = append([]byte(nil), sourceStateObjects[checkpointKey]...)
+	if err := destinationState.Import(stateCopy); err != nil {
+		t.Fatal(err)
+	}
+	if err := destinationFiles.Import(fileCopy); err != nil {
+		t.Fatal(err)
+	}
+	destinationServer := httptest.NewServer(destinationFiles)
+	t.Cleanup(destinationServer.Close)
+	if err := destinationFiles.ConfigureDataPlane(destinationServer.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(153, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	destination, err := portable.Open(context.Background(), portable.Options{
+		Backend: destinationState, FileBackend: destinationFiles, Clock: clock,
+		IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(154, 1<<20))), Writer: writer,
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.OpenWrites(context.Background(), checkpoint.CheckpointID); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := destination.Get(context.Background(), stateKey); err != nil || string(value.Data) != "portable state" {
+		t.Fatalf("destination state = %+v, %v", value, err)
+	}
+	entry, err := destination.Files().Stat(context.Background(), scope, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	download, err := destination.Files().CreateDownload(context.Background(), scope, domain.CreateDownloadRequest{Path: path, Version: entry.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := http.NewRequest(download.Method, download.URL, nil)
+	response, err := destinationServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloaded, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || !bytes.Equal(downloaded, content) {
+		t.Fatalf("destination download = %d %q", response.StatusCode, downloaded)
+	}
+	if _, err := destination.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/after-cutover")}); err != nil {
+		t.Fatalf("post-cutover mutation error = %v", err)
+	}
+}
+
 func authoritativeCopy(t *testing.T, source map[string][]byte, checkpoint storageformat.Checkpoint) map[string][]byte {
 	t.Helper()
 	result := make(map[string][]byte, len(checkpoint.Objects)+1)
@@ -187,6 +288,127 @@ func TestCheckpointVerifierIsStrictlyReadOnly(t *testing.T) {
 	if guard.writes != 0 {
 		t.Fatalf("read-only verifier attempted %d writes", guard.writes)
 	}
+}
+
+func TestCheckpointVerifierRejectsInvalidBootstrapAndCheckpointRecords(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2037, 3, 4, 6, 7, 8, 0, time.UTC))
+	engine := openEngine(t, backend, clock, 155, nil)
+	checkpoint, err := engine.CreateCheckpoint(context.Background(), "verify-boundaries")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := backend.Export()
+	writer := portable.WriterConfiguration{
+		WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1",
+		KeyringIdentifiers: []string{"session-v1"},
+	}
+	verify := func(t *testing.T, objects map[string][]byte, configuration portable.WriterConfiguration, checkpointID string) error {
+		t.Helper()
+		destination := objectmemory.New()
+		if err := destination.Import(objects); err != nil {
+			t.Fatal(err)
+		}
+		return portable.VerifyCheckpointReadOnly(context.Background(), destination, configuration, checkpointID)
+	}
+	assertRejected := func(t *testing.T, err error) {
+		t.Helper()
+		if !errors.Is(err, domain.ErrInvalid) && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("verification error = %v", err)
+		}
+	}
+
+	t.Run("nil backend", func(t *testing.T) {
+		assertRejected(t, portable.VerifyCheckpointReadOnly(context.Background(), nil, writer, checkpoint.CheckpointID))
+	})
+	t.Run("invalid writer configuration", func(t *testing.T) {
+		assertRejected(t, verify(t, base, portable.WriterConfiguration{}, checkpoint.CheckpointID))
+	})
+	for name, key := range map[string]objectstore.Key{
+		"missing superblock": storageformat.SuperblockKey(),
+		"missing writer set": storageformat.WriterSetKey(),
+		"missing write gate": storageformat.WriteGateKey(),
+		"missing checkpoint": storageformat.CheckpointKey(checkpoint.CheckpointID),
+	} {
+		t.Run(name, func(t *testing.T) {
+			objects := cloneObjects(base)
+			delete(objects, key.String())
+			assertRejected(t, verify(t, objects, writer, checkpoint.CheckpointID))
+		})
+	}
+	for name, key := range map[string]objectstore.Key{
+		"malformed superblock": storageformat.SuperblockKey(),
+		"malformed writer set": storageformat.WriterSetKey(),
+		"malformed write gate": storageformat.WriteGateKey(),
+		"malformed checkpoint": storageformat.CheckpointKey(checkpoint.CheckpointID),
+	} {
+		t.Run(name, func(t *testing.T) {
+			objects := cloneObjects(base)
+			objects[key.String()] = []byte("{")
+			assertRejected(t, verify(t, objects, writer, checkpoint.CheckpointID))
+		})
+	}
+	t.Run("incompatible writer set", func(t *testing.T) {
+		configuration := writer
+		configuration.ConfigurationDigest = "different-config"
+		assertRejected(t, verify(t, base, configuration, checkpoint.CheckpointID))
+	})
+	t.Run("incompatible checkpoint", func(t *testing.T) {
+		objects := cloneObjects(base)
+		key := storageformat.CheckpointKey(checkpoint.CheckpointID)
+		var envelope storageformat.Envelope
+		var stored storageformat.Checkpoint
+		if err := storageformat.DecodeEnvelope(objects[key.String()], key, "checkpoint-v1", &envelope, &stored); err != nil {
+			t.Fatal(err)
+		}
+		stored.SchemaVersion++
+		objects[key.String()], err = storageformat.EncodeEnvelope("checkpoint-v1", key, envelope.Revision, stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertRejected(t, verify(t, objects, writer, checkpoint.CheckpointID))
+	})
+	t.Run("checkpoint does not match closed gate", func(t *testing.T) {
+		key := storageformat.WriteGateKey()
+		original, getErr := backend.Get(context.Background(), key)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		var envelope storageformat.Envelope
+		var gate storageformat.WriteGate
+		if err := storageformat.DecodeEnvelope(original.Body, key, "write-gate-v1", &envelope, &gate); err != nil {
+			t.Fatal(err)
+		}
+		gate.CheckpointID = "different-checkpoint"
+		body, encodeErr := storageformat.EncodeEnvelope("write-gate-v1", key, envelope.Revision+1, gate)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		version, putErr := backend.Put(context.Background(), key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: original.Version})
+		if putErr != nil {
+			t.Fatal(putErr)
+		}
+		assertRejected(t, engine.VerifyCheckpoint(context.Background(), checkpoint.CheckpointID))
+		if _, putErr := backend.Put(context.Background(), key, original.Body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: version}); putErr != nil {
+			t.Fatal(putErr)
+		}
+	})
+	t.Run("malformed superblock during checkpoint retry", func(t *testing.T) {
+		key := storageformat.SuperblockKey()
+		original, getErr := backend.Get(context.Background(), key)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if _, putErr := backend.Put(context.Background(), key, []byte("{"), objectstore.PutCondition{Mode: objectstore.PutMatch, Version: original.Version}); putErr != nil {
+			t.Fatal(putErr)
+		}
+		if _, createErr := engine.CreateCheckpoint(context.Background(), checkpoint.CheckpointID); !errors.Is(createErr, domain.ErrInvalid) {
+			t.Fatalf("CreateCheckpoint() error = %v", createErr)
+		}
+	})
+	t.Run("empty checkpoint ID", func(t *testing.T) {
+		assertRejected(t, engine.VerifyCheckpoint(context.Background(), ""))
+	})
 }
 
 func TestCheckpointVerifierRejectsMissingExtraAndUnsupportedState(t *testing.T) {

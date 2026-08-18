@@ -72,9 +72,9 @@ func TestRunRejectsInvalidRuntimeOnlyConfiguration(t *testing.T) {
 	}
 	cfg = runtimeTestConfig(t)
 	cfg.StorageProvider = "gcs"
-	cfg.GCSBucket = "x"
+	cfg.GCSFileBucket = "x"
 	if err := run(context.Background(), logger, cfg); err == nil {
-		t.Fatal("invalid GCS bucket was accepted")
+		t.Fatal("invalid GCS file bucket was accepted")
 	}
 	cfg = runtimeTestConfig(t)
 	cfg.MockProviderURL = "http://127.0.0.1:invalid"

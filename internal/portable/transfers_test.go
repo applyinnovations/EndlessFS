@@ -10,14 +10,18 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/provider/providercontract"
+	"github.com/applyinnovations/endlessfs/internal/state"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
 func TestContractPortableProviderOverMemoryBackend(t *testing.T) {
@@ -108,6 +112,127 @@ func TestPortableDirectUploadPublishesImmutableBlobAndRangeDownload(t *testing.T
 	if counts.Upload != int64(len(content)) || counts.Download != 3 {
 		t.Fatalf("data-plane counts = %+v", counts)
 	}
+}
+
+func TestPortableSeparateFileBackendIsolatesBytesAndSharesOneCheckpoint(t *testing.T) {
+	stateBackend := objectmemory.New()
+	fileBackend := objectmemory.New()
+	server := httptest.NewServer(fileBackend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2039, 1, 2, 3, 4, 5, 0, time.UTC))
+	if err := fileBackend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(141, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	writer := portable.WriterConfiguration{
+		WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1",
+		KeyringIdentifiers: []string{"session-v1"},
+	}
+	engine, err := portable.Open(context.Background(), portable.Options{
+		Backend: stateBackend, FileBackend: fileBackend, Clock: clock,
+		IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(142, 1<<20))), Writer: writer,
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, _ := domain.ParseUserID("Tk5OTk5OTk5OTk5OTk5OTg")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	path := domain.MustParseUserPath("/isolated.txt")
+	content := []byte("separate bytes")
+	uploadPortableFile(t, server.Client(), engine.Files(), scope, path, content)
+	second, err := portable.Open(context.Background(), portable.Options{
+		Backend: stateBackend, FileBackend: fileBackend, Clock: clock,
+		IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(143, 1<<20))), Writer: writer,
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := second.Files().Stat(context.Background(), scope, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	download, err := second.Files().CreateDownload(context.Background(), scope, domain.CreateDownloadRequest{Path: path, Version: entry.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := http.NewRequest(download.Method, download.URL, nil)
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloaded, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || !bytes.Equal(downloaded, content) {
+		t.Fatalf("download = %d %q", response.StatusCode, downloaded)
+	}
+	if _, err := engine.Create(context.Background(), state.MustKey(state.NamespaceAccounts, "separate-buckets"), []byte(`{"enabled":true}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	stateObjects := stateBackend.Export()
+	fileObjects := fileBackend.Export()
+	for key := range stateObjects {
+		if strings.Contains(key, "/blobs/") || strings.HasPrefix(key, "endlessfs/v1/staging/") {
+			t.Fatalf("file bytes leaked into state backend at %q", key)
+		}
+	}
+	var blobKey string
+	for key := range fileObjects {
+		if strings.Contains(key, "/blobs/") {
+			blobKey = key
+		}
+		if !strings.Contains(key, "/blobs/") && !strings.HasPrefix(key, "endlessfs/v1/staging/") {
+			t.Fatalf("state metadata leaked into file backend at %q", key)
+		}
+	}
+	if blobKey == "" {
+		t.Fatal("completed upload did not publish a file-backend blob")
+	}
+
+	checkpoint, err := second.CreateCheckpoint(context.Background(), "separate-buckets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !checkpointContains(checkpoint, blobKey) {
+		t.Fatalf("checkpoint does not include file-backend blob %q", blobKey)
+	}
+	if err := portable.VerifyCheckpointReadOnlyWithFileBackend(context.Background(), stateBackend, fileBackend, writer, checkpoint.CheckpointID); err != nil {
+		t.Fatalf("split checkpoint verification error = %v", err)
+	}
+	superblock, err := stateBackend.Get(context.Background(), storageformat.SuperblockKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	misplacedVersion, err := fileBackend.Put(context.Background(), storageformat.SuperblockKey(), superblock.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := portable.VerifyCheckpointReadOnlyWithFileBackend(context.Background(), stateBackend, fileBackend, writer, checkpoint.CheckpointID); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("split checkpoint accepted misplaced state object: %v", err)
+	}
+	if err := fileBackend.Delete(context.Background(), storageformat.SuperblockKey(), objectstore.DeleteCondition{Version: misplacedVersion}); err != nil {
+		t.Fatal(err)
+	}
+	blobObject, err := fileBackend.Get(context.Background(), objectstore.MustKey(blobKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fileBackend.Delete(context.Background(), blobObject.Key, objectstore.DeleteCondition{Version: blobObject.Version}); err != nil {
+		t.Fatal(err)
+	}
+	if err := portable.VerifyCheckpointReadOnlyWithFileBackend(context.Background(), stateBackend, fileBackend, writer, checkpoint.CheckpointID); !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("split checkpoint accepted missing file blob: %v", err)
+	}
+}
+
+func checkpointContains(checkpoint storageformat.Checkpoint, key string) bool {
+	for _, object := range checkpoint.Objects {
+		if object.Key == key {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPortableUploadInitiationIsIdempotentAcrossReplicas(t *testing.T) {

@@ -18,14 +18,25 @@ const checkpointSchema = "checkpoint-v1"
 // VerifyCheckpointReadOnly validates an existing canonical bucket and closed
 // checkpoint without initializing, repairing, or otherwise writing storage.
 func VerifyCheckpointReadOnly(ctx context.Context, backend objectstore.Backend, writerConfiguration WriterConfiguration, checkpointID string) error {
+	return VerifyCheckpointReadOnlyWithFileBackend(ctx, backend, nil, writerConfiguration, checkpointID)
+}
+
+// VerifyCheckpointReadOnlyWithFileBackend validates a checkpoint whose
+// canonical metadata and file bytes may be stored on distinct backends. A nil
+// file backend selects the state backend and preserves the one-bucket layout.
+func VerifyCheckpointReadOnlyWithFileBackend(ctx context.Context, backend, fileBackend objectstore.Backend, writerConfiguration WriterConfiguration, checkpointID string) error {
 	if backend == nil || checkpointID == "" {
 		return domain.NewError(domain.ErrorInvalid, "backend and checkpoint ID are required")
+	}
+	separateFileBackend := fileBackend != nil
+	if fileBackend == nil {
+		fileBackend = backend
 	}
 	writer, err := canonicalWriterConfiguration(writerConfiguration)
 	if err != nil {
 		return err
 	}
-	engine := &Engine{backend: backend, writer: writer}
+	engine := &Engine{backend: backend, fileBackend: fileBackend, separateFileBackend: separateFileBackend, writer: writer}
 	superblockObject, err := backend.Get(ctx, storageformat.SuperblockKey())
 	if err != nil {
 		return err
@@ -149,7 +160,23 @@ func (e *Engine) readCheckpoint(ctx context.Context, checkpointID string) (stora
 }
 
 func (e *Engine) authoritativeInventory(ctx context.Context) ([]storageformat.CheckpointObject, error) {
-	infos, err := e.listAll(ctx, "endlessfs/v1/")
+	objects, err := e.authoritativeInventoryFrom(ctx, e.backend, false)
+	if err != nil {
+		return nil, err
+	}
+	if e.separateFileBackend {
+		fileObjects, fileErr := e.authoritativeInventoryFrom(ctx, e.fileBackend, true)
+		if fileErr != nil {
+			return nil, fileErr
+		}
+		objects = append(objects, fileObjects...)
+	}
+	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
+	return objects, nil
+}
+
+func (e *Engine) authoritativeInventoryFrom(ctx context.Context, backend objectstore.Backend, fileData bool) ([]storageformat.CheckpointObject, error) {
+	infos, err := listAllFrom(ctx, backend, "endlessfs/v1/")
 	if err != nil {
 		return nil, err
 	}
@@ -159,14 +186,21 @@ func (e *Engine) authoritativeInventory(ctx context.Context) ([]storageformat.Ch
 		if transientOrCheckpoint(key) {
 			continue
 		}
-		object, getErr := e.backend.Get(ctx, info.Key)
+		if e.separateFileBackend && fileData != isFileDataKey(key) {
+			return nil, domain.NewError(domain.ErrorPreconditionFailed, "canonical object is stored in the wrong backend")
+		}
+		object, getErr := backend.Get(ctx, info.Key)
 		if getErr != nil {
 			return nil, getErr
 		}
 		objects = append(objects, storageformat.CheckpointObject{Key: key, Size: int64(len(object.Body)), SHA256: storageformat.Digest(object.Body)})
 	}
-	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
 	return objects, nil
+}
+
+func isFileDataKey(key string) bool {
+	segments := strings.Split(key, "/")
+	return len(segments) == 6 && segments[0] == "endlessfs" && segments[1] == "v1" && segments[2] == "fs" && segments[3] != "" && segments[4] == "blobs" && segments[5] != ""
 }
 
 func transientOrCheckpoint(key string) bool {

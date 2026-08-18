@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	gcstore "github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
@@ -24,8 +25,10 @@ const (
 
 type verificationConfig struct {
 	Provider            string   `json:"provider"`
-	Bucket              string   `json:"bucket,omitempty"`
+	FileBucket          string   `json:"fileBucket,omitempty"`
+	StateBucket         string   `json:"stateBucket,omitempty"`
 	Fixture             string   `json:"fixture,omitempty"`
+	FileFixture         string   `json:"fileFixture,omitempty"`
 	CheckpointID        string   `json:"checkpointID"`
 	WriterSetID         string   `json:"writerSetID"`
 	ConfigurationDigest string   `json:"configurationDigest"`
@@ -65,46 +68,47 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	switch configuration.Provider {
 	case "memory":
-		if configuration.Fixture == "" || configuration.Bucket != "" {
-			return domain.NewError(domain.ErrorInvalid, "memory verification requires fixture and forbids bucket")
+		if configuration.Fixture == "" || configuration.FileBucket != "" || configuration.StateBucket != "" {
+			return domain.NewError(domain.ErrorInvalid, "memory verification requires fixture and forbids buckets")
 		}
-		fixturePath := configuration.Fixture
-		if !filepath.IsAbs(fixturePath) {
-			fixturePath = filepath.Join(filepath.Dir(configPath), fixturePath)
+		backend, loadErr := loadMemoryFixture(configPath, configuration.Fixture)
+		if loadErr != nil {
+			return loadErr
 		}
-		fixtureBody, readErr := readBoundedFile(fixturePath, maximumFixtureBytes)
-		if readErr != nil {
-			return readErr
-		}
-		var encoded map[string]string
-		if err := state.DecodeJSONWithLimit(fixtureBody, &encoded, maximumFixtureBytes); err != nil {
-			return err
-		}
-		objects := make(map[string][]byte, len(encoded))
-		for key, value := range encoded {
-			decoded, decodeErr := base64.StdEncoding.Strict().DecodeString(value)
-			if decodeErr != nil {
-				return domain.NewError(domain.ErrorInvalid, "fixture contains invalid base64 object body")
+		var fileBackend objectstore.Backend
+		if configuration.FileFixture != "" {
+			fileBackend, loadErr = loadMemoryFixture(configPath, configuration.FileFixture)
+			if loadErr != nil {
+				return loadErr
 			}
-			objects[key] = decoded
 		}
-		backend := objectmemory.New()
-		if err := backend.Import(objects); err != nil {
-			return err
-		}
-		if err := portable.VerifyCheckpointReadOnly(ctx, backend, writer, configuration.CheckpointID); err != nil {
+		if err := portable.VerifyCheckpointReadOnlyWithFileBackend(ctx, backend, fileBackend, writer, configuration.CheckpointID); err != nil {
 			return err
 		}
 	case "gcs":
-		if configuration.Bucket == "" || configuration.Fixture != "" {
-			return domain.NewError(domain.ErrorInvalid, "GCS verification requires bucket and forbids fixture")
+		if configuration.FileBucket == "" || configuration.Fixture != "" || configuration.FileFixture != "" {
+			return domain.NewError(domain.ErrorInvalid, "GCS verification requires fileBucket and forbids fixtures")
 		}
-		backend, openErr := gcstore.Open(ctx, configuration.Bucket)
+		fileBackend, openErr := gcstore.Open(ctx, configuration.FileBucket)
 		if openErr != nil {
 			return openErr
 		}
-		defer backend.Close()
-		if err := portable.VerifyCheckpointReadOnly(ctx, backend, writer, configuration.CheckpointID); err != nil {
+		defer fileBackend.Close()
+		stateBucket := configuration.StateBucket
+		if stateBucket == "" {
+			stateBucket = configuration.FileBucket
+		}
+		var stateBackend = fileBackend
+		var separateFileBackend objectstore.Backend
+		if stateBucket != configuration.FileBucket {
+			stateBackend, openErr = gcstore.Open(ctx, stateBucket)
+			if openErr != nil {
+				return openErr
+			}
+			defer stateBackend.Close()
+			separateFileBackend = fileBackend
+		}
+		if err := portable.VerifyCheckpointReadOnlyWithFileBackend(ctx, stateBackend, separateFileBackend, writer, configuration.CheckpointID); err != nil {
 			return err
 		}
 	default:
@@ -112,6 +116,34 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	_, err = fmt.Fprintf(output, "checkpoint %s verified read-only\n", configuration.CheckpointID)
 	return err
+}
+
+func loadMemoryFixture(configPath, fixture string) (*objectmemory.Backend, error) {
+	fixturePath := fixture
+	if !filepath.IsAbs(fixturePath) {
+		fixturePath = filepath.Join(filepath.Dir(configPath), fixturePath)
+	}
+	fixtureBody, err := readBoundedFile(fixturePath, maximumFixtureBytes)
+	if err != nil {
+		return nil, err
+	}
+	var encoded map[string]string
+	if err := state.DecodeJSONWithLimit(fixtureBody, &encoded, maximumFixtureBytes); err != nil {
+		return nil, err
+	}
+	objects := make(map[string][]byte, len(encoded))
+	for key, value := range encoded {
+		decoded, decodeErr := base64.StdEncoding.Strict().DecodeString(value)
+		if decodeErr != nil {
+			return nil, domain.NewError(domain.ErrorInvalid, "fixture contains invalid base64 object body")
+		}
+		objects[key] = decoded
+	}
+	backend := objectmemory.New()
+	if err := backend.Import(objects); err != nil {
+		return nil, err
+	}
+	return backend, nil
 }
 
 func readBoundedFile(path string, maximum int64) ([]byte, error) {

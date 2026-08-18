@@ -40,6 +40,13 @@ func (backend *failNthBackend) Head(ctx context.Context, key objectstore.Key) (o
 	return backend.backend.Head(ctx, key)
 }
 
+func (backend *failNthBackend) Verify(ctx context.Context, key objectstore.Key, expected objectstore.ExpectedIntegrity) (objectstore.ObjectInfo, error) {
+	if err := backend.fault(); err != nil {
+		return objectstore.ObjectInfo{}, err
+	}
+	return backend.backend.Verify(ctx, key, expected)
+}
+
 func (backend *failNthBackend) Get(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
 	if err := backend.fault(); err != nil {
 		return objectstore.Object{}, err

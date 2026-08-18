@@ -8,10 +8,12 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/integrity"
 	"github.com/deepteams/webp"
 )
 
@@ -65,6 +67,7 @@ type Artifact struct {
 	ContentType  string `json:"contentType"`
 	Size         int64  `json:"size"`
 	SHA256       string `json:"sha256"`
+	CRC32C       string `json:"crc32c"`
 	Bytes        []byte `json:"-"`
 }
 
@@ -76,6 +79,7 @@ type ArtifactMetadata struct {
 	ContentType  string `json:"contentType"`
 	Size         int64  `json:"size"`
 	SHA256       string `json:"sha256"`
+	CRC32C       string `json:"crc32c"`
 }
 
 type GenerationClaim struct {
@@ -91,7 +95,7 @@ func (c GenerationClaim) Valid() bool {
 func (a Artifact) Metadata() ArtifactMetadata {
 	return ArtifactMetadata{
 		GenerationID: a.GenerationID, Variant: a.Variant, Width: a.Width, Height: a.Height,
-		ContentType: a.ContentType, Size: a.Size, SHA256: a.SHA256,
+		ContentType: a.ContentType, Size: a.Size, SHA256: a.SHA256, CRC32C: a.CRC32C,
 	}
 }
 
@@ -102,7 +106,9 @@ func (a ArtifactMetadata) ValidFor(binding Binding) bool {
 		return false
 	}
 	digest, err := base64.RawURLEncoding.DecodeString(a.SHA256)
-	return err == nil && len(digest) == sha256.Size
+	_, checksumOK := integrity.ParseCRC32C(a.CRC32C)
+	return err == nil && len(digest) == sha256.Size &&
+		checksumOK
 }
 
 func (a Artifact) ValidFor(binding Binding) bool {
@@ -118,12 +124,45 @@ func (a Artifact) ValidFor(binding Binding) bool {
 	if subtle.ConstantTimeCompare(actual[:], want) != 1 {
 		return false
 	}
+	if subtle.ConstantTimeCompare([]byte(ChecksumCRC32C(a.Bytes)), []byte(a.CRC32C)) != 1 {
+		return false
+	}
 	features, err := webp.GetFeatures(bytes.NewReader(a.Bytes))
 	if err != nil || features.Width != a.Width || features.Height != a.Height || features.HasAnimation || features.FrameCount != 1 {
 		return false
 	}
 	decoded, err := webp.Decode(bytes.NewReader(a.Bytes))
 	return err == nil && decoded.Bounds().Dx() == a.Width && decoded.Bounds().Dy() == a.Height
+}
+
+// ChecksumCRC32C returns the canonical provider-independent encoding recorded
+// in preview manifests. Providers may use native checksum metadata to attest
+// to this expected value, but their metadata never becomes authoritative.
+func ChecksumCRC32C(data []byte) string {
+	return integrity.CRC32C(data)
+}
+
+var storeValidationCategories = map[string]bool{
+	"access": true, "list": true, "identity": true, "claim": true, "create": true,
+	"commit": true, "manifest": true, "read": true, "capability": true,
+	"capability status": true, "capability content type": true,
+	"capability disposition": true, "capability cache control": true,
+	"capability origin": true, "capability body": true,
+}
+
+// StoreValidationCategory extracts only the closed, security-safe startup
+// category vocabulary. Arbitrary provider details are deliberately discarded.
+func StoreValidationCategory(err error) string {
+	var classified *domain.Error
+	if !errors.As(err, &classified) {
+		return ""
+	}
+	const prefix = "preview store validation failed: "
+	category := strings.TrimPrefix(classified.Message, prefix)
+	if category == classified.Message || !storeValidationCategories[category] {
+		return ""
+	}
+	return category
 }
 
 // Store is an independently configured preview artifact provider. It never

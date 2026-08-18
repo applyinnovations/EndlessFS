@@ -226,7 +226,11 @@ func NewService(options Options, source provider.Storage, store Store, generator
 	}
 	if store != nil {
 		if err := store.Validate(startupContext); err != nil {
-			return nil, domain.NewError(domain.ErrorUnavailable, "preview store access validation failed")
+			message := "preview store access validation failed"
+			if category := StoreValidationCategory(err); category != "" {
+				message += ": " + category
+			}
+			return nil, domain.WrapError(domain.ErrorUnavailable, message, err)
 		}
 	}
 	return &Service{
@@ -982,7 +986,8 @@ func (s *Service) generate(ctx context.Context, scope domain.Scope, entry domain
 	sum := sha256.Sum256(generated.Bytes)
 	artifact := Artifact{
 		GenerationID: generationID, Variant: binding.Variant, Width: generated.Width, Height: generated.Height,
-		ContentType: ContentTypeWebP, Size: int64(len(generated.Bytes)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), Bytes: generated.Bytes,
+		ContentType: ContentTypeWebP, Size: int64(len(generated.Bytes)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]),
+		CRC32C: ChecksumCRC32C(generated.Bytes), Bytes: generated.Bytes,
 	}
 	if !artifact.ValidFor(binding) {
 		return "", domain.NewError(domain.ErrorInvalid, "preview generator produced invalid artifact")

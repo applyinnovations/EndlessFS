@@ -153,7 +153,7 @@ func (s *Store) Validate(ctx context.Context) error {
 	sum := sha256.Sum256(data)
 	artifact := preview.Artifact{
 		GenerationID: generationID, Variant: 64, Width: 1, Height: 1, ContentType: preview.ContentTypeWebP,
-		Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), Bytes: data,
+		Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), CRC32C: preview.ChecksumCRC32C(data), Bytes: data,
 	}
 	if !artifact.ValidFor(binding) {
 		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: read")

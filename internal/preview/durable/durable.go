@@ -160,7 +160,7 @@ func (s *Store) Validate(ctx context.Context) error {
 	artifact := preview.Artifact{
 		GenerationID: generationID, Variant: binding.Variant, Width: 1, Height: 1,
 		ContentType: preview.ContentTypeWebP, Size: int64(len(data)),
-		SHA256: base64.RawURLEncoding.EncodeToString(digest[:]), Bytes: data,
+		SHA256: base64.RawURLEncoding.EncodeToString(digest[:]), CRC32C: preview.ChecksumCRC32C(data), Bytes: data,
 	}
 	claim, err := s.Claim(ctx, binding, generationID, s.clock.Now().Add(time.Minute))
 	if err != nil {
@@ -202,6 +202,9 @@ func (s *Store) Validate(ctx context.Context) error {
 	}
 	if response.StatusCode != http.StatusOK {
 		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: capability status")
+	}
+	if s.allowedOrigin != "" && response.Header.Get("Access-Control-Allow-Origin") != s.allowedOrigin {
+		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: capability origin")
 	}
 	if response.Header.Get("Content-Type") != preview.ContentTypeWebP {
 		return domain.NewError(domain.ErrorUnavailable, "preview store validation failed: capability content type")
@@ -346,8 +349,11 @@ func (s *Store) Commit(ctx context.Context, binding preview.Binding, claim previ
 	}
 	// Recover a provider response lost after the successful visibility CAS.
 	_, recovered, readErr := s.readHead(ctx, binding, digest)
-	if readErr == nil && recovered.ClaimID == "" && findGeneration(recovered.Generations, artifact.GenerationID) != nil {
-		return nil
+	if readErr == nil {
+		metadata := findGeneration(recovered.Generations, artifact.GenerationID)
+		if metadata != nil && *metadata == artifact.Metadata() {
+			return nil
+		}
 	}
 	s.setReady(false)
 	return err
@@ -396,7 +402,7 @@ func (s *Store) Read(ctx context.Context, binding preview.Binding, generationID 
 	}
 	artifact := preview.Artifact{
 		GenerationID: metadata.GenerationID, Variant: metadata.Variant, Width: metadata.Width, Height: metadata.Height,
-		ContentType: metadata.ContentType, Size: metadata.Size, SHA256: metadata.SHA256, Bytes: object.Body,
+		ContentType: metadata.ContentType, Size: metadata.Size, SHA256: metadata.SHA256, CRC32C: metadata.CRC32C, Bytes: object.Body,
 	}
 	return artifact, nil
 }
@@ -413,7 +419,7 @@ func (s *Store) CreateDownload(ctx context.Context, binding preview.Binding, gen
 	if err != nil {
 		return domain.DownloadCapability{}, err
 	}
-	object, err := s.validateStoredGeneration(ctx, binding, digest, metadata, true)
+	object, err := s.validateStoredGeneration(ctx, binding, digest, metadata, false)
 	if err != nil {
 		return domain.DownloadCapability{}, err
 	}
@@ -464,12 +470,17 @@ func (s *Store) validateStoredGeneration(ctx context.Context, binding preview.Bi
 	}
 	key := generationArtifactKey(digest, generationDigest)
 	if !withBody {
-		info, err := s.backend.Head(ctx, key)
+		info, err := s.backend.Verify(ctx, key, objectstore.ExpectedIntegrity{
+			Size: metadata.Size, Checksum: objectstore.Checksum{Algorithm: objectstore.ChecksumCRC32C, Value: metadata.CRC32C},
+		})
 		if errors.Is(err, domain.ErrNotFound) {
 			return objectstore.Object{}, domain.NewError(domain.ErrorNotFound, "preview artifact not found")
 		}
 		if err != nil {
 			s.setReady(false)
+			if errors.Is(err, domain.ErrPreconditionFailed) {
+				return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "preview artifact is corrupt")
+			}
 			return objectstore.Object{}, err
 		}
 		if info.Size != metadata.Size {
@@ -492,7 +503,7 @@ func (s *Store) validateStoredGeneration(ctx context.Context, binding preview.Bi
 	}
 	artifact := preview.Artifact{
 		GenerationID: metadata.GenerationID, Variant: metadata.Variant, Width: metadata.Width, Height: metadata.Height,
-		ContentType: metadata.ContentType, Size: metadata.Size, SHA256: metadata.SHA256, Bytes: object.Body,
+		ContentType: metadata.ContentType, Size: metadata.Size, SHA256: metadata.SHA256, CRC32C: metadata.CRC32C, Bytes: object.Body,
 	}
 	if !artifact.ValidFor(binding) {
 		s.setReady(false)

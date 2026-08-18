@@ -15,6 +15,7 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/integrity"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
@@ -122,6 +123,30 @@ func (b *Backend) Head(ctx context.Context, key objectstore.Key) (objectstore.Ob
 	}
 	if attrs.Generation <= 0 || attrs.Size < 0 {
 		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorInternal, "GCS returned invalid object metadata")
+	}
+	return objectstore.ObjectInfo{Key: key, Version: encodeVersion(attrs.Generation), Size: attrs.Size}, nil
+}
+
+func (b *Backend) Verify(ctx context.Context, key objectstore.Key, expected objectstore.ExpectedIntegrity) (objectstore.ObjectInfo, error) {
+	if err := objectstore.ContextError(ctx); err != nil {
+		return objectstore.ObjectInfo{}, err
+	}
+	if !key.Valid() {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorInvalid, "invalid object key")
+	}
+	if err := expected.Validate(); err != nil {
+		return objectstore.ObjectInfo{}, err
+	}
+	expectedCRC32C, _ := integrity.ParseCRC32C(expected.Checksum.Value)
+	attrs, err := b.bucket.Object(key.String()).Attrs(ctx)
+	if err != nil {
+		return objectstore.ObjectInfo{}, classify("GCS object integrity metadata read failed", err)
+	}
+	if attrs.Generation <= 0 || attrs.Size < 0 {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorInternal, "GCS returned invalid object metadata")
+	}
+	if attrs.Size != expected.Size || attrs.CRC32C != expectedCRC32C {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorPreconditionFailed, "object integrity does not match")
 	}
 	return objectstore.ObjectInfo{Key: key, Version: encodeVersion(attrs.Generation), Size: attrs.Size}, nil
 }

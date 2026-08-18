@@ -235,6 +235,6 @@ func testArtifact(generationID string, variant int, data []byte) preview.Artifac
 	sum := sha256.Sum256(data)
 	return preview.Artifact{
 		GenerationID: generationID, Variant: variant, Width: 1, Height: 1, ContentType: "image/webp",
-		Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), Bytes: data,
+		Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), CRC32C: preview.ChecksumCRC32C(data), Bytes: data,
 	}
 }

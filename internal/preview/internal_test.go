@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,11 +53,22 @@ func TestContentBindingAndArtifactValidationFailures(t *testing.T) {
 	if mismatchedDigest.ValidFor(binding) {
 		t.Fatal("mismatched artifact digest was accepted")
 	}
+	invalidCRC32C := artifact
+	invalidCRC32C.CRC32C = "invalid"
+	if invalidCRC32C.ValidFor(binding) {
+		t.Fatal("invalid artifact CRC32C was accepted")
+	}
+	mismatchedCRC32C := artifact
+	mismatchedCRC32C.CRC32C = ChecksumCRC32C([]byte("different"))
+	if mismatchedCRC32C.ValidFor(binding) {
+		t.Fatal("mismatched artifact CRC32C was accepted")
+	}
 	invalidWebP := artifact
 	invalidWebP.Bytes = append([]byte(nil), artifact.Bytes...)
 	invalidWebP.Bytes[51] ^= 0xff
 	sum := sha256.Sum256(invalidWebP.Bytes)
 	invalidWebP.SHA256 = base64.RawURLEncoding.EncodeToString(sum[:])
+	invalidWebP.CRC32C = ChecksumCRC32C(invalidWebP.Bytes)
 	if invalidWebP.ValidFor(binding) {
 		t.Fatal("corrupt WebP was accepted")
 	}
@@ -259,6 +271,29 @@ func TestServiceRejectsInvalidRegistryAndGenerationRequests(t *testing.T) {
 		Path: domain.MustParseUserPath("/source.png"), Version: "version", Variant: 256, IdempotencyKey: "preview-exhausted-id-0001",
 	}); err == nil {
 		t.Fatal("exhausted operation ID source returned success")
+	}
+}
+
+func TestServicePreservesSafePreviewStoreStartupFailureCategory(t *testing.T) {
+	store := &scriptedStore{validateErr: domain.NewError(domain.ErrorUnavailable, "preview store validation failed: capability origin")}
+	_, err := NewService(
+		Options{ApplicationState: state.NewMemoryStore()},
+		&scriptedStorage{}, store, nil, http.DefaultClient,
+		domain.NewIDGenerator(bytes.NewReader(make([]byte, 64))), domain.SystemClock{},
+	)
+	if !errors.Is(err, domain.ErrUnavailable) || !strings.Contains(err.Error(), "capability origin") {
+		t.Fatalf("startup validation error = %v", err)
+	}
+}
+
+func TestStoreValidationCategoryRejectsUnclassifiedAndUnknownDetails(t *testing.T) {
+	for _, err := range []error{
+		errors.New("provider detail"),
+		domain.NewError(domain.ErrorUnavailable, "preview store validation failed: bucket secret"),
+	} {
+		if category := StoreValidationCategory(err); category != "" {
+			t.Fatalf("unsafe startup category = %q", category)
+		}
 	}
 }
 
@@ -729,13 +764,14 @@ func TestResolveGenerationFailureStates(t *testing.T) {
 type scriptedStore struct {
 	latest        Artifact
 	latestErr     error
+	validateErr   error
 	capabilityErr error
 	claimErr      error
 	commitErr     error
 }
 
-func (*scriptedStore) Validate(context.Context) error { return nil }
-func (*scriptedStore) Check(context.Context) error    { return nil }
+func (s *scriptedStore) Validate(context.Context) error { return s.validateErr }
+func (*scriptedStore) Check(context.Context) error      { return nil }
 func (s *scriptedStore) Claim(context.Context, Binding, string, time.Time) (GenerationClaim, error) {
 	return GenerationClaim{ID: "claim", Epoch: 1, ExpiresAt: time.Now().Add(time.Hour)}, s.claimErr
 }
@@ -837,7 +873,7 @@ func internalBinding(t *testing.T) Binding {
 func internalArtifact(generationID string, variant int) Artifact {
 	data := OnePixelWebP()
 	sum := sha256.Sum256(data)
-	return Artifact{GenerationID: generationID, Variant: variant, Width: 1, Height: 1, ContentType: ContentTypeWebP, Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), Bytes: data}
+	return Artifact{GenerationID: generationID, Variant: variant, Width: 1, Height: 1, ContentType: ContentTypeWebP, Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), CRC32C: ChecksumCRC32C(data), Bytes: data}
 }
 
 func operationIDsInSameShard() (domain.OperationID, domain.OperationID) {

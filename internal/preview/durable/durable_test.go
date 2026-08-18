@@ -25,7 +25,13 @@ func TestContractDurablePreviewStoreOverObjectBackend(t *testing.T) {
 	storecontract.Run(t, func(t *testing.T) storecontract.Harness {
 		clock := domain.NewFixedClock(time.Date(2035, 1, 2, 3, 4, 5, 0, time.UTC))
 		backend := objectmemory.New()
-		server := httptest.NewServer(backend)
+		const allowedOrigin = "https://drive.example.test"
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.Header.Get("Origin") == allowedOrigin {
+				writer.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			}
+			backend.ServeHTTP(writer, request)
+		}))
 		t.Cleanup(server.Close)
 		ids := domain.NewIDGenerator(bytes.NewReader(deterministicBytes(4 << 20)))
 		if err := backend.ConfigureDataPlane(server.URL, clock, ids); err != nil {
@@ -35,7 +41,7 @@ func TestContractDurablePreviewStoreOverObjectBackend(t *testing.T) {
 		store, err := durable.New(durable.Options{
 			Backend: faultable, Transfers: faultable, Clock: clock, IDs: ids,
 			Key: secret.Value(testBearer(0x51)), CapabilityTTL: time.Minute,
-			DataOrigin: server.URL, HTTPClient: server.Client(), AllowedOrigin: "https://drive.example.test",
+			DataOrigin: server.URL, HTTPClient: server.Client(), AllowedOrigin: allowedOrigin,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -145,6 +151,13 @@ func (b *faultBackend) Head(ctx context.Context, key objectstore.Key) (objectsto
 	return b.Backend.Head(ctx, key)
 }
 
+func (b *faultBackend) Verify(ctx context.Context, key objectstore.Key, expected objectstore.ExpectedIntegrity) (objectstore.ObjectInfo, error) {
+	if !b.allowed() {
+		return objectstore.ObjectInfo{}, b.unavailable()
+	}
+	return b.Backend.Verify(ctx, key, expected)
+}
+
 func (b *faultBackend) Get(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
 	if !b.allowed() {
 		return objectstore.Object{}, b.unavailable()
@@ -199,7 +212,7 @@ func testBinding(t *testing.T) preview.Binding {
 func testArtifact(generationID string, variant int) preview.Artifact {
 	data := preview.OnePixelWebP()
 	sum := sha256.Sum256(data)
-	return preview.Artifact{GenerationID: generationID, Variant: variant, Width: 1, Height: 1, ContentType: preview.ContentTypeWebP, Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), Bytes: data}
+	return preview.Artifact{GenerationID: generationID, Variant: variant, Width: 1, Height: 1, ContentType: preview.ContentTypeWebP, Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), CRC32C: preview.ChecksumCRC32C(data), Bytes: data}
 }
 
 func testBearer(fill byte) string {

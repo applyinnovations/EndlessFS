@@ -67,6 +67,32 @@ func (b *Backend) Head(ctx context.Context, key objectstore.Key) (objectstore.Ob
 	return objectstore.ObjectInfo{Key: key, Version: record.version, Size: record.size}, nil
 }
 
+func (b *Backend) Verify(ctx context.Context, key objectstore.Key, expected objectstore.ExpectedIntegrity) (objectstore.ObjectInfo, error) {
+	if err := objectstore.ContextError(ctx); err != nil {
+		return objectstore.ObjectInfo{}, err
+	}
+	if !key.Valid() {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorInvalid, "invalid object key")
+	}
+	if err := expected.Validate(); err != nil {
+		return objectstore.ObjectInfo{}, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	record, found := b.records[key.String()]
+	if !found {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorNotFound, "object not found")
+	}
+	if !record.materialized {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorUnavailable, "object integrity is not materialized")
+	}
+	actual := objectstore.IntegrityFor(record.body)
+	if record.size != expected.Size || actual.Checksum != expected.Checksum {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorPreconditionFailed, "object integrity does not match")
+	}
+	return objectstore.ObjectInfo{Key: key, Version: record.version, Size: record.size}, nil
+}
+
 func (b *Backend) Get(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
 	if err := objectstore.ContextError(ctx); err != nil {
 		return objectstore.Object{}, err

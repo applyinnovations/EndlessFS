@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/integrity"
 )
 
 const (
@@ -67,6 +68,37 @@ type ObjectInfo struct {
 	Size    int64
 }
 
+// ExpectedIntegrity is a provider-independent assertion about one immutable
+// object body. Backends may satisfy it from native integrity metadata or by
+// reading and hashing the body, but native checksum values never cross this
+// boundary or become durable application state.
+type ExpectedIntegrity struct {
+	Size     int64
+	Checksum Checksum
+}
+
+type ChecksumAlgorithm string
+
+const ChecksumCRC32C ChecksumAlgorithm = "crc32c"
+
+type Checksum struct {
+	Algorithm ChecksumAlgorithm
+	Value     string
+}
+
+func IntegrityFor(body []byte) ExpectedIntegrity {
+	return ExpectedIntegrity{Size: int64(len(body)), Checksum: Checksum{Algorithm: ChecksumCRC32C, Value: integrity.CRC32C(body)}}
+}
+
+func (i ExpectedIntegrity) Validate() error {
+	if i.Size >= 0 && i.Checksum.Algorithm == ChecksumCRC32C {
+		if _, ok := integrity.ParseCRC32C(i.Checksum.Value); ok {
+			return nil
+		}
+	}
+	return domain.NewError(domain.ErrorInvalid, "invalid expected object integrity")
+}
+
 type PutMode uint8
 
 const (
@@ -114,6 +146,7 @@ type ListPage struct {
 
 type Backend interface {
 	Head(context.Context, Key) (ObjectInfo, error)
+	Verify(context.Context, Key, ExpectedIntegrity) (ObjectInfo, error)
 	Get(context.Context, Key) (Object, error)
 	List(context.Context, ListRequest) (ListPage, error)
 	Put(context.Context, Key, []byte, PutCondition) (NativeVersion, error)

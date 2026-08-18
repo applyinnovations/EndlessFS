@@ -220,6 +220,27 @@ func TestDurableStoreLostSuccessAndImmutableRecovery(t *testing.T) {
 		t.Fatalf("lost head success recovery error = %v", err)
 	}
 
+	racingClaim, err := store.Claim(context.Background(), binding, "racing-head-recovery-claim", options.Clock.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var laterClaim preview.GenerationClaim
+	faults.afterLostSuccess = func() {
+		var claimErr error
+		laterClaim, claimErr = store.Claim(context.Background(), binding, "later-claim", options.Clock.Now().Add(time.Minute))
+		if claimErr != nil {
+			t.Errorf("later Claim() error = %v", claimErr)
+		}
+	}
+	faults.reset(3)
+	if err := store.Commit(context.Background(), binding, racingClaim, internalArtifact("racing-head-recovery-generation", binding.Variant)); err != nil {
+		t.Fatalf("lost head success with a later claim error = %v", err)
+	}
+	faults.afterLostSuccess = nil
+	if err := store.Release(context.Background(), binding, laterClaim); err != nil {
+		t.Fatalf("release later claim = %v", err)
+	}
+
 	thirdClaim, err := store.Claim(context.Background(), binding, "conflict-claim", options.Clock.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
@@ -306,6 +327,19 @@ func TestDurableRecordAndValidationFailureBoundaries(t *testing.T) {
 			t.Fatalf("%s validation error = %v", name, err)
 		}
 	}
+
+	options := internalOptions(t, nil, 4)
+	options.AllowedOrigin = "https://drive.example.test"
+	options.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return validationHTTPResponse(io.NopCloser(bytes.NewReader(preview.OnePixelWebP()))), nil
+	})}
+	store, err = New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Validate(context.Background()); !errors.Is(err, domain.ErrUnavailable) || !strings.Contains(err.Error(), "capability origin") {
+		t.Fatalf("missing exact CORS origin validation error = %v", err)
+	}
 }
 
 func TestDurableBackendFailureAndStoredGenerationMatrix(t *testing.T) {
@@ -379,6 +413,17 @@ func TestDurableBackendFailureAndStoredGenerationMatrix(t *testing.T) {
 		t.Fatalf("artifact body size error = %v", err)
 	}
 	faults.getSizeDelta = 0
+
+	// Capability issuance must use the backend integrity-verification primitive,
+	// not retrieve the artifact body through the control plane.
+	faults.getErrKey = artifactKey.String()
+	if _, err := store.CreateDownload(context.Background(), binding, artifact.GenerationID); err != nil {
+		t.Fatalf("metadata-verified capability error = %v", err)
+	}
+	if _, err := store.Read(context.Background(), binding, artifact.GenerationID); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("artifact body fault was not exercised by Read() = %v", err)
+	}
+	faults.getErrKey = ""
 
 	storedArtifact, _ := base.Get(context.Background(), artifactKey)
 	corrupt := append([]byte(nil), storedArtifact.Body...)
@@ -594,9 +639,10 @@ func validationHTTPResponse(body io.ReadCloser) *http.Response {
 type putFaultBackend struct {
 	objectstore.Backend
 	objectstore.DirectTransferBackend
-	mu        sync.Mutex
-	putCount  int
-	failAfter int
+	mu               sync.Mutex
+	putCount         int
+	failAfter        int
+	afterLostSuccess func()
 }
 
 type operationFaultBackend struct {
@@ -636,6 +682,15 @@ func (b *operationFaultBackend) Head(ctx context.Context, key objectstore.Key) (
 		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorUnavailable, "injected")
 	}
 	info, err := b.Backend.Head(ctx, key)
+	info.Size += b.headSizeDelta
+	return info, err
+}
+
+func (b *operationFaultBackend) Verify(ctx context.Context, key objectstore.Key, expected objectstore.ExpectedIntegrity) (objectstore.ObjectInfo, error) {
+	if key.String() == b.headErrKey {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorUnavailable, "injected")
+	}
+	info, err := b.Backend.Verify(ctx, key, expected)
 	info.Size += b.headSizeDelta
 	return info, err
 }
@@ -705,6 +760,9 @@ func (b *putFaultBackend) Put(ctx context.Context, key objectstore.Key, body []b
 	fail := b.failAfter > 0 && b.putCount == b.failAfter
 	b.mu.Unlock()
 	if fail {
+		if b.afterLostSuccess != nil {
+			b.afterLostSuccess()
+		}
 		return "", domain.NewError(domain.ErrorUnavailable, "injected lost success")
 	}
 	return version, nil
@@ -745,7 +803,7 @@ func internalBinding(t *testing.T) preview.Binding {
 func internalArtifact(generationID string, variant int) preview.Artifact {
 	data := preview.OnePixelWebP()
 	digest := sha256.Sum256(data)
-	return preview.Artifact{GenerationID: generationID, Variant: variant, Width: 1, Height: 1, ContentType: preview.ContentTypeWebP, Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(digest[:]), Bytes: data}
+	return preview.Artifact{GenerationID: generationID, Variant: variant, Width: 1, Height: 1, ContentType: preview.ContentTypeWebP, Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(digest[:]), CRC32C: preview.ChecksumCRC32C(data), Bytes: data}
 }
 
 func internalClaim(id string, epoch uint64, now time.Time) preview.GenerationClaim {

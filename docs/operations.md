@@ -4,7 +4,7 @@ This guide covers the provider-portable, multi-replica v1 runtime and its locall
 
 ## Runtime model
 
-EndlessFS runs one Go control-plane binary. Application use cases always use one portable storage engine; only the thin atomic-object backends change. The `mock` backend holds canonical records in memory and starts empty after a restart. The `gcs` backend stores the same canonical keys and bodies in a private state/file storage set. By default both roles use one bucket. `ENDLESSFS_GCS_STATE_BUCKET` can select a distinct bucket for state, filesystem metadata, operations, leases, and checkpoints; immutable blobs and upload staging remain in `ENDLESSFS_GCS_BUCKET`.
+EndlessFS runs one Go control-plane binary. Application use cases always use one portable storage engine; only the thin atomic-object backends change. The `mock` backend holds canonical records in memory and starts empty after a restart. The `gcs` backend stores the same canonical keys and bodies in a private state/file storage set. By default both roles use one bucket. `ENDLESSFS_GCS_STATE_BUCKET` can select a distinct bucket for state, filesystem metadata, operations, leases, and checkpoints; immutable blobs and upload staging remain in `ENDLESSFS_GCS_FILE_BUCKET`.
 
 Several replicas may share one storage set. They must use the same state/file bucket pairing, base URL/RP identity, registration policy, session-secret-derived keyring identity, stable writer-set ID, writer protocol, and canonical features. Startup rejects an incompatible writer before it serves bucket-backed requests. There is no leader or process-local lock: every mutation uses a durable state-bucket candidate/admitted ticket, canonical operation intent, conditional object updates, and a monotonically increasing fence.
 
@@ -22,8 +22,8 @@ Select GCS with:
 
 ```console
 export ENDLESSFS_STORAGE_PROVIDER=gcs
-export ENDLESSFS_GCS_BUCKET=endlessfs-files
-# Optional; omit for single-bucket mode or set equal to ENDLESSFS_GCS_BUCKET.
+export ENDLESSFS_GCS_FILE_BUCKET=endlessfs-files
+# Optional; omit for single-bucket mode or set equal to ENDLESSFS_GCS_FILE_BUCKET.
 export ENDLESSFS_GCS_STATE_BUCKET=endlessfs-state
 export ENDLESSFS_WRITER_SET_ID="$(nix run .#generate-secret)"
 export ENDLESSFS_BASE_URL=https://drive.example
@@ -59,7 +59,7 @@ The verifier configuration is strict JSON. For GCS:
 ```json
 {
   "provider": "gcs",
-  "bucket": "endlessfs-files-destination",
+  "fileBucket": "endlessfs-files-destination",
   "stateBucket": "endlessfs-state-destination",
   "checkpointID": "cutover-2026-08-17",
   "writerSetID": "BASE64URL_WRITER_SET_ID",

@@ -1589,8 +1589,8 @@ Configuration is read from environment variables. Secrets MUST NOT be accepted a
 | `ENDLESSFS_WRITER_SET_ID` | Required with `gcs`; deterministic mock default | Stable random deployment identity shared by every replica allowed to mutate the configured storage set; preserved across provider cutover. |
 | `ENDLESSFS_STORAGE_PROVIDER` | v1 default `mock` | Selects an object-store backend under the one portable storage engine. Deterministic local backends are acceptance-gated. |
 | `ENDLESSFS_MOCK_PROVIDER_URL` | Required for split E2E mock | Local control/data-plane mock endpoint. |
-| `ENDLESSFS_GCS_BUCKET` | Required with `gcs` | Private GCS file bucket used for immutable blobs and upload staging; also used for state when no distinct state bucket is configured. Excluded from canonical keys and bodies. |
-| `ENDLESSFS_GCS_STATE_BUCKET` | Optional; defaults to `ENDLESSFS_GCS_BUCKET` | Private GCS bucket for the superblock, write gate, application state, filesystem metadata, operations, leases, and checkpoints. Set it equal to `ENDLESSFS_GCS_BUCKET` for explicit single-bucket mode. |
+| `ENDLESSFS_GCS_FILE_BUCKET` | Required with `gcs` | Private GCS file bucket used for immutable blobs and upload staging; also used for state when no distinct state bucket is configured. Excluded from canonical keys and bodies. |
+| `ENDLESSFS_GCS_STATE_BUCKET` | Optional; defaults to `ENDLESSFS_GCS_FILE_BUCKET` | Private GCS bucket for the superblock, write gate, application state, filesystem metadata, operations, leases, and checkpoints. Set it equal to `ENDLESSFS_GCS_FILE_BUCKET` for explicit single-bucket mode. |
 | `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` | Optional ADC discovery | Lowercase service-account identifier used by the official client for keyless IAM `signBlob`; never private-key material. |
 | `ALLOW_REGISTRATION` | Default `false` | Public registration switch. |
 | `INVITE_REGISTRATION` | Default `true` | Invite creation and consumption switch. |

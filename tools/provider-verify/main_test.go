@@ -165,9 +165,9 @@ func TestVerificationInputBoundaryMatrix(t *testing.T) {
 		{},
 		{Provider: "unknown", CheckpointID: "checkpoint", WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"}},
 		{Provider: "memory", CheckpointID: "checkpoint", WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"}},
-		{Provider: "memory", Bucket: "forbidden", Fixture: "fixture.json", CheckpointID: "checkpoint", WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"}},
+		{Provider: "memory", FileBucket: "forbidden", Fixture: "fixture.json", CheckpointID: "checkpoint", WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"}},
 		{Provider: "gcs", CheckpointID: "checkpoint", WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"}},
-		{Provider: "gcs", Bucket: "bucket", Fixture: "forbidden", CheckpointID: "checkpoint", WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"}},
+		{Provider: "gcs", FileBucket: "bucket", Fixture: "forbidden", CheckpointID: "checkpoint", WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"}},
 	}
 	for index, configuration := range cases {
 		path := filepath.Join(directory, "config-"+string(rune('a'+index))+".json")

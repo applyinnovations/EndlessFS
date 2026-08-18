@@ -91,7 +91,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 		backend = memoryBackend
 		dataHandler = memoryBackend
 	case "gcs":
-		gcsBackend, openErr := gcstore.Open(ctx, cfg.GCSBucket)
+		gcsBackend, openErr := gcstore.Open(ctx, cfg.GCSFileBucket)
 		if openErr != nil {
 			return openErr
 		}
@@ -101,11 +101,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 		}
 		stateBucket := cfg.GCSStateBucket
 		if stateBucket == "" {
-			stateBucket = cfg.GCSBucket
+			stateBucket = cfg.GCSFileBucket
 		}
 		backend = gcsBackend
 		closeBackend = func() { _ = gcsBackend.Close() }
-		if stateBucket != cfg.GCSBucket {
+		if stateBucket != cfg.GCSFileBucket {
 			stateBackend, stateOpenErr := gcstore.Open(ctx, stateBucket)
 			if stateOpenErr != nil {
 				_ = gcsBackend.Close()

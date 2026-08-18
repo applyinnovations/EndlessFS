@@ -20,7 +20,7 @@ docker run --rm -p 8080:8080 \
   -e ENDLESSFS_LISTEN_ADDR=0.0.0.0:8080 \
   -e ENDLESSFS_BASE_URL=https://drive.example.com \
   -e ENDLESSFS_STORAGE_PROVIDER=gcs \
-  -e ENDLESSFS_GCS_BUCKET=endlessfs-files \
+  -e ENDLESSFS_GCS_FILE_BUCKET=endlessfs-files \
   -e ENDLESSFS_GCS_STATE_BUCKET=endlessfs-state \
   -e ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT=endlessfs@example-project.iam.gserviceaccount.com \
   -e ENDLESSFS_SESSION_SECRET \
@@ -31,6 +31,6 @@ docker run --rm -p 8080:8080 \
 
 The example assumes the container runtime supplies ADC. Terminate TLS at the ingress or reverse proxy; `ENDLESSFS_BASE_URL` must be the public HTTPS origin.
 
-Omit `ENDLESSFS_GCS_STATE_BUCKET`, or set it equal to `ENDLESSFS_GCS_BUCKET`, for single-bucket mode. Keep the state/file bucket pairing, `ENDLESSFS_SESSION_SECRET`, and `ENDLESSFS_WRITER_SET_ID` stable across restarts and identical on every replica using the storage set. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after creating the first administrator. Check `GET /healthz` for liveness and `GET /readyz` for readiness.
+Omit `ENDLESSFS_GCS_STATE_BUCKET`, or set it equal to `ENDLESSFS_GCS_FILE_BUCKET`, for single-bucket mode. Keep the state/file bucket pairing, `ENDLESSFS_SESSION_SECRET`, and `ENDLESSFS_WRITER_SET_ID` stable across restarts and identical on every replica using the storage set. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after creating the first administrator. Check `GET /healthz` for liveness and `GET /readyz` for readiness.
 
 The GCS adapter is locally protocol-qualified, but a live GCS deployment still requires IAM, CORS, backup/restore, monitoring, and security validation. See [operations](./operations.md#gcs-identity-and-bucket-policy) for details.

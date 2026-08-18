@@ -25,7 +25,7 @@ const (
 
 type verificationConfig struct {
 	Provider            string   `json:"provider"`
-	Bucket              string   `json:"bucket,omitempty"`
+	FileBucket          string   `json:"fileBucket,omitempty"`
 	StateBucket         string   `json:"stateBucket,omitempty"`
 	Fixture             string   `json:"fixture,omitempty"`
 	FileFixture         string   `json:"fileFixture,omitempty"`
@@ -68,7 +68,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	switch configuration.Provider {
 	case "memory":
-		if configuration.Fixture == "" || configuration.Bucket != "" || configuration.StateBucket != "" {
+		if configuration.Fixture == "" || configuration.FileBucket != "" || configuration.StateBucket != "" {
 			return domain.NewError(domain.ErrorInvalid, "memory verification requires fixture and forbids buckets")
 		}
 		backend, loadErr := loadMemoryFixture(configPath, configuration.Fixture)
@@ -86,21 +86,21 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			return err
 		}
 	case "gcs":
-		if configuration.Bucket == "" || configuration.Fixture != "" || configuration.FileFixture != "" {
-			return domain.NewError(domain.ErrorInvalid, "GCS verification requires bucket and forbids fixtures")
+		if configuration.FileBucket == "" || configuration.Fixture != "" || configuration.FileFixture != "" {
+			return domain.NewError(domain.ErrorInvalid, "GCS verification requires fileBucket and forbids fixtures")
 		}
-		fileBackend, openErr := gcstore.Open(ctx, configuration.Bucket)
+		fileBackend, openErr := gcstore.Open(ctx, configuration.FileBucket)
 		if openErr != nil {
 			return openErr
 		}
 		defer fileBackend.Close()
 		stateBucket := configuration.StateBucket
 		if stateBucket == "" {
-			stateBucket = configuration.Bucket
+			stateBucket = configuration.FileBucket
 		}
 		var stateBackend = fileBackend
 		var separateFileBackend objectstore.Backend
-		if stateBucket != configuration.Bucket {
+		if stateBucket != configuration.FileBucket {
 			stateBackend, openErr = gcstore.Open(ctx, stateBucket)
 			if openErr != nil {
 				return openErr

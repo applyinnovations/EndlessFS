@@ -231,7 +231,7 @@ func TestParseRejectsUnsafeOrMalformedValues(t *testing.T) {
 		{name: "weak bootstrap token", values: map[string]string{"ENDLESSFS_BOOTSTRAP_TOKEN": "not-random"}, want: "32 random bytes"},
 		{name: "HTTP public origin", values: map[string]string{"ENDLESSFS_BASE_URL": "http://example.com", "ENDLESSFS_LISTEN_ADDR": "0.0.0.0:8080"}, want: "HTTP is permitted only"},
 		{name: "mock preview with HTTPS", values: map[string]string{"ENDLESSFS_BASE_URL": "https://drive.example.com", "ENDLESSFS_LISTEN_ADDR": "0.0.0.0:8080", "ENDLESSFS_PREVIEW_PROVIDER": "mock"}, want: "loopback development"},
-		{name: "mock preview with GCS source", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_GCS_BUCKET": "endlessfs-test", "ENDLESSFS_WRITER_SET_ID": "EREREREREREREREREREREQ", "ENDLESSFS_PREVIEW_PROVIDER": "mock"}, want: "mock storage"},
+		{name: "mock preview with GCS source", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_GCS_FILE_BUCKET": "endlessfs-test", "ENDLESSFS_WRITER_SET_ID": "EREREREREREREREREREREQ", "ENDLESSFS_PREVIEW_PROVIDER": "mock"}, want: "mock storage"},
 		{name: "wildcard origin", values: map[string]string{"ENDLESSFS_BASE_URL": "https://*.example.com"}, want: "wildcard"},
 		{name: "origin path", values: map[string]string{"ENDLESSFS_BASE_URL": "https://drive.example.com/path"}, want: "without credentials"},
 		{name: "RP mismatch", values: map[string]string{"ENDLESSFS_BASE_URL": "https://drive.example.com", "ENDLESSFS_WEBAUTHN_RP_ID": "example.com"}, want: "exactly match"},

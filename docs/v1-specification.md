@@ -1605,6 +1605,7 @@ Configuration is read from environment variables. Secrets MUST NOT be accepted a
 | `ENDLESSFS_MOCK_PROVIDER_URL` | Required for split E2E mock | Local control/data-plane mock endpoint. |
 | `ENDLESSFS_GCS_FILE_BUCKET` | Required with `gcs` | Private GCS file bucket used for immutable blobs and upload staging; also used for state when no distinct state bucket is configured. Excluded from canonical keys and bodies. |
 | `ENDLESSFS_GCS_STATE_BUCKET` | Optional; defaults to `ENDLESSFS_GCS_FILE_BUCKET` | Private GCS bucket for the superblock, write gate, application state, filesystem metadata, operations, leases, and checkpoints. Set it equal to `ENDLESSFS_GCS_FILE_BUCKET` for explicit single-bucket mode. |
+| `ENDLESSFS_GCS_PREVIEW_BUCKET` | Required only for the v1.1 `gcs` preview provider | Distinct private GCS bucket for disposable generated artifacts; never part of the authoritative storage set. See the v1.1 specification for its complete contract. |
 | `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` | Optional ADC discovery | Lowercase service-account identifier used by the official client for keyless IAM `signBlob`; never private-key material. |
 | `ALLOW_REGISTRATION` | Default `false` | Public registration switch. |
 | `INVITE_REGISTRATION` | Default `true` | Invite creation and consumption switch. |

@@ -4,7 +4,7 @@ This guide covers the provider-portable, multi-replica v1 runtime and its locall
 
 ## Runtime model
 
-EndlessFS runs one Go control-plane binary. Application use cases always use one portable storage engine; only the thin atomic-object backends change. The `mock` backend holds canonical records in memory and starts empty after a restart. The `gcs` backend stores the same canonical keys and bodies in a private state/file storage set. By default both roles use one bucket. `ENDLESSFS_GCS_STATE_BUCKET` can select a distinct bucket for state, filesystem metadata, operations, leases, and checkpoints; immutable blobs and upload staging remain in `ENDLESSFS_GCS_FILE_BUCKET`.
+EndlessFS runs one Go control-plane binary. Application use cases always use one portable storage engine; only the thin atomic-object backends change. The `mock` backend holds canonical records in memory and starts empty after a restart. The `gcs` backend stores the same canonical keys and bodies in a private state/file storage set. By default both authoritative roles use one bucket. `ENDLESSFS_GCS_STATE_BUCKET` can select a distinct bucket for state, filesystem metadata, operations, leases, and checkpoints; immutable blobs and upload staging remain in `ENDLESSFS_GCS_FILE_BUCKET`. Optional generated previews use provider-neutral preview-store semantics over the same thin object-store interface, with a separate disposable GCS bucket rather than duplicating the transport adapter.
 
 Several replicas may share one storage set. They must use the same state/file bucket pairing, base URL/RP identity, registration policy, session-secret-derived keyring identity, stable writer-set ID, writer protocol, and canonical features. Startup rejects an incompatible writer before it serves bucket-backed requests. There is no leader or process-local lock: every mutation uses a durable state-bucket candidate/admitted ticket, canonical operation intent, conditional object updates, and a monotonically increasing fence.
 
@@ -33,7 +33,7 @@ The runtime uses [Application Default Credentials](https://cloud.google.com/docs
 
 Grant only the bucket object permissions the adapter needs. `roles/storage.objectUser` scoped to each configured bucket is the standard predefined starting role. Keep public access prevention and uniform bucket-level access enabled where policy permits. The service account used for [signed URLs](https://cloud.google.com/storage/docs/access-control/signed-urls) must also have `iam.serviceAccounts.signBlob` on itself (normally `roles/iam.serviceAccountTokenCreator`) and the IAM Service Account Credentials API must be enabled. Set `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` to that service-account email when automatic ADC identity discovery is unavailable; this is an identifier, not a credential.
 
-The browser needs [exact-origin bucket CORS](https://cloud.google.com/storage/docs/configuring-cors) on the file bucket for `GET`, `HEAD`, and `PUT`, request headers `Content-Type`, `Content-Range`, and `Range`, and exposed response headers `Content-Length`, `Content-Range`, `Range`, and `X-Goog-Generation`. A distinct state bucket needs no browser CORS. Do not use a wildcard origin. Signed URLs and [resumable session URLs](https://cloud.google.com/storage/docs/performing-resumable-uploads) are short-lived bearer capabilities and must never be logged.
+The browser needs [exact-origin bucket CORS](https://cloud.google.com/storage/docs/configuring-cors) on the file bucket for `GET`, `HEAD`, and `PUT`, request headers `Content-Type`, `Content-Range`, and `Range`, and exposed response headers `Content-Length`, `Content-Range`, `Range`, and `X-Goog-Generation`. A GCS preview bucket needs exact-origin `GET` and `HEAD`; preview writes are exclusively server-side. A distinct state bucket needs no browser CORS. Do not use a wildcard origin. Signed URLs and [resumable session URLs](https://cloud.google.com/storage/docs/performing-resumable-uploads) are short-lived bearer capabilities and must never be logged.
 
 State and file buckets may use different storage classes, billing boundaries, encryption settings, retention policies, and backup schedules. Those policies must preserve live canonical objects and the required strong read/list/conditional-operation behavior. Do not configure lifecycle deletion of state records, committed blobs, or other live objects outside EndlessFS. Retrieval-delayed file storage classes can make interactive downloads unavailable and require separate qualification.
 
@@ -88,11 +88,18 @@ Capability responses and public configuration use `no-store`. Diagnostics omit t
 
 ## Optional v1.1 previews
 
-The media browser is always available. The list/grid choice, metadata filters, full-screen viewer, and file-type icons require no preview storage and never retrieve originals automatically. `ENDLESSFS_PREVIEW_PROVIDER=disabled` keeps generated thumbnails off; `ENDLESSFS_PREVIEW_PROVIDER=mock` enables the separate ephemeral preview store and a third loopback data origin. The removed `ENDLESSFS_MEDIA_BROWSER_ENABLED` variable is a startup error so an obsolete deployment cannot silently hide this behavior. Original-file transfer remains on its existing data origin.
+The media browser is always available. The list/grid choice, metadata filters, full-screen viewer, and file-type icons require no preview storage and never retrieve originals automatically. `ENDLESSFS_PREVIEW_PROVIDER=disabled` keeps generated thumbnails off; `mock` enables the separate ephemeral loopback store; and `gcs` enables the durable shared store for GCS deployments. GCS previews require a distinct `ENDLESSFS_GCS_PREVIEW_BUCKET` and a stable canonical `ENDLESSFS_PREVIEW_KEY_SECRET` shared by every replica. The removed `ENDLESSFS_MEDIA_BROWSER_ENABLED` variable is a startup error so an obsolete deployment cannot silently hide this behavior. Original-file transfer remains on its existing data origin.
+
+```console
+export ENDLESSFS_PREVIEW_PROVIDER=gcs
+export ENDLESSFS_GCS_PREVIEW_BUCKET=endlessfs-previews
+export ENDLESSFS_PREVIEW_KEY_SECRET="$(nix run .#generate-secret)"
+export ENDLESSFS_PREVIEW_FORMATS=image
+```
 
 Configured generators and preview-store access are startup requirements. The process self-tests the packaged image codec and creates, reads, fully decodes, commits, retrieves, capability-issues, and capability-serves a fixed one-pixel WebP probe before becoming ready. Configuring `video` or `pdf` in the v1.1 image build is an intentional startup error. Preview-store access loss after startup returns `unavailable`, logs `preview_unavailable` without file/store identity, and makes `/readyz` fail while original listing and file operations continue.
 
-Preview data is disposable. Removing or expiring it never removes an original; the next eligible viewport request regenerates it. Rename, move, trash, and restore preserve the opaque content binding so no regeneration is required. Copy and content replacement receive distinct render identities. Provider lifecycle, storage class, billing, retention, and deletion policy remain independent of the authoritative store.
+Preview data is disposable. The durable store keeps an HMAC-derived opaque binding head with a bounded committed-generation history plus immutable manifests and WebP objects. Conditional head updates publish visibility, and one-winner claim takeover fences stale generators across replicas. Browser reads use short-lived exact-generation signed `GET` capabilities; the browser verifies the exact WebP type and RIFF/WebP signature before constructing an image blob. Removing or expiring preview objects never removes an original; the next eligible viewport request regenerates them. Rename, move, trash, and restore preserve the opaque content binding so no regeneration is required. Copy and content replacement receive distinct render identities. Provider lifecycle, storage class, billing, retention, and deletion policy remain independent of the authoritative store.
 
 ## Build and release verification
 
@@ -109,7 +116,7 @@ nix build .#release
 nix build .#release-images
 ```
 
-No required gate needs GCP credentials or a cloud service. The release inventory distinguishes the ephemeral memory backend, locally qualified GCS adapter, absent live-GCS validation, and absent deployment validation.
+No required gate needs GCP credentials or a cloud service. The release inventory distinguishes the ephemeral memory preview store, locally qualified durable GCS preview store, absent live-GCS validation, and absent deployment validation.
 
 The release output includes `SHA256SUMS`, `RELEASE-INVENTORY.txt`, the binary/archive, OCI archive, `CAPABILITIES.json`, dependency and license inventories, installed-theme inventory, release notes, and the acceptance record. Verify `SHA256SUMS` before distribution. The inventory records the source revision, `flake.lock` hash, pinned vulnerability database hash, Go toolchain, artifact hashes, thresholds, provider kind, and explicit no-cloud/no-deployment status.
 

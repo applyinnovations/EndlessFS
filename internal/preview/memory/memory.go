@@ -431,6 +431,7 @@ func (s *Store) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		size := artifact.Size
 		s.mu.Unlock()
 		writer.Header().Set("Content-Type", preview.ContentTypeWebP)
+		writer.Header().Set("Content-Disposition", "inline; filename=preview.webp")
 		writer.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write(body)

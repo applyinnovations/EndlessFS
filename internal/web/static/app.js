@@ -568,9 +568,8 @@
       }
       clearGridPreviewRetry(entry.path);
       const artifactResponse = await fetch(result.capability.url, { method: result.capability.method || "GET", headers: result.capability.headers || {}, signal: controller.signal, credentials: "omit" });
-      if (!artifactResponse.ok || artifactResponse.headers.get("Content-Type") !== "image/webp") throw new Error("Invalid preview artifact response");
-      const blob = await artifactResponse.blob();
-      if (blob.type !== "image/webp" || controller.signal.aborted) return;
+      const blob = await validatedPreviewBlob(artifactResponse);
+      if (controller.signal.aborted) return;
       const objectURL = URL.createObjectURL(blob);
       const previous = state.previewObjectURLs.get(entry.path);
       if (previous) URL.revokeObjectURL(previous);
@@ -585,6 +584,16 @@
         clearGridPreviewRetry(entry.path);
       }
     }
+  }
+
+  async function validatedPreviewBlob(response) {
+    if (!response.ok || response.headers.get("Content-Type") !== "image/webp") throw new Error("Invalid preview artifact response");
+    const data = await response.arrayBuffer();
+    const bytes = new Uint8Array(data);
+    if (bytes.length < 12 || bytes[0] !== 0x52 || bytes[1] !== 0x49 || bytes[2] !== 0x46 || bytes[3] !== 0x46 || bytes[8] !== 0x57 || bytes[9] !== 0x45 || bytes[10] !== 0x42 || bytes[11] !== 0x50) {
+      throw new Error("Invalid preview artifact body");
+    }
+    return new Blob([data], { type: "image/webp" });
   }
 
   function scheduleGridPreviewRetry(entry, frame) {
@@ -1010,9 +1019,7 @@
       return;
     }
     const response = await fetch(result.capability.url, { method: result.capability.method || "GET", headers: result.capability.headers || {}, signal, credentials: "omit" });
-    if (!response.ok || response.headers.get("Content-Type") !== "image/webp") throw new Error("Invalid preview artifact response");
-    const blob = await response.blob();
-    if (blob.type !== "image/webp") throw new Error("Invalid preview artifact type");
+    const blob = await validatedPreviewBlob(response);
     releaseViewerObjectURL();
     state.viewerObjectURL = URL.createObjectURL(blob);
     const image = document.createElement("img");

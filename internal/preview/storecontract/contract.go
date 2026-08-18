@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"testing"
 	"time"
@@ -64,7 +65,8 @@ func Run(t *testing.T, factory Factory) {
 		if readErr != nil || closeErr != nil {
 			t.Fatalf("artifact response body errors = read %v, close %v", readErr, closeErr)
 		}
-		if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/webp" || response.Header.Get("Cache-Control") != "no-store" || !bytes.Equal(body, artifact.Bytes) {
+		disposition, parameters, dispositionErr := mime.ParseMediaType(response.Header.Get("Content-Disposition"))
+		if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/webp" || response.Header.Get("Cache-Control") != "no-store" || dispositionErr != nil || disposition != "inline" || parameters["filename"] != "preview.webp" || !bytes.Equal(body, artifact.Bytes) {
 			t.Fatalf("artifact response = %d %q %v", response.StatusCode, body, response.Header)
 		}
 		second := testArtifact("generation-two", 256, preview.OnePixelWebP())

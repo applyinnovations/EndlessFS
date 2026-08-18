@@ -101,6 +101,24 @@ func TestParsePreviewConfiguration(t *testing.T) {
 	}
 }
 
+func TestParseGCSPreviewConfiguration(t *testing.T) {
+	t.Parallel()
+	values := map[string]string{
+		"ENDLESSFS_BASE_URL": "https://drive.example.test", "ENDLESSFS_LISTEN_ADDR": "0.0.0.0:8080",
+		"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_GCS_STATE_BUCKET": "endlessfs-state",
+		"ENDLESSFS_GCS_FILE_BUCKET": "endlessfs-files", "ENDLESSFS_GCS_PREVIEW_BUCKET": "endlessfs-previews",
+		"ENDLESSFS_WRITER_SET_ID": "EREREREREREREREREREREQ", "ENDLESSFS_PREVIEW_PROVIDER": "gcs",
+		"ENDLESSFS_PREVIEW_KEY_SECRET": testSecret,
+	}
+	cfg, err := Parse(mapLookup(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PreviewProvider != "gcs" || cfg.GCSPreviewBucket != "endlessfs-previews" || cfg.PreviewKeySecret.Reveal() != testSecret {
+		t.Fatalf("GCS preview configuration = %+v", cfg.Public())
+	}
+}
+
 func TestParseRejectsInvalidPreviewConfiguration(t *testing.T) {
 	t.Parallel()
 
@@ -111,7 +129,7 @@ func TestParseRejectsInvalidPreviewConfiguration(t *testing.T) {
 		want  string
 	}{
 		{name: "removed browser switch", field: "ENDLESSFS_MEDIA_BROWSER_ENABLED", value: "false", want: "always available"},
-		{name: "unknown provider", field: "ENDLESSFS_PREVIEW_PROVIDER", value: "s3", want: "disabled or mock"},
+		{name: "unknown provider", field: "ENDLESSFS_PREVIEW_PROVIDER", value: "s3", want: "disabled, mock, or gcs"},
 		{name: "unpackaged generator", field: "ENDLESSFS_PREVIEW_FORMATS", value: "video", want: "not packaged"},
 		{name: "unknown generator", field: "ENDLESSFS_PREVIEW_FORMATS", value: "office", want: "unknown"},
 		{name: "duplicate generator", field: "ENDLESSFS_PREVIEW_FORMATS", value: "image,image", want: "duplicate"},
@@ -155,7 +173,7 @@ func TestLoadReadsValidatedProcessEnvironment(t *testing.T) {
 	keys := []string{
 		"ENDLESSFS_LISTEN_ADDR", "ENDLESSFS_BASE_URL", "ALLOW_REGISTRATION", "INVITE_REGISTRATION",
 		"ENDLESSFS_STORAGE_PROVIDER", "ENDLESSFS_MOCK_PROVIDER_URL", "ENDLESSFS_BOOTSTRAP_TOKEN",
-		"ENDLESSFS_GCS_FILE_BUCKET", "ENDLESSFS_GCS_STATE_BUCKET", "ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT", "ENDLESSFS_WRITER_SET_ID",
+		"ENDLESSFS_GCS_FILE_BUCKET", "ENDLESSFS_GCS_STATE_BUCKET", "ENDLESSFS_GCS_PREVIEW_BUCKET", "ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT", "ENDLESSFS_WRITER_SET_ID",
 		"ENDLESSFS_SESSION_SECRET", "ENDLESSFS_WEBAUTHN_RP_ID", "ENDLESSFS_WEBAUTHN_RP_NAME",
 		"ENDLESSFS_SESSION_TTL", "ENDLESSFS_DOWNLOAD_CAPABILITY_TTL", "ENDLESSFS_UPLOAD_INIT_TTL",
 		"ENDLESSFS_TEXT_PREVIEW_MAX_BYTES", "ENDLESSFS_DEFAULT_LIGHT_THEME", "ENDLESSFS_DEFAULT_DARK_THEME",
@@ -239,6 +257,10 @@ func TestParseRejectsUnsafeOrMalformedValues(t *testing.T) {
 		{name: "gcs missing file bucket", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_WRITER_SET_ID": "EREREREREREREREREREREQ"}, want: "GCS_FILE_BUCKET"},
 		{name: "gcs missing writer set", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_GCS_FILE_BUCKET": "endlessfs-test"}, want: "WRITER_SET_ID"},
 		{name: "gcs forbids mock endpoint", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_GCS_FILE_BUCKET": "endlessfs-test", "ENDLESSFS_WRITER_SET_ID": "EREREREREREREREREREREQ", "ENDLESSFS_MOCK_PROVIDER_URL": "http://127.0.0.1:9090"}, want: "unavailable with GCS"},
+		{name: "gcs preview missing bucket", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_GCS_FILE_BUCKET": "endlessfs-files", "ENDLESSFS_WRITER_SET_ID": "EREREREREREREREREREREQ", "ENDLESSFS_PREVIEW_PROVIDER": "gcs", "ENDLESSFS_PREVIEW_KEY_SECRET": testSecret}, want: "GCS_PREVIEW_BUCKET"},
+		{name: "gcs preview missing key", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_GCS_FILE_BUCKET": "endlessfs-files", "ENDLESSFS_GCS_PREVIEW_BUCKET": "endlessfs-previews", "ENDLESSFS_WRITER_SET_ID": "EREREREREREREREREREREQ", "ENDLESSFS_PREVIEW_PROVIDER": "gcs"}, want: "PREVIEW_KEY_SECRET"},
+		{name: "gcs preview reuses file bucket", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_GCS_FILE_BUCKET": "endlessfs-files", "ENDLESSFS_GCS_PREVIEW_BUCKET": "endlessfs-files", "ENDLESSFS_WRITER_SET_ID": "EREREREREREREREREREREQ", "ENDLESSFS_PREVIEW_PROVIDER": "gcs", "ENDLESSFS_PREVIEW_KEY_SECRET": testSecret}, want: "must be distinct"},
+		{name: "gcs preview bucket while disabled", values: map[string]string{"ENDLESSFS_STORAGE_PROVIDER": "gcs", "ENDLESSFS_GCS_FILE_BUCKET": "endlessfs-files", "ENDLESSFS_GCS_PREVIEW_BUCKET": "endlessfs-previews", "ENDLESSFS_WRITER_SET_ID": "EREREREREREREREREREREQ"}, want: "available only"},
 		{name: "mock forbids GCS file bucket", values: map[string]string{"ENDLESSFS_GCS_FILE_BUCKET": "endlessfs-test"}, want: "unavailable with mock"},
 		{name: "mock forbids GCS state bucket", values: map[string]string{"ENDLESSFS_GCS_STATE_BUCKET": "endlessfs-state"}, want: "unavailable with mock"},
 		{name: "invalid writer set", values: map[string]string{"ENDLESSFS_WRITER_SET_ID": "not-base64url"}, want: "canonical base64url"},

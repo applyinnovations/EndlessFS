@@ -28,6 +28,7 @@ import (
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/preview"
+	previewdurable "github.com/applyinnovations/endlessfs/internal/preview/durable"
 	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
 	previewmemory "github.com/applyinnovations/endlessfs/internal/preview/memory"
 	"github.com/applyinnovations/endlessfs/internal/secret"
@@ -169,35 +170,70 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 			return err
 		}
 	}
-	var previewStore *previewmemory.Store
+	var previewStore preview.Store
+	var previewDataHandler http.Handler
+	closePreviewBackend := func() {}
 	if cfg.PreviewProvider != "" && cfg.PreviewProvider != "disabled" {
-		if cfg.PreviewProvider != "mock" {
+		switch cfg.PreviewProvider {
+		case "mock":
+			previewKey := cfg.PreviewKeySecret
+			if previewKey.Reveal() == "" {
+				value, keyErr := ids.BearerToken()
+				if keyErr != nil {
+					return keyErr
+				}
+				previewKey = secret.Value(value)
+			}
+			memoryStore, storeErr := previewmemory.New(previewmemory.Options{
+				Clock: clock, IDs: ids, Key: previewKey, CapabilityTTL: cfg.DownloadCapabilityTTL, AllowedOrigin: cfg.AllowedOrigin,
+			})
+			if storeErr != nil {
+				return domain.NewError(domain.ErrorInvalid, "invalid configured preview store")
+			}
+			previewStore = memoryStore
+			previewDataHandler = memoryStore
+		case "gcs":
+			previewBackend, openErr := gcstore.Open(ctx, cfg.GCSPreviewBucket)
+			if openErr != nil {
+				return openErr
+			}
+			previewKeyBytes, decodeErr := base64.RawURLEncoding.DecodeString(cfg.PreviewKeySecret.Reveal())
+			if decodeErr != nil || len(previewKeyBytes) < 32 {
+				_ = previewBackend.Close()
+				return domain.NewError(domain.ErrorInvalid, "invalid preview key material")
+			}
+			if enableErr := previewBackend.EnableWorkloadIdentityTransfers(deriveKey("endlessfs-preview-transfer-lease-v1", previewKeyBytes), cfg.GCSSigningAccount); enableErr != nil {
+				_ = previewBackend.Close()
+				return enableErr
+			}
+			previewStore, err = previewdurable.New(previewdurable.Options{
+				Backend: previewBackend, Transfers: previewBackend, Clock: clock, IDs: ids,
+				Key: cfg.PreviewKeySecret, CapabilityTTL: cfg.DownloadCapabilityTTL,
+				DataOrigin: dataOrigin, AllowedOrigin: cfg.AllowedOrigin, HTTPClient: http.DefaultClient,
+			})
+			if err != nil {
+				_ = previewBackend.Close()
+				return err
+			}
+			closePreviewBackend = func() { _ = previewBackend.Close() }
+		default:
 			return domain.NewError(domain.ErrorInvalid, "unsupported preview provider configuration")
 		}
-		previewKey := cfg.PreviewKeySecret
-		if previewKey.Reveal() == "" {
-			value, keyErr := ids.BearerToken()
-			if keyErr != nil {
-				return keyErr
-			}
-			previewKey = secret.Value(value)
-		}
-		previewStore, err = previewmemory.New(previewmemory.Options{
-			Clock: clock, IDs: ids, Key: previewKey, CapabilityTTL: cfg.DownloadCapabilityTTL, AllowedOrigin: cfg.AllowedOrigin,
-		})
-		if err != nil {
-			return domain.NewError(domain.ErrorInvalid, "invalid configured preview store")
-		}
 	}
+	defer closePreviewBackend()
 	var previewListener net.Listener
-	if previewStore != nil {
+	if previewDataHandler != nil {
 		previewListener, err = net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			return err
 		}
 		defer previewListener.Close()
 		previewOrigin := "http://" + previewListener.Addr().String()
-		if err := previewStore.SetDataPlaneBaseURL(previewOrigin); err != nil {
+		memoryStore, ok := previewStore.(*previewmemory.Store)
+		if !ok {
+			return domain.NewError(domain.ErrorInternal, "invalid mock preview store construction")
+		}
+		if err := memoryStore.SetDataPlaneBaseURL(previewOrigin); err != nil {
 			return err
 		}
 	}
@@ -237,8 +273,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 		dataServer = &http.Server{Handler: dataHandler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	}
 	var previewDataServer *http.Server
-	if previewStore != nil {
-		previewDataServer = &http.Server{Handler: previewStore, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	if previewDataHandler != nil {
+		previewDataServer = &http.Server{Handler: previewDataHandler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	}
 
 	applicationHandler := httpapi.NewCompleteApplicationWithLogger(cfg, version, identityService, sessions, driveService, logger, themeManager)

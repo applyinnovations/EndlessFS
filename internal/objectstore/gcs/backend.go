@@ -209,6 +209,9 @@ func (b *Backend) Put(ctx context.Context, key objectstore.Key, body []byte, con
 	writer := handle.NewWriter(writeCtx)
 	writer.ChunkSize = 0
 	writer.ContentType = "application/octet-stream"
+	// Private server-written objects must not become reusable through a shared
+	// browser cache. This provider metadata is deliberately non-authoritative.
+	writer.CacheControl = "no-store"
 	writer.CRC32C = crc32.Checksum(body, crc32.MakeTable(crc32.Castagnoli))
 	writer.SendCRC32C = true
 	if _, err = io.Copy(writer, bytes.NewReader(body)); err != nil {

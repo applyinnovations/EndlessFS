@@ -450,10 +450,11 @@
     const scroller = byID("media-grid");
     const content = byID("media-grid-content");
     if (state.gridObserver) state.gridObserver.disconnect();
-    const style = getComputedStyle(document.documentElement);
-    const thumbnailSize = Number.parseFloat(style.getPropertyValue("--efs-metric-thumbnailSize")) || 96;
+    const rootMetrics = getComputedStyle(document.documentElement);
+    const thumbnailSize = Number.parseFloat(rootMetrics.getPropertyValue("--efs-metric-thumbnailSize")) || 96;
+    const componentGap = Number.parseFloat(rootMetrics.getPropertyValue("--efs-spacing-componentGap")) || 8;
     const tileMinimum = Math.max(140, thumbnailSize + 32);
-    const columns = Math.max(1, Math.floor(Math.max(scroller.clientWidth, 280) / tileMinimum));
+    const columns = Math.max(1, Math.floor((Math.max(scroller.clientWidth, 280) - componentGap) / (tileMinimum + componentGap)));
     const rowHeight = Math.max(184, thumbnailSize + 92);
     const totalRows = Math.ceil(entries.length / columns);
     const viewportHeight = Math.max(scroller.clientHeight, 420);
@@ -466,15 +467,11 @@
     const activePaths = new Set(entries.slice(firstIndex, lastIndex).map((entry) => entry.path));
     cleanupGridMedia(activePaths);
     content.replaceChildren();
-    content.style.setProperty("--media-grid-columns", String(columns));
-    content.style.height = `${totalRows * rowHeight}px`;
     content.dataset.itemCount = String(entries.length);
     const layer = document.createElement("div");
     layer.className = "media-grid-layer";
-    layer.style.transform = `translateY(${firstRow * rowHeight}px)`;
-    layer.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
     for (let index = firstIndex; index < lastIndex; index += 1) layer.append(mediaTile(entries[index], index, columns));
-    content.append(layer);
+    content.append(mediaGridSpacer(firstRow * rowHeight), layer, mediaGridSpacer((totalRows - lastRow) * rowHeight));
     scroller.setAttribute("aria-rowcount", String(totalRows));
     scroller.setAttribute("aria-colcount", String(columns));
     const observe = (frame) => queueGridPreview(frame.entry, frame);
@@ -486,6 +483,16 @@
     } else {
       layer.querySelectorAll(".media-frame[data-preview-candidate='true']").forEach(observe);
     }
+  }
+
+  function mediaGridSpacer(height) {
+    const spacer = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    spacer.classList.add("media-grid-spacer");
+    spacer.setAttribute("width", "1");
+    spacer.setAttribute("height", String(Math.max(0, Math.round(height))));
+    spacer.setAttribute("aria-hidden", "true");
+    spacer.setAttribute("focusable", "false");
+    return spacer;
   }
 
   function mediaTile(entry, index, columns) {
@@ -644,13 +651,25 @@
 
   function setPreviewImage(frame, entry, objectURL, result) {
     const image = document.createElement("img");
+    image.addEventListener("load", () => {
+      if (image.isConnected) frame.dataset.previewLoaded = "true";
+    }, { once: true });
+    image.addEventListener("error", () => {
+      if (!image.isConnected) return;
+      if (state.previewObjectURLs.get(entry.path) === objectURL) {
+        URL.revokeObjectURL(objectURL);
+        state.previewObjectURLs.delete(entry.path);
+      }
+      state.previewStates.set(entry.path, { state: "unavailable" });
+      frame.dataset.previewState = "unavailable";
+      frame.removeAttribute("data-preview-loaded");
+      frame.replaceChildren(fileTypeIcon(entry, "media-fallback-icon"));
+    }, { once: true });
     image.src = objectURL;
     image.alt = `Preview of ${entry.name}`;
     image.width = result && result.artifact ? result.artifact.width : 1;
     image.height = result && result.artifact ? result.artifact.height : 1;
     image.decoding = "async";
-    image.loading = "lazy";
-    image.fetchPriority = "low";
     frame.replaceChildren(image);
   }
 
@@ -1042,6 +1061,13 @@
     image.width = result.artifact.width;
     image.height = result.artifact.height;
     image.decoding = "async";
+    try {
+      await image.decode();
+    } catch (error) {
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+      throw error;
+    }
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     byID("preview-content").replaceChildren(image);
     byID("preview-status").textContent = "Generated WebP preview ready.";
   }

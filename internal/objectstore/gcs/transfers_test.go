@@ -75,6 +75,82 @@ func TestGCSResumableCapabilityCanMoveBetweenReplicas(t *testing.T) {
 	}
 }
 
+func TestGCSUploadCleanupDistinguishesFinalizedAndIncompleteSessions(t *testing.T) {
+	t.Run("finalized-object", func(t *testing.T) {
+		server, fake := newGCSServerWithFake(t)
+		fake.rejectCompletedDelete = true
+		backend, err := gcstransport.NewWithTransfers(protocolClient(t, server), "endlessfs-test", gcstransport.TransferOptions{
+			HTTPClient: server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
+			SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x5a}, 256), nil },
+			Hostname:  strings.TrimPrefix(server.URL, "http://"), Insecure: true,
+			LeaseKey: bytes.Repeat([]byte{0x42}, 32), Random: bytes.NewReader(bytes.Repeat([]byte{0x27}, 4096)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := objectstore.MustKey("endlessfs/v1/staging/user/finalized/data")
+		handle, err := backend.BeginUpload(context.Background(), objectstore.UploadRequest{
+			UploadID: "finalized-1", Key: key, Size: 4, MediaType: "application/octet-stream", Resumable: true,
+			ExpiresAt: time.Now().UTC().Add(time.Minute),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, _ := http.NewRequest(http.MethodPut, handle.Capability.URL, strings.NewReader("data"))
+		request.Header.Set("Content-Type", "application/octet-stream")
+		request.Header.Set("Content-Range", "bytes 0-3/4")
+		response, err := server.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("upload status = %d", response.StatusCode)
+		}
+		if err := backend.AbortUpload(context.Background(), handle.Lease); err != nil {
+			t.Fatalf("clean finalized upload: %v", err)
+		}
+		fake.mu.Lock()
+		deleteAttempts := fake.sessionDeleteAttempts
+		_, objectExists := fake.objects[key.String()]
+		fake.mu.Unlock()
+		if deleteAttempts != 0 || objectExists {
+			t.Fatalf("finalized cleanup = session deletes %d, object exists %t", deleteAttempts, objectExists)
+		}
+	})
+
+	t.Run("incomplete-session", func(t *testing.T) {
+		server, fake := newGCSServerWithFake(t)
+		fake.rejectCompletedDelete = true
+		backend, err := gcstransport.NewWithTransfers(protocolClient(t, server), "endlessfs-test", gcstransport.TransferOptions{
+			HTTPClient: server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
+			SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x5a}, 256), nil },
+			Hostname:  strings.TrimPrefix(server.URL, "http://"), Insecure: true,
+			LeaseKey: bytes.Repeat([]byte{0x42}, 32), Random: bytes.NewReader(bytes.Repeat([]byte{0x28}, 4096)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err := backend.BeginUpload(context.Background(), objectstore.UploadRequest{
+			UploadID: "incomplete-1", Key: objectstore.MustKey("endlessfs/v1/staging/user/incomplete/data"),
+			Size: 4, MediaType: "application/octet-stream", Resumable: true, ExpiresAt: time.Now().UTC().Add(time.Minute),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := backend.AbortUpload(context.Background(), handle.Lease); err != nil {
+			t.Fatalf("cancel incomplete upload: %v", err)
+		}
+		fake.mu.Lock()
+		deleteAttempts := fake.sessionDeleteAttempts
+		activeSessions := len(fake.sessions)
+		fake.mu.Unlock()
+		if deleteAttempts != 1 || activeSessions != 0 {
+			t.Fatalf("incomplete cancellation = session deletes %d, active sessions %d", deleteAttempts, activeSessions)
+		}
+	})
+}
+
 func TestWorkloadIdentityTransferConstructionRequiresNoPrivateKeyOrNetwork(t *testing.T) {
 	server, _ := newGCSServerWithFake(t)
 	backend, err := gcstransport.New(protocolClient(t, server), "endlessfs-test")

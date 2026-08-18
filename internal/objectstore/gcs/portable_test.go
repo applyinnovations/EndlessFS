@@ -31,6 +31,7 @@ import (
 func TestContractPortableProviderOverGCSProtocolFake(t *testing.T) {
 	providercontract.Run(t, func(t *testing.T) providercontract.Harness {
 		server, fake := newGCSServerWithFake(t)
+		fake.rejectCompletedDelete = true
 		client := protocolClient(t, server)
 		clock := domain.NewFixedClock(time.Now().UTC().Truncate(time.Second))
 		fake.clock = clock

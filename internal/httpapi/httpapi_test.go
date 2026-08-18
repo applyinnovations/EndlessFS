@@ -166,4 +166,13 @@ func assertSecurityHeaders(t *testing.T, header http.Header) {
 	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "frame-src 'self'") {
 		t.Errorf("Content-Security-Policy does not constrain preview frames: %q", csp)
 	}
+	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "img-src 'self' blob:") {
+		t.Errorf("Content-Security-Policy does not allow validated in-memory preview images: %q", csp)
+	}
+	if csp := header.Get("Content-Security-Policy"); strings.Contains(csp, "'unsafe-inline'") {
+		t.Errorf("Content-Security-Policy permits inline styles or scripts: %q", csp)
+	}
+	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "style-src-attr 'none'") || strings.Count(csp, "blob:") != 1 {
+		t.Errorf("Content-Security-Policy does not keep preview blobs and inline styles narrowly scoped: %q", csp)
+	}
 }

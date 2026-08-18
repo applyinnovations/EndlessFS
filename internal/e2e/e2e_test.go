@@ -253,6 +253,52 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		t.Fatalf("wait for restored file to leave trash: %v (%s)", err, browserStatus(ctx))
 	}
 
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(harness.origin+"/"),
+		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
+		chromedp.Evaluate(`(() => {
+			const fileEntry = (name, body) => ({
+				isFile: true, isDirectory: false, name,
+				file: (success) => success(new File([body], name, {type: "text/plain"})),
+			});
+			const directoryEntry = (name, batches) => ({
+				isFile: false, isDirectory: true, name,
+				createReader: () => {
+					let index = 0;
+					return {readEntries: (success) => success(index < batches.length ? batches[index++] : [])};
+				},
+			});
+			const nested = directoryEntry("Nested", [[fileEntry("second.txt", "second")], []]);
+			const root = directoryEntry("Dropped Folder", [[fileEntry("first.txt", "first"), fileEntry("..", "must-not-escape")], [nested], []]);
+			const event = new Event("drop", {bubbles: true, cancelable: true});
+			Object.defineProperty(event, "dataTransfer", {value: {
+				items: [{kind: "file", webkitGetAsEntry: () => root}],
+				files: [],
+			}});
+			document.querySelector("#drop-target").dispatchEvent(event);
+		})()`, nil),
+	); err != nil {
+		t.Fatalf("drop folder tree: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector(".transfer-group-row.complete")?.textContent.includes("2 of 2 files") && (() => { const progress = document.querySelector("progress[aria-label='Upload progress for folder Dropped Folder']"); return progress && progress.value === progress.max; })()`, 15*time.Second); err != nil {
+		t.Fatalf("wait for aggregate folder upload progress: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := waitFor(ctx, `document.querySelector("#file-rows").textContent.includes("Dropped Folder")`, 10*time.Second); err != nil {
+		t.Fatalf("wait for dropped folder listing: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`[aria-label="Open folder Dropped Folder"]`, chromedp.ByQuery)); err != nil {
+		t.Fatalf("open dropped folder: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#file-rows").textContent.includes("first.txt") && document.querySelector("#file-rows").textContent.includes("Nested")`, 10*time.Second); err != nil {
+		t.Fatalf("wait for dropped folder contents: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`[aria-label="Open folder Nested"]`, chromedp.ByQuery)); err != nil {
+		t.Fatalf("open nested dropped folder: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#file-rows").textContent.includes("second.txt")`, 10*time.Second); err != nil {
+		t.Fatalf("wait for nested dropped file: %v (%s)", err, browserStatus(ctx))
+	}
+
 	mediaPath := writeMediaFixture(t, "media-proof.png", 96, 48)
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(harness.origin+"/"),
@@ -296,8 +342,51 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if !squareFrame || previewAspect != "96x48" {
 		t.Fatalf("media geometry: squareFrame=%v intrinsic=%q", squareFrame, previewAspect)
 	}
-	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Generated WebP preview ready") && document.querySelector("#preview-content img")?.naturalWidth > 0`, 15*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Preview ready") && document.querySelector("#preview-content img")?.naturalWidth > 0`, 15*time.Second); err != nil {
 		t.Fatalf("wait for full-screen generated preview: %v (%s)", err, browserStatus(ctx))
+	}
+	mu.Lock()
+	resolveRequestsBeforeViewerReopen := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
+	mu.Unlock()
+	reopenStarted := time.Now()
+	if err := chromedp.Run(ctx,
+		chromedp.KeyEvent(kb.Escape),
+		chromedp.Focus(".media-tile-open[aria-label='View file media-proof.png']", chromedp.ByQuery),
+		chromedp.KeyEvent(kb.Enter),
+	); err != nil {
+		t.Fatalf("reopen verified generated preview: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Preview ready") && document.querySelector("#preview-content img")?.naturalWidth > 0`, time.Second); err != nil {
+		t.Fatalf("verified generated preview was not reused immediately: %v (%s)", err, browserStatus(ctx))
+	}
+	mu.Lock()
+	resolveRequestsAfterViewerReopen := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
+	mu.Unlock()
+	if resolveRequestsAfterViewerReopen != resolveRequestsBeforeViewerReopen || time.Since(reopenStarted) > time.Second {
+		t.Fatalf("viewer reopen missed document-memory preview: resolves before=%d after=%d elapsed=%s", resolveRequestsBeforeViewerReopen, resolveRequestsAfterViewerReopen, time.Since(reopenStarted))
+	}
+	if err := chromedp.Run(ctx, chromedp.KeyEvent(kb.Escape)); err != nil {
+		t.Fatalf("close reused generated preview: %v", err)
+	}
+	mu.Lock()
+	resolveRequestsBeforeExpiredReopen := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
+	mu.Unlock()
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const originalNow = Date.now;
+		Date.now = () => originalNow() + 60 * 60 * 1000;
+		try { document.querySelector(".media-tile-open[aria-label='View file media-proof.png']").click(); }
+		finally { Date.now = originalNow; }
+	})()`, nil)); err != nil {
+		t.Fatalf("reopen expired document-memory preview: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Preview ready") && document.querySelector("#preview-content img")?.naturalWidth > 0`, 15*time.Second); err != nil {
+		t.Fatalf("expired generated preview was not reacquired: %v (%s)", err, browserStatus(ctx))
+	}
+	mu.Lock()
+	resolveRequestsAfterExpiredReopen := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
+	mu.Unlock()
+	if resolveRequestsAfterExpiredReopen <= resolveRequestsBeforeExpiredReopen {
+		t.Fatalf("viewer reused preview beyond capability expiry: resolves before=%d after=%d", resolveRequestsBeforeExpiredReopen, resolveRequestsAfterExpiredReopen)
 	}
 	binding, claim, artifact := claimConcurrentBrowserPreview(t, harness, domain.MustParseUserPath("/media-proof.png"), mediaPath, 1600)
 	if err := chromedp.Run(ctx, chromedp.Click("#preview-regenerate", chromedp.ByQuery)); err != nil {
@@ -309,7 +398,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := harness.previewStore.Commit(context.Background(), binding, claim, artifact); err != nil {
 		t.Fatalf("complete contending preview generation: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Generated WebP preview ready")`, 15*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Preview ready")`, 15*time.Second); err != nil {
 		t.Fatalf("wait for regenerated preview: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := chromedp.Run(ctx, chromedp.KeyEvent(kb.ArrowLeft), chromedp.KeyEvent(kb.ArrowRight), chromedp.KeyEvent(kb.Escape)); err != nil {
@@ -367,7 +456,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	mu.Lock()
 	resolveRequestsAfterScale := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
 	mu.Unlock()
-	if loaded != 10_002 || renderedTiles > 64 || resolveRequestsAfterScale-resolveRequestsBeforeScale > 32 {
+	if loaded != 10_003 || renderedTiles > 64 || resolveRequestsAfterScale-resolveRequestsBeforeScale > 32 {
 		t.Fatalf("virtual grid bounds: logical=%d rendered=%d previewRequests=%d", loaded, renderedTiles, resolveRequestsAfterScale-resolveRequestsBeforeScale)
 	}
 	if err := waitFor(ctx, `document.querySelector(".media-frame img[alt='Preview of media-proof.png']") !== null`, 15*time.Second); err != nil {
@@ -750,7 +839,7 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	); err != nil {
 		t.Fatalf("open dark mobile viewer by keyboard: %v", err)
 	}
-	if err := waitFor(member.ctx, `document.querySelector("#preview-status").textContent.includes("Generated WebP preview ready")`, 15*time.Second); err != nil {
+	if err := waitFor(member.ctx, `document.querySelector("#preview-status").textContent.includes("Preview ready")`, 15*time.Second); err != nil {
 		t.Fatalf("wait for dark mobile viewer: %v (%s)", err, browserStatus(member.ctx))
 	}
 	var darkMobileViewer bool

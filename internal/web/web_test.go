@@ -47,6 +47,7 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 	for _, required := range []string{
 		"navigator.credentials.create", "navigator.credentials.get", "textContent",
 		"Upload-Offset", "Content-Range", "webkitRelativePath", "history.replaceState",
+		"webkitGetAsEntry", "getAsFileSystemHandle", "readEntries", "transferGroups",
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("browser source is missing workflow primitive %q", required)
@@ -77,6 +78,7 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 		"renderVirtualGrid", "IntersectionObserver", "gridOverscanRows = 3", "URL.revokeObjectURL",
 		"/api/v1/previews/resolve", "/api/v1/previews/generations", "/api/v1/previews/operations/", "image/webp", "validatedPreviewBlob", "Invalid preview artifact body", "filterLoadedEntries",
 		`crypto.subtle.digest("SHA-256"`, "Invalid preview artifact checksum", "await image.decode()", "previewLoaded",
+		"viewerPreviewCache", "cachedViewerPreview", "cacheViewerPreview",
 		"waitForPreviewOperation", "previewRetryTimers", "Idempotency-Key",
 		"ArrowLeft", "ArrowRight",
 	} {

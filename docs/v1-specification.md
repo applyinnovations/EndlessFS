@@ -144,9 +144,9 @@ The implementation is v1 complete only when:
 - Paginated directory listings.
 - Current-folder filename filtering.
 - Create empty folders.
-- Drag-and-drop files.
+- Drag-and-drop files or directory trees where the browser exposes dropped directory entries.
 - Multi-file selection and upload.
-- Folder upload where the browser exposes relative paths, with a multi-file fallback.
+- Folder upload where the browser exposes relative paths, with recursive dropped-directory traversal and a multi-file fallback.
 - Concurrent upload initialization and transfer.
 - Resumable uploads, progress, retry, and cancellation.
 - Upload conflict handling: fail, replace, or generate a non-conflicting name.
@@ -2103,7 +2103,7 @@ Each criterion MUST have an automated test unless marked “inspection”.
 **AC-041** — Browser upload bytes reach the separate mock data-plane listener and control-plane byte instrumentation remains zero.  
 **AC-042** — Interrupted resumable upload reports the provider-confirmed offset, resumes from it, tolerates an idempotent retry, and completes once.  
 **AC-043** — Cancellation, expiry, checksum mismatch, wrong declared size, and transient provider faults yield safe recoverable/terminal UI states and no visible corrupt file.  
-**AC-044** — Batch/folder uploads preserve validated relative structure, enforce 100-init and concurrency bounds, and report per-file progress.  
+**AC-044** — Batch/folder uploads preserve validated relative structure, enforce 100-init and concurrency bounds, and report per-file plus aggregate folder progress. Dropped directory entries are recursively traversed without treating the directory itself as a zero-byte file.
 **AC-045** — Tests simulate offsets and sizes greater than 1 TiB without control-plane buffering or equivalent memory allocation.  
 **AC-046** — Download and preview authorization returns short-lived exact-object capabilities; bytes flow through the mock data plane, not the control API.  
 **AC-047** — Expired download capability refresh, range request, safe attachment filename, and preview disposition work.  
@@ -2250,7 +2250,7 @@ An implementation agent should keep this checklist current and attach test names
 - [x] Single and batch upload initialization return destination-bound capabilities.
 - [x] Control API rejects file bodies and enforces request-body limits.
 - [x] Browser bytes bypass control handlers in E2E instrumentation.
-- [x] Concurrent multi-file and folder upload preserve validated paths.
+- [x] Concurrent multi-file and folder upload preserve validated paths; dropped directory trees recurse and report aggregate plus per-file progress.
 - [x] Resumable offset, interruption, retry, completion, expiry, checksum, and cancel work.
 - [x] Upload conflict modes and completion verification work.
 - [x] Large-size/offset behavior is simulated above 1 TiB.

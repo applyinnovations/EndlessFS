@@ -39,6 +39,11 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 			t.Errorf("browser source contains forbidden API %q", forbidden)
 		}
 	}
+	for _, forbidden := range []string{".style.", ".style =", ".style=", `setAttribute("style"`, `setAttribute('style'`} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("browser source creates a CSP-blocked inline style through %q", forbidden)
+		}
+	}
 	for _, required := range []string{
 		"navigator.credentials.create", "navigator.credentials.get", "textContent",
 		"Upload-Offset", "Content-Range", "webkitRelativePath", "history.replaceState",
@@ -71,7 +76,7 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 	for _, required := range []string{
 		"renderVirtualGrid", "IntersectionObserver", "gridOverscanRows = 3", "URL.revokeObjectURL",
 		"/api/v1/previews/resolve", "/api/v1/previews/generations", "/api/v1/previews/operations/", "image/webp", "validatedPreviewBlob", "Invalid preview artifact body", "filterLoadedEntries",
-		`crypto.subtle.digest("SHA-256"`, "Invalid preview artifact checksum",
+		`crypto.subtle.digest("SHA-256"`, "Invalid preview artifact checksum", "await image.decode()", "previewLoaded",
 		"waitForPreviewOperation", "previewRetryTimers", "Idempotency-Key",
 		"ArrowLeft", "ArrowRight",
 	} {
@@ -83,7 +88,7 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 		t.Error("media browsing is incorrectly gated by optional preview configuration")
 	}
 	stylesheet := string(mustRead("static/app.css"))
-	for _, required := range []string{".media-grid", ".media-tile", "aspect-ratio: 1", "object-fit: contain"} {
+	for _, required := range []string{".media-grid", ".media-grid-spacer", "repeat(auto-fill", ".media-tile", "aspect-ratio: 1", "object-fit: contain"} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("media browser stylesheet is missing %q", required)
 		}

@@ -39,6 +39,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/theme"
 	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/emulation"
+	cdplog "github.com/chromedp/cdproto/log"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/runtime"
 	cdpwebauthn "github.com/chromedp/cdproto/webauthn"
@@ -90,6 +91,12 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 			mu.Lock()
 			browserFailures = append(browserFailures, value.ExceptionDetails.Error())
 			mu.Unlock()
+		case *cdplog.EventEntryAdded:
+			if strings.Contains(value.Entry.Text, "Content Security Policy") || strings.Contains(value.Entry.Text, "Refused to") {
+				mu.Lock()
+				browserFailures = append(browserFailures, value.Entry.Text)
+				mu.Unlock()
+			}
 		case *network.EventRequestWillBeSent:
 			parsed, err := url.Parse(value.Request.URL)
 			if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") {
@@ -110,7 +117,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	var authenticatorID cdpwebauthn.AuthenticatorID
 	// The first Run owns the browser allocation and therefore uses the parent
 	// context; cancelling a derived first-run context would terminate Chrome.
-	if err := chromedp.Run(ctx, network.Enable(), runtime.Enable(), chromedp.Navigate(harness.origin+"/bootstrap")); err != nil {
+	if err := chromedp.Run(ctx, network.Enable(), runtime.Enable(), cdplog.Enable(), chromedp.Navigate(harness.origin+"/bootstrap")); err != nil {
 		t.Fatalf("launch browser: %v", err)
 	}
 	if err := runStage(ctx, 10*time.Second,
@@ -267,9 +274,9 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := harness.previewStore.Commit(context.Background(), gridBinding, gridClaim, gridArtifact); err != nil {
 		t.Fatalf("complete contending grid generation: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector(".media-frame img[alt='Preview of media-proof.png']") !== null`, 15*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector(".media-frame[data-path='/media-proof.png']")?.dataset.previewLoaded === "true" && document.querySelector(".media-frame img[alt='Preview of media-proof.png']")?.naturalWidth > 0`, 15*time.Second); err != nil {
 		var gridState string
-		_ = chromedp.Run(ctx, chromedp.Evaluate(`JSON.stringify(Array.from(document.querySelectorAll(".media-frame")).map((node) => ({path: node.dataset.path, state: node.dataset.previewState, html: node.innerHTML})))`, &gridState))
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`JSON.stringify(Array.from(document.querySelectorAll(".media-frame")).map((node) => ({path: node.dataset.path, state: node.dataset.previewState, html: node.innerHTML, complete: node.querySelector("img")?.complete, naturalWidth: node.querySelector("img")?.naturalWidth})))`, &gridState))
 		mu.Lock()
 		failures := append([]string(nil), browserFailures...)
 		requests := append([]string(nil), requestedURLs...)
@@ -289,7 +296,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if !squareFrame || previewAspect != "96x48" {
 		t.Fatalf("media geometry: squareFrame=%v intrinsic=%q", squareFrame, previewAspect)
 	}
-	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Generated WebP preview ready") && document.querySelector("#preview-content img") !== null`, 15*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Generated WebP preview ready") && document.querySelector("#preview-content img")?.naturalWidth > 0`, 15*time.Second); err != nil {
 		t.Fatalf("wait for full-screen generated preview: %v (%s)", err, browserStatus(ctx))
 	}
 	binding, claim, artifact := claimConcurrentBrowserPreview(t, harness, domain.MustParseUserPath("/media-proof.png"), mediaPath, 1600)

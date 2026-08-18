@@ -320,6 +320,23 @@
           go = goFor pkgs;
           packages = self.packages.${system};
           headlessBrowser = headlessBrowserFor pkgs;
+          relativePath = path: lib.removePrefix (toString ./. + "/") (toString path);
+          coverageSource = lib.cleanSourceWith {
+            src = ./.;
+            filter =
+              path: _type:
+              let
+                relative = relativePath path;
+              in
+              relative == "go.mod"
+              || relative == "go.sum"
+              || relative == "cmd"
+              || lib.hasPrefix "cmd/" relative
+              || relative == "internal"
+              || lib.hasPrefix "internal/" relative
+              || relative == "tools"
+              || lib.hasPrefix "tools/" relative;
+          };
           goTools = [ go ];
           qualityTools = goTools ++ [
             pkgs.actionlint
@@ -445,7 +462,18 @@
                   export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
                   export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
                 ''}
-                profile="''${TMPDIR:-/tmp}/endlessfs-coverage.out"
+                coverage_root="$(mktemp -d "''${TMPDIR:-/tmp}/endlessfs-coverage.XXXXXX")"
+                cleanup() {
+                  chmod -R u+w "$coverage_root"
+                  rm -rf "$coverage_root"
+                }
+                trap cleanup EXIT
+                cp -R ${coverageSource} "$coverage_root/source"
+                chmod -R u+w "$coverage_root/source"
+                cp -R ${packages.default.goModules} "$coverage_root/source/vendor"
+                cd "$coverage_root/source"
+                export GOFLAGS=-mod=vendor
+                profile="$coverage_root/endlessfs-coverage.out"
                 go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
                 gawk -f tools/coverage.awk "$profile"
               '';
@@ -652,14 +680,11 @@
                 rg --quiet '(^|/)bin/endlessfs$' image-paths.txt
                 touch "$out"
               '';
-          goCheckWithSourceAfter =
-            name: checkSource: command: tools: prerequisites:
+          goCheckWithSource =
+            name: checkSource: command: tools:
             pkgs.runCommand "endlessfs-${name}"
               {
                 nativeBuildInputs = [ go ] ++ tools;
-                # Keep latency-sensitive checks isolated from other expensive
-                # derivations without disabling parallelism for the whole gate.
-                checkPrerequisites = prerequisites;
               }
               ''
                 # Nix builds otherwise use /homeless-shelter. Chromium needs a
@@ -682,9 +707,6 @@
                 ${command}
                 touch "$out"
               '';
-          goCheckWithSource =
-            name: checkSource: command: tools:
-            goCheckWithSourceAfter name checkSource command tools [ ];
           goCheck =
             name: command: tools:
             goCheckWithSource name testSource command tools;
@@ -741,34 +763,6 @@
           repositoryPolicyCheck =
             goCheckWithSource "repository-policy" policySource "go run ./tools/repository-policy check"
               [ ];
-          coveragePrerequisites = [
-            self.packages.${system}.default
-            self.packages.${system}.container
-            self.packages.${system}.release
-            containerPolicy
-            formatCheck
-            lintCheck
-            raceCheck
-            fuzzCheck
-            securityCheck
-            repositoryPolicyCheck
-          ];
-          fullCoverage =
-            goCheckWithSourceAfter "coverage" testSource
-              ''
-                export ENDLESSFS_RUN_E2E=1
-                export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
-                export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
-                profile="$TMPDIR/endlessfs-coverage.out"
-                go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
-                gawk -f tools/coverage.awk "$profile"
-              ''
-              [
-                pkgs.gawk
-                headlessBrowser
-              ]
-              coveragePrerequisites;
-          validationSuite = if pkgs.stdenv.hostPlatform.isLinux then fullCoverage else testSuite;
         in
         {
           build = self.packages.${system}.default;
@@ -776,23 +770,23 @@
           container-policy = containerPolicy;
           release = self.packages.${system}.release;
 
-          e2e = if pkgs.stdenv.hostPlatform.isLinux then fullCoverage else e2eCompile;
+          e2e = e2eCompile;
 
           format = formatCheck;
 
           lint = lintCheck;
 
-          tests = validationSuite;
-          integration = validationSuite;
-          contract = validationSuite;
-          replica = validationSuite;
-          portability = validationSuite;
-          provider-verify = validationSuite;
-          theme = validationSuite;
+          tests = testSuite;
+          integration = testSuite;
+          contract = testSuite;
+          replica = testSuite;
+          portability = testSuite;
+          provider-verify = testSuite;
+          theme = testSuite;
           race = raceCheck;
-          coverage = if pkgs.stdenv.hostPlatform.isLinux then fullCoverage else coverageCompile;
+          coverage = coverageCompile;
           fuzz = fuzzCheck;
-          offline = validationSuite;
+          offline = testSuite;
           security = securityCheck;
           dependencies = securityCheck;
 

@@ -179,7 +179,7 @@ Direct dependency rationale is recorded in [docs/dependencies.md](./docs/depende
 
 GitHub Actions contains no project test selection or tool installation logic beyond bootstrapping Nix. Actions are pinned to immutable revisions, Nix build outputs are cached, full checks use a standard Ubuntu runner, and a bounded macOS job proves contributor-platform compatibility.
 
-- `CI` runs the authoritative Nix gate on pull requests and merge groups, plus a Darwin build/unit smoke test on pull requests.
+- `CI` runs the authoritative Nix gate and host-side Chromium coverage through Nix on pull requests and merge groups, plus a Darwin build/unit smoke test on pull requests. Coverage reuses the fixed-output vendored module closure instead of downloading modules.
 - `PR` provides early format, lint, and source-policy feedback while the live required-check policy transitions to the single authoritative gate.
 - `Container` publishes `sha-<commit>` and `edge` images to `ghcr.io/applyinnovations/endlessfs` after merge-queue-verified changes reach `main`; it does not repeat the gate.
 - `Release` re-verifies `v*.*.*` tags, publishes version and `latest` images, and creates a GitHub release containing the Nix-built binary/archive, OCI archive, checksums, dependency/license inventory, theme inventory, and release evidence.

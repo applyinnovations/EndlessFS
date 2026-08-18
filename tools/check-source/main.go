@@ -12,7 +12,10 @@ import (
 	"strings"
 )
 
-var wallClockFuzzBudget = regexp.MustCompile(`(?:-fuzztime\s+|ENDLESSFS_FUZZTIME:-)[0-9]+(?:ns|us|µs|ms|s|m|h)\b`)
+var (
+	wallClockFuzzBudget = regexp.MustCompile(`(?:-fuzztime\s+|ENDLESSFS_FUZZTIME:-)[0-9]+(?:ns|us|µs|ms|s|m|h)\b`)
+	flakeChecksBlock    = regexp.MustCompile(`(?s)(?:^|\n)\s*checks\s*=\s*forAllSystems.*?(?:^|\n)\s*devShells\s*=`)
+)
 
 var forbiddenNames = map[string]string{
 	"docker-compose.yml":  "Docker Compose is not a required project tool",
@@ -106,6 +109,10 @@ func check(root string) ([]string, error) {
 			}
 			if wallClockFuzzBudget.Match(content) {
 				violations = append(violations, "flake.nix: fuzz smoke budgets must use an iteration count")
+			}
+			checks := flakeChecksBlock.Find(content)
+			if strings.Contains(string(checks), "ENDLESSFS_RUN_E2E=1") {
+				violations = append(violations, "flake.nix: browser runtime gate must run outside the Nix build sandbox")
 			}
 		}
 

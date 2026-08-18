@@ -32,6 +32,12 @@ jobs:
       - name: Run the authoritative Nix gate
         run: nix flake check --print-build-logs --max-jobs 2
 
+      # Chromium's virtual WebAuthn authenticator cannot complete inside a Nix
+      # build sandbox. This Nix app runs on the host while consuming the same
+      # fixed-output vendored module closure as the sandboxed checks.
+      - name: Run the browser and coverage gate
+        run: nix run .#test-coverage
+
   darwin:
     name: Darwin build
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'

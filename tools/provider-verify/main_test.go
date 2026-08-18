@@ -142,6 +142,9 @@ func TestVerificationInputBoundaryMatrix(t *testing.T) {
 	if _, err := readBoundedFile(missing, 10); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("missing input error = %v", err)
 	}
+	if err := run(context.Background(), []string{"check", missing}, &bytes.Buffer{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("missing configuration error = %v", err)
+	}
 	missingParent := filepath.Join(directory, "missing", "input.json")
 	if _, err := readBoundedFile(missingParent, 10); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("missing input directory error = %v", err)
@@ -159,6 +162,9 @@ func TestVerificationInputBoundaryMatrix(t *testing.T) {
 	}
 	if _, err := readBoundedFile(large, 10); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("large input error = %v", err)
+	}
+	if _, err := readBoundedFile(directory, maximumVerificationConfigBytes); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("directory input error = %v", err)
 	}
 
 	cases := []verificationConfig{
@@ -191,6 +197,43 @@ func TestVerificationInputBoundaryMatrix(t *testing.T) {
 	writeJSON(t, invalidKeyConfig, verificationConfig{Provider: "memory", Fixture: invalidKeyFixture, CheckpointID: "checkpoint", WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"}})
 	if err := run(context.Background(), []string{"check", invalidKeyConfig}, &bytes.Buffer{}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid fixture key error = %v", err)
+	}
+
+	emptyFixture := filepath.Join(directory, "empty-objects.json")
+	writeJSON(t, emptyFixture, map[string]string{})
+	for name, configuration := range map[string]verificationConfig{
+		"missing state fixture": {
+			Provider: "memory", Fixture: "absent-state.json", CheckpointID: "checkpoint",
+			WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"},
+		},
+		"missing file fixture": {
+			Provider: "memory", Fixture: emptyFixture, FileFixture: "absent-files.json", CheckpointID: "checkpoint",
+			WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"},
+		},
+		"checkpoint absent from fixture": {
+			Provider: "memory", Fixture: emptyFixture, CheckpointID: "checkpoint",
+			WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(directory, strings.ReplaceAll(name, " ", "-")+".json")
+			writeJSON(t, path, configuration)
+			if err := run(context.Background(), []string{"check", path}, &bytes.Buffer{}); err == nil {
+				t.Fatal("invalid verification input was accepted")
+			}
+		})
+	}
+	malformedFixture := filepath.Join(directory, "malformed-objects.json")
+	if err := os.WriteFile(malformedFixture, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	malformedFixtureConfig := filepath.Join(directory, "malformed-objects-config.json")
+	writeJSON(t, malformedFixtureConfig, verificationConfig{
+		Provider: "memory", Fixture: malformedFixture, CheckpointID: "checkpoint",
+		WriterSetID: "writer", ConfigurationDigest: "digest", KeyringIdentifiers: []string{"key"},
+	})
+	if err := run(context.Background(), []string{"check", malformedFixtureConfig}, &bytes.Buffer{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("malformed fixture error = %v", err)
 	}
 }
 

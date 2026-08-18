@@ -41,6 +41,19 @@ func TestParseDefaults(t *testing.T) {
 	}
 }
 
+func TestURLAndLoopbackHelperBoundaryMatrix(t *testing.T) {
+	t.Parallel()
+	if _, err := parseBaseURL("%"); err == nil || !strings.Contains(err.Error(), "absolute HTTP(S) origin") {
+		t.Fatalf("malformed base URL error = %v", err)
+	}
+	if _, err := parseBaseURL("ftp://example.com"); err == nil || !strings.Contains(err.Error(), "http or https") {
+		t.Fatalf("unsupported base URL scheme error = %v", err)
+	}
+	if normalized := normalizeLoopbackHost(""); normalized != "127.0.0.1" {
+		t.Fatalf("normalized empty loopback host = %q", normalized)
+	}
+}
+
 func TestLoadReadsValidatedProcessEnvironment(t *testing.T) {
 	keys := []string{
 		"ENDLESSFS_LISTEN_ADDR", "ENDLESSFS_BASE_URL", "ALLOW_REGISTRATION", "INVITE_REGISTRATION",

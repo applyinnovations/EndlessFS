@@ -290,6 +290,127 @@ func TestCheckpointVerifierIsStrictlyReadOnly(t *testing.T) {
 	}
 }
 
+func TestCheckpointVerifierRejectsInvalidBootstrapAndCheckpointRecords(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2037, 3, 4, 6, 7, 8, 0, time.UTC))
+	engine := openEngine(t, backend, clock, 155, nil)
+	checkpoint, err := engine.CreateCheckpoint(context.Background(), "verify-boundaries")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := backend.Export()
+	writer := portable.WriterConfiguration{
+		WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1",
+		KeyringIdentifiers: []string{"session-v1"},
+	}
+	verify := func(t *testing.T, objects map[string][]byte, configuration portable.WriterConfiguration, checkpointID string) error {
+		t.Helper()
+		destination := objectmemory.New()
+		if err := destination.Import(objects); err != nil {
+			t.Fatal(err)
+		}
+		return portable.VerifyCheckpointReadOnly(context.Background(), destination, configuration, checkpointID)
+	}
+	assertRejected := func(t *testing.T, err error) {
+		t.Helper()
+		if !errors.Is(err, domain.ErrInvalid) && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("verification error = %v", err)
+		}
+	}
+
+	t.Run("nil backend", func(t *testing.T) {
+		assertRejected(t, portable.VerifyCheckpointReadOnly(context.Background(), nil, writer, checkpoint.CheckpointID))
+	})
+	t.Run("invalid writer configuration", func(t *testing.T) {
+		assertRejected(t, verify(t, base, portable.WriterConfiguration{}, checkpoint.CheckpointID))
+	})
+	for name, key := range map[string]objectstore.Key{
+		"missing superblock": storageformat.SuperblockKey(),
+		"missing writer set": storageformat.WriterSetKey(),
+		"missing write gate": storageformat.WriteGateKey(),
+		"missing checkpoint": storageformat.CheckpointKey(checkpoint.CheckpointID),
+	} {
+		t.Run(name, func(t *testing.T) {
+			objects := cloneObjects(base)
+			delete(objects, key.String())
+			assertRejected(t, verify(t, objects, writer, checkpoint.CheckpointID))
+		})
+	}
+	for name, key := range map[string]objectstore.Key{
+		"malformed superblock": storageformat.SuperblockKey(),
+		"malformed writer set": storageformat.WriterSetKey(),
+		"malformed write gate": storageformat.WriteGateKey(),
+		"malformed checkpoint": storageformat.CheckpointKey(checkpoint.CheckpointID),
+	} {
+		t.Run(name, func(t *testing.T) {
+			objects := cloneObjects(base)
+			objects[key.String()] = []byte("{")
+			assertRejected(t, verify(t, objects, writer, checkpoint.CheckpointID))
+		})
+	}
+	t.Run("incompatible writer set", func(t *testing.T) {
+		configuration := writer
+		configuration.ConfigurationDigest = "different-config"
+		assertRejected(t, verify(t, base, configuration, checkpoint.CheckpointID))
+	})
+	t.Run("incompatible checkpoint", func(t *testing.T) {
+		objects := cloneObjects(base)
+		key := storageformat.CheckpointKey(checkpoint.CheckpointID)
+		var envelope storageformat.Envelope
+		var stored storageformat.Checkpoint
+		if err := storageformat.DecodeEnvelope(objects[key.String()], key, "checkpoint-v1", &envelope, &stored); err != nil {
+			t.Fatal(err)
+		}
+		stored.SchemaVersion++
+		objects[key.String()], err = storageformat.EncodeEnvelope("checkpoint-v1", key, envelope.Revision, stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertRejected(t, verify(t, objects, writer, checkpoint.CheckpointID))
+	})
+	t.Run("checkpoint does not match closed gate", func(t *testing.T) {
+		key := storageformat.WriteGateKey()
+		original, getErr := backend.Get(context.Background(), key)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		var envelope storageformat.Envelope
+		var gate storageformat.WriteGate
+		if err := storageformat.DecodeEnvelope(original.Body, key, "write-gate-v1", &envelope, &gate); err != nil {
+			t.Fatal(err)
+		}
+		gate.CheckpointID = "different-checkpoint"
+		body, encodeErr := storageformat.EncodeEnvelope("write-gate-v1", key, envelope.Revision+1, gate)
+		if encodeErr != nil {
+			t.Fatal(encodeErr)
+		}
+		version, putErr := backend.Put(context.Background(), key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: original.Version})
+		if putErr != nil {
+			t.Fatal(putErr)
+		}
+		assertRejected(t, engine.VerifyCheckpoint(context.Background(), checkpoint.CheckpointID))
+		if _, putErr := backend.Put(context.Background(), key, original.Body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: version}); putErr != nil {
+			t.Fatal(putErr)
+		}
+	})
+	t.Run("malformed superblock during checkpoint retry", func(t *testing.T) {
+		key := storageformat.SuperblockKey()
+		original, getErr := backend.Get(context.Background(), key)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if _, putErr := backend.Put(context.Background(), key, []byte("{"), objectstore.PutCondition{Mode: objectstore.PutMatch, Version: original.Version}); putErr != nil {
+			t.Fatal(putErr)
+		}
+		if _, createErr := engine.CreateCheckpoint(context.Background(), checkpoint.CheckpointID); !errors.Is(createErr, domain.ErrInvalid) {
+			t.Fatalf("CreateCheckpoint() error = %v", createErr)
+		}
+	})
+	t.Run("empty checkpoint ID", func(t *testing.T) {
+		assertRejected(t, engine.VerifyCheckpoint(context.Background(), ""))
+	})
+}
+
 func TestCheckpointVerifierRejectsMissingExtraAndUnsupportedState(t *testing.T) {
 	backend := objectmemory.New()
 	clock := domain.NewFixedClock(time.Date(2037, 3, 5, 5, 6, 7, 0, time.UTC))

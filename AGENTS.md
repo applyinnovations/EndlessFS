@@ -64,7 +64,12 @@ nix build .#release-images
 
 Application, server, test-driver, helper, and generator code must be Go. Browser code is embedded semantic HTML, application-owned CSS, and minimal vanilla JavaScript. Do not introduce Node.js or a frontend/CSS framework. Do not add Python, Ruby, Java, .NET, PHP, Rust, SQL, Redis, queues, Docker Compose, or a required container runtime.
 
-Pin every Go module, Nix input, and GitHub Action. Go modules are locked by `go.mod`, `go.sum`, and Nix's fixed-output module hash; `vendor/` is generated inside Nix builds and MUST NOT be tracked. Justify a direct dependency in review: maintenance health, license, security history, and why the standard library is insufficient. Cryptography and WebAuthn must use established libraries, never custom protocols.
+Pin every Go module, Nix input, Tekton task runtime image, and any temporary
+bootstrap GitHub Action. Go modules are locked by `go.mod`, `go.sum`, and Nix's
+fixed-output module hash; `vendor/` is generated inside Nix builds and MUST NOT
+be tracked. Justify a direct dependency in review: maintenance health, license,
+security history, and why the standard library is insufficient. Cryptography
+and WebAuthn must use established libraries, never custom protocols.
 
 ## Architectural boundaries
 
@@ -141,9 +146,17 @@ Never interpret raw theme strings as CSS or HTML. Validate archives, normalized 
 
 ## GitHub and releases
 
-Workflows should bootstrap Nix, invoke flake commands, cache Nix outputs, and publish their results. Do not duplicate project test logic in YAML or install Go/Node tools directly. Pin actions by full commit SHA and let Dependabot propose reviewed updates.
+Tekton PaC workflows run on xlab Linux compute, bootstrap Nix, invoke flake
+commands, cache Nix outputs on local NVMe, and publish their results. Do not
+duplicate project test logic in YAML or install Go/Node tools directly. The
+retired Darwin workflow must remain triggerless and must never reference or
+start Namespace Mac runners.
 
-`.github/rulesets/*.json` is the source of truth for branch/tag policy. Validate it with `nix run .#repository-policy -- check`. Applying it is an explicit administrator action through the protected `Repository Policy` workflow; never place an administration token in source or ordinary CI.
+`.github/rulesets/*.json` is the source of truth for branch/tag policy. Validate
+it with `nix run .#repository-policy -- check`. Applying it is an explicit
+administrator action from a trusted checkout through
+`nix run .#repository-policy -- apply`; never place an administration token in
+source or ordinary CI.
 
 Release tags are `vMAJOR.MINOR.PATCH`. A v1 release needs the evidence in spec section 19.3, including source/input hashes, check and coverage summaries, canonical-format/writer-protocol/checkpoint/portability fixture digests, multi-replica schedule results, binary/OCI hashes, dependency and theme inventories, limitations, and confirmation that no credentials or external services were used.
 

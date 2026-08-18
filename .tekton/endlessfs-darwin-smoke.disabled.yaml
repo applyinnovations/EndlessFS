@@ -1,0 +1,32 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: endlessfs-darwin-smoke-disabled
+  labels:
+    app.kubernetes.io/part-of: endlessfs-ci
+    endlessfs.dev/workflow-state: deprecated-disabled
+  annotations:
+    endlessfs.dev/deprecation-note: >-
+      Darwin smoke verification is retired. This Pipeline has no
+      Pipelines-as-Code trigger and no active PipelineRun references it.
+spec:
+  description: >-
+    Inert retirement record for the former Darwin smoke job. If an operator
+    deliberately instantiates it, it reports the deprecation from an xlab Linux
+    pod; it does not build EndlessFS or allocate external Apple compute.
+  tasks:
+    - name: retired
+      taskSpec:
+        steps:
+          - name: report-retirement
+            image: docker.io/nixos/nix:2.34.0@sha256:b9c9611c8530fa8049a1215b20638536e1e71dcaf85212e47845112caf3adeea
+            computeResources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+              limits:
+                cpu: 50m
+                memory: 64Mi
+            script: |
+              #!/bin/sh
+              echo "Darwin smoke verification is deprecated and disabled."

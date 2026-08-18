@@ -128,10 +128,13 @@ tbody tr.selected { background: var(--efs-color-interaction-selected, #dce8ff); 
 .transfer-panel input { width: 5rem; }
 .transfer-list, .record-list { margin: .75rem 0 0; padding: 0; list-style: none; }
 .transfer-list li, .record-list li { border-top: 1px solid var(--efs-color-border, #c7cfdb); padding: .8rem 0; }
-.transfer-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .5rem; }
-.transfer-row progress { width: 100%; grid-column: 1 / -1; accent-color: var(--efs-color-file-uploading, #2759c7); }
-.transfer-row.failed { color: var(--efs-color-file-failed, #b42318); }
-.transfer-row.complete { color: var(--efs-color-file-complete, #176b3a); }
+.transfer-row, .transfer-group-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .5rem; }
+.transfer-row progress, .transfer-group-row progress { width: 100%; grid-column: 1 / -1; accent-color: var(--efs-color-file-uploading, #2759c7); }
+.transfer-row.failed, .transfer-group-row.failed { color: var(--efs-color-file-failed, #b42318); }
+.transfer-row.complete, .transfer-group-row.complete { color: var(--efs-color-file-complete, #176b3a); }
+.transfer-group-row { font-weight: 600; }
+.transfer-file-list { margin: .5rem 0 0 1rem; padding: 0; list-style: none; }
+.transfer-file-list li { padding: .5rem 0; }
 .record-main { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .record-actions { display: flex; flex-wrap: wrap; gap: .4rem; }
 .settings-grid { display: grid; margin-top: 1.5rem; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }

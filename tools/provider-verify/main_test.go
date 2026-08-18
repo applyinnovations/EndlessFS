@@ -13,9 +13,11 @@ import (
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/state"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
 func TestRunVerifiesLocalRawCopyFixtureWithoutWritingIt(t *testing.T) {
@@ -69,6 +71,48 @@ func TestRunVerifiesLocalRawCopyFixtureWithoutWritingIt(t *testing.T) {
 	}
 	if !bytes.Equal(after, original) {
 		t.Fatal("read-only verification changed fixture")
+	}
+}
+
+func TestRunVerifiesSeparateStateAndFileFixtures(t *testing.T) {
+	stateBackend := objectmemory.New()
+	fileBackend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2041, 1, 2, 3, 4, 5, 0, time.UTC))
+	writer := portable.WriterConfiguration{
+		WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1",
+		KeyringIdentifiers: []string{"session-v1"},
+	}
+	engine, err := portable.Open(context.Background(), portable.Options{
+		Backend: stateBackend, FileBackend: fileBackend, Clock: clock,
+		IDs: domain.NewIDGenerator(bytes.NewReader(bytes.Repeat([]byte{0x72}, 1<<20))), Writer: writer,
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobKey := storageformat.BlobKey("U1NTU1NTU1NTU1NTU1NTUw", "provider-verify")
+	if _, err := fileBackend.Put(context.Background(), blobKey, []byte("file bytes"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Create(context.Background(), state.MustKey(state.NamespaceAccounts, "split-provider-verify"), []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.CreateCheckpoint(context.Background(), "split-fixture-checkpoint"); err != nil {
+		t.Fatal(err)
+	}
+
+	directory := t.TempDir()
+	statePath := filepath.Join(directory, "state.json")
+	filePath := filepath.Join(directory, "files.json")
+	writeEncodedFixture(t, statePath, stateBackend.Export())
+	writeEncodedFixture(t, filePath, fileBackend.Export())
+	configPath := filepath.Join(directory, "verify.json")
+	writeJSON(t, configPath, verificationConfig{
+		Provider: "memory", Fixture: statePath, FileFixture: filePath, CheckpointID: "split-fixture-checkpoint",
+		WriterSetID: writer.WriterSetID, ConfigurationDigest: writer.ConfigurationDigest, KeyringIdentifiers: writer.KeyringIdentifiers,
+	})
+	if err := run(context.Background(), []string{"check", configPath}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("run() error = %v", err)
 	}
 }
 
@@ -159,4 +203,13 @@ func writeJSON(t *testing.T, path string, value any) {
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeEncodedFixture(t *testing.T, path string, objects map[string][]byte) {
+	t.Helper()
+	fixture := make(map[string]string, len(objects))
+	for key, body := range objects {
+		fixture[key] = base64.StdEncoding.EncodeToString(body)
+	}
+	writeJSON(t, path, fixture)
 }

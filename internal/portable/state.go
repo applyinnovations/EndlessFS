@@ -298,10 +298,14 @@ func (e *Engine) Delete(ctx context.Context, key state.Key, current state.Versio
 }
 
 func (e *Engine) listAll(ctx context.Context, prefix string) ([]objectstore.ObjectInfo, error) {
+	return listAllFrom(ctx, e.backend, prefix)
+}
+
+func listAllFrom(ctx context.Context, backend objectstore.Backend, prefix string) ([]objectstore.ObjectInfo, error) {
 	request := objectstore.ListRequest{Prefix: prefix, Limit: 1000}
 	var result []objectstore.ObjectInfo
 	for {
-		page, err := e.backend.List(ctx, request)
+		page, err := backend.List(ctx, request)
 		if err != nil {
 			return nil, err
 		}

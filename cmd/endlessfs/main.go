@@ -62,6 +62,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	configurationDigest := base64.RawURLEncoding.EncodeToString(deriveKey("endlessfs-writer-configuration-v1", []byte(configuration)))
 
 	var backend objectstore.Backend
+	var fileBackend objectstore.Backend
 	var dataHandler http.Handler
 	var dataListener net.Listener
 	var dataServer *http.Server
@@ -98,14 +99,31 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 			_ = gcsBackend.Close()
 			return err
 		}
+		stateBucket := cfg.GCSStateBucket
+		if stateBucket == "" {
+			stateBucket = cfg.GCSBucket
+		}
 		backend = gcsBackend
 		closeBackend = func() { _ = gcsBackend.Close() }
+		if stateBucket != cfg.GCSBucket {
+			stateBackend, stateOpenErr := gcstore.Open(ctx, stateBucket)
+			if stateOpenErr != nil {
+				_ = gcsBackend.Close()
+				return stateOpenErr
+			}
+			backend = stateBackend
+			fileBackend = gcsBackend
+			closeBackend = func() {
+				_ = stateBackend.Close()
+				_ = gcsBackend.Close()
+			}
+		}
 	default:
 		return domain.NewError(domain.ErrorInvalid, "unsupported storage provider")
 	}
 	defer closeBackend()
 	engine, err := portable.Open(ctx, portable.Options{
-		Backend: backend, Clock: clock, IDs: ids,
+		Backend: backend, FileBackend: fileBackend, Clock: clock, IDs: ids,
 		Writer: portable.WriterConfiguration{
 			WriterSetID: cfg.WriterSetID, ConfigurationDigest: configurationDigest,
 			KeyringIdentifiers: []string{keyringID},

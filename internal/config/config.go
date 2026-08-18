@@ -36,6 +36,7 @@ type Config struct {
 	StorageProvider       string
 	MockProviderURL       string
 	GCSBucket             string
+	GCSStateBucket        string
 	GCSSigningAccount     string
 	WriterSetID           string
 	AllowRegistration     bool
@@ -125,6 +126,10 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if value, ok := lookup("ENDLESSFS_GCS_BUCKET"); ok {
 		gcsBucket = strings.TrimSpace(value)
 	}
+	gcsStateBucket := ""
+	if value, ok := lookup("ENDLESSFS_GCS_STATE_BUCKET"); ok {
+		gcsStateBucket = strings.TrimSpace(value)
+	}
 	gcsSigningAccount := ""
 	if value, ok := lookup("ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT"); ok {
 		gcsSigningAccount = strings.TrimSpace(value)
@@ -140,13 +145,16 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		if gcsBucket == "" {
 			return Config{}, fmt.Errorf("ENDLESSFS_GCS_BUCKET: required for GCS")
 		}
+		if gcsStateBucket == "" {
+			gcsStateBucket = gcsBucket
+		}
 		if _, configured := lookup("ENDLESSFS_WRITER_SET_ID"); !configured {
 			return Config{}, fmt.Errorf("ENDLESSFS_WRITER_SET_ID: required for GCS")
 		}
 		if mockProviderURL != "" {
 			return Config{}, fmt.Errorf("ENDLESSFS_MOCK_PROVIDER_URL: unavailable with GCS")
 		}
-	} else if gcsBucket != "" || gcsSigningAccount != "" {
+	} else if gcsBucket != "" || gcsStateBucket != "" || gcsSigningAccount != "" {
 		return Config{}, fmt.Errorf("GCS configuration is unavailable with mock storage")
 	}
 	if !validRandomIdentifier(writerSetID) {
@@ -215,6 +223,7 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		StorageProvider:       storageProvider,
 		MockProviderURL:       mockProviderURL,
 		GCSBucket:             gcsBucket,
+		GCSStateBucket:        gcsStateBucket,
 		GCSSigningAccount:     gcsSigningAccount,
 		WriterSetID:           writerSetID,
 		AllowRegistration:     allowRegistration,

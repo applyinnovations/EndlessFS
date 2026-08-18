@@ -520,7 +520,7 @@ func (s *FileStore) CreateDownload(ctx context.Context, scope domain.Scope, requ
 		return domain.DownloadCapability{}, err
 	}
 	blobKey := storageformat.BlobKey(scope.UserID().String(), entry.BlobID)
-	info, err := s.engine.backend.Head(ctx, blobKey)
+	info, err := s.engine.fileBackend.Head(ctx, blobKey)
 	if err != nil {
 		return domain.DownloadCapability{}, err
 	}
@@ -552,7 +552,7 @@ func (s *FileStore) readUploadRecord(ctx context.Context, userID domain.UserID, 
 }
 
 func (s *FileStore) transferBackend() (objectstore.DirectTransferBackend, error) {
-	transfers, ok := s.engine.backend.(objectstore.DirectTransferBackend)
+	transfers, ok := s.engine.fileBackend.(objectstore.DirectTransferBackend)
 	if !ok {
 		return nil, domain.NewError(domain.ErrorPreconditionFailed, "object backend has no direct transfer support")
 	}

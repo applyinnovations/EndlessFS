@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,6 +112,104 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 	}
 	if _, err := returnedEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/after-cutover")); err != nil {
 		t.Fatalf("reverse-copy continued state missing: %v", err)
+	}
+}
+
+func TestPortabilityRawCopyPreservesSplitStateAndFileBackends(t *testing.T) {
+	clock := domain.NewFixedClock(time.Date(2037, 2, 4, 4, 5, 6, 0, time.UTC))
+	writer := portable.WriterConfiguration{
+		WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1",
+		KeyringIdentifiers: []string{"session-v1"},
+	}
+	sourceState := objectmemory.New()
+	sourceFiles := objectmemory.New()
+	sourceServer := httptest.NewServer(sourceFiles)
+	t.Cleanup(sourceServer.Close)
+	if err := sourceFiles.ConfigureDataPlane(sourceServer.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(151, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	source, err := portable.Open(context.Background(), portable.Options{
+		Backend: sourceState, FileBackend: sourceFiles, Clock: clock,
+		IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(152, 1<<20))), Writer: writer,
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateKey := state.MustKey(state.NamespaceAccounts, "split-portability")
+	if _, err := source.Create(context.Background(), stateKey, []byte("portable state")); err != nil {
+		t.Fatal(err)
+	}
+	user, _ := domain.ParseUserID("VFRUVFRUVFRUVFRUVFRUVA")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	path := domain.MustParseUserPath("/portable.txt")
+	content := []byte("portable split bytes")
+	uploadPortableFile(t, sourceServer.Client(), source.Files(), scope, path, content)
+	checkpoint, err := source.CreateCheckpoint(context.Background(), "split-portability")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	destinationState := objectmemory.New()
+	destinationFiles := objectmemory.New()
+	stateCopy := make(map[string][]byte)
+	fileCopy := make(map[string][]byte)
+	sourceStateObjects := sourceState.Export()
+	sourceFileObjects := sourceFiles.Export()
+	for _, object := range checkpoint.Objects {
+		if strings.Contains(object.Key, "/blobs/") {
+			fileCopy[object.Key] = append([]byte(nil), sourceFileObjects[object.Key]...)
+		} else {
+			stateCopy[object.Key] = append([]byte(nil), sourceStateObjects[object.Key]...)
+		}
+	}
+	checkpointKey := storageformat.CheckpointKey(checkpoint.CheckpointID).String()
+	stateCopy[checkpointKey] = append([]byte(nil), sourceStateObjects[checkpointKey]...)
+	if err := destinationState.Import(stateCopy); err != nil {
+		t.Fatal(err)
+	}
+	if err := destinationFiles.Import(fileCopy); err != nil {
+		t.Fatal(err)
+	}
+	destinationServer := httptest.NewServer(destinationFiles)
+	t.Cleanup(destinationServer.Close)
+	if err := destinationFiles.ConfigureDataPlane(destinationServer.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(153, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	destination, err := portable.Open(context.Background(), portable.Options{
+		Backend: destinationState, FileBackend: destinationFiles, Clock: clock,
+		IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(154, 1<<20))), Writer: writer,
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.OpenWrites(context.Background(), checkpoint.CheckpointID); err != nil {
+		t.Fatal(err)
+	}
+	if value, err := destination.Get(context.Background(), stateKey); err != nil || string(value.Data) != "portable state" {
+		t.Fatalf("destination state = %+v, %v", value, err)
+	}
+	entry, err := destination.Files().Stat(context.Background(), scope, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	download, err := destination.Files().CreateDownload(context.Background(), scope, domain.CreateDownloadRequest{Path: path, Version: entry.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := http.NewRequest(download.Method, download.URL, nil)
+	response, err := destinationServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloaded, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || !bytes.Equal(downloaded, content) {
+		t.Fatalf("destination download = %d %q", response.StatusCode, downloaded)
+	}
+	if _, err := destination.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/after-cutover")}); err != nil {
+		t.Fatalf("post-cutover mutation error = %v", err)
 	}
 }
 

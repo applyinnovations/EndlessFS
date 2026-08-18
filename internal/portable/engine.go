@@ -35,6 +35,7 @@ type WriterConfiguration struct {
 
 type Options struct {
 	Backend     objectstore.Backend
+	FileBackend objectstore.Backend
 	Clock       domain.Clock
 	IDs         *domain.IDGenerator
 	Writer      WriterConfiguration
@@ -61,16 +62,18 @@ const (
 )
 
 type Engine struct {
-	backend     objectstore.Backend
-	clock       domain.Clock
-	ids         *domain.IDGenerator
-	writer      storageformat.WriterSet
-	leaseTTL    time.Duration
-	uploadTTL   time.Duration
-	downloadTTL time.Duration
-	cursorAEAD  cipher.AEAD
-	cursorTTL   time.Duration
-	scheduler   Scheduler
+	backend             objectstore.Backend
+	fileBackend         objectstore.Backend
+	separateFileBackend bool
+	clock               domain.Clock
+	ids                 *domain.IDGenerator
+	writer              storageformat.WriterSet
+	leaseTTL            time.Duration
+	uploadTTL           time.Duration
+	downloadTTL         time.Duration
+	cursorAEAD          cipher.AEAD
+	cursorTTL           time.Duration
+	scheduler           Scheduler
 
 	admissionSequence atomic.Uint64
 }
@@ -103,7 +106,12 @@ func Open(ctx context.Context, options Options) (*Engine, error) {
 	if err != nil {
 		return nil, domain.WrapError(domain.ErrorInternal, "initialize portable cursor protection", err)
 	}
-	engine := &Engine{backend: options.Backend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, uploadTTL: options.UploadTTL, downloadTTL: options.DownloadTTL, cursorAEAD: cursorAEAD, cursorTTL: options.CursorTTL, scheduler: options.Scheduler}
+	fileBackend := options.FileBackend
+	separateFileBackend := fileBackend != nil
+	if fileBackend == nil {
+		fileBackend = options.Backend
+	}
+	engine := &Engine{backend: options.Backend, fileBackend: fileBackend, separateFileBackend: separateFileBackend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, uploadTTL: options.UploadTTL, downloadTTL: options.DownloadTTL, cursorAEAD: cursorAEAD, cursorTTL: options.CursorTTL, scheduler: options.Scheduler}
 	if err := engine.initialize(ctx); err != nil {
 		return nil, err
 	}

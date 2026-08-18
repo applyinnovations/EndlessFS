@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,7 +14,19 @@ import (
 
 	"github.com/applyinnovations/endlessfs/internal/config"
 	endlesslogging "github.com/applyinnovations/endlessfs/internal/logging"
+	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
+	"github.com/applyinnovations/endlessfs/internal/secret"
 )
+
+func TestMain(m *testing.M) {
+	if imagegen.IsWorkerInvocation() {
+		if err := imagegen.RunWorker(os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func runtimeTestConfig(t *testing.T) config.Config {
 	t.Helper()
@@ -39,6 +52,18 @@ func TestRunStartsAndGracefullyStopsCompleteApplication(t *testing.T) {
 	logger := endlesslogging.NewJSON(io.Discard, slog.LevelDebug)
 	if err := run(ctx, logger, cfg); err != nil {
 		t.Fatalf("run = %v", err)
+	}
+}
+
+func TestControlWriteTimeoutContainsPreviewOperationDeadline(t *testing.T) {
+	if got := controlWriteTimeout(false, 5*time.Minute); got != 30*time.Second {
+		t.Fatalf("disabled preview write timeout = %s", got)
+	}
+	if got := controlWriteTimeout(true, 20*time.Second); got != 30*time.Second {
+		t.Fatalf("short preview write timeout = %s", got)
+	}
+	if got := controlWriteTimeout(true, 45*time.Second); got != 50*time.Second {
+		t.Fatalf("preview write timeout = %s", got)
 	}
 }
 
@@ -108,3 +133,23 @@ func (ctx *alreadyDoneContext) Err() error {
 	return nil
 }
 func (*alreadyDoneContext) Value(any) any { return nil }
+
+func TestRunValidatesConfiguredPreviewDependenciesBeforeServing(t *testing.T) {
+	cfg := runtimeTestConfig(t)
+	cfg.PreviewProvider = "mock"
+	cfg.PreviewAutomatic = true
+	cfg.PreviewFormats = []string{"image"}
+	cfg.PreviewResolutions = []int{256, 512, 1600}
+	cfg.PreviewMaxConcurrency = 2
+	cfg.PreviewOperationTimeout = 45 * time.Second
+	cfg.PreviewStartupTimeout = 10 * time.Second
+	cfg.PreviewKeySecret = secret.Value("invalid")
+	if err := run(context.Background(), endlesslogging.NewJSON(io.Discard, slog.LevelInfo), cfg); err == nil {
+		t.Fatal("configured preview store accepted an invalid key")
+	}
+
+	cfg.PreviewKeySecret = ""
+	if err := run(newAlreadyDoneContext(), endlesslogging.NewJSON(io.Discard, slog.LevelInfo), cfg); err != nil {
+		t.Fatalf("configured mock preview startup = %v", err)
+	}
+}

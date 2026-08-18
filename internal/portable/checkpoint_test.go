@@ -54,6 +54,10 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 		t.Fatal(err)
 	}
 	uploadPortableFile(t, sourceServer.Client(), sourceEngine.Files(), scope, domain.MustParseUserPath("/documents/file.txt"), []byte("portable bytes"))
+	sourceFile, err := sourceEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/documents/file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := sourceEngine.Files().CreateDirectory(context.Background(), trashScope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/trash-folder")}); err != nil {
 		t.Fatal(err)
 	}
@@ -87,6 +91,13 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 		if getErr != nil || value.Version != stateVersions[key] || !bytes.Equal(value.Data, expected) {
 			t.Fatalf("destination state %q = %+v, %v", key, value, getErr)
 		}
+	}
+	destinationFile, err := destinationEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/documents/file.txt"))
+	if err != nil {
+		t.Fatalf("destination original file missing: %v", err)
+	}
+	if destinationFile.PreviewContentIdentity() != sourceFile.PreviewContentIdentity() {
+		t.Fatalf("raw-copy preview identity = %+v, want %+v", destinationFile.PreviewContentIdentity(), sourceFile.PreviewContentIdentity())
 	}
 	if _, err := destinationEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/copy/file.txt")); err != nil {
 		t.Fatalf("destination copied file missing: %v", err)

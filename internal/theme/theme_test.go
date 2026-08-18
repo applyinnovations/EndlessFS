@@ -74,6 +74,44 @@ func TestOlderCompatibleCustomInheritsSimulatedNewMediaSlot(t *testing.T) {
 	}
 }
 
+func TestMediaPreviewFallbackSlotsAreCompleteAndVersioned(t *testing.T) {
+	if APIMajor != 1 || APIMinor != 1 {
+		t.Fatalf("Theme API = %d.%d, want 1.1", APIMajor, APIMinor)
+	}
+	wanted := map[string]bool{
+		"icon.file.image": false, "icon.file.video": false, "icon.file.pdf": false, "icon.file.audio": false,
+		"icon.file.document": false, "icon.file.archive": false, "icon.file.unknown": false,
+	}
+	for _, slot := range MediaRegistry() {
+		if _, exists := wanted[slot.ID]; exists {
+			wanted[slot.ID] = true
+		}
+	}
+	for id, found := range wanted {
+		if !found {
+			t.Errorf("Theme API is missing %q", id)
+		}
+	}
+	builtins, err := Builtins()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, theme := range builtins {
+		digests := make(map[string]string, len(wanted))
+		for slot := range wanted {
+			asset, found := theme.Assets[slot]
+			if !found {
+				t.Errorf("built-in %s is missing %s", id, slot)
+				continue
+			}
+			if previous, duplicate := digests[asset.Media.Digest]; duplicate {
+				t.Errorf("built-in %s uses the same fallback glyph for %s and %s", id, previous, slot)
+			}
+			digests[asset.Media.Digest] = slot
+		}
+	}
+}
+
 func TestThemeTokensAreClosedTypedBoundedAndContrastChecked(t *testing.T) {
 	builtins, err := Builtins()
 	if err != nil {
@@ -130,7 +168,7 @@ func TestThemeManifestStrictMetadataAndCompatibility(t *testing.T) {
 	builtins, _ := Builtins()
 	compiler := NewCompiler(builtins)
 	for name, mutate := range map[string]func(*Manifest){
-		"API major": func(m *Manifest) { m.ThemeAPI.Major = 2 }, "API minor": func(m *Manifest) { m.ThemeAPI.Minor = 1 }, "reserved ID": func(m *Manifest) { m.ID = "endlessfs-shadow" }, "bad ID": func(m *Manifest) { m.ID = "Example" }, "bad version": func(m *Manifest) { m.Version = "latest" }, "remote license": func(m *Manifest) { m.License = "https://license.example" }, "indirect parent": func(m *Manifest) { m.Extends = "com.example.parent" }, "appearance mismatch": func(m *Manifest) { m.Appearance = AppearanceDark },
+		"API major": func(m *Manifest) { m.ThemeAPI.Major = 2 }, "API minor": func(m *Manifest) { m.ThemeAPI.Minor = 2 }, "reserved ID": func(m *Manifest) { m.ID = "endlessfs-shadow" }, "bad ID": func(m *Manifest) { m.ID = "Example" }, "bad version": func(m *Manifest) { m.Version = "latest" }, "remote license": func(m *Manifest) { m.License = "https://license.example" }, "indirect parent": func(m *Manifest) { m.Extends = "com.example.parent" }, "appearance mismatch": func(m *Manifest) { m.Appearance = AppearanceDark },
 	} {
 		t.Run(name, func(t *testing.T) {
 			manifest := customManifest()

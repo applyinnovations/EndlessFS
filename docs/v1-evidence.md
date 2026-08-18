@@ -2,6 +2,23 @@
 
 This is the release evidence index for the acceptance criteria and feature-completion checklist in [the v1 specification](./v1-specification.md). It records the provider-portable, multi-replica implementation and credential-free local qualification of the GCS adapter. It does not claim live GCS interoperability, production durability, deployment readiness, or production operations validation.
 
+## v1.1 media browsing and generated image previews — complete
+
+The [v1.1 extension specification](./v1.1-media-preview-specification.md) is implemented with the portable engine as its authoritative source and the independently faultable deterministic preview store as its artifact boundary. The virtualized grid, metadata filters, full-screen viewer, and file-type icons are always available. Image thumbnail artifacts are optional static WebP only. Original files remain authoritative and ordinary file operations remain available when previews are disabled or unavailable. The preview-store proof does not claim a durable cloud preview bucket. Video and PDF generation remain deferred to the separate v1.2 and v1.3 specifications.
+
+| Requirement | Automated evidence |
+|---|---|
+| Independent, default-off browser/store configuration; unpackaged generators and inaccessible configured stores fail startup | `TestParsePreviewConfiguration`, `TestParseRejectsInvalidPreviewConfiguration`, `TestNewServiceFailsFastForGeneratorAndStoreMisconfiguration`, and `TestRunValidatesConfiguredPreviewDependenciesBeforeServing` |
+| Non-public move-stable identity is canonical across replicas and raw-copy cutovers, is preserved by rename/move/trash/restore, and cannot alias copy/replacement artifacts | shared provider contract `preview content identity lifecycle` over portable memory and local GCS; `TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections`; `TestResolveGeneratesOnceAndRenameReusesArtifact`; `TestResolveCopyAndReplacementRequireDistinctArtifacts` |
+| Automatic recency and source-size policies are independent, exact at their boundaries, and read zero excluded source bytes; explicit generation bypasses those policies | `TestResolveAutomaticPolicyExclusionsReadNoOriginalBytes` and `TestResolveAutomaticPolicyIncludesExactAgeAndSizeBoundaries` |
+| Closed PNG/JPEG/GIF/WebP input set produces bounded, metadata-free, source-aspect-preserving static WebP variants through portable memory and locally qualified GCS source capabilities | image-generator positive/negative matrix beginning with `TestGeneratorProducesStaticWebPAtSourceAspectRatio`, `TestIntegrationGeneratedPreviewReadsPortableGCSSource`, every-orientation coverage, and `FuzzGeneratorMalformed` |
+| Artifact identity, validation, immutable generations, exact capabilities, expiry, corruption denial, runtime removal, and revalidation | reusable preview-store contract via `TestContractMemoryPreviewStore`; `TestContentBindingAndArtifactValidationFailures`; memory-store boundary tests |
+| Authenticated exact-version resolve, explicit generate/regenerate, CSRF/origin enforcement, owner isolation, runtime health failure, safe logging, and unchanged file availability | `TestIntegrationGeneratedPreviewResolveRegenerateAndAuthorization`, `TestPreviewHTTPRejectsUnexpectedFieldsAndStaleVersions`, and `TestIntegrationPreviewRuntimeLossFailsReadinessButNotFileListing` |
+| Lazy virtual grid, square frames with uncropped source-ratio WebP, full-screen viewer, keyboard navigation, 320-pixel dark-theme operation, and bounded 10,002-entry DOM/request behavior | `TestE2EBrowserBootstrapLoginDriveShareAndTrash`, `TestE2EInviteSettingsAdminRecoveryAndShareRevocation`, and embedded-browser source assertions |
+| Profile-selectable release contract and identical configuration schema | `.#container-images` and `.#release-images`; release `CAPABILITIES.json`, dependency/license inventories, recipe/dependency digests, OCI sizes, and deterministic-preview-store limitation |
+
+The focused gate is `nix run .#test-preview`. The final acceptance run used `nix flake check --print-build-logs`; it passed the full build, format, lint, unit, contract, integration, preview, theme, race, fuzz, offline, dependency, security, OCI, and release set without cloud credentials or external services. The real Chromium workflows passed through `nix run .#test-e2e`.
+
 ## Reproducible foundation — implemented baseline
 
 - The one-binary Go module, embedded browser shell, pinned Nix environment, minimal OCI image, release artifacts, GitHub workflows, and repository rulesets were introduced in commit `8c04cbb`.
@@ -95,7 +112,7 @@ The Milestone 4 checkpoint implements specification section 14, acceptance crite
 
 | Requirement | Automated evidence |
 |---|---|
-| Closed versioned registry with typed serializers, bounds, defaults, CSS mapping, contrast pairs, fonts, and complete semantic media slots | `TestThemeTokensAreClosedTypedBoundedAndContrastChecked`; generated `tools/theme api`; [Theme API 1.0](./theme-api.md) |
+| Closed versioned registry with typed serializers, bounds, defaults, CSS mapping, contrast pairs, fonts, and complete semantic media slots | `TestThemeTokensAreClosedTypedBoundedAndContrastChecked`; generated `tools/theme api`; [Theme API 1.1](./theme-api.md) |
 | Immutable complete light/dark bundles through the ordinary compiler | `TestBuiltinsAndMinimalCustomUseOrdinaryCompletePipeline`; `nix run .#test-theme` |
 | Direct built-in inheritance, old-bundle compatible additions, unavailable selection, media fallback, and emergency safe theme | `TestBuiltinsAndMinimalCustomUseOrdinaryCompletePipeline`, `TestOlderCompatibleCustomInheritsSimulatedNewMediaSlot`, `TestThemeReferenceClosureAndAssetFallback`, `TestThemePreferenceIsSeparatePersistentAndSafelyResolved` |
 | Strict manifest metadata/API/license/ID validation and collision prevention | `TestThemeManifestStrictMetadataAndCompatibility`, `TestThemeDigestIsCanonicalAndIDsCannotCollide` |
@@ -151,7 +168,7 @@ Browser network diagnostics retain only request methods and paths: credential ce
 | Every private file/share/trash/operation family rejects another owner's paths, versions, cursor, upload/trash/share/operation IDs, and mutation intent | `TestIntegrationCrossUserPrivateEndpointMatrix`, `TestIntegrationDirectTransfersAndIsolation`, `TestIntegrationCopyMoveTrashRestoreAndDelete` |
 | Raw, encoded, double-encoded, Unicode-normalized, slash/backslash, dot, NUL/control, reserved, and overlong paths fail before provider access | `TestReservedNamespaceAndEncodingCorpusFailsBeforeProviderAccess`, `TestFileHTTPRejectsProviderFieldsBodiesAndTraversalBeforeProvider`, `FuzzParseUserPath`, `FuzzParseUserPathEncodingBoundary` |
 | Structured logs remain secret-safe at every configured level and request logs use route templates | `TestJSONLoggerRedactsSensitiveFieldsAtEveryLevel`, `TestJSONLoggerHonorsConfiguredLevelAndKeepsSafeFields`, `TestRequestLoggingUsesRouteTemplatesAndOmitsSensitiveMaterial`, `FuzzStructuredLogRedaction` |
-| Every required parser/security boundary has a bounded fuzz target | `nix run .#test-fuzz`: fixed 1,000-input CI campaigns for configuration/origin, path, percent encoding, JSON records, cursors, WebAuthn responses, share subtrees, ranges/dispositions, logging, and the complete theme boundary; `TestCheckRejectsWallClockFuzzSmokeBudgets` prevents timing-dependent defaults |
+| Every required parser/security boundary has a bounded fuzz target | `nix run .#test-fuzz`: fixed 1,000-input CI campaigns for configuration/origin, path, percent encoding, JSON records, cursors, WebAuthn responses, share subtrees, ranges/dispositions, logging, the complete theme boundary, and malformed image-preview inputs; `TestCheckRejectsWallClockFuzzSmokeBudgets` prevents timing-dependent defaults |
 | Race-sensitive identity, state, provider, transfer, trash, idempotency, and final-admin behavior is clean | `nix run .#test-race`; explicit concurrent tests and both reusable contracts |
 | Threats, runtime behavior, shutdown, ephemeral state, and absence of a v1 backup claim are reviewed | [Implemented threat model](./threat-model.md), [operations guide](./operations.md), and `TestRunStartsAndGracefullyStopsCompleteApplication` |
 | Static, vulnerability, dependency-license, source, configuration, and OCI policies pass with pinned inputs | `nix run .#security`, `nix run .#dependency-check`, `checks.security`, `checks.dependencies`, `checks.container-policy` |
@@ -163,16 +180,19 @@ The release coverage command is `nix run .#test-coverage`. CI first runs the cac
 
 | Boundary | Statements | Result | Required |
 |---|---:|---:|---:|
-| Repository | 7,120 / 8,367 | 85.096% | 85% |
+| Repository | 8,091 / 9,426 | 85.837% | 85% |
 | Authentication | 154 / 161 | 95.652% | 95% |
 | Authorization | 419 / 438 | 95.662% | 95% |
-| Canonical path | 206 / 211 | 97.630% | 95% |
+| Canonical path | 207 / 212 | 97.642% | 95% |
 | Bearer token | 20 / 21 | 95.238% | 95% |
-| Provider capability | 703 / 736 | 95.516% | 95% |
+| Provider capability | 729 / 764 | 95.419% | 95% |
 | State CAS | 204 / 209 | 97.608% | 95% |
-| Scope mapping | 703 / 736 | 95.516% | 95% |
+| Scope mapping | 729 / 764 | 95.419% | 95% |
 | Theme validation/sanitization | 650 / 684 | 95.029% | 95% |
-| Configuration | 177 / 180 | 98.333% | 95% |
+| Configuration | 264 / 270 | 97.778% | 95% |
+| Preview core | 266 / 276 | 96.377% | 95% |
+| Preview image generator | 189 / 196 | 96.429% | 95% |
+| Preview store | 158 / 166 | 95.181% | 95% |
 
 ### Acceptance-criterion index
 
@@ -252,6 +272,26 @@ The release coverage command is `nix run .#test-coverage`. CI first runs the cac
 | AC-086 | `TestReplicaCompatibilityRejectsWriterConfigurationDrift` covers writer set, security configuration, keyring, and feature mismatch. |
 | AC-087 | Crashed admitted state/operation and active-capability tests require safe recovery/drain before checkpoint closure. |
 | AC-088 | The shared atomic backend contract runs against memory and the protocol-level GCS adapter; generation and lost-success tests enforce the linearization boundary. |
+
+### v1.1 acceptance-criterion index
+
+| Criterion | Evidence |
+|---|---|
+| MP-001 | Default configuration tests, disabled-service provider-call instrumentation, and the complete unchanged v1 regression suite. |
+| MP-002 | Browser/config regression assertions prove grid/filter/viewer availability has no feature flag; `TestE2EMediaBrowserIsAvailableWithoutGeneratedPreviews` proves the icon-only keyboard path and zero preview requests with the provider disabled. |
+| MP-003 | Preview-store contract, runtime loss/revalidation tests, readiness integration, and successful ordinary file listing during preview loss. |
+| MP-004 | Automatic policy exclusion and exact-boundary tests, including source-byte instrumentation. |
+| MP-005 | Explicit generation after age exclusion, regenerate HTTP/browser workflows, and hard-limit/authorization negatives. |
+| MP-006 | Provider identity lifecycle contract, binding validation, cross-owner HTTP denial, and exact-version capability issuance. |
+| MP-007 | Real generator format/aspect/orientation/metadata/animation/resource matrix and malformed-input fuzz target. |
+| MP-008 | Chromium 10,002-entry proof: at most 64 rendered tiles and at most 32 new resolve requests, with square-frame and 96×48 intrinsic-image assertions. |
+| MP-009 | Keyboard viewer workflows in the default desktop path and dark 320-pixel path; semantic controls and focus restoration in embedded-browser tests. |
+| MP-010 | `.#container-images`, `.#release-images`, OCI policy, `CAPABILITIES.json`, dependency inventories, and the full offline flake gate. |
+| MP-011 | Configuration, service assembly, store access-probe, and process-startup fail-fast tests with sanitized errors. |
+| MP-012 | Provider lifecycle contract plus rename reuse and copy/replacement distinct-generation service tests. |
+| MP-013 | Store/service/HTTP negative matrices, preview CSP and origin tests, safe runtime-loss logging, fuzz, race, and security gates. |
+| MP-014 | Loaded-metadata browser filters, no search API/index, and documentation that preserves search as a future feature. |
+| MP-015 | README, operations guide, threat model, release notes, capability inventory, and release inventory distinguish portable memory/local-GCS source qualification, the deterministic preview store, and absent live/production validation. |
 
 ### Release record contract
 

@@ -77,6 +77,10 @@ func TestIntegrationPublicConfigExposesNoSecrets(t *testing.T) {
 	if value["allowRegistration"] != true || value["inviteRegistration"] != false {
 		t.Fatalf("response = %#v", value)
 	}
+	capabilities, ok := value["previewCapabilities"].(map[string]any)
+	if !ok || capabilities["previewSpecification"] != "v1.1" || capabilities["profile"] != "images" || capabilities["artifactMediaTypes"].([]any)[0] != "image/webp" {
+		t.Fatalf("preview capability manifest = %#v", value["previewCapabilities"])
+	}
 	for key := range value {
 		if strings.Contains(strings.ToLower(key), "secret") || strings.Contains(strings.ToLower(key), "token") {
 			t.Fatalf("secret-shaped key exposed: %q", key)

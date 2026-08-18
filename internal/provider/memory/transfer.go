@@ -178,13 +178,18 @@ func (p *Provider) CompleteUpload(ctx context.Context, scope domain.Scope, reque
 		if !exists || current.entry.Version != session.expectedVersion {
 			return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload destination changed")
 		}
-		p.deleteTreeLocked(scope, session.path)
 	} else if exists {
 		return domain.Entry{}, domain.NewError(domain.ErrorConflict, "upload destination appeared during transfer")
 	}
 	data := append([]byte(nil), session.data...)
 	storedMediaType := trustedMediaType(session.mediaType, data, session.materialized)
-	entry := p.newEntryLocked(session.path, domain.EntryFile, session.size, storedMediaType)
+	entry, err := p.newFileEntryLocked(session.path, session.size, storedMediaType)
+	if err != nil {
+		return domain.Entry{}, err
+	}
+	if session.targetExisted {
+		p.deleteTreeLocked(scope, session.path)
+	}
 	p.scopeObjectsLocked(scope)[session.path.String()] = object{entry: entry, data: data, materialized: session.materialized}
 	delete(p.uploadTokens, session.capabilityHash)
 	delete(p.uploads, request.UploadID)

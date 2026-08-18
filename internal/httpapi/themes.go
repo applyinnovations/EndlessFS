@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/theme"
 )
 
 func (api *identityAPI) themeRoutes(mux *http.ServeMux) {
@@ -15,7 +16,7 @@ func (api *identityAPI) themeRoutes(mux *http.ServeMux) {
 }
 
 func (api *identityAPI) listThemes(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"themeAPI": map[string]int{"major": 1, "minor": 0}, "themes": api.themes.Metadata(), "tokens": api.themes.TokenRegistry(), "mediaSlots": api.themes.MediaRegistry()})
+	writeJSON(w, http.StatusOK, map[string]any{"themeAPI": map[string]int{"major": theme.APIMajor, "minor": theme.APIMinor}, "themes": api.themes.Metadata(), "tokens": api.themes.TokenRegistry(), "mediaSlots": api.themes.MediaRegistry()})
 }
 
 func parseThemeResolutionQuery(r *http.Request) (bool, bool, error) {

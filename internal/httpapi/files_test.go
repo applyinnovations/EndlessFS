@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,7 +21,11 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/identity"
+	endlesslogging "github.com/applyinnovations/endlessfs/internal/logging"
 	"github.com/applyinnovations/endlessfs/internal/model"
+	"github.com/applyinnovations/endlessfs/internal/preview"
+	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
+	previewmemory "github.com/applyinnovations/endlessfs/internal/preview/memory"
 	providermemory "github.com/applyinnovations/endlessfs/internal/provider/memory"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
@@ -26,19 +33,31 @@ import (
 )
 
 type driveHTTPEnvironment struct {
-	handler      http.Handler
-	data         *httptest.Server
-	storage      *providermemory.Provider
-	session      *http.Cookie
-	csrf         *http.Cookie
-	otherSession *http.Cookie
-	otherCSRF    *http.Cookie
-	themes       *theme.Manager
-	user         domain.UserID
-	otherUser    domain.UserID
+	handler       http.Handler
+	data          *httptest.Server
+	storage       *providermemory.Provider
+	session       *http.Cookie
+	csrf          *http.Cookie
+	otherSession  *http.Cookie
+	otherCSRF     *http.Cookie
+	themes        *theme.Manager
+	previews      *preview.Service
+	previewStore  *previewmemory.Store
+	previewOrigin string
+	logs          *bytes.Buffer
+	user          domain.UserID
+	otherUser     domain.UserID
 }
 
 func newDriveHTTPEnvironment(t *testing.T) driveHTTPEnvironment {
+	return newDriveHTTPEnvironmentConfigured(t, false)
+}
+
+func newDriveHTTPEnvironmentWithPreviews(t *testing.T) driveHTTPEnvironment {
+	return newDriveHTTPEnvironmentConfigured(t, true)
+}
+
+func newDriveHTTPEnvironmentConfigured(t *testing.T, withPreviews bool) driveHTTPEnvironment {
 	t.Helper()
 	ctx := context.Background()
 	store := state.NewMemoryStore()
@@ -52,10 +71,26 @@ func newDriveHTTPEnvironment(t *testing.T) driveHTTPEnvironment {
 		t.Fatal(err)
 	}
 	storage := providermemory.New(providermemory.Options{Clock: clock, IDs: ids, AllowedOrigin: origin})
+	var previewStore *previewmemory.Store
+	if withPreviews {
+		previewStore, err = previewmemory.New(previewmemory.Options{Clock: clock, IDs: ids, Key: protection, AllowedOrigin: origin})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	data := httptest.NewServer(storage)
 	t.Cleanup(data.Close)
 	if err := storage.SetDataPlaneBaseURL(data.URL); err != nil {
 		t.Fatal(err)
+	}
+	previewOrigin := ""
+	if previewStore != nil {
+		previewData := httptest.NewServer(previewStore)
+		t.Cleanup(previewData.Close)
+		previewOrigin = previewData.URL
+		if err := previewStore.SetDataPlaneBaseURL(previewOrigin); err != nil {
+			t.Fatal(err)
+		}
 	}
 	service, err := drive.NewService(storage, store, repository, ids, clock, protection, origin, data.URL, 1<<20)
 	if err != nil {
@@ -82,7 +117,23 @@ func newDriveHTTPEnvironment(t *testing.T) driveHTTPEnvironment {
 		}
 	}
 	cfg := config.Config{BaseURL: origin, AllowedOrigin: origin, Secure: true}
-	return driveHTTPEnvironment{handler: NewCompleteApplication(cfg, "test", nil, sessions, service, themeManager), data: data, storage: storage, session: sessions.Cookie(issued[0]), csrf: sessions.CSRFCookie(issued[0]), otherSession: sessions.Cookie(issued[1]), otherCSRF: sessions.CSRFCookie(issued[1]), themes: themeManager, user: users[0], otherUser: users[1]}
+	var previewService *preview.Service
+	var handler http.Handler
+	var logOutput bytes.Buffer
+	if withPreviews {
+		cfg.PreviewProvider = "mock"
+		cfg.PreviewAutomatic = true
+		cfg.PreviewFormats = []string{"image"}
+		cfg.PreviewResolutions = []int{256, 512, 1600}
+		previewService, err = preview.NewService(preview.Options{Automatic: true, Resolutions: cfg.PreviewResolutions, ApplicationState: store}, storage, previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, data.Client(), ids, clock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler = NewCompleteApplicationWithPreviewAndLogger(cfg, "test", nil, sessions, service, previewService, endlesslogging.NewJSON(&logOutput, 0), themeManager)
+	} else {
+		handler = NewCompleteApplication(cfg, "test", nil, sessions, service, themeManager)
+	}
+	return driveHTTPEnvironment{handler: handler, data: data, storage: storage, session: sessions.Cookie(issued[0]), csrf: sessions.CSRFCookie(issued[0]), otherSession: sessions.Cookie(issued[1]), otherCSRF: sessions.CSRFCookie(issued[1]), themes: themeManager, previews: previewService, previewStore: previewStore, previewOrigin: previewOrigin, logs: &logOutput, user: users[0], otherUser: users[1]}
 }
 
 func httpUserID(t *testing.T, fill byte) domain.UserID {
@@ -92,6 +143,47 @@ func httpUserID(t *testing.T, fill byte) domain.UserID {
 		t.Fatal(err)
 	}
 	return value
+}
+
+func uploadHTTPPreviewImage(t *testing.T, env driveHTTPEnvironment, pathValue string) domain.Entry {
+	t.Helper()
+	value := image.NewNRGBA(image.Rect(0, 0, 24, 12))
+	for y := range 12 {
+		for x := range 24 {
+			value.SetNRGBA(x, y, color.NRGBA{R: uint8(x * 9), G: uint8(y * 13), B: 80, A: 255})
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, value); err != nil {
+		t.Fatal(err)
+	}
+	data := encoded.Bytes()
+	scope, err := domain.NewScope(env.user, domain.AreaLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := domain.MustParseUserPath(pathValue)
+	upload, err := env.storage.CreateUpload(context.Background(), scope, domain.CreateUploadRequest{Path: path, Size: int64(len(data)), MediaType: "image/png"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := http.NewRequest(upload.Method, upload.URL, bytes.NewReader(data))
+	for name, header := range upload.Headers {
+		request.Header.Set(name, header)
+	}
+	response, err := env.data.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("preview fixture upload = %d", response.StatusCode)
+	}
+	entry, err := env.storage.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: upload.UploadID, Path: path, Size: int64(len(data)), MediaType: "image/png"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entry
 }
 
 func driveMutationHeaders(csrf, key string) map[string]string {
@@ -199,6 +291,111 @@ func TestIntegrationFileHTTPDirectDataPathTrashAndShare(t *testing.T) {
 	}
 	if csp := createdDirectory.Header().Get("Content-Security-Policy"); csp == "" || !bytes.Contains([]byte(csp), []byte(env.data.URL)) {
 		t.Fatalf("CSP = %q", csp)
+	}
+}
+
+func TestIntegrationGeneratedPreviewResolveRegenerateAndAuthorization(t *testing.T) {
+	env := newDriveHTTPEnvironmentWithPreviews(t)
+	const origin = "https://drive.example.test"
+	entry := uploadHTTPPreviewImage(t, env, "/photo.png")
+	cookies := []*http.Cookie{env.session, env.csrf}
+	body, _ := json.Marshal(map[string]any{"items": []map[string]any{{"path": entry.Path.String(), "version": entry.Version, "variant": 256}}})
+
+	missingCSRF := performRequest(t, env.handler, http.MethodPost, "/api/v1/previews/resolve", origin, string(body), []*http.Cookie{env.session}, map[string]string{"Content-Type": "application/json"})
+	if missingCSRF.Code != http.StatusForbidden {
+		t.Fatalf("resolve without CSRF = %d %s", missingCSRF.Code, missingCSRF.Body.String())
+	}
+	resolved := performRequest(t, env.handler, http.MethodPost, "/api/v1/previews/resolve", origin, string(body), cookies, driveMutationHeaders(env.csrf.Value, ""))
+	if resolved.Code != http.StatusOK {
+		t.Fatalf("resolve = %d %s", resolved.Code, resolved.Body.String())
+	}
+	if csp := resolved.Header().Get("Content-Security-Policy"); env.previewOrigin == env.data.URL || !strings.Contains(csp, env.data.URL) || !strings.Contains(csp, env.previewOrigin) {
+		t.Fatalf("preview CSP origins = %q, source=%q preview=%q", csp, env.data.URL, env.previewOrigin)
+	}
+	var resolveResponse preview.ResolveResponse
+	decodeResponse(t, resolved, &resolveResponse)
+	if len(resolveResponse.Items) != 1 || resolveResponse.Items[0].State != preview.StateReady || resolveResponse.Items[0].Artifact == nil || resolveResponse.Items[0].Artifact.ContentType != "image/webp" || resolveResponse.Items[0].Capability == nil {
+		t.Fatalf("resolve response = %+v", resolveResponse)
+	}
+	if bytes.Contains(resolved.Body.Bytes(), []byte("contentID")) || bytes.Contains(resolved.Body.Bytes(), []byte(string(entry.ContentID))) {
+		t.Fatalf("resolve exposed private content identity: %s", resolved.Body.String())
+	}
+	artifactRequest, _ := http.NewRequest(resolveResponse.Items[0].Capability.Method, resolveResponse.Items[0].Capability.URL, nil)
+	artifactRequest.Header.Set("Origin", origin)
+	artifactResponse, err := env.data.Client().Do(artifactRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactBytes, _ := io.ReadAll(artifactResponse.Body)
+	artifactResponse.Body.Close()
+	if artifactResponse.StatusCode != http.StatusOK || artifactResponse.Header.Get("Content-Type") != "image/webp" || string(artifactBytes[:4]) != "RIFF" {
+		t.Fatalf("artifact = %d %v %q", artifactResponse.StatusCode, artifactResponse.Header, artifactBytes)
+	}
+
+	regenerateBody, _ := json.Marshal(map[string]any{"path": entry.Path.String(), "version": entry.Version, "variant": 256, "action": "regenerate"})
+	regenerated := performRequest(t, env.handler, http.MethodPost, "/api/v1/previews/generations", origin, string(regenerateBody), cookies, driveMutationHeaders(env.csrf.Value, "preview-http-regenerate-0001"))
+	if regenerated.Code != http.StatusAccepted {
+		t.Fatalf("regenerate = %d %s", regenerated.Code, regenerated.Body.String())
+	}
+	var operation preview.Operation
+	decodeResponse(t, regenerated, &operation)
+	if operation.State != domain.OperationSucceeded || operation.Result == nil || operation.Result.Artifact.GenerationID == resolveResponse.Items[0].Artifact.GenerationID {
+		t.Fatalf("regenerate operation = %+v", operation)
+	}
+	polled := performRequest(t, env.handler, http.MethodGet, "/api/v1/previews/operations/"+string(operation.ID), "", "", []*http.Cookie{env.session}, nil)
+	if polled.Code != http.StatusOK {
+		t.Fatalf("operation poll = %d %s", polled.Code, polled.Body.String())
+	}
+	other := performRequest(t, env.handler, http.MethodPost, "/api/v1/previews/resolve", origin, string(body), []*http.Cookie{env.otherSession, env.otherCSRF}, driveMutationHeaders(env.otherCSRF.Value, ""))
+	if other.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner resolve = %d %s", other.Code, other.Body.String())
+	}
+	otherOperation := performRequest(t, env.handler, http.MethodGet, "/api/v1/previews/operations/"+string(operation.ID), "", "", []*http.Cookie{env.otherSession}, nil)
+	if otherOperation.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner operation = %d", otherOperation.Code)
+	}
+}
+
+func TestIntegrationPreviewRuntimeLossFailsReadinessButNotFileListing(t *testing.T) {
+	env := newDriveHTTPEnvironmentWithPreviews(t)
+	const origin = "https://drive.example.test"
+	entry := uploadHTTPPreviewImage(t, env, "/ready.png")
+	env.previewStore.SetAvailable(false)
+	body, _ := json.Marshal(map[string]any{"items": []map[string]any{{"path": entry.Path.String(), "version": entry.Version, "variant": 256}}})
+	resolve := performRequest(t, env.handler, http.MethodPost, "/api/v1/previews/resolve", origin, string(body), []*http.Cookie{env.session, env.csrf}, driveMutationHeaders(env.csrf.Value, ""))
+	if resolve.Code != http.StatusOK || !bytes.Contains(resolve.Body.Bytes(), []byte(`"state":"unavailable"`)) {
+		t.Fatalf("unavailable resolve = %d %s", resolve.Code, resolve.Body.String())
+	}
+	if logValue := env.logs.String(); !strings.Contains(logValue, `"msg":"preview_unavailable"`) || !strings.Contains(logValue, `"category":"preview_store"`) || strings.Contains(logValue, entry.Path.String()) || strings.Contains(logValue, string(entry.ContentID)) {
+		t.Fatalf("preview loss log was not safe and loud: %s", logValue)
+	}
+	ready := performRequest(t, env.handler, http.MethodGet, "/readyz", "", "", nil, nil)
+	if ready.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readiness after preview loss = %d %s", ready.Code, ready.Body.String())
+	}
+	listing := performRequest(t, env.handler, http.MethodGet, "/api/v1/files?path=/", "", "", []*http.Cookie{env.session}, nil)
+	if listing.Code != http.StatusOK || !bytes.Contains(listing.Body.Bytes(), []byte("ready.png")) {
+		t.Fatalf("authoritative listing during preview loss = %d %s", listing.Code, listing.Body.String())
+	}
+	env.previewStore.SetAvailable(true)
+	ready = performRequest(t, env.handler, http.MethodGet, "/readyz", "", "", nil, nil)
+	if ready.Code != http.StatusOK {
+		t.Fatalf("readiness after revalidation = %d %s", ready.Code, ready.Body.String())
+	}
+}
+
+func TestPreviewHTTPRejectsUnexpectedFieldsAndStaleVersions(t *testing.T) {
+	env := newDriveHTTPEnvironmentWithPreviews(t)
+	const origin = "https://drive.example.test"
+	entry := uploadHTTPPreviewImage(t, env, "/strict.png")
+	cookies := []*http.Cookie{env.session, env.csrf}
+	unexpected := performRequest(t, env.handler, http.MethodPost, "/api/v1/previews/resolve", origin, `{"items":[{"path":"/strict.png","version":"stale","variant":256,"bucket":"private"}]}`, cookies, driveMutationHeaders(env.csrf.Value, ""))
+	if unexpected.Code != http.StatusBadRequest {
+		t.Fatalf("unexpected field = %d %s", unexpected.Code, unexpected.Body.String())
+	}
+	stale := performRequest(t, env.handler, http.MethodPost, "/api/v1/previews/resolve", origin, `{"items":[{"path":"/strict.png","version":"stale","variant":256}]}`, cookies, driveMutationHeaders(env.csrf.Value, ""))
+	if stale.Code != http.StatusPreconditionFailed {
+		t.Fatalf("stale resolve = %d %s, current=%s", stale.Code, stale.Body.String(), entry.Version)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
 )
 
 func TestTransferHelpersRejectMalformedProviderValues(t *testing.T) {
@@ -259,4 +261,394 @@ func TestTransferLeaseRandomFailureAndSingleResume(t *testing.T) {
 	if err != nil || capability.Protocol != domain.UploadSingle || capability.ChunkRules != nil || capability.DeclaredSize != 1 {
 		t.Fatalf("single resume = %+v, %v", capability, err)
 	}
+}
+
+func TestTransferProviderFailureMatrixFailsClosed(t *testing.T) {
+	now := time.Now().UTC()
+	key := objectstore.MustKey("endlessfs/v1/staging/user/failure/data")
+	request := objectstore.UploadRequest{UploadID: "failure-upload", Key: key, Size: 4, MediaType: "text/plain", Resumable: true, ExpiresAt: now.Add(time.Minute)}
+
+	t.Run("construction", func(t *testing.T) {
+		backend, _ := newTransferBoundaryBackend(t, now, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writeBoundaryGCSProblem(writer, http.StatusNotFound)
+		}))
+		if configured, err := NewWithTransfers(backend.client, "endlessfs-test", TransferOptions{}); configured != nil || !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("NewWithTransfers() = %+v, %v", configured, err)
+		}
+		backend.owned = true
+		if err := backend.Close(); err != nil || backend.owned {
+			t.Fatalf("owned Close() error = %v, owned=%v", err, backend.owned)
+		}
+	})
+
+	for name, configure := range map[string]func(*Backend, *httptest.Server){
+		"signing": func(backend *Backend, _ *httptest.Server) {
+			backend.transfer.signBytes = func([]byte) ([]byte, error) { return nil, errors.New("signing unavailable") }
+		},
+		"transport": func(backend *Backend, _ *httptest.Server) {
+			backend.transfer.httpClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("transport unavailable") })}
+		},
+	} {
+		t.Run("begin-"+name, func(t *testing.T) {
+			backend, server := newTransferBoundaryBackend(t, now, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				writer.Header().Set("Location", "http://"+request.Host+"/session")
+				writer.WriteHeader(http.StatusCreated)
+			}))
+			configure(backend, server)
+			if _, err := backend.BeginUpload(context.Background(), request); !errors.Is(err, domain.ErrUnavailable) {
+				t.Fatalf("BeginUpload() error = %v", err)
+			}
+		})
+	}
+
+	for name, handler := range map[string]http.Handler{
+		"status": http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writeBoundaryGCSProblem(writer, http.StatusTeapot) }),
+		"location": http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writer.Header().Set("Location", "https://other.example/session")
+			writer.WriteHeader(http.StatusCreated)
+		}),
+	} {
+		t.Run("begin-"+name, func(t *testing.T) {
+			backend, _ := newTransferBoundaryBackend(t, now, handler)
+			if _, err := backend.BeginUpload(context.Background(), request); err == nil {
+				t.Fatal("BeginUpload() unexpectedly succeeded")
+			}
+		})
+	}
+
+	t.Run("begin-seal", func(t *testing.T) {
+		backend, _ := newTransferBoundaryBackend(t, now, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			writer.Header().Set("Location", "http://"+request.Host+"/session")
+			writer.WriteHeader(http.StatusCreated)
+		}))
+		backend.transfer.random = strings.NewReader("short")
+		if _, err := backend.BeginUpload(context.Background(), request); !errors.Is(err, domain.ErrInternal) {
+			t.Fatalf("BeginUpload() seal error = %v", err)
+		}
+	})
+
+	t.Run("progress-and-abort", func(t *testing.T) {
+		status := http.StatusPermanentRedirect
+		rangeValue := "bytes=0-x"
+		backend, server := newTransferBoundaryBackend(t, now, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if strings.HasPrefix(request.URL.Path, "/storage/v1/") {
+				writeBoundaryGCSProblem(writer, http.StatusNotFound)
+				return
+			}
+			if request.Method == http.MethodDelete {
+				writer.WriteHeader(status)
+				return
+			}
+			writer.Header().Set("Range", rangeValue)
+			writer.WriteHeader(status)
+		}))
+		lease := uploadLease{SchemaVersion: 1, UploadID: "upload", Key: key.String(), Size: 4, MediaType: "text/plain", Protocol: domain.UploadResumable, SessionURL: server.URL + "/session", ExpiresAt: now.Add(time.Minute)}
+		sealed, err := backend.sealLease(lease)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backend.UploadProgress(context.Background(), []byte("invalid")); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid progress lease error = %v", err)
+		}
+		canceled, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := backend.UploadProgress(canceled, sealed); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("canceled progress error = %v", err)
+		}
+		if _, err := backend.ResumeUpload(canceled, sealed); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("canceled resume error = %v", err)
+		}
+		if _, err := backend.UploadProgress(context.Background(), sealed); !errors.Is(err, domain.ErrInternal) {
+			t.Fatalf("invalid progress range error = %v", err)
+		}
+
+		rangeValue = ""
+		status = http.StatusTeapot
+		if _, err := backend.UploadProgress(context.Background(), sealed); !errors.Is(err, domain.ErrInternal) {
+			t.Fatalf("progress status error = %v", err)
+		}
+		if err := backend.AbortUpload(context.Background(), sealed); !errors.Is(err, domain.ErrInternal) {
+			t.Fatalf("abort status error = %v", err)
+		}
+
+		backend.transfer.httpClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("transport unavailable") })}
+		if _, err := backend.UploadProgress(context.Background(), sealed); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("progress transport error = %v", err)
+		}
+		if err := backend.AbortUpload(context.Background(), sealed); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("abort transport error = %v", err)
+		}
+
+		invalidURL := lease
+		invalidURL.SessionURL = ":"
+		invalidSealed, err := backend.sealLease(invalidURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := backend.AbortUpload(context.Background(), invalidSealed); !errors.Is(err, domain.ErrInternal) {
+			t.Fatalf("abort URL error = %v", err)
+		}
+	})
+
+	t.Run("download-and-seal", func(t *testing.T) {
+		backend, _ := newTransferBoundaryBackend(t, now, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writeBoundaryGCSProblem(writer, http.StatusNotFound)
+		}))
+		download := objectstore.DownloadRequest{Key: key, Version: "foreign", Filename: "safe.txt", MediaType: "text/plain", Disposition: domain.DispositionAttachment, ExpiresAt: now.Add(time.Minute)}
+		if _, err := backend.CreateDownload(context.Background(), download); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("foreign download version error = %v", err)
+		}
+		download.Version = encodeVersion(1)
+		backend.transfer.signBytes = func([]byte) ([]byte, error) { return nil, errors.New("signing unavailable") }
+		if _, err := backend.CreateDownload(context.Background(), download); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("download signing error = %v", err)
+		}
+		lease := uploadLease{SchemaVersion: 1, UploadID: "upload", Key: key.String(), Size: 1, MediaType: "text/plain", Protocol: domain.UploadSingle, ExpiresAt: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}
+		if _, err := backend.sealLease(lease); !errors.Is(err, domain.ErrInternal) {
+			t.Fatalf("lease encoding error = %v", err)
+		}
+	})
+}
+
+func TestBackendAndTransferReconciliationBranchesFailClosed(t *testing.T) {
+	now := time.Now().UTC()
+	key := objectstore.MustKey("endlessfs/v1/staging/user/reconcile/data")
+
+	if _, err := Open(context.Background(), "x"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Open(invalid bucket) error = %v", err)
+	}
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", t.TempDir()+"/missing-credentials.json")
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Open(canceled, "endlessfs-test"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("Open(invalid ADC) error = %v", err)
+	}
+
+	backend, _ := newTransferBoundaryBackend(t, now, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writeBoundaryGCSProblem(writer, http.StatusNotFound)
+	}))
+	if _, err := backend.Put(context.Background(), key, nil, objectstore.PutCondition{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Put(invalid condition) error = %v", err)
+	}
+	if _, err := backend.Copy(context.Background(), key, objectstore.MustKey("endlessfs/v1/staging/user/reconcile/copy"), objectstore.CopyCondition{SourceVersion: encodeVersion(1)}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Copy(invalid destination condition) error = %v", err)
+	}
+	if _, err := backend.conditionedObject(key, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: "foreign"}); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("conditionedObject(foreign version) error = %v", err)
+	}
+	if _, err := backend.conditionedObject(key, objectstore.PutCondition{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("conditionedObject(invalid mode) error = %v", err)
+	}
+	transportFailure := errors.New("opaque copy failure")
+	if err := backend.classifyCopy(context.Background(), key, 1, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: encodeVersion(1)}, transportFailure); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("classifyCopy(match) error = %v", err)
+	}
+	if err := backend.classifyCopy(context.Background(), key, 1, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}, transportFailure); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("classifyCopy(non-precondition) error = %v", err)
+	}
+
+	for name, test := range map[string]struct {
+		handler func(http.ResponseWriter, *http.Request, *int)
+		lease   uploadLease
+		invoke  func(*Backend, []byte) error
+		want    error
+	}{
+		"progress-head-failure": {
+			handler: func(writer http.ResponseWriter, request *http.Request, _ *int) {
+				writeBoundaryGCSProblem(writer, http.StatusTeapot)
+			},
+			lease: boundaryLease(now, key, domain.UploadSingle, "", 4),
+			invoke: func(backend *Backend, sealed []byte) error {
+				_, err := backend.UploadProgress(context.Background(), sealed)
+				return err
+			},
+			want: domain.ErrInternal,
+		},
+		"progress-single-missing": {
+			handler: func(writer http.ResponseWriter, request *http.Request, _ *int) {
+				writeBoundaryGCSProblem(writer, http.StatusNotFound)
+			},
+			lease: boundaryLease(now, key, domain.UploadSingle, "", 4),
+			invoke: func(backend *Backend, sealed []byte) error {
+				progress, err := backend.UploadProgress(context.Background(), sealed)
+				if err == nil && progress.Complete {
+					return errors.New("missing single upload was complete")
+				}
+				return err
+			},
+		},
+		"progress-existing-size": {
+			handler: func(writer http.ResponseWriter, request *http.Request, _ *int) {
+				writeBoundaryObject(writer, key.String(), 1, 3)
+			},
+			lease: boundaryLease(now, key, domain.UploadSingle, "", 4),
+			invoke: func(backend *Backend, sealed []byte) error {
+				_, err := backend.UploadProgress(context.Background(), sealed)
+				return err
+			},
+			want: domain.ErrPreconditionFailed,
+		},
+		"progress-invalid-session": {
+			handler: func(writer http.ResponseWriter, request *http.Request, _ *int) {
+				writeBoundaryGCSProblem(writer, http.StatusNotFound)
+			},
+			lease: boundaryLease(now, key, domain.UploadResumable, ":", 4),
+			invoke: func(backend *Backend, sealed []byte) error {
+				_, err := backend.UploadProgress(context.Background(), sealed)
+				return err
+			},
+			want: domain.ErrInternal,
+		},
+		"progress-complete-missing-object": {
+			handler: func(writer http.ResponseWriter, request *http.Request, calls *int) {
+				if strings.HasPrefix(request.URL.Path, "/storage/v1/") {
+					*calls++
+					writeBoundaryGCSProblem(writer, http.StatusNotFound)
+					return
+				}
+				writer.WriteHeader(http.StatusOK)
+			},
+			lease: boundaryLease(now, key, domain.UploadResumable, "SESSION", 4),
+			invoke: func(backend *Backend, sealed []byte) error {
+				_, err := backend.UploadProgress(context.Background(), sealed)
+				return err
+			},
+			want: domain.ErrNotFound,
+		},
+		"abort-head-failure": {
+			handler: func(writer http.ResponseWriter, request *http.Request, _ *int) {
+				writeBoundaryGCSProblem(writer, http.StatusTeapot)
+			},
+			lease:  boundaryLease(now, key, domain.UploadSingle, "", 4),
+			invoke: func(backend *Backend, sealed []byte) error { return backend.AbortUpload(context.Background(), sealed) },
+			want:   domain.ErrInternal,
+		},
+		"abort-size-mismatch": {
+			handler: func(writer http.ResponseWriter, request *http.Request, _ *int) {
+				writeBoundaryObject(writer, key.String(), 1, 3)
+			},
+			lease:  boundaryLease(now, key, domain.UploadSingle, "", 4),
+			invoke: func(backend *Backend, sealed []byte) error { return backend.AbortUpload(context.Background(), sealed) },
+			want:   domain.ErrPreconditionFailed,
+		},
+		"abort-delete-failure": {
+			handler: func(writer http.ResponseWriter, request *http.Request, _ *int) {
+				if request.Method == http.MethodDelete {
+					writeBoundaryGCSProblem(writer, http.StatusInternalServerError)
+					return
+				}
+				writeBoundaryObject(writer, key.String(), 1, 4)
+			},
+			lease:  boundaryLease(now, key, domain.UploadSingle, "", 4),
+			invoke: func(backend *Backend, sealed []byte) error { return backend.AbortUpload(context.Background(), sealed) },
+			want:   domain.ErrUnavailable,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			var server *httptest.Server
+			handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if test.lease.SessionURL == "SESSION" {
+					test.lease.SessionURL = server.URL + "/session"
+				}
+				test.handler(writer, request, &calls)
+			})
+			backend, server = newTransferBoundaryBackend(t, now, handler)
+			if test.lease.SessionURL == "SESSION" {
+				test.lease.SessionURL = server.URL + "/session"
+			}
+			sealed, err := backend.sealLease(test.lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = test.invoke(backend, sealed)
+			if test.want == nil && err != nil {
+				t.Fatalf("operation error = %v", err)
+			}
+			if test.want != nil && !errors.Is(err, test.want) {
+				t.Fatalf("operation error = %v, want %v", err, test.want)
+			}
+		})
+	}
+
+	backend, _ = newTransferBoundaryBackend(t, now, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writeBoundaryGCSProblem(writer, http.StatusNotFound)
+	}))
+	invalidFilename := objectstore.DownloadRequest{Key: key, Version: encodeVersion(1), Filename: "safe.txt", MediaType: "text/plain", Disposition: domain.Disposition("\n"), ExpiresAt: now.Add(time.Minute)}
+	if _, err := backend.CreateDownload(context.Background(), invalidFilename); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid download filename error = %v", err)
+	}
+}
+
+func TestBackendRejectsInvalidProviderMutationMetadata(t *testing.T) {
+	now := time.Now().UTC()
+	key := objectstore.MustKey("endlessfs/v1/state/users/metadata.json")
+	destination := objectstore.MustKey("endlessfs/v1/state/users/metadata-copy.json")
+	backend, _ := newTransferBoundaryBackend(t, now, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.Contains(request.URL.Path, "rewriteTo") {
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(writer, `{"kind":"storage#rewriteResponse","totalBytesRewritten":"1","objectSize":"1","done":true,"resource":{"kind":"storage#object","bucket":"endlessfs-test","name":%q,"size":"1","generation":"0","metageneration":"1","crc32c":"AAAAAA=="}}`, destination.String())
+			return
+		}
+		writeBoundaryObject(writer, key.String(), 0, 1)
+	}))
+	if _, err := backend.Head(context.Background(), key); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("Head(invalid generation) error = %v", err)
+	}
+	if _, err := backend.Put(context.Background(), key, []byte("x"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("Put(invalid generation) error = %v", err)
+	}
+	if _, err := backend.Put(context.Background(), key, []byte("x"), objectstore.PutCondition{Mode: objectstore.PutMatch, Version: "foreign"}); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("Put(foreign match version) error = %v", err)
+	}
+	if _, err := backend.Copy(context.Background(), key, destination, objectstore.CopyCondition{SourceVersion: encodeVersion(1), Destination: objectstore.PutCondition{Mode: objectstore.PutMatch, Version: "foreign"}}); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("Copy(foreign destination version) error = %v", err)
+	}
+	if _, err := backend.Copy(context.Background(), key, destination, objectstore.CopyCondition{SourceVersion: encodeVersion(1), Destination: objectstore.PutCondition{Mode: objectstore.PutCreateOnly}}); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("Copy(invalid generation) error = %v", err)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+func newTransferBoundaryBackend(t *testing.T, now time.Time, handler http.Handler) (*Backend, *httptest.Server) {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	client, err := storage.NewClient(context.Background(), storage.WithJSONReads(), option.WithEndpoint(server.URL+"/storage/v1/"), option.WithHTTPClient(server.Client()), option.WithoutAuthentication())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	backend, err := NewWithTransfers(client, "endlessfs-test", TransferOptions{
+		HTTPClient: server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
+		SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x55}, 256), nil },
+		Hostname:  strings.TrimPrefix(server.URL, "http://"), Insecure: true,
+		LeaseKey: bytes.Repeat([]byte{0x44}, 32), Random: bytes.NewReader(bytes.Repeat([]byte{0x22}, 4096)), Clock: domain.NewFixedClock(now),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return backend, server
+}
+
+func writeBoundaryGCSProblem(writer http.ResponseWriter, status int) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(status)
+	_, _ = fmt.Fprintf(writer, `{"error":{"code":%d,"message":"failure"}}`, status)
+}
+
+func boundaryLease(now time.Time, key objectstore.Key, protocol domain.UploadProtocol, session string, size int64) uploadLease {
+	return uploadLease{SchemaVersion: 1, UploadID: "upload", Key: key.String(), Size: size, MediaType: "text/plain", Protocol: protocol, SessionURL: session, ExpiresAt: now.Add(time.Minute)}
+}
+
+func writeBoundaryObject(writer http.ResponseWriter, key string, generation, size int64) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprintf(writer, `{"kind":"storage#object","bucket":"endlessfs-test","name":%q,"size":%q,"generation":%q,"metageneration":"1","crc32c":"AAAAAA=="}`, key, fmt.Sprint(size), fmt.Sprint(generation))
 }

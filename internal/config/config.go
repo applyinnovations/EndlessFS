@@ -16,52 +16,73 @@ import (
 )
 
 const (
-	defaultListenAddr           = "127.0.0.1:8080"
-	defaultSessionTTL           = 12 * time.Hour
-	maximumSessionTTL           = 7 * 24 * time.Hour
-	defaultDownloadTTL          = time.Minute
-	maximumDownloadTTL          = 10 * time.Minute
-	defaultUploadTTL            = 5 * time.Minute
-	maximumUploadTTL            = time.Hour
-	defaultTextPreviewMax int64 = 1 << 20
+	defaultListenAddr                = "127.0.0.1:8080"
+	defaultSessionTTL                = 12 * time.Hour
+	maximumSessionTTL                = 7 * 24 * time.Hour
+	defaultDownloadTTL               = time.Minute
+	maximumDownloadTTL               = 10 * time.Minute
+	defaultUploadTTL                 = 5 * time.Minute
+	maximumUploadTTL                 = time.Hour
+	defaultTextPreviewMax      int64 = 1 << 20
+	defaultPreviewOperationTTL       = 45 * time.Second
+	maximumPreviewOperationTTL       = 5 * time.Minute
+	defaultPreviewStartupTTL         = 10 * time.Second
+	maximumPreviewStartupTTL         = time.Minute
 )
 
 // Config is the validated process configuration. Secret fields use a redacting
 // value type and are never included in PublicConfig.
 type Config struct {
-	ListenAddr            string
-	BaseURL               string
-	AllowedOrigin         string
-	Secure                bool
-	StorageProvider       string
-	MockProviderURL       string
-	GCSFileBucket         string
-	GCSStateBucket        string
-	GCSSigningAccount     string
-	WriterSetID           string
-	AllowRegistration     bool
-	InviteRegistration    bool
-	BootstrapToken        secret.Value
-	SessionSecret         secret.Value
-	WebAuthnRPID          string
-	WebAuthnRPName        string
-	SessionTTL            time.Duration
-	DownloadCapabilityTTL time.Duration
-	UploadInitTTL         time.Duration
-	TextPreviewMaxBytes   int64
-	DefaultLightTheme     string
-	DefaultDarkTheme      string
-	LogLevel              slog.Level
+	ListenAddr                string
+	BaseURL                   string
+	AllowedOrigin             string
+	Secure                    bool
+	StorageProvider           string
+	MockProviderURL           string
+	GCSFileBucket             string
+	GCSStateBucket            string
+	GCSSigningAccount         string
+	WriterSetID               string
+	AllowRegistration         bool
+	InviteRegistration        bool
+	BootstrapToken            secret.Value
+	SessionSecret             secret.Value
+	WebAuthnRPID              string
+	WebAuthnRPName            string
+	SessionTTL                time.Duration
+	DownloadCapabilityTTL     time.Duration
+	UploadInitTTL             time.Duration
+	TextPreviewMaxBytes       int64
+	DefaultLightTheme         string
+	DefaultDarkTheme          string
+	LogLevel                  slog.Level
+	PreviewProvider           string
+	PreviewAutomatic          bool
+	PreviewFormats            []string
+	PreviewAutoMaxAge         *time.Duration
+	PreviewAutoMaxSourceBytes *int64
+	PreviewResolutions        []int
+	PreviewMaxConcurrency     int
+	PreviewOperationTimeout   time.Duration
+	PreviewStartupTimeout     time.Duration
+	PreviewKeySecret          secret.Value
 }
 
 // PublicConfig contains the non-secret settings safe to expose to browsers.
 type PublicConfig struct {
-	AllowRegistration            bool `json:"allowRegistration"`
-	InviteRegistration           bool `json:"inviteRegistration"`
-	PasskeysAvailable            bool `json:"passkeysAvailable"`
-	MaximumUploadInitializations int  `json:"maximumUploadInitializations"`
-	DefaultTransferConcurrency   int  `json:"defaultTransferConcurrency"`
-	MaximumTransferConcurrency   int  `json:"maximumTransferConcurrency"`
+	AllowRegistration            bool     `json:"allowRegistration"`
+	InviteRegistration           bool     `json:"inviteRegistration"`
+	PasskeysAvailable            bool     `json:"passkeysAvailable"`
+	MaximumUploadInitializations int      `json:"maximumUploadInitializations"`
+	DefaultTransferConcurrency   int      `json:"defaultTransferConcurrency"`
+	MaximumTransferConcurrency   int      `json:"maximumTransferConcurrency"`
+	PreviewConfigured            bool     `json:"previewConfigured"`
+	PreviewAutomatic             bool     `json:"previewAutomatic"`
+	PreviewFormats               []string `json:"previewFormats"`
+	PreviewResolutions           []int    `json:"previewResolutions"`
+	PreviewMaxConcurrency        int      `json:"previewMaxConcurrency"`
+	PreviewAutoMaxAgeSeconds     *int64   `json:"previewAutoMaxAgeSeconds,omitempty"`
+	PreviewAutoMaxSourceBytes    *int64   `json:"previewAutoMaxSourceBytes,omitempty"`
 }
 
 // Load reads configuration from the process environment.
@@ -214,31 +235,95 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if _, configured := lookup("ENDLESSFS_MEDIA_BROWSER_ENABLED"); configured {
+		return Config{}, fmt.Errorf("ENDLESSFS_MEDIA_BROWSER_ENABLED: removed because media browsing is always available; configure only generated thumbnails with ENDLESSFS_PREVIEW_PROVIDER")
+	}
+	previewProvider := "disabled"
+	if value, ok := lookup("ENDLESSFS_PREVIEW_PROVIDER"); ok {
+		previewProvider = strings.TrimSpace(value)
+	}
+	if previewProvider != "disabled" && previewProvider != "mock" {
+		return Config{}, fmt.Errorf("ENDLESSFS_PREVIEW_PROVIDER: expected exactly disabled or mock")
+	}
+	if previewProvider == "mock" {
+		if storageProvider != "mock" {
+			return Config{}, fmt.Errorf("ENDLESSFS_PREVIEW_PROVIDER: mock previews are available only with mock storage")
+		}
+		if secure || !listenLoopback || !isLoopbackHost(baseURL.Hostname()) {
+			return Config{}, fmt.Errorf("ENDLESSFS_PREVIEW_PROVIDER: mock previews are available only in HTTP loopback development")
+		}
+	}
+	previewAutomatic, err := parseBool(lookup, "ENDLESSFS_PREVIEW_AUTOMATIC", previewProvider != "disabled")
+	if err != nil {
+		return Config{}, err
+	}
+	previewFormats, err := parsePreviewFormats(lookup)
+	if err != nil {
+		return Config{}, err
+	}
+	previewAutoMaxAge, err := parseOptionalDuration(lookup, "ENDLESSFS_PREVIEW_AUTO_MAX_AGE")
+	if err != nil {
+		return Config{}, err
+	}
+	previewAutoMaxSourceBytes, err := parseOptionalPositiveInt64(lookup, "ENDLESSFS_PREVIEW_AUTO_MAX_SOURCE_BYTES")
+	if err != nil {
+		return Config{}, err
+	}
+	previewResolutions, err := parsePreviewResolutions(lookup)
+	if err != nil {
+		return Config{}, err
+	}
+	previewMaxConcurrency64, err := parsePositiveInt64(lookup, "ENDLESSFS_PREVIEW_MAX_CONCURRENCY", 2, 8)
+	if err != nil {
+		return Config{}, err
+	}
+	previewOperationTimeout, err := parseDuration(lookup, "ENDLESSFS_PREVIEW_OPERATION_TIMEOUT", defaultPreviewOperationTTL, maximumPreviewOperationTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	previewStartupTimeout, err := parseDuration(lookup, "ENDLESSFS_PREVIEW_STARTUP_TIMEOUT", defaultPreviewStartupTTL, maximumPreviewStartupTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	previewKeySecret, err := parseOptionalBearer(lookup, "ENDLESSFS_PREVIEW_KEY_SECRET")
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
-		ListenAddr:            listenAddr,
-		BaseURL:               strings.TrimSuffix(baseURL.String(), "/"),
-		AllowedOrigin:         strings.TrimSuffix(baseURL.String(), "/"),
-		Secure:                secure,
-		StorageProvider:       storageProvider,
-		MockProviderURL:       mockProviderURL,
-		GCSFileBucket:         gcsFileBucket,
-		GCSStateBucket:        gcsStateBucket,
-		GCSSigningAccount:     gcsSigningAccount,
-		WriterSetID:           writerSetID,
-		AllowRegistration:     allowRegistration,
-		InviteRegistration:    inviteRegistration,
-		BootstrapToken:        bootstrapToken,
-		SessionSecret:         sessionSecret,
-		WebAuthnRPID:          strings.ToLower(rpID),
-		WebAuthnRPName:        rpName,
-		SessionTTL:            sessionTTL,
-		DownloadCapabilityTTL: downloadTTL,
-		UploadInitTTL:         uploadTTL,
-		TextPreviewMaxBytes:   textPreviewMax,
-		DefaultLightTheme:     defaultLightTheme,
-		DefaultDarkTheme:      defaultDarkTheme,
-		LogLevel:              logLevel,
+		ListenAddr:                listenAddr,
+		BaseURL:                   strings.TrimSuffix(baseURL.String(), "/"),
+		AllowedOrigin:             strings.TrimSuffix(baseURL.String(), "/"),
+		Secure:                    secure,
+		StorageProvider:           storageProvider,
+		MockProviderURL:           mockProviderURL,
+		GCSFileBucket:             gcsFileBucket,
+		GCSStateBucket:            gcsStateBucket,
+		GCSSigningAccount:         gcsSigningAccount,
+		WriterSetID:               writerSetID,
+		AllowRegistration:         allowRegistration,
+		InviteRegistration:        inviteRegistration,
+		BootstrapToken:            bootstrapToken,
+		SessionSecret:             sessionSecret,
+		WebAuthnRPID:              strings.ToLower(rpID),
+		WebAuthnRPName:            rpName,
+		SessionTTL:                sessionTTL,
+		DownloadCapabilityTTL:     downloadTTL,
+		UploadInitTTL:             uploadTTL,
+		TextPreviewMaxBytes:       textPreviewMax,
+		DefaultLightTheme:         defaultLightTheme,
+		DefaultDarkTheme:          defaultDarkTheme,
+		LogLevel:                  logLevel,
+		PreviewProvider:           previewProvider,
+		PreviewAutomatic:          previewAutomatic,
+		PreviewFormats:            previewFormats,
+		PreviewAutoMaxAge:         previewAutoMaxAge,
+		PreviewAutoMaxSourceBytes: previewAutoMaxSourceBytes,
+		PreviewResolutions:        previewResolutions,
+		PreviewMaxConcurrency:     int(previewMaxConcurrency64),
+		PreviewOperationTimeout:   previewOperationTimeout,
+		PreviewStartupTimeout:     previewStartupTimeout,
+		PreviewKeySecret:          previewKeySecret,
 	}, nil
 }
 
@@ -262,6 +347,11 @@ func validGCSServiceAccount(value string) bool {
 
 // Public returns a copy containing no secrets.
 func (c Config) Public() PublicConfig {
+	var previewAutoMaxAgeSeconds *int64
+	if c.PreviewAutoMaxAge != nil {
+		seconds := int64(c.PreviewAutoMaxAge.Seconds())
+		previewAutoMaxAgeSeconds = &seconds
+	}
 	return PublicConfig{
 		AllowRegistration:            c.AllowRegistration,
 		InviteRegistration:           c.InviteRegistration,
@@ -269,7 +359,100 @@ func (c Config) Public() PublicConfig {
 		MaximumUploadInitializations: 100,
 		DefaultTransferConcurrency:   4,
 		MaximumTransferConcurrency:   8,
+		PreviewConfigured:            c.PreviewProvider != "" && c.PreviewProvider != "disabled",
+		PreviewAutomatic:             c.PreviewAutomatic,
+		PreviewFormats:               append([]string(nil), c.PreviewFormats...),
+		PreviewResolutions:           append([]int(nil), c.PreviewResolutions...),
+		PreviewMaxConcurrency:        c.PreviewMaxConcurrency,
+		PreviewAutoMaxAgeSeconds:     previewAutoMaxAgeSeconds,
+		PreviewAutoMaxSourceBytes:    cloneInt64(c.PreviewAutoMaxSourceBytes),
 	}
+}
+
+func cloneInt64(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func parsePreviewFormats(lookup func(string) (string, bool)) ([]string, error) {
+	value := "image"
+	if configured, ok := lookup("ENDLESSFS_PREVIEW_FORMATS"); ok {
+		value = configured
+	}
+	if value == "" {
+		return nil, fmt.Errorf("ENDLESSFS_PREVIEW_FORMATS: expected at least one capability")
+	}
+	seen := make(map[string]bool)
+	formats := strings.Split(value, ",")
+	for _, format := range formats {
+		if format != strings.TrimSpace(format) || format == "" {
+			return nil, fmt.Errorf("ENDLESSFS_PREVIEW_FORMATS: invalid capability list")
+		}
+		if seen[format] {
+			return nil, fmt.Errorf("ENDLESSFS_PREVIEW_FORMATS: duplicate capability %q", format)
+		}
+		seen[format] = true
+		switch format {
+		case "image":
+		case "video", "pdf":
+			return nil, fmt.Errorf("ENDLESSFS_PREVIEW_FORMATS: capability %q is not packaged in profile image", format)
+		default:
+			return nil, fmt.Errorf("ENDLESSFS_PREVIEW_FORMATS: unknown capability %q", format)
+		}
+	}
+	return formats, nil
+}
+
+func parseOptionalDuration(lookup func(string) (string, bool), name string) (*time.Duration, error) {
+	value, ok := lookup(name)
+	if !ok {
+		return nil, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return nil, fmt.Errorf("%s: expected duration greater than zero", name)
+	}
+	return &duration, nil
+}
+
+func parseOptionalPositiveInt64(lookup func(string) (string, bool), name string) (*int64, error) {
+	value, ok := lookup(name)
+	if !ok {
+		return nil, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 1 {
+		return nil, fmt.Errorf("%s: expected an integer from 1 through %d", name, int64(^uint64(0)>>1))
+	}
+	return &parsed, nil
+}
+
+func parsePreviewResolutions(lookup func(string) (string, bool)) ([]int, error) {
+	value := "256,512,1600"
+	if configured, ok := lookup("ENDLESSFS_PREVIEW_RESOLUTIONS"); ok {
+		value = configured
+	}
+	parts := strings.Split(value, ",")
+	if len(parts) == 0 || len(parts) > 4 {
+		return nil, fmt.Errorf("ENDLESSFS_PREVIEW_RESOLUTIONS: expected at most 4 entries")
+	}
+	resolutions := make([]int, 0, len(parts))
+	previous := 0
+	for _, part := range parts {
+		parsed, err := strconv.Atoi(part)
+		if err != nil || parsed < 64 || parsed > 4096 {
+			return nil, fmt.Errorf("ENDLESSFS_PREVIEW_RESOLUTIONS: expected values from 64 through 4096")
+		}
+		if parsed <= previous {
+			return nil, fmt.Errorf("ENDLESSFS_PREVIEW_RESOLUTIONS: values must be strictly increasing")
+		}
+		resolutions = append(resolutions, parsed)
+		previous = parsed
+	}
+	return resolutions, nil
 }
 
 func parseMockProviderURL(value string) (*url.URL, error) {

@@ -90,6 +90,7 @@ func (p *Provider) copyOrMove(ctx context.Context, operationName string, move bo
 		oldPath domain.UserPath
 		newPath domain.UserPath
 		value   object
+		entry   domain.Entry
 	}
 	items := make([]treeItem, 0)
 	for pathValue, item := range p.scopeObjectsLocked(from) {
@@ -107,15 +108,28 @@ func (p *Provider) copyOrMove(ctx context.Context, operationName string, move bo
 				return domain.Operation{}, domain.NewError(domain.ErrorConflict, "destination tree conflicts with existing content")
 			}
 		}
-		items = append(items, treeItem{oldPath: path, newPath: newPath, value: item})
+		entry := p.newEntryLocked(newPath, item.entry.Kind, item.entry.Size, item.entry.MediaType)
+		if item.entry.Kind == domain.EntryFile {
+			if move {
+				entry.ModifiedAt = item.entry.ModifiedAt
+				entry.ContentID = item.entry.ContentID
+				entry.ContentVersion = item.entry.ContentVersion
+				entry.ContentModifiedAt = item.entry.ContentModifiedAt
+			} else {
+				entry, err = p.newFileEntryLocked(newPath, item.entry.Size, item.entry.MediaType)
+				if err != nil {
+					return domain.Operation{}, err
+				}
+			}
+		}
+		items = append(items, treeItem{oldPath: path, newPath: newPath, value: item, entry: entry})
 	}
 	if conflict == domain.ConflictReplace {
 		p.deleteTreeLocked(to, destination)
 	}
 	for _, item := range items {
-		entry := p.newEntryLocked(item.newPath, item.value.entry.Kind, item.value.entry.Size, item.value.entry.MediaType)
 		p.scopeObjectsLocked(to)[item.newPath.String()] = object{
-			entry: entry, data: append([]byte(nil), item.value.data...), materialized: item.value.materialized,
+			entry: item.entry, data: append([]byte(nil), item.value.data...), materialized: item.value.materialized,
 		}
 	}
 	if move {

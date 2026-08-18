@@ -1,11 +1,18 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -22,6 +29,9 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/httpapi"
 	"github.com/applyinnovations/endlessfs/internal/identity"
+	"github.com/applyinnovations/endlessfs/internal/preview"
+	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
+	previewmemory "github.com/applyinnovations/endlessfs/internal/preview/memory"
 	providermemory "github.com/applyinnovations/endlessfs/internal/provider/memory"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
@@ -235,6 +245,134 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		t.Fatalf("wait for restored file to leave trash: %v (%s)", err, browserStatus(ctx))
 	}
 
+	mediaPath := writeMediaFixture(t, "media-proof.png", 96, 48)
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(harness.origin+"/"),
+		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
+		chromedp.SetUploadFiles("#upload-input", []string{mediaPath}, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("upload media fixture: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#file-rows").textContent.includes("media-proof.png")`, 10*time.Second); err != nil {
+		t.Fatalf("wait for media fixture: %v (%s)", err, browserStatus(ctx))
+	}
+	gridBinding, gridClaim, gridArtifact := claimConcurrentBrowserPreview(t, harness, domain.MustParseUserPath("/media-proof.png"), mediaPath, 256)
+	if err := chromedp.Run(ctx, chromedp.Focus("#file-view-grid", chromedp.ByQuery), chromedp.KeyEvent(" ")); err != nil {
+		t.Fatalf("switch to media grid: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector(".media-frame[data-path='/media-proof.png']").dataset.previewState === "generating"`, 5*time.Second); err != nil {
+		t.Fatalf("wait for contending grid generation: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := harness.previewStore.Commit(context.Background(), gridBinding, gridClaim, gridArtifact); err != nil {
+		t.Fatalf("complete contending grid generation: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector(".media-frame img[alt='Preview of media-proof.png']") !== null`, 15*time.Second); err != nil {
+		var gridState string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`JSON.stringify(Array.from(document.querySelectorAll(".media-frame")).map((node) => ({path: node.dataset.path, state: node.dataset.previewState, html: node.innerHTML})))`, &gridState))
+		mu.Lock()
+		failures := append([]string(nil), browserFailures...)
+		requests := append([]string(nil), requestedURLs...)
+		mu.Unlock()
+		t.Fatalf("wait for lazy WebP grid preview: %v (%s) grid=%s exceptions=%v requests=%v", err, browserStatus(ctx), gridState, failures, requests)
+	}
+	var squareFrame bool
+	var previewAspect string
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`Math.abs(document.querySelector(".media-frame img[alt='Preview of media-proof.png']").parentElement.getBoundingClientRect().width - document.querySelector(".media-frame img[alt='Preview of media-proof.png']").parentElement.getBoundingClientRect().height) < 1`, &squareFrame),
+		chromedp.Evaluate(`document.querySelector(".media-frame img[alt='Preview of media-proof.png']").getAttribute("width") + "x" + document.querySelector(".media-frame img[alt='Preview of media-proof.png']").getAttribute("height")`, &previewAspect),
+		chromedp.Focus(".media-tile-open[aria-label='View file media-proof.png']", chromedp.ByQuery),
+		chromedp.KeyEvent(kb.Enter),
+	); err != nil {
+		t.Fatalf("open generated preview viewer: %v", err)
+	}
+	if !squareFrame || previewAspect != "96x48" {
+		t.Fatalf("media geometry: squareFrame=%v intrinsic=%q", squareFrame, previewAspect)
+	}
+	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Generated WebP preview ready") && document.querySelector("#preview-content img") !== null`, 15*time.Second); err != nil {
+		t.Fatalf("wait for full-screen generated preview: %v (%s)", err, browserStatus(ctx))
+	}
+	binding, claim, artifact := claimConcurrentBrowserPreview(t, harness, domain.MustParseUserPath("/media-proof.png"), mediaPath, 1600)
+	if err := chromedp.Run(ctx, chromedp.Click("#preview-regenerate", chromedp.ByQuery)); err != nil {
+		t.Fatalf("regenerate preview: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("generation is running")`, 5*time.Second); err != nil {
+		t.Fatalf("wait for contending preview operation: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := harness.previewStore.Commit(context.Background(), binding, claim, artifact); err != nil {
+		t.Fatalf("complete contending preview generation: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Generated WebP preview ready")`, 15*time.Second); err != nil {
+		t.Fatalf("wait for regenerated preview: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.KeyEvent(kb.ArrowLeft), chromedp.KeyEvent(kb.ArrowRight), chromedp.KeyEvent(kb.Escape)); err != nil {
+		t.Fatalf("preview navigation and close: %v", err)
+	}
+
+	seedVirtualFiles(t, harness, 10_000)
+	mu.Lock()
+	resolveRequestsBeforeScale := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
+	mu.Unlock()
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(harness.origin+"/"),
+		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
+		chromedp.Evaluate(`document.querySelector("#file-view-grid").click()`, nil),
+	); err != nil {
+		t.Fatalf("open large virtual grid: %v", err)
+	}
+	loaded := 0
+	for page := 0; page < 110; page++ {
+		if err := waitFor(ctx, `Number(document.querySelector("#media-grid-content").dataset.itemCount || 0) > `+fmt.Sprint(loaded), 10*time.Second); err != nil {
+			t.Fatalf("load virtual grid page %d after %d items: %v (%s)", page, loaded, err, browserStatus(ctx))
+		}
+		if err := chromedp.Run(ctx, chromedp.Evaluate(`Number(document.querySelector("#media-grid-content").dataset.itemCount)`, &loaded)); err != nil {
+			t.Fatal(err)
+		}
+		var nextHidden bool
+		if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("#next-page").hidden`, &nextHidden)); err != nil {
+			t.Fatal(err)
+		}
+		if nextHidden {
+			break
+		}
+		if err := chromedp.Run(ctx, chromedp.Click("#next-page", chromedp.ByQuery)); err != nil {
+			t.Fatalf("load virtual grid page after %d items: %v", loaded, err)
+		}
+	}
+	var renderedTiles int
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelectorAll(".media-tile").length`, &renderedTiles)); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	resolveRequestsAfterScale := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
+	mu.Unlock()
+	if loaded != 10_002 || renderedTiles > 64 || resolveRequestsAfterScale-resolveRequestsBeforeScale > 32 {
+		t.Fatalf("virtual grid bounds: logical=%d rendered=%d previewRequests=%d", loaded, renderedTiles, resolveRequestsAfterScale-resolveRequestsBeforeScale)
+	}
+	if err := waitFor(ctx, `document.querySelector(".media-frame img[alt='Preview of media-proof.png']") !== null`, 15*time.Second); err != nil {
+		t.Fatalf("wait for preview before virtual eviction: %v (%s)", err, browserStatus(ctx))
+	}
+	mu.Lock()
+	resolveRequestsBeforeEviction := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
+	mu.Unlock()
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => { const grid = document.querySelector("#media-grid"); grid.scrollTop = grid.scrollHeight; grid.dispatchEvent(new Event("scroll")); })()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitFor(ctx, `document.querySelector(".media-frame[data-path='/media-proof.png']") === null`, 10*time.Second); err != nil {
+		t.Fatalf("preview tile was not virtually evicted: %v", err)
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => { const grid = document.querySelector("#media-grid"); grid.scrollTop = 0; grid.dispatchEvent(new Event("scroll")); })()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitFor(ctx, `document.querySelector(".media-frame img[alt='Preview of media-proof.png']") !== null`, 15*time.Second); err != nil {
+		t.Fatalf("evicted preview was not reacquired: %v (%s)", err, browserStatus(ctx))
+	}
+	mu.Lock()
+	resolveRequestsAfterEviction := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
+	mu.Unlock()
+	if resolveRequestsAfterEviction <= resolveRequestsBeforeEviction {
+		t.Fatalf("evicted preview reused a revoked object URL: requests before=%d after=%d", resolveRequestsBeforeEviction, resolveRequestsAfterEviction)
+	}
+
 	var fitsMobile bool
 	var namedControls bool
 	var focusOutline string
@@ -268,10 +406,52 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		t.Fatalf("browser exceptions: %v", browserFailures)
 	}
 	for _, requestedOrigin := range requestedOrigins {
-		if requestedOrigin != harness.origin && requestedOrigin != harness.dataOrigin {
+		if requestedOrigin != harness.origin && requestedOrigin != harness.dataOrigin && requestedOrigin != harness.previewOrigin {
 			t.Errorf("unexpected browser request origin: %s", requestedOrigin)
 		}
 	}
+}
+
+func claimConcurrentBrowserPreview(t *testing.T, harness harness, path domain.UserPath, sourcePath string, variant int) (preview.Binding, preview.GenerationClaim, preview.Artifact) {
+	t.Helper()
+	accounts, err := harness.repository.Accounts(context.Background())
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("resolve browser preview owner: %v, accounts=%d", err, len(accounts))
+	}
+	scope, err := domain.NewScope(accounts[0].UserID, domain.AreaLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := harness.storage.Stat(context.Background(), scope, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := preview.Binding{
+		Owner: accounts[0].UserID, ContentID: entry.ContentID, ContentVersion: entry.ContentVersion,
+		MediaType: entry.MediaType, SourceSize: entry.Size, RecipeID: "image-webp-q80-v1", Variant: variant,
+	}
+	const generationID = "browser-contending-generation"
+	claim, err := harness.previewStore.Claim(context.Background(), binding, generationID, harness.clock.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, err := imagegen.New(imagegen.Options{}).Generate(context.Background(), preview.GenerationRequest{
+		Source: bytes.NewReader(source), SourceSize: int64(len(source)), MediaType: entry.MediaType, Variant: variant,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := generated.Bytes
+	sum := sha256.Sum256(data)
+	artifact := preview.Artifact{
+		GenerationID: generationID, Variant: variant, Width: generated.Width, Height: generated.Height, ContentType: preview.ContentTypeWebP,
+		Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), Bytes: data,
+	}
+	return binding, claim, artifact
 }
 
 func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
@@ -524,8 +704,121 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 		t.Fatalf("revoked share was not denied: %v (%s)", err, browserStatus(admin.ctx))
 	}
 
+	darkMediaPath := writeMediaFixture(t, "dark-mobile-preview.png", 48, 96)
+	if err := chromedp.Run(member.ctx,
+		emulation.SetDeviceMetricsOverride(320, 720, 1, false),
+		chromedp.Click("a[data-route='drive']", chromedp.ByQuery),
+		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
+		chromedp.SetUploadFiles("#upload-input", []string{darkMediaPath}, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("upload dark mobile media fixture: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelector("#file-rows").textContent.includes("dark-mobile-preview.png")`, 15*time.Second); err != nil {
+		t.Fatalf("wait for dark mobile fixture: %v (%s)", err, browserStatus(member.ctx))
+	}
+	if err := chromedp.Run(member.ctx, chromedp.Focus("#file-view-grid", chromedp.ByQuery), chromedp.KeyEvent(" ")); err != nil {
+		t.Fatalf("open dark mobile grid: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelector(".media-frame img[alt='Preview of dark-mobile-preview.png']") !== null`, 15*time.Second); err != nil {
+		t.Fatalf("wait for dark mobile preview: %v (%s)", err, browserStatus(member.ctx))
+	}
+	if err := chromedp.Run(member.ctx,
+		chromedp.Focus(".media-tile-open[aria-label='View file dark-mobile-preview.png']", chromedp.ByQuery),
+		chromedp.KeyEvent(kb.Enter),
+	); err != nil {
+		t.Fatalf("open dark mobile viewer by keyboard: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelector("#preview-status").textContent.includes("Generated WebP preview ready")`, 15*time.Second); err != nil {
+		t.Fatalf("wait for dark mobile viewer: %v (%s)", err, browserStatus(member.ctx))
+	}
+	var darkMobileViewer bool
+	if err := chromedp.Run(member.ctx,
+		chromedp.Evaluate(`document.documentElement.dataset.theme === "endlessfs-dark" && document.documentElement.scrollWidth <= 320 && document.querySelector("#preview-dialog").getBoundingClientRect().width <= 320`, &darkMobileViewer),
+		chromedp.KeyEvent(kb.ArrowLeft),
+		chromedp.KeyEvent(kb.ArrowRight),
+		chromedp.KeyEvent(kb.Escape),
+	); err != nil {
+		t.Fatalf("navigate dark mobile viewer by keyboard: %v", err)
+	}
+	if !darkMobileViewer {
+		t.Fatal("dark media viewer did not fit the 320-pixel viewport")
+	}
+
 	admin.assertNoExternalRequests(t, harness)
 	member.assertNoExternalRequests(t, harness)
+}
+
+func TestE2EMediaBrowserIsAvailableWithoutGeneratedPreviews(t *testing.T) {
+	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
+		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
+	}
+	harness := newHarnessWithPreviews(t, false)
+	client := newTestBrowser(t)
+	bootstrapBrowser(t, client, harness)
+
+	mediaPath := writeMediaFixture(t, "icon-only.png", 96, 48)
+	if err := chromedp.Run(client.ctx,
+		chromedp.SetUploadFiles("#upload-input", []string{mediaPath}, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("upload icon-only fixture: %v", err)
+	}
+	if err := waitFor(client.ctx, `document.querySelector("#file-rows").textContent.includes("icon-only.png")`, 15*time.Second); err != nil {
+		t.Fatalf("wait for icon-only fixture: %v (%s)", err, browserStatus(client.ctx))
+	}
+	if err := chromedp.Run(client.ctx,
+		chromedp.Focus("#file-view-grid", chromedp.ByQuery),
+		chromedp.KeyEvent(" "),
+		chromedp.Focus(".media-tile-open[aria-label='View file icon-only.png']", chromedp.ByQuery),
+		chromedp.KeyEvent(kb.Enter),
+	); err != nil {
+		t.Fatalf("open icon-only grid and viewer: %v", err)
+	}
+	if err := waitFor(client.ctx, `document.querySelector("#preview-dialog").open && document.querySelector("#preview-content .viewer-fallback-icon") !== null`, 10*time.Second); err != nil {
+		t.Fatalf("wait for icon-only viewer: %v (%s)", err, browserStatus(client.ctx))
+	}
+	var correctBoundary bool
+	if err := chromedp.Run(client.ctx,
+		chromedp.Evaluate(`!document.querySelector("#file-presentation").hidden && !document.querySelector("#metadata-filters").hidden && document.querySelector("#preview-generate").hidden && document.querySelector("#preview-regenerate").hidden && document.querySelector("#preview-status").textContent.includes("not configured")`, &correctBoundary),
+		chromedp.KeyEvent(kb.ArrowLeft),
+		chromedp.KeyEvent(kb.ArrowRight),
+		chromedp.KeyEvent(kb.Escape),
+	); err != nil {
+		t.Fatalf("verify icon-only media browser: %v", err)
+	}
+	if !correctBoundary {
+		t.Fatal("grid, metadata filters, or full-screen icon viewer depended on generated-preview configuration")
+	}
+	for _, request := range client.requestSnapshot() {
+		if strings.Contains(request, "/api/v1/previews/") {
+			t.Fatalf("preview-disabled browser made generated-preview request %q", request)
+		}
+	}
+	client.assertNoExternalRequests(t, harness)
+}
+
+func writeMediaFixture(t *testing.T, name string, width, height int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageValue := image.NewNRGBA(image.Rect(0, 0, width, height))
+	for y := range height {
+		for x := range width {
+			imageValue.SetNRGBA(x, y, color.NRGBA{R: uint8(x * 2), G: uint8(y * 4), B: 140, A: 255})
+		}
+	}
+	if err := png.Encode(file, imageValue); err != nil {
+		if closeErr := file.Close(); closeErr != nil {
+			t.Errorf("close failed after encode error: %v", closeErr)
+		}
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 type testBrowser struct {
@@ -590,7 +883,7 @@ func (browserClient *testBrowser) assertNoExternalRequests(t *testing.T, harness
 	browserClient.mu.Lock()
 	defer browserClient.mu.Unlock()
 	for _, origin := range browserClient.origins {
-		if origin != harness.origin && origin != harness.dataOrigin {
+		if origin != harness.origin && origin != harness.dataOrigin && origin != harness.previewOrigin {
 			t.Errorf("unexpected browser request origin: %s", origin)
 		}
 	}
@@ -676,10 +969,19 @@ func runStage(ctx context.Context, timeout time.Duration, actions ...chromedp.Ac
 type harness struct {
 	origin         string
 	dataOrigin     string
+	previewOrigin  string
 	bootstrapToken string
+	repository     *identity.Repository
+	storage        *providermemory.Provider
+	previewStore   *previewmemory.Store
+	clock          domain.Clock
 }
 
 func newHarness(t *testing.T) harness {
+	return newHarnessWithPreviews(t, true)
+}
+
+func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
 	t.Helper()
 	controlListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -690,14 +992,22 @@ func newHarness(t *testing.T) harness {
 		controlListener.Close()
 		t.Fatal(err)
 	}
-	_, controlPort, err := net.SplitHostPort(controlListener.Addr().String())
+	previewListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		controlListener.Close()
 		dataListener.Close()
 		t.Fatal(err)
 	}
+	_, controlPort, err := net.SplitHostPort(controlListener.Addr().String())
+	if err != nil {
+		controlListener.Close()
+		dataListener.Close()
+		previewListener.Close()
+		t.Fatal(err)
+	}
 	origin := "http://localhost:" + controlPort
 	dataOrigin := "http://" + dataListener.Addr().String()
+	previewOrigin := "http://" + previewListener.Addr().String()
 	store := state.NewMemoryStore()
 	repository := identity.NewRepository(store)
 	ids := domain.SystemIDGenerator()
@@ -724,6 +1034,13 @@ func newHarness(t *testing.T) harness {
 	if err := storage.SetDataPlaneBaseURL(dataOrigin); err != nil {
 		t.Fatal(err)
 	}
+	previewStore, err := previewmemory.New(previewmemory.Options{Clock: clock, IDs: ids, Key: sessionKey, AllowedOrigin: origin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := previewStore.SetDataPlaneBaseURL(previewOrigin); err != nil {
+		t.Fatal(err)
+	}
 	driveService, err := drive.NewService(storage, store, repository, ids, clock, sessionKey, origin, dataOrigin, 1<<20)
 	if err != nil {
 		t.Fatal(err)
@@ -736,24 +1053,81 @@ func newHarness(t *testing.T) harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{BaseURL: origin, AllowedOrigin: origin, Secure: false, AllowRegistration: true, InviteRegistration: true}
-	controlServer := &http.Server{Handler: httpapi.NewCompleteApplication(cfg, "e2e", identityService, sessions, driveService, themeManager)}
+	cfg := config.Config{BaseURL: origin, AllowedOrigin: origin, Secure: false, AllowRegistration: true, InviteRegistration: true, PreviewProvider: "disabled", PreviewFormats: []string{"image"}, PreviewResolutions: []int{256, 512, 1600}, PreviewMaxConcurrency: 2}
+	var controlHandler http.Handler = httpapi.NewCompleteApplication(cfg, "e2e", identityService, sessions, driveService, themeManager)
+	if withPreviews {
+		cfg.PreviewProvider = "mock"
+		cfg.PreviewAutomatic = true
+		previewService, serviceErr := preview.NewService(preview.Options{Automatic: true, Resolutions: cfg.PreviewResolutions, MaxConcurrency: cfg.PreviewMaxConcurrency, ApplicationState: store}, storage, previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, http.DefaultClient, ids, clock)
+		if serviceErr != nil {
+			t.Fatal(serviceErr)
+		}
+		controlHandler = httpapi.NewCompleteApplicationWithPreview(cfg, "e2e", identityService, sessions, driveService, previewService, themeManager)
+	}
+	controlServer := &http.Server{Handler: controlHandler}
 	dataServer := &http.Server{Handler: storage}
-	serveErrors := make(chan error, 2)
+	previewServer := &http.Server{Handler: previewStore}
+	serveErrors := make(chan error, 3)
 	go func() { serveErrors <- controlServer.Serve(controlListener) }()
 	go func() { serveErrors <- dataServer.Serve(dataListener) }()
+	go func() { serveErrors <- previewServer.Serve(previewListener) }()
 	t.Cleanup(func() {
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = controlServer.Shutdown(shutdownContext)
 		_ = dataServer.Shutdown(shutdownContext)
-		for range 2 {
+		_ = previewServer.Shutdown(shutdownContext)
+		for range 3 {
 			if serveErr := <-serveErrors; serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 				t.Errorf("browser test server: %v", serveErr)
 			}
 		}
 	})
-	return harness{origin: origin, dataOrigin: dataOrigin, bootstrapToken: bootstrapToken}
+	return harness{
+		origin: origin, dataOrigin: dataOrigin, previewOrigin: previewOrigin, bootstrapToken: bootstrapToken,
+		repository: repository, storage: storage, previewStore: previewStore, clock: clock,
+	}
+}
+
+func seedVirtualFiles(t *testing.T, harness harness, count int) {
+	t.Helper()
+	accounts, err := harness.repository.Accounts(context.Background())
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("resolve browser account for large listing: %v, accounts=%d", err, len(accounts))
+	}
+	scope, err := domain.NewScope(accounts[0].UserID, domain.AreaLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range count {
+		path := domain.MustParseUserPath(fmt.Sprintf("/virtual-%05d.bin", index))
+		capability, err := harness.storage.CreateUpload(context.Background(), scope, domain.CreateUploadRequest{Path: path, Size: 0, MediaType: "application/octet-stream"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(capability.Method, capability.URL, nil)
+		for name, value := range capability.Headers {
+			request.Header.Set(name, value)
+		}
+		response := httptest.NewRecorder()
+		harness.storage.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("seed upload %d status = %d", index, response.Code)
+		}
+		if _, err := harness.storage.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: 0, MediaType: "application/octet-stream"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func countRequestPath(requests []string, path string) int {
+	count := 0
+	for _, request := range requests {
+		if strings.Contains(request, path) {
+			count++
+		}
+	}
+	return count
 }
 
 func chromiumPath(t *testing.T) string {

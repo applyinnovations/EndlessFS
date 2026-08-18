@@ -516,7 +516,26 @@ func findDirectoryEntry(entries []storageformat.DirectoryEntry, name string) (st
 }
 
 func domainEntry(path domain.UserPath, entry storageformat.DirectoryEntry) domain.Entry {
-	return domain.Entry{Path: path, Name: entry.Name, Kind: entry.Kind, Size: entry.Size, MediaType: entry.MediaType, ModifiedAt: entry.ModifiedAt, Version: domain.Version(entry.LogicalVersion)}
+	identity := previewContentIdentity(entry)
+	return domain.Entry{
+		Path: path, Name: entry.Name, Kind: entry.Kind, Size: entry.Size, MediaType: entry.MediaType,
+		ModifiedAt: entry.ModifiedAt, Version: domain.Version(entry.LogicalVersion),
+		ContentID: identity.ContentID, ContentVersion: identity.ContentVersion, ContentModifiedAt: identity.ContentModifiedAt,
+	}
+}
+
+func previewContentIdentity(entry storageformat.DirectoryEntry) domain.PreviewContentIdentity {
+	if entry.Kind != domain.EntryFile {
+		return domain.PreviewContentIdentity{}
+	}
+	contentID := storageformat.Digest([]byte("endlessfs-preview-content-id-v1\x00" + entry.BlobID))
+	contentVersion := storageformat.Digest([]byte(fmt.Sprintf(
+		"endlessfs-preview-content-version-v1\x00%s\x00%s\x00%d\x00%s",
+		entry.BlobID, entry.SHA256, entry.Size, entry.MediaType,
+	)))
+	return domain.PreviewContentIdentity{
+		ContentID: domain.ContentID(contentID), ContentVersion: domain.ContentVersion(contentVersion), ContentModifiedAt: entry.ModifiedAt.UTC(),
+	}
 }
 
 func validateFileRequest(ctx context.Context, scope domain.Scope) error {

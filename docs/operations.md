@@ -86,6 +86,14 @@ The command performs no `Put`, `Copy`, or `Delete`. Its local `memory` mode acce
 
 Capability responses and public configuration use `no-store`. Diagnostics omit token-bearing queries, request bodies, authorization values, provider keys, full user paths, native continuation values, and credential material.
 
+## Optional v1.1 previews
+
+The media browser is always available. The list/grid choice, metadata filters, full-screen viewer, and file-type icons require no preview storage and never retrieve originals automatically. `ENDLESSFS_PREVIEW_PROVIDER=disabled` keeps generated thumbnails off; `ENDLESSFS_PREVIEW_PROVIDER=mock` enables the separate ephemeral preview store and a third loopback data origin. The removed `ENDLESSFS_MEDIA_BROWSER_ENABLED` variable is a startup error so an obsolete deployment cannot silently hide this behavior. Original-file transfer remains on its existing data origin.
+
+Configured generators and preview-store access are startup requirements. The process self-tests the packaged image codec and creates, reads, fully decodes, commits, retrieves, capability-issues, and capability-serves a fixed one-pixel WebP probe before becoming ready. Configuring `video` or `pdf` in the v1.1 image build is an intentional startup error. Preview-store access loss after startup returns `unavailable`, logs `preview_unavailable` without file/store identity, and makes `/readyz` fail while original listing and file operations continue.
+
+Preview data is disposable. Removing or expiring it never removes an original; the next eligible viewport request regenerates it. Rename, move, trash, and restore preserve the opaque content binding so no regeneration is required. Copy and content replacement receive distinct render identities. Provider lifecycle, storage class, billing, retention, and deletion policy remain independent of the authoritative store.
+
 ## Build and release verification
 
 Run the acceptance gates from a clean checkout:
@@ -96,10 +104,16 @@ nix run .#test-portability
 nix flake check --print-build-logs
 nix build
 nix build .#container
+nix build .#container-images
 nix build .#release
+nix build .#release-images
 ```
 
 No required gate needs GCP credentials or a cloud service. The release inventory distinguishes the ephemeral memory backend, locally qualified GCS adapter, absent live-GCS validation, and absent deployment validation.
+
+The release output includes `SHA256SUMS`, `RELEASE-INVENTORY.txt`, the binary/archive, OCI archive, `CAPABILITIES.json`, dependency and license inventories, installed-theme inventory, release notes, and the acceptance record. Verify `SHA256SUMS` before distribution. The inventory records the source revision, `flake.lock` hash, pinned vulnerability database hash, Go toolchain, artifact hashes, thresholds, provider kind, and explicit no-cloud/no-deployment status.
+
+GitHub publishing is tag-driven. Protected `vMAJOR.MINOR.PATCH` tags cause the release workflow to repeat the full gate, push version and `latest` tags to GHCR, and attach the Nix-built evidence. Applying branch/tag rules is an explicit administrator operation through the protected Repository Policy workflow.
 
 ## Failure handling
 

@@ -17,7 +17,31 @@
     inviteToken: "",
     recoveryToken: "",
     dialogOpener: null,
+    viewMode: "list",
+    filteredEntries: [],
+    themeAssets: {},
+    previewStates: new Map(),
+    previewQueue: [],
+    previewQueued: new Set(),
+    previewActive: 0,
+    previewControllers: new Map(),
+    previewObjectURLs: new Map(),
+    previewRetryAttempts: new Map(),
+    previewRetryTimers: new Map(),
+    previewGenerationRequests: new Map(),
+    gridObserver: null,
+    gridRenderFrame: 0,
+    viewerEntries: [],
+    viewerIndex: -1,
+    viewerObjectURL: "",
+    viewerEntry: null,
+    viewerController: null,
+    viewerOpener: null,
   };
+
+  const gridOverscanRows = 3;
+  const previewRetryDelays = [250, 500, 1000, 2000, 4000, 5000];
+  const maximumPreviewPolls = 14;
 
   class APIError extends Error {
     constructor(response, problem) {
@@ -50,6 +74,18 @@
   const csrf = () => cookie("__Host-endlessfs_csrf") || cookie("endlessfs_csrf_dev");
   const idempotencyKey = () => crypto.randomUUID();
   const isMutation = (method) => !["GET", "HEAD"].includes(method);
+
+  function wait(delay, signal) {
+    return new Promise((resolve, reject) => {
+      if (signal && signal.aborted) { reject(new DOMException("Aborted", "AbortError")); return; }
+      const onAbort = () => { window.clearTimeout(timer); reject(new DOMException("Aborted", "AbortError")); };
+      const timer = window.setTimeout(() => {
+        if (signal) signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, delay);
+      if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
 
   async function api(path, options = {}) {
     const method = options.method || "GET";
@@ -311,6 +347,8 @@
   async function loadDirectory(directory, append = false) {
     state.currentDirectory = directory;
     if (!append) {
+      cleanupGridMedia(new Set());
+      state.previewStates.clear();
       state.entries = [];
       state.nextCursor = "";
       state.selected.clear();
@@ -336,14 +374,284 @@
   function renderFiles() {
     const rows = byID("file-rows");
     rows.replaceChildren();
-    const query = byID("file-filter").value.trim().toLocaleLowerCase();
-    const visible = state.entries.filter((entry) => entry.name.toLocaleLowerCase().includes(query));
-    for (const entry of visible) rows.append(fileRow(entry));
+    const visible = filterLoadedEntries(state.entries);
+    state.filteredEntries = visible;
+    const gridEnabled = state.viewMode === "grid";
+    byID("list-presentation").hidden = gridEnabled;
+    byID("media-grid").hidden = !gridEnabled;
+    if (gridEnabled) renderVirtualGrid(visible);
+    else {
+      cleanupGridMedia(new Set());
+      for (const entry of visible) rows.append(fileRow(entry));
+    }
     showState("drive-state", visible.length ? "" : (state.entries.length ? "No loaded items match this filter." : "This folder is empty. Upload a file or create a folder."));
     byID("next-page").hidden = !state.nextCursor;
     const selectedVisible = visible.filter((entry) => state.selected.has(entry.path)).length;
     byID("select-all").checked = visible.length > 0 && selectedVisible === visible.length;
     byID("select-all").indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
+  }
+
+  function filterLoadedEntries(entries) {
+    const query = byID("file-filter").value.trim().toLocaleLowerCase();
+    const kind = byID("filter-kind").value;
+    const media = byID("filter-media").value;
+    const previewState = byID("filter-preview").value;
+    const minimumSize = Number.parseInt(byID("filter-min-size").value, 10);
+    const maximumSize = Number.parseInt(byID("filter-max-size").value, 10);
+    const modifiedAfter = byID("filter-modified-after").value ? new Date(`${byID("filter-modified-after").value}T00:00:00`).valueOf() : Number.NEGATIVE_INFINITY;
+    const modifiedBefore = byID("filter-modified-before").value ? new Date(`${byID("filter-modified-before").value}T23:59:59.999`).valueOf() : Number.POSITIVE_INFINITY;
+    return entries.filter((entry) => {
+      const changed = new Date(entry.modifiedAt).valueOf();
+      const knownPreviewState = state.previewStates.get(entry.path);
+      return (!query || entry.name.toLocaleLowerCase().includes(query)) &&
+        (!kind || entry.kind === kind) &&
+        (!media || mediaCategory(entry) === media) &&
+        (!Number.isFinite(minimumSize) || entry.kind === "directory" || entry.size >= minimumSize) &&
+        (!Number.isFinite(maximumSize) || entry.kind === "directory" || entry.size <= maximumSize) &&
+        (!Number.isFinite(changed) || (changed >= modifiedAfter && changed <= modifiedBefore)) &&
+        (!previewState || (knownPreviewState ? knownPreviewState.state : "missing") === previewState);
+    });
+  }
+
+  function mediaCategory(entry) {
+    if (entry.kind === "directory") return "folder";
+    const mediaType = (entry.mediaType || "").toLocaleLowerCase();
+    const extension = (entry.name.split(".").pop() || "").toLocaleLowerCase();
+    if (mediaType.startsWith("image/")) return "image";
+    if (mediaType.startsWith("video/")) return "video";
+    if (mediaType === "application/pdf" || extension === "pdf") return "pdf";
+    if (mediaType.startsWith("audio/")) return "audio";
+    if (mediaType.startsWith("text/") || ["application/rtf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"].includes(mediaType)) return "document";
+    if (["application/zip", "application/gzip", "application/x-tar", "application/x-7z-compressed", "application/vnd.rar"].includes(mediaType) || ["zip", "gz", "tar", "7z", "rar"].includes(extension)) return "archive";
+    return "unknown";
+  }
+
+  function fileTypeIcon(entry, className = "file-icon") {
+    const category = mediaCategory(entry);
+    const slot = category === "folder" ? "icon.folder" : `icon.file.${category}`;
+    const descriptor = state.themeAssets[slot] || state.themeAssets[entry.kind === "directory" ? "icon.folder" : "icon.file"];
+    const wrapper = document.createElement("span");
+    wrapper.className = className;
+    wrapper.setAttribute("aria-hidden", "true");
+    if (descriptor && descriptor.url) {
+      const image = document.createElement("img");
+      image.src = descriptor.url;
+      image.alt = "";
+      image.width = descriptor.width || 32;
+      image.height = descriptor.height || 32;
+      wrapper.append(image);
+    } else {
+      wrapper.textContent = category === "folder" ? "▰" : category === "image" ? "▧" : category === "video" ? "▶" : category === "pdf" ? "PDF" : category === "audio" ? "♪" : category === "archive" ? "▦" : "▤";
+    }
+    return wrapper;
+  }
+
+  function renderVirtualGrid(entries) {
+    const scroller = byID("media-grid");
+    const content = byID("media-grid-content");
+    if (state.gridObserver) state.gridObserver.disconnect();
+    const style = getComputedStyle(document.documentElement);
+    const thumbnailSize = Number.parseFloat(style.getPropertyValue("--efs-metric-thumbnailSize")) || 96;
+    const tileMinimum = Math.max(140, thumbnailSize + 32);
+    const columns = Math.max(1, Math.floor(Math.max(scroller.clientWidth, 280) / tileMinimum));
+    const rowHeight = Math.max(184, thumbnailSize + 92);
+    const totalRows = Math.ceil(entries.length / columns);
+    const viewportHeight = Math.max(scroller.clientHeight, 420);
+    const firstVisible = Math.floor(scroller.scrollTop / rowHeight);
+    const lastVisible = Math.ceil((scroller.scrollTop + viewportHeight) / rowHeight);
+    const firstRow = Math.max(0, firstVisible - gridOverscanRows);
+    const lastRow = Math.min(totalRows, lastVisible + gridOverscanRows);
+    const firstIndex = firstRow * columns;
+    const lastIndex = Math.min(entries.length, lastRow * columns);
+    const activePaths = new Set(entries.slice(firstIndex, lastIndex).map((entry) => entry.path));
+    cleanupGridMedia(activePaths);
+    content.replaceChildren();
+    content.style.setProperty("--media-grid-columns", String(columns));
+    content.style.height = `${totalRows * rowHeight}px`;
+    content.dataset.itemCount = String(entries.length);
+    const layer = document.createElement("div");
+    layer.className = "media-grid-layer";
+    layer.style.transform = `translateY(${firstRow * rowHeight}px)`;
+    layer.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
+    for (let index = firstIndex; index < lastIndex; index += 1) layer.append(mediaTile(entries[index], index, columns));
+    content.append(layer);
+    scroller.setAttribute("aria-rowcount", String(totalRows));
+    scroller.setAttribute("aria-colcount", String(columns));
+    const observe = (frame) => queueGridPreview(frame.entry, frame);
+    if ("IntersectionObserver" in window) {
+      state.gridObserver = new IntersectionObserver((records) => {
+        for (const record of records) if (record.isIntersecting) observe(record.target);
+      }, { root: scroller, rootMargin: `${rowHeight * gridOverscanRows}px 0px`, threshold: 0.01 });
+      layer.querySelectorAll(".media-frame[data-preview-candidate='true']").forEach((frame) => state.gridObserver.observe(frame));
+    } else {
+      layer.querySelectorAll(".media-frame[data-preview-candidate='true']").forEach(observe);
+    }
+  }
+
+  function mediaTile(entry, index, columns) {
+    const tile = document.createElement("article");
+    tile.className = `media-tile${state.selected.has(entry.path) ? " selected" : ""}`;
+    tile.setAttribute("role", "gridcell");
+    tile.setAttribute("aria-rowindex", String(Math.floor(index / columns) + 1));
+    tile.setAttribute("aria-colindex", String(index % columns + 1));
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = state.selected.has(entry.path);
+    checkbox.setAttribute("aria-label", `Select ${entry.name}`);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) state.selected.set(entry.path, entry); else state.selected.delete(entry.path);
+      renderFiles(); updateSelection();
+    });
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "media-tile-open";
+    open.setAttribute("aria-label", `${entry.kind === "directory" ? "Open folder" : "View file"} ${entry.name}`);
+    const frame = document.createElement("span");
+    frame.className = "media-frame";
+    frame.entry = entry;
+    frame.dataset.path = entry.path;
+    if (entry.kind === "file") frame.dataset.previewCandidate = "true";
+    const objectURL = state.previewObjectURLs.get(entry.path);
+    if (objectURL) setPreviewImage(frame, entry, objectURL, state.previewStates.get(entry.path));
+    else frame.append(fileTypeIcon(entry, "media-fallback-icon"));
+    open.append(frame, text("strong", entry.name, "media-tile-name"), text("span", entry.kind === "directory" ? "Folder" : formatBytes(entry.size), "media-tile-meta"));
+    open.addEventListener("click", () => entry.kind === "directory" ? loadDirectory(entry.path) : openMediaViewer(entry));
+    tile.append(checkbox, open);
+    return tile;
+  }
+
+  function previewVariant(renderedCSSPixels) {
+    const resolutions = state.config && Array.isArray(state.config.previewResolutions) ? state.config.previewResolutions : [256, 512, 1600];
+    const target = Math.max(1, renderedCSSPixels * (window.devicePixelRatio || 1));
+    return resolutions.find((value) => value >= target) || resolutions[resolutions.length - 1] || 256;
+  }
+
+  function queueGridPreview(entry, frame) {
+    const known = state.previewStates.get(entry.path);
+    if (!state.config || !state.config.previewConfigured || entry.kind !== "file" || (known && known.state !== "ready" && known.state !== "generating") || state.previewQueued.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
+    state.previewQueued.add(entry.path);
+    state.previewQueue.push({ entry, frame });
+    pumpPreviewQueue();
+  }
+
+  function pumpPreviewQueue() {
+    const maximum = Math.max(1, Math.min(8, state.config && state.config.previewMaxConcurrency ? state.config.previewMaxConcurrency : 2));
+    while (state.previewActive < maximum && state.previewQueue.length) {
+      const queued = state.previewQueue.shift();
+      state.previewQueued.delete(queued.entry.path);
+      if (!queued.frame.isConnected) continue;
+      state.previewActive += 1;
+      const controller = new AbortController();
+      state.previewControllers.set(queued.entry.path, controller);
+      resolveGridPreview(queued.entry, queued.frame, controller).finally(() => {
+        if (state.previewControllers.get(queued.entry.path) === controller) state.previewControllers.delete(queued.entry.path);
+        state.previewActive -= 1;
+        pumpPreviewQueue();
+      });
+    }
+  }
+
+  async function resolveGridPreview(entry, frame, controller) {
+    try {
+      const variant = previewVariant(frame.getBoundingClientRect().width || 96);
+      const response = await api("/api/v1/previews/resolve", { method: "POST", body: { items: [{ path: entry.path, version: entry.version, variant }] }, signal: controller.signal });
+      const result = response.items[0];
+      if (controller.signal.aborted) return;
+      state.previewStates.set(entry.path, result);
+      let currentFrame = connectedGridFrame(entry.path) || frame;
+      if (currentFrame.isConnected) currentFrame.dataset.previewState = result.state;
+      if (result.state !== "ready" || !result.capability) {
+        if (result.state === "generating") scheduleGridPreviewRetry(entry, currentFrame);
+        else clearGridPreviewRetry(entry.path);
+        if (byID("filter-preview").value) renderFiles();
+        return;
+      }
+      clearGridPreviewRetry(entry.path);
+      const artifactResponse = await fetch(result.capability.url, { method: result.capability.method || "GET", headers: result.capability.headers || {}, signal: controller.signal, credentials: "omit" });
+      if (!artifactResponse.ok || artifactResponse.headers.get("Content-Type") !== "image/webp") throw new Error("Invalid preview artifact response");
+      const blob = await artifactResponse.blob();
+      if (blob.type !== "image/webp" || controller.signal.aborted) return;
+      const objectURL = URL.createObjectURL(blob);
+      const previous = state.previewObjectURLs.get(entry.path);
+      if (previous) URL.revokeObjectURL(previous);
+      state.previewObjectURLs.set(entry.path, objectURL);
+      currentFrame = connectedGridFrame(entry.path) || frame;
+      if (currentFrame.isConnected) setPreviewImage(currentFrame, entry, objectURL, result);
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        const result = { state: "unavailable" };
+        state.previewStates.set(entry.path, result);
+        frame.dataset.previewState = result.state;
+        clearGridPreviewRetry(entry.path);
+      }
+    }
+  }
+
+  function scheduleGridPreviewRetry(entry, frame) {
+    clearGridPreviewRetry(entry.path, false);
+    const attempt = state.previewRetryAttempts.get(entry.path) || 0;
+    if (attempt >= maximumPreviewPolls) {
+      const failed = { state: "failed" };
+      state.previewStates.set(entry.path, failed);
+      if (frame && frame.isConnected) frame.dataset.previewState = failed.state;
+      state.previewRetryAttempts.delete(entry.path);
+      return;
+    }
+    state.previewRetryAttempts.set(entry.path, attempt + 1);
+    const delay = previewRetryDelays[Math.min(attempt, previewRetryDelays.length - 1)];
+    const timer = window.setTimeout(() => {
+      state.previewRetryTimers.delete(entry.path);
+      const currentFrame = connectedGridFrame(entry.path);
+      if (!currentFrame || !currentFrame.isConnected || state.previewStates.get(entry.path)?.state !== "generating") return;
+      queueGridPreview(entry, currentFrame);
+    }, delay);
+    state.previewRetryTimers.set(entry.path, timer);
+  }
+
+  function clearGridPreviewRetry(path, resetAttempts = true) {
+    const timer = state.previewRetryTimers.get(path);
+    if (timer) window.clearTimeout(timer);
+    state.previewRetryTimers.delete(path);
+    if (resetAttempts) state.previewRetryAttempts.delete(path);
+  }
+
+  function connectedGridFrame(path) {
+    return Array.from(byID("media-grid-content").querySelectorAll(".media-frame")).find((candidate) => candidate.dataset.path === path) || null;
+  }
+
+  function setPreviewImage(frame, entry, objectURL, result) {
+    const image = document.createElement("img");
+    image.src = objectURL;
+    image.alt = `Preview of ${entry.name}`;
+    image.width = result && result.artifact ? result.artifact.width : 1;
+    image.height = result && result.artifact ? result.artifact.height : 1;
+    image.decoding = "async";
+    image.loading = "lazy";
+    image.fetchPriority = "low";
+    frame.replaceChildren(image);
+  }
+
+  function cleanupGridMedia(activePaths) {
+    if (state.gridObserver) { state.gridObserver.disconnect(); state.gridObserver = null; }
+    for (const [path, controller] of state.previewControllers) {
+      if (!activePaths.has(path)) {
+        controller.abort();
+        state.previewControllers.delete(path);
+        if (state.previewStates.get(path) && state.previewStates.get(path).state === "ready") state.previewStates.delete(path);
+      }
+    }
+    state.previewQueue = state.previewQueue.filter((item) => activePaths.has(item.entry.path));
+    state.previewQueued = new Set(state.previewQueue.map((item) => item.entry.path));
+    for (const [path, objectURL] of state.previewObjectURLs) {
+      if (!activePaths.has(path)) {
+        URL.revokeObjectURL(objectURL);
+        state.previewObjectURLs.delete(path);
+        if (state.previewStates.get(path) && state.previewStates.get(path).state === "ready") state.previewStates.delete(path);
+      }
+    }
+    for (const path of state.previewRetryTimers.keys()) {
+      if (!activePaths.has(path)) clearGridPreviewRetry(path);
+    }
   }
 
   function fileRow(entry) {
@@ -362,7 +670,7 @@
     selectCell.append(checkbox);
     const nameCell = document.createElement("td");
     const open = button(entry.name, () => entry.kind === "directory" ? loadDirectory(entry.path) : preview(entry), "file-name");
-    open.prepend(text("span", entry.kind === "directory" ? "▰" : "▤", "file-icon"));
+    open.prepend(fileTypeIcon(entry));
     open.setAttribute("aria-label", `${entry.kind === "directory" ? "Open folder" : "Preview file"} ${entry.name}`);
     nameCell.append(open);
     const sizeCell = text("td", entry.kind === "directory" ? "Folder" : formatBytes(entry.size));
@@ -575,8 +883,14 @@
   }
 
   async function preview(entry, publicToken = "") {
-    if (entry.kind !== "file") return;
-    const dialog = byID("preview-dialog");
+    if (!publicToken) {
+      openMediaViewer(entry);
+      return;
+    }
+    await openSafeOriginalPreview(entry, publicToken);
+  }
+
+  function populatePreviewMetadata(entry) {
     byID("preview-title").textContent = entry.name;
     const metadata = byID("preview-metadata");
     metadata.replaceChildren();
@@ -585,9 +899,23 @@
       group.append(text("dt", label), text("dd", value));
       metadata.append(group);
     }
+  }
+
+  async function openSafeOriginalPreview(entry, publicToken = "") {
+    if (entry.kind !== "file") return;
+    const dialog = byID("preview-dialog");
+    populatePreviewMetadata(entry);
+    byID("preview-previous").hidden = true;
+    byID("preview-next").hidden = true;
+    byID("preview-generate").hidden = true;
+    byID("preview-regenerate").hidden = true;
+    byID("preview-original").hidden = true;
+    byID("preview-download").hidden = false;
+    byID("preview-download").onclick = () => download(entry, publicToken);
+    byID("preview-status").textContent = "Loading the original through an explicit safe-preview capability.";
     const content = byID("preview-content");
     content.replaceChildren(text("p", "Preparing a safe preview…", "state-panel"));
-    dialog.showModal();
+    if (!dialog.open) dialog.showModal();
     try {
       const endpoint = publicToken ? `/api/v1/public/shares/${encodeURIComponent(publicToken)}/downloads` : "/api/v1/downloads";
       const created = await api(endpoint, { method: "POST", body: { path: entry.path, version: entry.version, preview: true } });
@@ -609,7 +937,154 @@
       } else {
         content.append(text("p", "A browser preview is not available for this file. Use Download instead.", "state-panel"));
       }
+      byID("preview-status").textContent = "Original preview loaded.";
     } catch (error) { content.replaceChildren(text("p", friendlyError(error, "Preview is unavailable."), "state-panel error")); }
+  }
+
+  function openMediaViewer(entry) {
+    if (entry.kind !== "file") return;
+    state.viewerEntries = state.filteredEntries.filter((item) => item.kind === "file");
+    state.viewerIndex = state.viewerEntries.findIndex((item) => item.path === entry.path);
+    if (state.viewerIndex < 0) { state.viewerEntries = [entry]; state.viewerIndex = 0; }
+    state.viewerOpener = document.activeElement;
+    const dialog = byID("preview-dialog");
+    if (!dialog.open) dialog.showModal();
+    showViewerEntry(state.viewerEntries[state.viewerIndex]);
+  }
+
+  async function showViewerEntry(entry) {
+    state.viewerEntry = entry;
+    if (state.viewerController) state.viewerController.abort();
+    state.viewerController = new AbortController();
+    releaseViewerObjectURL();
+    populatePreviewMetadata(entry);
+    byID("preview-previous").hidden = false;
+    byID("preview-next").hidden = false;
+    byID("preview-previous").disabled = state.viewerIndex <= 0;
+    byID("preview-next").disabled = state.viewerIndex >= state.viewerEntries.length - 1;
+    const canGenerate = Boolean(state.config && state.config.previewConfigured && mediaCategory(entry) === "image");
+    byID("preview-generate").hidden = !canGenerate;
+    byID("preview-regenerate").hidden = !canGenerate;
+    byID("preview-original").hidden = false;
+    byID("preview-download").hidden = false;
+    byID("preview-download").onclick = () => download(entry);
+    byID("preview-status").textContent = "Resolving generated preview…";
+    showViewerFallback(entry);
+    if (!state.config || !state.config.previewConfigured) {
+      byID("preview-status").textContent = "Generated thumbnails are not configured. The file-type icon is shown; the original remains available on request.";
+      return;
+    }
+    try {
+      const variant = previewVariant(Math.max(window.innerWidth, window.innerHeight));
+      const response = await api("/api/v1/previews/resolve", { method: "POST", body: { items: [{ path: entry.path, version: entry.version, variant }] }, signal: state.viewerController.signal });
+      await displayViewerResult(entry, response.items[0], state.viewerController.signal);
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        byID("preview-status").textContent = friendlyError(error, "Generated preview is unavailable.");
+        showViewerFallback(entry);
+      }
+    }
+  }
+
+  function showViewerFallback(entry) {
+    const fallback = fileTypeIcon(entry, "viewer-fallback-icon");
+    fallback.setAttribute("role", "img");
+    fallback.setAttribute("aria-label", `${mediaCategory(entry)} file icon for ${entry.name}`);
+    fallback.removeAttribute("aria-hidden");
+    byID("preview-content").replaceChildren(fallback);
+  }
+
+  async function displayViewerResult(entry, result, signal) {
+    state.previewStates.set(entry.path, result);
+    if (result.state !== "ready" || !result.capability) {
+      const messages = {
+        disabled: "Generated previews are not configured. The original remains available on request.",
+        unsupported: "This file type uses its built-in icon in v1.1.",
+        ineligible: `Automatic generation is excluded by the ${result.reason || "configured"} policy. You can generate it explicitly.`,
+        missing: "No generated preview exists yet. You can generate it explicitly.",
+        unavailable: "The preview store is unavailable. Original files are unaffected.",
+        failed: "Preview generation did not complete. You can try again.",
+      };
+      byID("preview-status").textContent = messages[result.state] || "Generated preview is unavailable.";
+      showViewerFallback(entry);
+      return;
+    }
+    const response = await fetch(result.capability.url, { method: result.capability.method || "GET", headers: result.capability.headers || {}, signal, credentials: "omit" });
+    if (!response.ok || response.headers.get("Content-Type") !== "image/webp") throw new Error("Invalid preview artifact response");
+    const blob = await response.blob();
+    if (blob.type !== "image/webp") throw new Error("Invalid preview artifact type");
+    releaseViewerObjectURL();
+    state.viewerObjectURL = URL.createObjectURL(blob);
+    const image = document.createElement("img");
+    image.src = state.viewerObjectURL;
+    image.alt = `Preview of ${entry.name}`;
+    image.width = result.artifact.width;
+    image.height = result.artifact.height;
+    image.decoding = "async";
+    byID("preview-content").replaceChildren(image);
+    byID("preview-status").textContent = "Generated WebP preview ready.";
+  }
+
+  async function generateViewerPreview(regenerate) {
+    const entry = state.viewerEntry;
+    if (!entry) return;
+    const action = regenerate ? "regenerate" : "generate";
+    byID("preview-status").textContent = `${regenerate ? "Regenerating" : "Generating"} preview…`;
+    try {
+      const variant = previewVariant(Math.max(window.innerWidth, window.innerHeight));
+      const requestIdentity = `${entry.path}\u0000${entry.version}\u0000${variant}\u0000${action}`;
+      let pending = state.previewGenerationRequests.get(requestIdentity);
+      if (!pending) {
+        if (state.previewGenerationRequests.size >= 64) state.previewGenerationRequests.delete(state.previewGenerationRequests.keys().next().value);
+        pending = { idempotencyKey: idempotencyKey(), body: { path: entry.path, version: entry.version, variant, action } };
+        state.previewGenerationRequests.set(requestIdentity, pending);
+      }
+      const postGeneration = () => api("/api/v1/previews/generations", {
+        method: "POST", headers: { "Idempotency-Key": pending.idempotencyKey }, body: pending.body, signal: state.viewerController.signal,
+      });
+      let operation = await postGeneration();
+      if (operation.state === "running") byID("preview-status").textContent = "Preview generation is running and will be recovered safely if its replica stops.";
+      operation = await waitForPreviewOperation(operation, postGeneration, state.viewerController.signal);
+      if (operation.state === "succeeded" && operation.result) {
+        state.previewGenerationRequests.delete(requestIdentity);
+        await displayViewerResult(entry, operation.result, state.viewerController.signal);
+      } else if (operation.state === "failed") {
+        state.previewGenerationRequests.delete(requestIdentity);
+        byID("preview-status").textContent = "Preview generation failed. You can try again.";
+        showViewerFallback(entry);
+      } else {
+        byID("preview-status").textContent = "Preview generation is still running. Choose Generate again to resume this operation.";
+        showViewerFallback(entry);
+      }
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        byID("preview-status").textContent = friendlyError(error, "Preview generation did not complete. Choose Generate again to safely retry it.");
+        showViewerFallback(entry);
+      }
+    }
+  }
+
+  async function waitForPreviewOperation(initial, retryMutation, signal) {
+    let operation = initial;
+    for (let attempt = 0; attempt < maximumPreviewPolls && operation.state === "running"; attempt += 1) {
+      const delay = previewRetryDelays[Math.min(attempt, previewRetryDelays.length - 1)];
+      await wait(delay, signal);
+      if (attempt >= 12 && attempt % 2 === 0) operation = await retryMutation();
+      else operation = await api(`/api/v1/previews/operations/${encodeURIComponent(operation.id)}`, { signal });
+    }
+    return operation;
+  }
+
+  function navigateViewer(offset) {
+    const next = state.viewerIndex + offset;
+    if (next < 0 || next >= state.viewerEntries.length) return;
+    state.viewerIndex = next;
+    showViewerEntry(state.viewerEntries[next]);
+  }
+
+  function releaseViewerObjectURL() {
+    if (state.viewerObjectURL) URL.revokeObjectURL(state.viewerObjectURL);
+    state.viewerObjectURL = "";
   }
 
   async function openItemActions(entry) {
@@ -749,10 +1224,12 @@
 
   function applyTheme(selection) {
     const link = byID("theme-stylesheet");
-    if (!selection || !selection.cssURL) { link.disabled = true; link.removeAttribute("href"); return; }
+    if (!selection || !selection.cssURL) { link.disabled = true; link.removeAttribute("href"); state.themeAssets = {}; return; }
     link.href = selection.cssURL;
     link.disabled = false;
+    state.themeAssets = selection.assets || {};
     document.documentElement.dataset.theme = selection.resolved.id;
+    if (state.user && !byID("drive-view").hidden) renderFiles();
   }
 
   function renderPasskeys(passkeys) {
@@ -945,7 +1422,11 @@
     byID("transfer-concurrency").addEventListener("change", pumpTransfers);
     byID("clear-transfers").addEventListener("click", () => { state.transfers = state.transfers.filter((item) => !["complete", "cancelled"].includes(item.state)); renderTransfers(); byID("transfer-panel").hidden = !state.transfers.length; });
     byID("file-filter").addEventListener("input", renderFiles); byID("file-sort").addEventListener("change", () => loadDirectory(state.currentDirectory));
-    byID("select-all").addEventListener("change", (event) => { const query = byID("file-filter").value.trim().toLocaleLowerCase(); for (const entry of state.entries.filter((item) => item.name.toLocaleLowerCase().includes(query))) { if (event.target.checked) state.selected.set(entry.path, entry); else state.selected.delete(entry.path); } renderFiles(); updateSelection(); });
+    for (const id of ["filter-kind", "filter-media", "filter-min-size", "filter-max-size", "filter-modified-after", "filter-modified-before", "filter-preview"]) byID(id).addEventListener("input", renderFiles);
+    for (const id of ["file-view-list", "file-view-grid"]) byID(id).addEventListener("change", (event) => { if (event.target.checked) { state.viewMode = event.target.value; renderFiles(); } });
+    byID("media-grid").addEventListener("scroll", () => { if (state.gridRenderFrame) return; state.gridRenderFrame = requestAnimationFrame(() => { state.gridRenderFrame = 0; if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries); }); });
+    window.addEventListener("resize", () => { if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries); });
+    byID("select-all").addEventListener("change", (event) => { for (const entry of filterLoadedEntries(state.entries)) { if (event.target.checked) state.selected.set(entry.path, entry); else state.selected.delete(entry.path); } renderFiles(); updateSelection(); });
     byID("clear-selection").addEventListener("click", () => { state.selected.clear(); renderFiles(); updateSelection(); });
     byID("download-selected").addEventListener("click", () => download([...state.selected.values()][0]));
     byID("share-selected").addEventListener("click", () => createShare([...state.selected.values()][0]));
@@ -961,9 +1442,15 @@
     byID("refresh-users").addEventListener("click", loadAdmin);
     byID("users-next").addEventListener("click", async () => { try { const page = await api(`/api/v1/admin/users?limit=100&cursor=${encodeURIComponent(byID("users-next").dataset.cursor)}`); renderUsers(page.users || [], true); byID("users-next").hidden = !page.nextCursor; byID("users-next").dataset.cursor = page.nextCursor || ""; } catch (error) { announce(friendlyError(error), true); } });
     byID("public-next").addEventListener("click", () => loadPublicShare(true));
-    const closePreview = () => { byID("preview-content").replaceChildren(); byID("preview-dialog").close(); };
+    const closePreview = () => { if (state.viewerController) state.viewerController.abort(); state.viewerController = null; releaseViewerObjectURL(); byID("preview-content").replaceChildren(); byID("preview-dialog").close(); if (state.viewerOpener && state.viewerOpener.focus) state.viewerOpener.focus(); state.viewerEntry = null; };
+    byID("preview-previous").addEventListener("click", () => navigateViewer(-1));
+    byID("preview-next").addEventListener("click", () => navigateViewer(1));
+    byID("preview-generate").addEventListener("click", () => generateViewerPreview(false));
+    byID("preview-regenerate").addEventListener("click", () => generateViewerPreview(true));
+    byID("preview-original").addEventListener("click", () => { if (state.viewerEntry) openSafeOriginalPreview(state.viewerEntry); });
     byID("preview-close").addEventListener("click", closePreview);
     byID("preview-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closePreview(); });
+    byID("preview-dialog").addEventListener("keydown", (event) => { if (event.key === "ArrowLeft") { event.preventDefault(); navigateViewer(-1); } if (event.key === "ArrowRight") { event.preventDefault(); navigateViewer(1); } });
     window.addEventListener("popstate", () => { if (state.user) setRoute(routeFromPath(), false); });
     window.addEventListener("online", () => { byID("connection-status").textContent = "Online"; byID("connection-status").classList.remove("offline"); announce("Connection restored."); });
     window.addEventListener("offline", () => { byID("connection-status").textContent = "Offline"; byID("connection-status").classList.add("offline"); announce("You are offline. Active transfers may pause.", true); });

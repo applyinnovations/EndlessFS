@@ -76,6 +76,7 @@
         go test ./internal/provider/memory -run '^$' -fuzz '^FuzzRangeAndContentDisposition$' -fuzztime "$fuzztime"
         go test ./internal/logging -run '^$' -fuzz '^FuzzStructuredLogRedaction$' -fuzztime "$fuzztime"
         go test ./internal/theme -run '^$' -fuzz '^FuzzThemeBoundaries$' -fuzztime "$fuzztime"
+        go test ./internal/preview/imagegen -run '^$' -fuzz '^FuzzGeneratorMalformed$' -fuzztime "$fuzztime"
       '';
     in
     {
@@ -118,6 +119,16 @@
               gofmt -w internal/theme/custom_build_inputs.go
             '';
 
+          dependencyDigestBuildHook = ''
+            if [ -f vendor/modules.txt ]; then
+              dependency_inventory="$TMPDIR/endlessfs-dependencies.txt"
+              awk '/^# / && $2 != "=>" { print $2, $3 }' vendor/modules.txt \
+                | LC_ALL=C sort -u > "$dependency_inventory"
+              dependency_digest="$(sha256sum "$dependency_inventory" | cut -d ' ' -f 1)"
+              ldflags+=("-X=github.com/applyinnovations/endlessfs/internal/preview.DependencyInventoryDigest=$dependency_digest")
+            fi
+          '';
+
           mkEndlessFS =
             {
               themeBundles ? [ ],
@@ -127,7 +138,7 @@
               inherit version;
               src = goSource;
               subPackages = [ "cmd/endlessfs" ];
-              vendorHash = "sha256-VKX45eWoUXXVtAWI6DQ/SF3kofBHXEgGiezYbXpSRpk=";
+              vendorHash = "sha256-Rgxyk0aXuICRsQ8rJEhEbx2RbNZ81xcV9khACnVPcEY=";
               # Keep the fixed-output dependency closure address stable when the
               # source revision changes without changing go.mod/go.sum.
               overrideModAttrs = _final: _previous: {
@@ -136,7 +147,7 @@
               inherit go;
               doCheck = false;
               env.CGO_ENABLED = 0;
-              preBuild = themePreBuild themeBundles;
+              preBuild = (themePreBuild themeBundles) + dependencyDigestBuildHook;
               ldflags = [
                 "-s"
                 "-w"
@@ -165,11 +176,15 @@
                 cp -R ${endlessfs.goModules} vendor
                 export GOFLAGS=-mod=vendor
                 ${themePreBuild themeBundles}
+                dependency_inventory="$TMPDIR/endlessfs-dependencies.txt"
+                awk '/^# / && $2 != "=>" { print $2, $3 }' vendor/modules.txt \
+                  | LC_ALL=C sort -u > "$dependency_inventory"
+                dependency_digest="$(sha256sum "$dependency_inventory" | cut -d ' ' -f 1)"
                 export GOOS=linux
                 export GOARCH=${linuxArchitecture}
                 export CGO_ENABLED=0
                 go build -trimpath -buildvcs=false \
-                  -ldflags "-s -w -buildid= -X=main.version=${version}" \
+                  -ldflags "-s -w -buildid= -X=main.version=${version} -X=github.com/applyinnovations/endlessfs/internal/preview.DependencyInventoryDigest=$dependency_digest" \
                   -o endlessfs ./cmd/endlessfs
                 runHook postBuild
               '';
@@ -228,6 +243,32 @@
                 go run ./tools/theme inventory > "$out"
               '';
 
+          dependencyInventory =
+            pkgs.runCommand "endlessfs-dependency-inventory-${version}" { nativeBuildInputs = [ pkgs.gawk ]; }
+              ''
+                awk '/^# / && $2 != "=>" { print $2, $3 }' \
+                  ${endlessfs.goModules}/modules.txt | LC_ALL=C sort -u > "$out"
+              '';
+
+          capabilityInventory =
+            pkgs.runCommand "endlessfs-capabilities-${version}.json" { nativeBuildInputs = [ pkgs.jq ]; }
+              ''
+                dependency_digest="$(sha256sum ${dependencyInventory} | cut -d ' ' -f 1)"
+                jq -n \
+                  --arg applicationVersion '${version}' \
+                  --arg dependencyInventorySHA256 "$dependency_digest" \
+                  '{
+                    applicationVersion: $applicationVersion,
+                    previewSpecification: "v1.1",
+                    profile: "images",
+                    packagedCapabilities: ["image"],
+                    acceptedImageMediaTypes: ["image/gif", "image/jpeg", "image/png", "image/webp"],
+                    artifactMediaTypes: ["image/webp"],
+                    imageRecipeID: "image-webp-q80-v1",
+                    dependencyInventorySHA256: $dependencyInventorySHA256
+                  }' > "$out"
+              '';
+
           release =
             pkgs.runCommand "endlessfs-release-${version}-${system}"
               {
@@ -249,9 +290,8 @@
                 cp ${projectSource}/docs/v1-evidence.md staging/V1-EVIDENCE.md
                 cp ${projectSource}/docs/v1-release-notes.md staging/RELEASE-NOTES.md
                 cp ${themeInventory} staging/THEMES.json
-                awk '/^# / && $2 != "=>" { print $2, $3 }' \
-                  ${endlessfs.goModules}/modules.txt | LC_ALL=C sort -u \
-                  > staging/DEPENDENCIES.txt
+                cp ${dependencyInventory} staging/DEPENDENCIES.txt
+                cp ${capabilityInventory} staging/CAPABILITIES.json
                 (
                   cd ${endlessfs.goModules}
                   find . -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) -print0 \
@@ -261,8 +301,16 @@
                 binary_hash="$(sha256sum staging/endlessfs | cut -d ' ' -f 1)"
                 container_hash="$(sha256sum "staging/endlessfs-container-${version}.tar.gz" | cut -d ' ' -f 1)"
                 theme_hash="$(sha256sum staging/THEMES.json | cut -d ' ' -f 1)"
+                capability_hash="$(sha256sum staging/CAPABILITIES.json | cut -d ' ' -f 1)"
                 dependency_hash="$(sha256sum staging/DEPENDENCIES.txt | cut -d ' ' -f 1)"
                 license_hash="$(sha256sum staging/DEPENDENCY-LICENSES.sha256 | cut -d ' ' -f 1)"
+                container_archive_bytes="$(wc -c < "staging/endlessfs-container-${version}.tar.gz" | tr -d ' ')"
+                mkdir -p image-archive image-root
+                tar -xzf "staging/endlessfs-container-${version}.tar.gz" -C image-archive
+                jq -r '.[0].Layers[]' image-archive/manifest.json | while IFS= read -r layer; do
+                  tar -xf "image-archive/$layer" -C image-root
+                done
+                container_unpacked_bytes="$(du -sb image-root | cut -f 1)"
                 lock_hash="$(sha256sum ${projectSource}/flake.lock | cut -d ' ' -f 1)"
                 vulndb_hash="$(jq -r '.nodes.vulndb.locked.narHash' ${projectSource}/flake.lock)"
                 {
@@ -271,9 +319,14 @@
                   printf 'vulnerability-database-nar-hash=%s\n' "$vulndb_hash"
                   printf 'target-system=%s\n' '${system}'
                   printf 'go-toolchain=%s\n' '1.26.6'
+                  printf 'capability-profile=%s\n' 'images'
+                  printf 'packaged-preview-capabilities=%s\n' 'image'
                   printf 'binary-sha256=%s\n' "$binary_hash"
                   printf 'oci-sha256=%s\n' "$container_hash"
+                  printf 'oci-archive-bytes=%s\n' "$container_archive_bytes"
+                  printf 'oci-unpacked-root-bytes=%s\n' "$container_unpacked_bytes"
                   printf 'theme-inventory-sha256=%s\n' "$theme_hash"
+                  printf 'capability-inventory-sha256=%s\n' "$capability_hash"
                   printf 'dependency-inventory-sha256=%s\n' "$dependency_hash"
                   printf 'dependency-license-inventory-sha256=%s\n' "$license_hash"
                   printf 'verification-command=%s\n' 'nix flake check --print-build-logs'
@@ -283,7 +336,8 @@
                   printf 'storage-providers=%s\n' 'deterministic-memory,locally-qualified-gcs-adapter'
                   printf 'canonical-format=%s\n' 'endlessfs-portable-bucket-v1'
                   printf 'writer-protocol-version=%s\n' '1'
-                  printf 'implementation-status=%s\n' 'v1-portable-local-qualification'
+                  printf 'preview-store-providers=%s\n' 'disabled,deterministic-memory'
+                  printf 'implementation-status=%s\n' 'v1.1-image-preview-complete-local-qualification'
                   printf 'live-gcs-validation=%s\n' 'not-performed'
                   printf 'deployment-validation=%s\n' 'not-performed'
                   printf 'build-and-test-credentials-used=%s\n' 'none'
@@ -296,12 +350,13 @@
                 cp staging/DEPENDENCIES.txt "$out/"
                 cp staging/DEPENDENCY-LICENSES.sha256 "$out/"
                 cp staging/THEMES.json "$out/"
+                cp staging/CAPABILITIES.json "$out/"
                 (
                   cd "$out"
                   sha256sum \
                     "endlessfs-${version}-${system}.tar.gz" \
                     "endlessfs-container-${version}.tar.gz" \
-                    DEPENDENCIES.txt DEPENDENCY-LICENSES.sha256 RELEASE-INVENTORY.txt THEMES.json \
+                    CAPABILITIES.json DEPENDENCIES.txt DEPENDENCY-LICENSES.sha256 RELEASE-INVENTORY.txt THEMES.json \
                     > SHA256SUMS
                 )
               '';
@@ -309,6 +364,8 @@
         {
           default = endlessfs;
           inherit container release;
+          container-images = container;
+          release-images = release;
         }
       );
 
@@ -430,7 +487,6 @@
           test-contract = goTask "endlessfs-test-contract" ''
             go test ./... -run '^TestContract'
           '';
-
           test-replica = goTask "endlessfs-test-replica" ''
             exec go test ./internal/portable ./internal/objectstore/gcs \
               -run '(Replica|CandidateCannot|Superseded|GenerationConditionsFence|LostMutation)' -count=1 "$@"
@@ -441,6 +497,10 @@
               -run '(Portab|Checkpoint|ContractGCSProtocol|GCSResumableCapability)' -count=1 "$@"
           '';
 
+          test-preview = goTask "endlessfs-test-preview" ''
+            go test ./internal/preview/... -count=1
+            go test ./internal/httpapi -run 'Preview' -count=1
+          '';
           test-e2e =
             mkTask "endlessfs-test-e2e"
               (goTools ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
@@ -767,8 +827,10 @@
         {
           build = self.packages.${system}.default;
           container = self.packages.${system}.container;
+          container-images = self.packages.${system}.container-images;
           container-policy = containerPolicy;
           release = self.packages.${system}.release;
+          release-images = self.packages.${system}.release-images;
 
           e2e = e2eCompile;
 
@@ -782,6 +844,7 @@
           replica = testSuite;
           portability = testSuite;
           provider-verify = testSuite;
+          preview = testSuite;
           theme = testSuite;
           race = raceCheck;
           coverage = coverageCompile;

@@ -111,7 +111,9 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 	}
 	preparation.entry.Name = resolved.Name()
 	preparation.entry.NameDigest = storageformat.NameDigest(resolved.Name())
-	preparation.entry.ModifiedAt = s.engine.clock.Now().UTC()
+	if !move || preparation.entry.Kind == domain.EntryDirectory {
+		preparation.entry.ModifiedAt = s.engine.clock.Now().UTC()
+	}
 	preparation.entry.LogicalVersion, err = directoryEntryVersion(preparation.entry)
 	if err != nil {
 		return domain.Operation{}, err
@@ -254,8 +256,8 @@ func (s *FileStore) cloneTree(ctx context.Context, from, to domain.Scope, source
 			destinationKey := storageformat.BlobKey(to.UserID().String(), blobID)
 			result.copies = append(result.copies, storageformat.MutationCopy{SourceKey: sourceKey.String(), DestinationKey: destinationKey.String(), Size: source.Size, SHA256: source.SHA256})
 			result.entry.BlobID = blobID
+			result.entry.ModifiedAt = now
 		}
-		result.entry.ModifiedAt = now
 		return result, nil
 	}
 	sourceDirectory, err := s.readDirectory(ctx, from, source.DirectoryID, false)

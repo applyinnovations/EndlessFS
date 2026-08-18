@@ -16,6 +16,17 @@ const (
 type Version string
 type UploadID string
 type OperationID string
+type ContentID string
+type ContentVersion string
+
+// PreviewContentIdentity is trusted provider metadata. It is deliberately
+// absent from every public JSON representation and remains stable when a file
+// is renamed, moved, trashed, or restored.
+type PreviewContentIdentity struct {
+	ContentID         ContentID
+	ContentVersion    ContentVersion
+	ContentModifiedAt time.Time
+}
 
 type Entry struct {
 	Path       UserPath  `json:"path"`
@@ -25,6 +36,16 @@ type Entry struct {
 	MediaType  string    `json:"mediaType,omitempty"`
 	ModifiedAt time.Time `json:"modifiedAt"`
 	Version    Version   `json:"version"`
+
+	ContentID         ContentID      `json:"-"`
+	ContentVersion    ContentVersion `json:"-"`
+	ContentModifiedAt time.Time      `json:"-"`
+}
+
+func (e Entry) PreviewContentIdentity() PreviewContentIdentity {
+	return PreviewContentIdentity{
+		ContentID: e.ContentID, ContentVersion: e.ContentVersion, ContentModifiedAt: e.ContentModifiedAt,
+	}
 }
 
 type ConflictMode string

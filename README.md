@@ -105,7 +105,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#test-e2e` | Run Go-controlled Chromium passkey and core Drive workflows. Nix supplies Chromium on Linux. |
 | `nix run .#test-coverage` | Run the complete suite and enforce 85% repository plus 95% security-boundary statement coverage. |
 | `nix run .#test-race` | Run the suite with Go's race detector. |
-| `nix run .#test-fuzz` | Run fixed-iteration path, encoding, JSON, cursor, share, capability, WebAuthn, logging, and theme fuzz smoke targets. |
+| `nix run .#test-fuzz` | Run fixed-iteration path, encoding, JSON, cursor, share, capability, WebAuthn, logging, theme, and image-preview decoder fuzz smoke targets. |
 | `nix run .#security` | Run pinned static, vulnerability, configuration, dependency, source-policy, and OCI checks. |
 | `nix run .#dependency-check` | Verify the locked module inventory and retained dependency licenses. |
 | `nix run .#container` | Build the local OCI archive through Nix. |
@@ -146,7 +146,7 @@ Only settings that have validation and tests are parsed by the current binary:
 | `ENDLESSFS_DEFAULT_LIGHT_THEME` | `endlessfs-light` | Installed light-appearance theme used by `system`; startup rejects missing/wrong-appearance values. |
 | `ENDLESSFS_DEFAULT_DARK_THEME` | `endlessfs-dark` | Installed dark-appearance theme used by `system`; startup rejects missing/wrong-appearance values. |
 | `ENDLESSFS_LOG_LEVEL` | `info` | Exact `debug`, `info`, `warn`, or `error`; all levels retain structural secret redaction. |
-| `ENDLESSFS_PREVIEW_PROVIDER` | `disabled` | Accepts `disabled` or the independently faultable local `mock` preview store. Configured access is a startup requirement. |
+| `ENDLESSFS_PREVIEW_PROVIDER` | `disabled` | Accepts `disabled` or the independently faultable local `mock` preview store. `mock` is restricted to the HTTP-loopback control plane with mock authoritative storage; deployed GCS/HTTPS/multi-process use requires a future durable shared preview adapter. |
 | `ENDLESSFS_PREVIEW_AUTOMATIC` | Provider configured | Enables lazy generation for visible eligible image tiles; `false` is manual-only. |
 | `ENDLESSFS_PREVIEW_FORMATS` | `image` | Closed packaged capability set. `video`, `pdf`, unknown, duplicate, or unpackaged values fail startup in the image profile. |
 | `ENDLESSFS_PREVIEW_AUTO_MAX_AGE` | Unset | Optional positive source-age limit for automatic generation. |

@@ -31,6 +31,8 @@ docker run --rm -p 8080:8080 \
 
 The example assumes the container runtime supplies ADC. Terminate TLS at the ingress or reverse proxy; `ENDLESSFS_BASE_URL` must be the public HTTPS origin.
 
+Leave `ENDLESSFS_PREVIEW_PROVIDER` unset or set it to `disabled`. The implemented `mock` preview store is deliberately restricted to single-process HTTP-loopback development and fails startup when combined with GCS. The media grid, metadata filters, keyboard-accessible viewer, and file-type icons remain available without generated thumbnails. A future durable shared preview-store adapter can add generated thumbnails without changing the authoritative GCS storage set.
+
 Omit `ENDLESSFS_GCS_STATE_BUCKET`, or set it equal to `ENDLESSFS_GCS_FILE_BUCKET`, for single-bucket mode. Keep the state/file bucket pairing, `ENDLESSFS_SESSION_SECRET`, and `ENDLESSFS_WRITER_SET_ID` stable across restarts and identical on every replica using the storage set. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after creating the first administrator. Check `GET /healthz` for liveness and `GET /readyz` for readiness.
 
 The GCS adapter is locally protocol-qualified, but a live GCS deployment still requires IAM, CORS, backup/restore, monitoring, and security validation. See [operations](./operations.md#gcs-identity-and-bucket-policy) for details.

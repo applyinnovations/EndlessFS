@@ -80,6 +80,7 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 		`crypto.subtle.digest("SHA-256"`, "Invalid preview artifact checksum", "await image.decode()", "previewLoaded",
 		"viewerPreviewCache", "cachedViewerPreview", "cacheViewerPreview",
 		"waitForPreviewOperation", "previewRetryTimers", "Idempotency-Key",
+		"uploadMediaType", "image/x-sony-arw", "image/x-adobe-dng",
 		"ArrowLeft", "ArrowRight",
 	} {
 		if !strings.Contains(script, required) {

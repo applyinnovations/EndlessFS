@@ -78,7 +78,10 @@ func TestIntegrationPublicConfigExposesNoSecrets(t *testing.T) {
 		t.Fatalf("response = %#v", value)
 	}
 	capabilities, ok := value["previewCapabilities"].(map[string]any)
-	if !ok || capabilities["previewSpecification"] != "v1.1" || capabilities["profile"] != "images" || capabilities["artifactMediaTypes"].([]any)[0] != "image/webp" {
+	accepted, acceptedOK := capabilities["acceptedImageMediaTypes"].([]any)
+	decoders, decodersOK := capabilities["packagedImageDecoders"].([]any)
+	if !ok || capabilities["previewSpecification"] != "v1.1" || capabilities["profile"] != "images" || capabilities["artifactMediaTypes"].([]any)[0] != "image/webp" ||
+		!acceptedOK || len(accepted) != 13 || accepted[12] != "image/x-sony-arw" || !decodersOK || len(decoders) != 3 || decoders[2] != "libraw-0.22.1" {
 		t.Fatalf("preview capability manifest = %#v", value["previewCapabilities"])
 	}
 	for key := range value {

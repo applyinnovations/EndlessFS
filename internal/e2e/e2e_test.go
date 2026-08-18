@@ -20,6 +20,7 @@ import (
 	stdruntime "runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -307,6 +308,20 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.KeyEvent(kb.ArrowLeft), chromedp.KeyEvent(kb.ArrowRight), chromedp.KeyEvent(kb.Escape)); err != nil {
 		t.Fatalf("preview navigation and close: %v", err)
 	}
+	harness.corruptPreview.Store(true)
+	if err := chromedp.Run(ctx,
+		chromedp.Navigate(harness.origin+"/"),
+		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
+		chromedp.Evaluate(`document.querySelector("#file-view-grid").click()`, nil),
+	); err != nil {
+		t.Fatalf("open grid for corrupt preview denial: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector(".media-frame[data-path='/media-proof.png']")?.dataset.previewState === "unavailable" && document.querySelector(".media-frame[data-path='/media-proof.png'] img[alt='Preview of media-proof.png']") === null`, 15*time.Second); err != nil {
+		var gridState string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`JSON.stringify({frames:Array.from(document.querySelectorAll(".media-frame")).map((node) => ({path:node.dataset.path,state:node.dataset.previewState,html:node.innerHTML})), mode:document.querySelector("input[name='file-view']:checked")?.value, drive:document.querySelector("#file-rows")?.textContent})`, &gridState))
+		t.Fatalf("browser displayed a preview whose SHA-256 did not match its manifest: %v (%s) grid=%s", err, browserStatus(ctx), gridState)
+	}
+	harness.corruptPreview.Store(false)
 
 	seedVirtualFiles(t, harness, 10_000)
 	mu.Lock()
@@ -449,7 +464,7 @@ func claimConcurrentBrowserPreview(t *testing.T, harness harness, path domain.Us
 	sum := sha256.Sum256(data)
 	artifact := preview.Artifact{
 		GenerationID: generationID, Variant: variant, Width: generated.Width, Height: generated.Height, ContentType: preview.ContentTypeWebP,
-		Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), Bytes: data,
+		Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), CRC32C: preview.ChecksumCRC32C(data), Bytes: data,
 	}
 	return binding, claim, artifact
 }
@@ -974,6 +989,7 @@ type harness struct {
 	repository     *identity.Repository
 	storage        *providermemory.Provider
 	previewStore   *previewmemory.Store
+	corruptPreview *atomic.Bool
 	clock          domain.Clock
 }
 
@@ -1041,6 +1057,7 @@ func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
 	if err := previewStore.SetDataPlaneBaseURL(previewOrigin); err != nil {
 		t.Fatal(err)
 	}
+	corruptPreview := &atomic.Bool{}
 	driveService, err := drive.NewService(storage, store, repository, ids, clock, sessionKey, origin, dataOrigin, 1<<20)
 	if err != nil {
 		t.Fatal(err)
@@ -1066,7 +1083,21 @@ func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
 	}
 	controlServer := &http.Server{Handler: controlHandler}
 	dataServer := &http.Server{Handler: storage}
-	previewServer := &http.Server{Handler: previewStore}
+	previewServer := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		response := httptest.NewRecorder()
+		previewStore.ServeHTTP(response, request)
+		for name, values := range response.Header() {
+			for _, value := range values {
+				writer.Header().Add(name, value)
+			}
+		}
+		body := append([]byte(nil), response.Body.Bytes()...)
+		if corruptPreview.Load() && response.Code == http.StatusOK && strings.HasPrefix(request.URL.Path, "/cap/preview/") && len(body) > 12 {
+			body[len(body)-1] ^= 0xff
+		}
+		writer.WriteHeader(response.Code)
+		_, _ = writer.Write(body)
+	})}
 	serveErrors := make(chan error, 3)
 	go func() { serveErrors <- controlServer.Serve(controlListener) }()
 	go func() { serveErrors <- dataServer.Serve(dataListener) }()
@@ -1085,7 +1116,7 @@ func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
 	})
 	return harness{
 		origin: origin, dataOrigin: dataOrigin, previewOrigin: previewOrigin, bootstrapToken: bootstrapToken,
-		repository: repository, storage: storage, previewStore: previewStore, clock: clock,
+		repository: repository, storage: storage, previewStore: previewStore, corruptPreview: corruptPreview, clock: clock,
 	}
 }
 

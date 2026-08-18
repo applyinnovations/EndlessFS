@@ -536,6 +536,7 @@ Object-store adapters implement transport primitives, not EndlessFS filesystem o
 ```go
 type ObjectBackend interface {
     Get(context.Context, ObjectKey, GetObjectRequest) (Object, error)
+    Verify(context.Context, ObjectKey, ExpectedIntegrity) (ObjectInfo, error)
     List(context.Context, ListObjectsRequest) (ObjectPage, error)
     Put(context.Context, ObjectKey, PutObjectRequest) (NativeVersion, error)
     Delete(context.Context, ObjectKey, DeleteObjectRequest) error
@@ -553,9 +554,10 @@ type ObjectBackend interface {
 - `NativeVersion` is opaque, scoped to one backend object incarnation, and usable only as an immediate conditional-request input. It MUST NOT be serialized into canonical objects, returned through provider/state interfaces, logged, compared across backends, or used as an EndlessFS logical version.
 - Successful single-object create, replace, copy, and delete operations are atomic. After success, `Get` and complete prefix `List` operations are strongly consistent for the affected live object; a backend with eventual object or listing visibility cannot satisfy the v1 contract.
 - `Get` and `List` return native versions separately from object bodies. The portable engine normalizes provider listing order, page sizes, missing metadata, and error forms, but it does not attempt to repair an eventually consistent backend.
+- `Verify` accepts a provider-independent expected byte size and checksum and returns an exact native version only when that immutable object incarnation matches. An adapter MAY satisfy the assertion from provider integrity metadata or by reading the body. Provider-native checksum encodings never leave the adapter and the expectation remains authoritative after a raw-copy cutover.
 - `Copy` keeps file bytes inside the configured provider data plane. A backend that cannot provide conditionally safe server-side copy/rewrite semantics cannot satisfy the v1 backend contract.
 - Upload capabilities bind only to operation-specific immutable staging keys supplied by the portable engine. Download capabilities bind only to committed immutable blob keys. Capabilities cannot address state, directory, operation, idempotency, admission, checkpoint, gate, or lease objects.
-- Provider authentication, endpoints, retry hints, checksums, generations, ETags, version IDs, signing material, resumable session URIs, multipart IDs, block IDs, and rewrite/copy tokens remain inside the adapter or an encrypted transient lease.
+- Provider authentication, endpoints, retry hints, native checksum values, generations, ETags, version IDs, signing material, resumable session URIs, multipart IDs, block IDs, and rewrite/copy tokens remain inside the adapter or an encrypted transient lease.
 - Backend adapters may set provider metadata for transport optimization, but portable behavior MUST remain correct when all such metadata is absent or changed after a raw-copy cutover.
 
 ### 8.6 Canonical records and logical versions
@@ -1605,6 +1607,7 @@ Configuration is read from environment variables. Secrets MUST NOT be accepted a
 | `ENDLESSFS_MOCK_PROVIDER_URL` | Required for split E2E mock | Local control/data-plane mock endpoint. |
 | `ENDLESSFS_GCS_FILE_BUCKET` | Required with `gcs` | Private GCS file bucket used for immutable blobs and upload staging; also used for state when no distinct state bucket is configured. Excluded from canonical keys and bodies. |
 | `ENDLESSFS_GCS_STATE_BUCKET` | Optional; defaults to `ENDLESSFS_GCS_FILE_BUCKET` | Private GCS bucket for the superblock, write gate, application state, filesystem metadata, operations, leases, and checkpoints. Set it equal to `ENDLESSFS_GCS_FILE_BUCKET` for explicit single-bucket mode. |
+| `ENDLESSFS_GCS_PREVIEW_BUCKET` | Required only for the v1.1 `gcs` preview provider | Distinct private GCS bucket for disposable generated artifacts; never part of the authoritative storage set. See the v1.1 specification for its complete contract. |
 | `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` | Optional ADC discovery | Lowercase service-account identifier used by the official client for keyless IAM `signBlob`; never private-key material. |
 | `ALLOW_REGISTRATION` | Default `false` | Public registration switch. |
 | `INVITE_REGISTRATION` | Default `true` | Invite creation and consumption switch. |

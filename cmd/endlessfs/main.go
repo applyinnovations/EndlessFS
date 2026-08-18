@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
@@ -13,6 +14,9 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +32,7 @@ import (
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/preview"
+	previewdurable "github.com/applyinnovations/endlessfs/internal/preview/durable"
 	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
 	previewmemory "github.com/applyinnovations/endlessfs/internal/preview/memory"
 	"github.com/applyinnovations/endlessfs/internal/secret"
@@ -68,8 +73,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	}
 	leaseKey := deriveKey("endlessfs-transfer-lease-v1", secretBytes)
 	keyringID := base64.RawURLEncoding.EncodeToString(deriveKey("endlessfs-keyring-id-v1", secretBytes))
-	configuration := fmt.Sprintf("%s\x00%s\x00%s\x00%t\x00%t\x00%s", cfg.AllowedOrigin, cfg.WebAuthnRPID, cfg.WebAuthnRPName, cfg.AllowRegistration, cfg.InviteRegistration, keyringID)
-	configurationDigest := base64.RawURLEncoding.EncodeToString(deriveKey("endlessfs-writer-configuration-v1", []byte(configuration)))
+	previewEnabled := cfg.PreviewProvider != "" && cfg.PreviewProvider != "disabled"
+	writerConfiguration, err := buildWriterConfiguration(cfg, keyringID)
+	if err != nil {
+		return err
+	}
 
 	var backend objectstore.Backend
 	var fileBackend objectstore.Backend
@@ -134,11 +142,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	defer closeBackend()
 	engine, err := portable.Open(ctx, portable.Options{
 		Backend: backend, FileBackend: fileBackend, Clock: clock, IDs: ids,
-		Writer: portable.WriterConfiguration{
-			WriterSetID: cfg.WriterSetID, ConfigurationDigest: configurationDigest,
-			KeyringIdentifiers: []string{keyringID},
-			RequiredFeatures:   []string{"directory-manifests", "fenced-operations", "portable-checkpoints"},
-		},
+		Writer:   writerConfiguration,
 		LeaseTTL: 2 * time.Minute, UploadTTL: cfg.UploadInitTTL, DownloadTTL: cfg.DownloadCapabilityTTL,
 		CursorKey: deriveKey("endlessfs-state-cursor-key-v1", secretBytes),
 	})
@@ -163,41 +167,70 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	previewEnabled := cfg.PreviewProvider != "" && cfg.PreviewProvider != "disabled"
-	if previewEnabled {
-		if err := validatePreviewCapabilities(cfg.PreviewFormats); err != nil {
-			return err
-		}
-	}
-	var previewStore *previewmemory.Store
+	var previewStore preview.Store
+	var previewDataHandler http.Handler
+	closePreviewBackend := func() {}
 	if cfg.PreviewProvider != "" && cfg.PreviewProvider != "disabled" {
-		if cfg.PreviewProvider != "mock" {
+		switch cfg.PreviewProvider {
+		case "mock":
+			previewKey := cfg.PreviewKeySecret
+			if previewKey.Reveal() == "" {
+				value, keyErr := ids.BearerToken()
+				if keyErr != nil {
+					return keyErr
+				}
+				previewKey = secret.Value(value)
+			}
+			memoryStore, storeErr := previewmemory.New(previewmemory.Options{
+				Clock: clock, IDs: ids, Key: previewKey, CapabilityTTL: cfg.DownloadCapabilityTTL, AllowedOrigin: cfg.AllowedOrigin,
+			})
+			if storeErr != nil {
+				return domain.NewError(domain.ErrorInvalid, "invalid configured preview store")
+			}
+			previewStore = memoryStore
+			previewDataHandler = memoryStore
+		case "gcs":
+			previewBackend, openErr := gcstore.Open(ctx, cfg.GCSPreviewBucket)
+			if openErr != nil {
+				return openErr
+			}
+			previewKeyBytes, decodeErr := base64.RawURLEncoding.DecodeString(cfg.PreviewKeySecret.Reveal())
+			if decodeErr != nil || len(previewKeyBytes) < 32 {
+				_ = previewBackend.Close()
+				return domain.NewError(domain.ErrorInvalid, "invalid preview key material")
+			}
+			if enableErr := previewBackend.EnableWorkloadIdentityTransfers(deriveKey("endlessfs-preview-transfer-lease-v1", previewKeyBytes), cfg.GCSSigningAccount); enableErr != nil {
+				_ = previewBackend.Close()
+				return enableErr
+			}
+			previewStore, err = previewdurable.New(previewdurable.Options{
+				Backend: previewBackend, Transfers: previewBackend, Clock: clock, IDs: ids,
+				Key: cfg.PreviewKeySecret, CapabilityTTL: cfg.DownloadCapabilityTTL,
+				DataOrigin: dataOrigin, AllowedOrigin: cfg.AllowedOrigin, HTTPClient: http.DefaultClient,
+			})
+			if err != nil {
+				_ = previewBackend.Close()
+				return err
+			}
+			closePreviewBackend = func() { _ = previewBackend.Close() }
+		default:
 			return domain.NewError(domain.ErrorInvalid, "unsupported preview provider configuration")
 		}
-		previewKey := cfg.PreviewKeySecret
-		if previewKey.Reveal() == "" {
-			value, keyErr := ids.BearerToken()
-			if keyErr != nil {
-				return keyErr
-			}
-			previewKey = secret.Value(value)
-		}
-		previewStore, err = previewmemory.New(previewmemory.Options{
-			Clock: clock, IDs: ids, Key: previewKey, CapabilityTTL: cfg.DownloadCapabilityTTL, AllowedOrigin: cfg.AllowedOrigin,
-		})
-		if err != nil {
-			return domain.NewError(domain.ErrorInvalid, "invalid configured preview store")
-		}
 	}
+	defer closePreviewBackend()
 	var previewListener net.Listener
-	if previewStore != nil {
+	if previewDataHandler != nil {
 		previewListener, err = net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			return err
 		}
 		defer previewListener.Close()
 		previewOrigin := "http://" + previewListener.Addr().String()
-		if err := previewStore.SetDataPlaneBaseURL(previewOrigin); err != nil {
+		memoryStore, ok := previewStore.(*previewmemory.Store)
+		if !ok {
+			return domain.NewError(domain.ErrorInternal, "invalid mock preview store construction")
+		}
+		if err := memoryStore.SetDataPlaneBaseURL(previewOrigin); err != nil {
 			return err
 		}
 	}
@@ -237,8 +270,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 		dataServer = &http.Server{Handler: dataHandler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	}
 	var previewDataServer *http.Server
-	if previewStore != nil {
-		previewDataServer = &http.Server{Handler: previewStore, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+	if previewDataHandler != nil {
+		previewDataServer = &http.Server{Handler: previewDataHandler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	}
 
 	applicationHandler := httpapi.NewCompleteApplicationWithLogger(cfg, version, identityService, sessions, driveService, logger, themeManager)
@@ -312,6 +345,62 @@ func deriveKey(label string, material []byte) []byte {
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write(material)
 	return hash.Sum(nil)
+}
+
+func buildWriterConfiguration(cfg config.Config, sessionKeyringID string) (portable.WriterConfiguration, error) {
+	if sessionKeyringID == "" {
+		return portable.WriterConfiguration{}, domain.NewError(domain.ErrorInvalid, "invalid storage key identifier")
+	}
+	keyringIdentifiers := []string{sessionKeyringID}
+	requiredFeatures := []string{"directory-manifests", "fenced-operations", "portable-checkpoints"}
+	previewProfile := "disabled"
+	if cfg.PreviewProvider != "" && cfg.PreviewProvider != "disabled" {
+		if err := validatePreviewCapabilities(cfg.PreviewFormats); err != nil {
+			return portable.WriterConfiguration{}, err
+		}
+		requiredFeatures = append(requiredFeatures, "generated-previews-v1", "preview-integrity-crc32c-v1")
+		storeIdentity := "process-local-mock-v1"
+		if cfg.PreviewProvider == "gcs" {
+			key, err := base64.RawURLEncoding.DecodeString(cfg.PreviewKeySecret.Reveal())
+			if err != nil || len(key) < 32 {
+				return portable.WriterConfiguration{}, domain.NewError(domain.ErrorInvalid, "invalid preview key material")
+			}
+			previewKeyringID := base64.RawURLEncoding.EncodeToString(deriveKey("endlessfs-preview-keyring-id-v1", key))
+			keyringIdentifiers = append(keyringIdentifiers, previewKeyringID)
+			mac := hmac.New(sha256.New, key)
+			_, _ = mac.Write([]byte("endlessfs-preview-store-v1\x00" + cfg.PreviewProvider + "\x00" + cfg.GCSPreviewBucket))
+			storeIdentity = base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+		} else if cfg.PreviewProvider != "mock" {
+			return portable.WriterConfiguration{}, domain.NewError(domain.ErrorInvalid, "unsupported preview provider configuration")
+		}
+		formats := append([]string(nil), cfg.PreviewFormats...)
+		slices.Sort(formats)
+		resolutions := append([]int(nil), cfg.PreviewResolutions...)
+		slices.Sort(resolutions)
+		resolutionValues := make([]string, len(resolutions))
+		for index, resolution := range resolutions {
+			resolutionValues[index] = strconv.Itoa(resolution)
+		}
+		maxAge := "unset"
+		if cfg.PreviewAutoMaxAge != nil {
+			maxAge = cfg.PreviewAutoMaxAge.String()
+		}
+		maxSourceBytes := "unset"
+		if cfg.PreviewAutoMaxSourceBytes != nil {
+			maxSourceBytes = strconv.FormatInt(*cfg.PreviewAutoMaxSourceBytes, 10)
+		}
+		previewProfile = strings.Join([]string{
+			cfg.PreviewProvider, storeIdentity, strconv.FormatBool(cfg.PreviewAutomatic),
+			strings.Join(formats, ","), strings.Join(resolutionValues, ","), maxAge, maxSourceBytes,
+			strconv.Itoa(cfg.PreviewMaxConcurrency), cfg.PreviewOperationTimeout.String(), cfg.DownloadCapabilityTTL.String(),
+		}, "\x00")
+	}
+	configuration := fmt.Sprintf("%s\x00%s\x00%s\x00%t\x00%t\x00%s\x00%s", cfg.AllowedOrigin, cfg.WebAuthnRPID, cfg.WebAuthnRPName, cfg.AllowRegistration, cfg.InviteRegistration, sessionKeyringID, previewProfile)
+	return portable.WriterConfiguration{
+		WriterSetID:         cfg.WriterSetID,
+		ConfigurationDigest: base64.RawURLEncoding.EncodeToString(deriveKey("endlessfs-writer-configuration-v1", []byte(configuration))),
+		KeyringIdentifiers:  keyringIdentifiers, RequiredFeatures: requiredFeatures,
+	}, nil
 }
 
 func validatePreviewCapabilities(formats []string) error {

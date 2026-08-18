@@ -11,7 +11,6 @@ import (
 	"image/png"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -19,8 +18,9 @@ import (
 	gcstransport "github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/preview"
+	previewdurable "github.com/applyinnovations/endlessfs/internal/preview/durable"
 	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
-	previewmemory "github.com/applyinnovations/endlessfs/internal/preview/memory"
+	"github.com/applyinnovations/endlessfs/internal/preview/storecontract"
 	"github.com/applyinnovations/endlessfs/internal/provider/providercontract"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
@@ -75,6 +75,41 @@ func TestContractPortableProviderOverGCSProtocolFake(t *testing.T) {
 				fake.mu.Lock()
 				defer fake.mu.Unlock()
 				return providercontract.ByteCounts{Upload: fake.uploadBytes, Download: fake.downloadBytes}
+			},
+		}
+	})
+}
+
+func TestContractDurablePreviewStoreOverGCSProtocolFake(t *testing.T) {
+	storecontract.Run(t, func(t *testing.T) storecontract.Harness {
+		server, fake := newGCSServerWithFake(t)
+		clock := domain.NewFixedClock(time.Now().UTC().Truncate(time.Second))
+		fake.clock = clock
+		fake.allowedOrigin = "https://drive.example.test"
+		backend, err := gcstransport.NewWithTransfers(protocolClient(t, server), "endlessfs-test", gcstransport.TransferOptions{
+			HTTPClient: server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
+			SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x5a}, 256), nil },
+			Hostname:  server.Listener.Addr().String(), Insecure: true,
+			LeaseKey: bytes.Repeat([]byte{0x42}, 32), Random: bytes.NewReader(gcsDeterministic(62, 4<<20)), Clock: clock,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		store, err := previewdurable.New(previewdurable.Options{
+			Backend: backend, Transfers: backend, Clock: clock,
+			IDs:           domain.NewIDGenerator(bytes.NewReader(gcsDeterministic(63, 4<<20))),
+			Key:           secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x74}, 32))),
+			CapabilityTTL: time.Minute, DataOrigin: server.URL, HTTPClient: server.Client(), AllowedOrigin: fake.allowedOrigin,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return storecontract.Harness{
+			Store: store, Client: server.Client(), Advance: clock.Advance, Now: clock.Now,
+			SetAvailable: func(available bool) {
+				fake.mu.Lock()
+				fake.unavailable = !available
+				fake.mu.Unlock()
 			},
 		}
 	})
@@ -145,16 +180,25 @@ func TestIntegrationGeneratedPreviewReadsPortableGCSSource(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	previewIDs := domain.NewIDGenerator(bytes.NewReader(gcsDeterministic(92, 2<<20)))
-	previewStore, err := previewmemory.New(previewmemory.Options{
-		Clock: clock, IDs: previewIDs, Key: secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x73}, 32))),
+	previewServer, previewFake := newGCSServerWithFake(t)
+	previewFake.clock = clock
+	previewFake.allowedOrigin = "https://drive.example.test"
+	previewBackend, err := gcstransport.NewWithTransfers(protocolClient(t, previewServer), "endlessfs-test", gcstransport.TransferOptions{
+		HTTPClient: previewServer.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
+		SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x5a}, 256), nil },
+		Hostname:  previewServer.Listener.Addr().String(), Insecure: true,
+		LeaseKey: bytes.Repeat([]byte{0x72}, 32), Random: bytes.NewReader(gcsDeterministic(92, 2<<20)), Clock: clock,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	previewServer := httptest.NewServer(previewStore)
-	t.Cleanup(previewServer.Close)
-	if err := previewStore.SetDataPlaneBaseURL(previewServer.URL); err != nil {
+	previewIDs := domain.NewIDGenerator(bytes.NewReader(gcsDeterministic(93, 2<<20)))
+	previewStore, err := previewdurable.New(previewdurable.Options{
+		Backend: previewBackend, Transfers: previewBackend, Clock: clock, IDs: previewIDs,
+		Key:           secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x73}, 32))),
+		CapabilityTTL: time.Minute, DataOrigin: previewServer.URL, HTTPClient: previewServer.Client(), AllowedOrigin: previewFake.allowedOrigin,
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	service, err := preview.NewService(preview.Options{Automatic: true, Resolutions: []int{256}, MaxConcurrency: 1, ApplicationState: engine}, engine.Files(), previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, server.Client(), previewIDs, clock)
@@ -165,14 +209,26 @@ func TestIntegrationGeneratedPreviewReadsPortableGCSSource(t *testing.T) {
 	if err != nil || len(resolved.Items) != 1 || resolved.Items[0].State != preview.StateReady || resolved.Items[0].Capability == nil {
 		t.Fatalf("GCS-backed preview resolve = %+v, %v", resolved, err)
 	}
-	artifactResponse, err := previewServer.Client().Get(resolved.Items[0].Capability.URL)
+	artifactRequest, _ := http.NewRequest(http.MethodGet, resolved.Items[0].Capability.URL, http.NoBody)
+	artifactRequest.Header.Set("Origin", previewFake.allowedOrigin)
+	artifactResponse, err := previewServer.Client().Do(artifactRequest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	artifact, _ := io.ReadAll(artifactResponse.Body)
 	_ = artifactResponse.Body.Close()
-	if artifactResponse.StatusCode != http.StatusOK || artifactResponse.Header.Get("Content-Type") != preview.ContentTypeWebP || len(artifact) < 12 || string(artifact[:4]) != "RIFF" || string(artifact[8:12]) != "WEBP" {
+	if artifactResponse.StatusCode != http.StatusOK || artifactResponse.Header.Get("Access-Control-Allow-Origin") != previewFake.allowedOrigin || artifactResponse.Header.Get("Content-Type") != preview.ContentTypeWebP || artifactResponse.Header.Get("Cache-Control") != "no-store" || len(artifact) < 12 || string(artifact[:4]) != "RIFF" || string(artifact[8:12]) != "WEBP" {
 		t.Fatalf("preview artifact = status %d type %q bytes %d", artifactResponse.StatusCode, artifactResponse.Header.Get("Content-Type"), len(artifact))
+	}
+	deniedRequest, _ := http.NewRequest(http.MethodGet, resolved.Items[0].Capability.URL, http.NoBody)
+	deniedRequest.Header.Set("Origin", "https://attacker.example.test")
+	deniedResponse, err := previewServer.Client().Do(deniedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = deniedResponse.Body.Close()
+	if deniedResponse.StatusCode != http.StatusForbidden || deniedResponse.Header.Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("wrong-origin preview status = %d, origin = %q", deniedResponse.StatusCode, deniedResponse.Header.Get("Access-Control-Allow-Origin"))
 	}
 }
 

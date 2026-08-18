@@ -65,7 +65,7 @@ func internalReadyStore(t *testing.T) (*Store, domain.DownloadCapability) {
 	binding := preview.Binding{Owner: owner, ContentID: "content", ContentVersion: "version", MediaType: "image/png", SourceSize: 1, RecipeID: "image-webp-q80-v1", Variant: 256}
 	data := preview.OnePixelWebP()
 	sum := sha256.Sum256(data)
-	artifact := preview.Artifact{GenerationID: "generation", Variant: 256, Width: 1, Height: 1, ContentType: preview.ContentTypeWebP, Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), Bytes: data}
+	artifact := preview.Artifact{GenerationID: "generation", Variant: 256, Width: 1, Height: 1, ContentType: preview.ContentTypeWebP, Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), CRC32C: preview.ChecksumCRC32C(data), Bytes: data}
 	claim, err := store.Claim(context.Background(), binding, artifact.GenerationID, clock.Now().Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)

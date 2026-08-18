@@ -7,7 +7,7 @@ EndlessFS is an open-source, provider-neutral, security-first private cloud driv
 
 The normative implementation contract is [docs/v1-specification.md](./docs/v1-specification.md). The credential-free GCS suite models the documented JSON/XML, generation, signing, CORS, checksum, range, resumable-session, cancellation, and failure behavior on loopback. It qualifies the integration layer locally; only the separate opt-in live qualification described by the specification can establish real-service interoperability.
 
-The [v1.1 media browsing and image preview specification](./docs/v1.1-media-preview-specification.md) is implemented over the same portable source engine. Its private content identities are canonical across replicas, raw-copy cutovers, memory, and the locally qualified GCS adapter. It adds an always-available virtualized media grid and full-screen navigation, with optional WebP-only generated image thumbnails behind an independently faultable deterministic preview store. No durable preview-bucket adapter or live cloud preview deployment is claimed. The [v1.2 video](./docs/v1.2-video-preview-specification.md) and [v1.3 PDF](./docs/v1.3-pdf-preview-specification.md) preview drafts remain deferred for revision; their unchecked acceptance criteria are plans, not current release evidence.
+The [v1.1 media browsing and image preview specification](./docs/v1.1-media-preview-specification.md) is implemented over the same portable source engine. Its private content identities are canonical across replicas, raw-copy cutovers, memory, and the locally qualified GCS adapter. It adds an always-available virtualized media grid and full-screen navigation, with optional WebP-only generated image thumbnails behind an independently faultable preview store. Both the deterministic memory store and a durable shared GCS preview bucket use the same provider-neutral store semantics over the existing thin object-store interface. The GCS path is credential-free protocol-qualified; no live cloud validation or deployment is claimed. The [v1.2 video](./docs/v1.2-video-preview-specification.md) and [v1.3 PDF](./docs/v1.3-pdf-preview-specification.md) preview drafts remain deferred for revision; their unchecked acceptance criteria are plans, not current release evidence.
 
 ## Why EndlessFS
 
@@ -131,6 +131,7 @@ Only settings that have validation and tests are parsed by the current binary:
 | `ENDLESSFS_MOCK_PROVIDER_URL` | Ephemeral loopback origin | Optional explicit HTTP loopback origin/port for the separate capability data plane. |
 | `ENDLESSFS_GCS_FILE_BUCKET` | Unset | Required with `gcs`; private file bucket for immutable blobs and upload staging, also used for state by default. |
 | `ENDLESSFS_GCS_STATE_BUCKET` | `ENDLESSFS_GCS_FILE_BUCKET` | Optional private state/metadata bucket. Set it to a distinct bucket for policy/cost isolation or to the file bucket for explicit single-bucket mode. |
+| `ENDLESSFS_GCS_PREVIEW_BUCKET` | Unset | Required when `ENDLESSFS_PREVIEW_PROVIDER=gcs`; distinct private bucket for disposable generated-preview artifacts and manifests. |
 | `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` | ADC discovery | Optional lowercase service-account email used by the official client for keyless IAM `signBlob` signed URLs. |
 | `ENDLESSFS_WRITER_SET_ID` | Local mock identifier | Stable canonical base64url identifier of at least 128 bits; required with `gcs` and identical across all replicas and provider cutovers. |
 | `ALLOW_REGISTRATION` | `false` | Exact `true` or `false`; exposed as non-secret public policy. |
@@ -146,7 +147,7 @@ Only settings that have validation and tests are parsed by the current binary:
 | `ENDLESSFS_DEFAULT_LIGHT_THEME` | `endlessfs-light` | Installed light-appearance theme used by `system`; startup rejects missing/wrong-appearance values. |
 | `ENDLESSFS_DEFAULT_DARK_THEME` | `endlessfs-dark` | Installed dark-appearance theme used by `system`; startup rejects missing/wrong-appearance values. |
 | `ENDLESSFS_LOG_LEVEL` | `info` | Exact `debug`, `info`, `warn`, or `error`; all levels retain structural secret redaction. |
-| `ENDLESSFS_PREVIEW_PROVIDER` | `disabled` | Accepts `disabled` or the independently faultable local `mock` preview store. `mock` is restricted to the HTTP-loopback control plane with mock authoritative storage; deployed GCS/HTTPS/multi-process use requires a future durable shared preview adapter. |
+| `ENDLESSFS_PREVIEW_PROVIDER` | `disabled` | Accepts `disabled`, the loopback-only ephemeral `mock`, or the durable shared `gcs` store. The GCS preview provider requires GCS authoritative storage and a distinct preview bucket. |
 | `ENDLESSFS_PREVIEW_AUTOMATIC` | Provider configured | Enables lazy generation for visible eligible image tiles; `false` is manual-only. |
 | `ENDLESSFS_PREVIEW_FORMATS` | `image` | Closed packaged capability set. `video`, `pdf`, unknown, duplicate, or unpackaged values fail startup in the image profile. |
 | `ENDLESSFS_PREVIEW_AUTO_MAX_AGE` | Unset | Optional positive source-age limit for automatic generation. |
@@ -155,7 +156,7 @@ Only settings that have validation and tests are parsed by the current binary:
 | `ENDLESSFS_PREVIEW_MAX_CONCURRENCY` | `2` | Global generation bound from 1 through 8; per-user generation remains serialized. |
 | `ENDLESSFS_PREVIEW_OPERATION_TIMEOUT` | `45s` | Hard generation timeout, capped at 5 minutes. |
 | `ENDLESSFS_PREVIEW_STARTUP_TIMEOUT` | `10s` | Generator and preview-store startup validation timeout, capped at 60 seconds. |
-| `ENDLESSFS_PREVIEW_KEY_SECRET` | Ephemeral for mock | Optional canonical 256-bit key for non-revealing artifact bindings; durable stores will require an explicit value. |
+| `ENDLESSFS_PREVIEW_KEY_SECRET` | Ephemeral for mock | Canonical 256-bit key for non-revealing artifact bindings; required for `gcs` and identical on every replica sharing the preview bucket. |
 
 Secrets are never accepted as command-line arguments or exposed through the public configuration endpoint. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after the initial administrator has been created. The current HTTP contract is documented in [docs/http-api.md](./docs/http-api.md).
 
@@ -177,7 +178,7 @@ internal/httpapi/        router and transport security headers
 internal/identity/       bootstrap, registration, accounts, passkeys, invites, roles, and recovery
 internal/drive/          authenticated files, transfers, operations, trash, previews, and shares
 internal/logging/        structured, level-aware, security-field-redacting JSON logging
-internal/preview/        generated-preview policy, static WebP codec, independent store, contracts, and orchestration
+internal/preview/        generated-preview policy, static WebP codec, memory/durable stores, contracts, and orchestration
 internal/theme/          closed Theme API, compiler, media validation, registry, preferences, and built-ins
 internal/web/            embedded HTML, CSS, and vanilla JavaScript
 internal/e2e/            Go-controlled Chromium passkey, Drive, responsive, and privacy workflows

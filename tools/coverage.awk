@@ -26,9 +26,9 @@ function belongs(file, group) {
   if (group == "gcs-transport") return index(file, "/internal/objectstore/gcs/") > 0
   if (group == "theme-validation") return index(file, "/internal/theme/") > 0
   if (group == "configuration") return index(file, "/internal/config/") > 0
-  if (group == "preview-core") return index(file, "/internal/preview/") > 0 && index(file, "/internal/preview/imagegen/") == 0 && index(file, "/internal/preview/memory/") == 0 && index(file, "/internal/preview/storecontract/") == 0
+  if (group == "preview-core") return index(file, "/internal/preview/") > 0 && index(file, "/internal/preview/imagegen/") == 0 && index(file, "/internal/preview/memory/") == 0 && index(file, "/internal/preview/durable/") == 0 && index(file, "/internal/preview/storecontract/") == 0
   if (group == "preview-image-generator") return index(file, "/internal/preview/imagegen/") > 0
-  if (group == "preview-store") return index(file, "/internal/preview/memory/") > 0
+  if (group == "preview-store") return index(file, "/internal/preview/memory/") > 0 || index(file, "/internal/preview/durable/") > 0
   return 0
 }
 

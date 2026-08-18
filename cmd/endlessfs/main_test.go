@@ -153,3 +153,47 @@ func TestRunValidatesConfiguredPreviewDependenciesBeforeServing(t *testing.T) {
 		t.Fatalf("configured mock preview startup = %v", err)
 	}
 }
+
+func TestWriterCompatibilityIncludesDurablePreviewConfiguration(t *testing.T) {
+	base := runtimeTestConfig(t)
+	base.PreviewProvider = "gcs"
+	base.GCSPreviewBucket = "preview-bucket-one"
+	base.PreviewFormats = []string{"image"}
+	base.PreviewResolutions = []int{256, 512, 1600}
+	base.PreviewKeySecret = secret.Value(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("p", 32))))
+	initial, err := buildWriterConfiguration(base, "session-keyring-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(initial.KeyringIdentifiers) != 2 || !contains(initial.RequiredFeatures, "generated-previews-v1") || !contains(initial.RequiredFeatures, "preview-integrity-crc32c-v1") {
+		t.Fatalf("preview compatibility markers = %+v", initial)
+	}
+	variations := []config.Config{
+		func() config.Config { value := base; value.PreviewProvider = "disabled"; return value }(),
+		func() config.Config { value := base; value.GCSPreviewBucket = "preview-bucket-two"; return value }(),
+		func() config.Config { value := base; value.PreviewResolutions = []int{256}; return value }(),
+		func() config.Config {
+			value := base
+			value.PreviewKeySecret = secret.Value(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("q", 32))))
+			return value
+		}(),
+	}
+	for index, variation := range variations {
+		configuration, buildErr := buildWriterConfiguration(variation, "session-keyring-v1")
+		if buildErr != nil {
+			t.Fatalf("variation %d: %v", index, buildErr)
+		}
+		if configuration.ConfigurationDigest == initial.ConfigurationDigest && strings.Join(configuration.KeyringIdentifiers, "\x00") == strings.Join(initial.KeyringIdentifiers, "\x00") && strings.Join(configuration.RequiredFeatures, "\x00") == strings.Join(initial.RequiredFeatures, "\x00") {
+			t.Fatalf("variation %d did not change replica compatibility", index)
+		}
+	}
+}
+
+func contains(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}

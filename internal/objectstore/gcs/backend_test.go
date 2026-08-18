@@ -97,6 +97,24 @@ func TestChecksumsSizesListingsAndCursorsFailClosed(t *testing.T) {
 	}
 }
 
+func TestVerifyUsesProviderIntegrityMetadataWithoutReadingObjectBytes(t *testing.T) {
+	backend, fake := newProtocolBackend(t)
+	key := objectstore.MustKey("endlessfs/v1/state/users/metadata-integrity.json")
+	body := []byte("metadata-verified")
+	if _, err := backend.Put(context.Background(), key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	fake.corruptNextDownloadCRC = true
+	fake.mu.Unlock()
+	if _, err := backend.Verify(context.Background(), key, objectstore.IntegrityFor(body)); err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if _, err := backend.Get(context.Background(), key); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("Verify consumed object bytes instead of metadata; following Get() error = %v", err)
+	}
+}
+
 func TestGenerationConditionsFenceEveryMutation(t *testing.T) {
 	backend, _ := newProtocolBackend(t)
 	ctx := context.Background()
@@ -145,6 +163,16 @@ func TestInputAndContextBoundaries(t *testing.T) {
 	cancel()
 	if _, err := backend.Get(cancelled, objectstore.MustKey("endlessfs/v1/state/users/cancelled.json")); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("Get(cancelled) error = %v", err)
+	}
+	expected := objectstore.IntegrityFor([]byte("expected"))
+	if _, err := backend.Verify(cancelled, objectstore.MustKey("endlessfs/v1/state/users/cancelled-verify.json"), expected); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("Verify(cancelled) error = %v", err)
+	}
+	if _, err := backend.Verify(context.Background(), objectstore.Key{}, expected); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Verify(invalid key) error = %v", err)
+	}
+	if _, err := backend.Verify(context.Background(), objectstore.MustKey("endlessfs/v1/state/users/missing-verify.json"), expected); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("Verify(missing) error = %v", err)
 	}
 }
 

@@ -41,6 +41,7 @@ type Config struct {
 	MockProviderURL           string
 	GCSFileBucket             string
 	GCSStateBucket            string
+	GCSPreviewBucket          string
 	GCSSigningAccount         string
 	WriterSetID               string
 	AllowRegistration         bool
@@ -151,6 +152,10 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if value, ok := lookup("ENDLESSFS_GCS_STATE_BUCKET"); ok {
 		gcsStateBucket = strings.TrimSpace(value)
 	}
+	gcsPreviewBucket := ""
+	if value, ok := lookup("ENDLESSFS_GCS_PREVIEW_BUCKET"); ok {
+		gcsPreviewBucket = strings.TrimSpace(value)
+	}
 	gcsSigningAccount := ""
 	if value, ok := lookup("ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT"); ok {
 		gcsSigningAccount = strings.TrimSpace(value)
@@ -175,7 +180,7 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		if mockProviderURL != "" {
 			return Config{}, fmt.Errorf("ENDLESSFS_MOCK_PROVIDER_URL: unavailable with GCS")
 		}
-	} else if gcsFileBucket != "" || gcsStateBucket != "" || gcsSigningAccount != "" {
+	} else if gcsFileBucket != "" || gcsStateBucket != "" || gcsPreviewBucket != "" || gcsSigningAccount != "" {
 		return Config{}, fmt.Errorf("GCS configuration is unavailable with mock storage")
 	}
 	if !validRandomIdentifier(writerSetID) {
@@ -242,8 +247,8 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if value, ok := lookup("ENDLESSFS_PREVIEW_PROVIDER"); ok {
 		previewProvider = strings.TrimSpace(value)
 	}
-	if previewProvider != "disabled" && previewProvider != "mock" {
-		return Config{}, fmt.Errorf("ENDLESSFS_PREVIEW_PROVIDER: expected exactly disabled or mock")
+	if previewProvider != "disabled" && previewProvider != "mock" && previewProvider != "gcs" {
+		return Config{}, fmt.Errorf("ENDLESSFS_PREVIEW_PROVIDER: expected exactly disabled, mock, or gcs")
 	}
 	if previewProvider == "mock" {
 		if storageProvider != "mock" {
@@ -252,6 +257,18 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		if secure || !listenLoopback || !isLoopbackHost(baseURL.Hostname()) {
 			return Config{}, fmt.Errorf("ENDLESSFS_PREVIEW_PROVIDER: mock previews are available only in HTTP loopback development")
 		}
+	} else if previewProvider == "gcs" {
+		if storageProvider != "gcs" {
+			return Config{}, fmt.Errorf("ENDLESSFS_PREVIEW_PROVIDER: GCS previews require GCS storage")
+		}
+		if gcsPreviewBucket == "" {
+			return Config{}, fmt.Errorf("ENDLESSFS_GCS_PREVIEW_BUCKET: required for GCS previews")
+		}
+		if gcsPreviewBucket == gcsFileBucket || gcsPreviewBucket == gcsStateBucket {
+			return Config{}, fmt.Errorf("ENDLESSFS_GCS_PREVIEW_BUCKET: must be distinct from state and file buckets")
+		}
+	} else if gcsPreviewBucket != "" {
+		return Config{}, fmt.Errorf("ENDLESSFS_GCS_PREVIEW_BUCKET: available only with the GCS preview provider")
 	}
 	previewAutomatic, err := parseBool(lookup, "ENDLESSFS_PREVIEW_AUTOMATIC", previewProvider != "disabled")
 	if err != nil {
@@ -289,6 +306,9 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if previewProvider == "gcs" && previewKeySecret.Reveal() == "" {
+		return Config{}, fmt.Errorf("ENDLESSFS_PREVIEW_KEY_SECRET: required for GCS previews")
+	}
 
 	return Config{
 		ListenAddr:                listenAddr,
@@ -299,6 +319,7 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		MockProviderURL:           mockProviderURL,
 		GCSFileBucket:             gcsFileBucket,
 		GCSStateBucket:            gcsStateBucket,
+		GCSPreviewBucket:          gcsPreviewBucket,
 		GCSSigningAccount:         gcsSigningAccount,
 		WriterSetID:               writerSetID,
 		AllowRegistration:         allowRegistration,

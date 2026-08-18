@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"testing"
 	"time"
@@ -64,7 +65,8 @@ func Run(t *testing.T, factory Factory) {
 		if readErr != nil || closeErr != nil {
 			t.Fatalf("artifact response body errors = read %v, close %v", readErr, closeErr)
 		}
-		if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/webp" || response.Header.Get("Cache-Control") != "no-store" || !bytes.Equal(body, artifact.Bytes) {
+		disposition, parameters, dispositionErr := mime.ParseMediaType(response.Header.Get("Content-Disposition"))
+		if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/webp" || response.Header.Get("Cache-Control") != "no-store" || dispositionErr != nil || disposition != "inline" || parameters["filename"] != "preview.webp" || !bytes.Equal(body, artifact.Bytes) {
 			t.Fatalf("artifact response = %d %q %v", response.StatusCode, body, response.Header)
 		}
 		second := testArtifact("generation-two", 256, preview.OnePixelWebP())
@@ -233,6 +235,6 @@ func testArtifact(generationID string, variant int, data []byte) preview.Artifac
 	sum := sha256.Sum256(data)
 	return preview.Artifact{
 		GenerationID: generationID, Variant: variant, Width: 1, Height: 1, ContentType: "image/webp",
-		Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), Bytes: data,
+		Size: int64(len(data)), SHA256: base64.RawURLEncoding.EncodeToString(sum[:]), CRC32C: preview.ChecksumCRC32C(data), Bytes: data,
 	}
 }

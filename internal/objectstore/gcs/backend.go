@@ -15,6 +15,7 @@ import (
 
 	"cloud.google.com/go/storage"
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/integrity"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
@@ -126,6 +127,30 @@ func (b *Backend) Head(ctx context.Context, key objectstore.Key) (objectstore.Ob
 	return objectstore.ObjectInfo{Key: key, Version: encodeVersion(attrs.Generation), Size: attrs.Size}, nil
 }
 
+func (b *Backend) Verify(ctx context.Context, key objectstore.Key, expected objectstore.ExpectedIntegrity) (objectstore.ObjectInfo, error) {
+	if err := objectstore.ContextError(ctx); err != nil {
+		return objectstore.ObjectInfo{}, err
+	}
+	if !key.Valid() {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorInvalid, "invalid object key")
+	}
+	if err := expected.Validate(); err != nil {
+		return objectstore.ObjectInfo{}, err
+	}
+	expectedCRC32C, _ := integrity.ParseCRC32C(expected.Checksum.Value)
+	attrs, err := b.bucket.Object(key.String()).Attrs(ctx)
+	if err != nil {
+		return objectstore.ObjectInfo{}, classify("GCS object integrity metadata read failed", err)
+	}
+	if attrs.Generation <= 0 || attrs.Size < 0 {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorInternal, "GCS returned invalid object metadata")
+	}
+	if attrs.Size != expected.Size || attrs.CRC32C != expectedCRC32C {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorPreconditionFailed, "object integrity does not match")
+	}
+	return objectstore.ObjectInfo{Key: key, Version: encodeVersion(attrs.Generation), Size: attrs.Size}, nil
+}
+
 func (b *Backend) Get(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
 	if err := objectstore.ContextError(ctx); err != nil {
 		return objectstore.Object{}, err
@@ -209,6 +234,9 @@ func (b *Backend) Put(ctx context.Context, key objectstore.Key, body []byte, con
 	writer := handle.NewWriter(writeCtx)
 	writer.ChunkSize = 0
 	writer.ContentType = "application/octet-stream"
+	// Private server-written objects must not become reusable through a shared
+	// browser cache. This provider metadata is deliberately non-authoritative.
+	writer.CacheControl = "no-store"
 	writer.CRC32C = crc32.Checksum(body, crc32.MakeTable(crc32.Castagnoli))
 	writer.SendCRC32C = true
 	if _, err = io.Copy(writer, bytes.NewReader(body)); err != nil {

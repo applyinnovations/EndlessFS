@@ -27,6 +27,7 @@ type fakeObject struct {
 	logicalSize    int64
 	generation     int64
 	metageneration int64
+	cacheControl   string
 }
 
 type fakeResumableSession struct {
@@ -54,6 +55,7 @@ type fakeGCS struct {
 	uploadBytes               int64
 	downloadBytes             int64
 	allowedOrigin             string
+	unavailable               bool
 }
 
 func newGCSServer(t *testing.T) *httptest.Server {
@@ -71,6 +73,13 @@ func newGCSServerWithFake(t *testing.T) (*httptest.Server, *fakeGCS) {
 }
 
 func (f *fakeGCS) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	f.mu.Lock()
+	unavailable := f.unavailable
+	f.mu.Unlock()
+	if unavailable {
+		f.problem(writer, http.StatusForbidden, "accessDenied")
+		return
+	}
 	if origin := request.Header.Get("Origin"); origin != "" {
 		f.mu.Lock()
 		allowedOrigin := f.allowedOrigin
@@ -230,6 +239,7 @@ func (f *fakeGCS) signedGet(writer http.ResponseWriter, request *http.Request, n
 	}
 	writer.Header().Set("Content-Type", request.URL.Query().Get("response-content-type"))
 	writer.Header().Set("Content-Disposition", request.URL.Query().Get("response-content-disposition"))
+	writer.Header().Set("Cache-Control", object.cacheControl)
 	size := fakeObjectSize(object)
 	if rangeHeader := request.Header.Get("Range"); rangeHeader != "" {
 		start, end, ok := parseFakeRange(rangeHeader, size)
@@ -345,8 +355,9 @@ func (f *fakeGCS) upload(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	var metadata struct {
-		Name   string `json:"name"`
-		CRC32C string `json:"crc32c"`
+		Name         string `json:"name"`
+		CRC32C       string `json:"crc32c"`
+		CacheControl string `json:"cacheControl"`
 	}
 	if err := json.NewDecoder(metadataPart).Decode(&metadata); err != nil {
 		f.problem(writer, http.StatusBadRequest, "invalid")
@@ -374,7 +385,7 @@ func (f *fakeGCS) upload(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	f.nextGeneration++
-	created := fakeObject{body: append([]byte(nil), body...), generation: f.nextGeneration, metageneration: 1}
+	created := fakeObject{body: append([]byte(nil), body...), generation: f.nextGeneration, metageneration: 1, cacheControl: metadata.CacheControl}
 	f.objects[name] = created
 	if f.failUploadAfterCommit || f.failUploadAfterCommitName == name {
 		f.failUploadAfterCommit = false

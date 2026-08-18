@@ -70,7 +70,8 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 	script := string(mustRead("static/app.js"))
 	for _, required := range []string{
 		"renderVirtualGrid", "IntersectionObserver", "gridOverscanRows = 3", "URL.revokeObjectURL",
-		"/api/v1/previews/resolve", "/api/v1/previews/generations", "/api/v1/previews/operations/", "image/webp", "filterLoadedEntries",
+		"/api/v1/previews/resolve", "/api/v1/previews/generations", "/api/v1/previews/operations/", "image/webp", "validatedPreviewBlob", "Invalid preview artifact body", "filterLoadedEntries",
+		`crypto.subtle.digest("SHA-256"`, "Invalid preview artifact checksum",
 		"waitForPreviewOperation", "previewRetryTimers", "Idempotency-Key",
 		"ArrowLeft", "ArrowRight",
 	} {

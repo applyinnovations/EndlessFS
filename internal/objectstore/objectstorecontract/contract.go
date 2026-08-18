@@ -45,6 +45,16 @@ func Run(t *testing.T, factory Factory) {
 		if err != nil || info.Key != key || info.Version != version || info.Size != 3 {
 			t.Fatalf("Head() = %+v, %v", info, err)
 		}
+		verified, err := backend.Verify(context.Background(), key, objectstore.IntegrityFor([]byte("one")))
+		if err != nil || verified != info {
+			t.Fatalf("Verify() = %+v, %v", verified, err)
+		}
+		if _, err := backend.Verify(context.Background(), key, objectstore.IntegrityFor([]byte("two"))); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("Verify(mismatch) error = %v", err)
+		}
+		if _, err := backend.Verify(context.Background(), key, objectstore.ExpectedIntegrity{Size: 3, Checksum: objectstore.Checksum{Algorithm: objectstore.ChecksumCRC32C, Value: "invalid"}}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("Verify(invalid) error = %v", err)
+		}
 	})
 
 	t.Run("single conditional winner", func(t *testing.T) {

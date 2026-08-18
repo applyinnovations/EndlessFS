@@ -26,7 +26,7 @@
       "flake": false,
       "locked": {
         "lastModified": 312732000,
-        "narHash": "sha256-KAvvNECPTzWp4SV4gzT8p0qmSsJqfLrh+LZRQPlRSzM=",
+        "narHash": "sha256-iAKCSWlcNuRHPoHaQjO7JHI5tFo/H+MU3sWFixA2UlE=",
         "type": "tarball",
         "url": "https://storage.googleapis.com/go-vulndb/vulndb.zip"
       },

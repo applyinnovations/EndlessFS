@@ -1048,7 +1048,7 @@ func removeBrowserTempDir(directory string) error {
 	if err != nil {
 		return err
 	}
-	command := exec.Command("rm", "-rf", "--", directory)
+	command := exec.CommandContext(context.Background(), "rm", "-rf", "--", directory)
 	configureBrowserCommand(command, uid)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("remove as browser uid %d: %w: %s", uid, err, strings.TrimSpace(string(output)))

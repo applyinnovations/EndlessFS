@@ -48,7 +48,8 @@
           ''
             mkdir -p "$out/bin"
             makeWrapper ${pkgs.chromium}/bin/chromium "$out/bin/chrome-headless-shell" \
-              --set FONTCONFIG_FILE ${fontConfig}
+              --set FONTCONFIG_FILE ${fontConfig} \
+              --set XDG_DATA_DIRS ${pkgs.shared-mime-info}/share
           '';
       dependencyPolicyCommand = moduleClosure: ''
         vulndb_locked_url="$(jq -er '.nodes.vulndb.locked.url' flake.lock)"
@@ -958,6 +959,7 @@
                   rg --quiet '^export CGO_ENABLED=0$' "$program"
                 done
                 rg --fixed-strings --quiet 'FONTCONFIG_FILE' ${headlessBrowser}/bin/chrome-headless-shell
+                rg --fixed-strings --quiet 'XDG_DATA_DIRS' ${headlessBrowser}/bin/chrome-headless-shell
                 touch "$out"
               '';
           formatCheck =

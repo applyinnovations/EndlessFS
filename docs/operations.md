@@ -130,7 +130,9 @@ clone the tag performs release creation and asset upload. GHCR publishing uses
 a separate SOPS-encrypted classic PAT limited to `write:packages`, mounted only
 into the trusted publishing step after the general App installation token was
 rejected by the registry. The workflow never targets the production GKE
-cluster. Applying branch/tag rules is a separate explicit administrator operation through
+cluster. GitHub Actions workflows are retired; build, test, publish, and release
+automation is owned by these PaC definitions. Applying branch/tag rules is a
+separate explicit administrator operation through
 `nix run .#repository-policy -- apply`; the ordinary CI token cannot administer
 repository policy.
 

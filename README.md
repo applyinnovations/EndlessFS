@@ -94,7 +94,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#dev` | Run the loopback-only development control plane. |
 | `nix run .#generate-secret` | Generate one canonical 256-bit base64url environment secret. |
 | `nix run .#fmt` / `.#fmt-check` | Apply or verify Go and Nix formatting. |
-| `nix run .#lint` | Run `actionlint`, `go vet`, and `staticcheck`. |
+| `nix run .#lint` | Run Tekton policy validation, `go vet`, and `staticcheck`. |
 | `nix run .#test` / `.#test-unit` | Run the current Go suite. |
 | `nix run .#test-integration` | Run tests named as integration tests. |
 | `nix run .#test-contract` | Run reusable provider and state-store contract suites. |
@@ -190,7 +190,6 @@ tools/repository-policy/ checked-in GitHub ruleset validator/applier
 tools/coverage.awk       repository and security-boundary coverage policy
 .tekton/                 xlab Linux PaC CI, publishing, release, and retired Darwin definition
 .github/rulesets/        declarative default-branch and release-tag policy
-.github/workflows/       temporary Linux bootstrap checks; removed at PaC cutover
 docs/                    normative specification and project documentation
 AGENTS.md                repository instructions for implementation agents
 ```
@@ -219,10 +218,11 @@ these pipelines neither target nor configure the GKE cluster that hosts
   Repository administration remains outside ordinary CI.
 
 The former Darwin smoke job is deprecated. Its triggerless PaC definition
-cannot start a PipelineRun and contains no Namespace Mac runner reference. The
-legacy Linux GitHub workflows remain only for the default-branch-provenance
-bootstrap described in [.tekton/README.md](./.tekton/README.md); they are removed
-after the PaC required check and package write are proven.
+cannot start a PipelineRun and contains no Namespace Mac runner reference.
+GitHub Actions workflows and their Actions-only Dependabot configuration are
+retired after the pull-request, merge-queue, cache-placement, Chromium, and GHCR
+cutover proof recorded in [.tekton/README.md](./.tekton/README.md). Automated
+build, test, container, and release work now runs only through xlab PaC.
 
 To run the image against Google Cloud Storage, follow the short [GCS container guide](./docs/gcs-container.md).
 

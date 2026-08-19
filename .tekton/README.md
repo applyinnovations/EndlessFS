@@ -68,21 +68,27 @@ it. Its only possible manual behavior is a Linux deprecation message. It does
 not reference xlab's `namespace-macos-fastlane` task or any Namespace CLI,
 credential, cache, or runner, so ordinary PaC events cannot allocate a Mac.
 
-## Safe cutover
+## Cutover evidence
 
-1. Merge the companion xlab-deployments change that adds the EndlessFS
-   `Repository`, repository-keyed clone caching, sandboxed Nix task, and
-   GitHub-token publishing task.
-2. Land these `.tekton` definitions on `main` while the legacy Linux GitHub
-   checks still protect the bootstrap merge. The xlab `Repository` resolves
-   PipelineRuns from the default branch, so pull requests cannot replace trusted
-   pipeline code.
-3. Confirm a pull-request run, a merge-queue run, and an isolated GHCR tag push
-   from xlab using the scoped Packages credential. The package token has no
-   deletion scope, so verification must use the ordinary immutable SHA and
-   moving `edge` tags rather than creating a disposable tag that CI cannot
-   remove.
-4. Apply the checked-in rulesets only after the successful PaC check is visible
-   as `tekton-xlab / endlessfs-ci-` from GitHub App integration `949094`.
-5. Remove the remaining bootstrap GitHub workflows in the cutover PR. The Darwin
-   job is already retired and must not be restored during bootstrap.
+The xlab cutover was proven on 2026-08-19 before GitHub Actions retirement:
+
+- xlab-deployments PR 62 installed the optional, read-only package-auth
+  workspace on `nix-run-github-v2` and the SOPS-managed
+  `github-packages-credentials` Secret;
+- EndlessFS PR 17 passed pull-request PipelineRun `endlessfs-ci-xcwpj` and
+  merge-queue PipelineRun `endlessfs-ci-v7wwj`, including real Chromium coverage;
+- every cache-consuming task and affinity assistant used Sirius with
+  `storage.xlab.now/fast-local=true`, while the shared Git and Nix PVCs and each
+  per-run source PVC were Bound;
+- main commit `113d739334fd6b095210b6cb91fb779439566226` completed
+  `endlessfs-container-7wzsv`; its immutable `sha-113d739334fd6b095210b6cb91fb779439566226`
+  and moving `edge` tags both resolved to manifest
+  `sha256:ebd23aba9664c8f71c4c647bde4af673c68fe34b1bb25decb10c7b5fec7e1862`;
+- the package workspace was mounted only in the trusted publishing step, not in
+  Nix-store seeding, pull-request CI, or merge-queue CI.
+
+The checked-in ruleset requires the App-owned
+`tekton-xlab / endlessfs-ci-` context from GitHub App integration `949094`.
+`nix run .#pipeline-policy` rejects reintroduced GitHub Actions workflows or an
+Actions-only Dependabot configuration. The Darwin job remains retired and must
+not be restored.

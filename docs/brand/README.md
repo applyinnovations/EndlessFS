@@ -30,10 +30,14 @@ The following board is the agreed light-mode visual reference. It establishes th
 
 This board is a reference, not a fixed component inventory. Future interfaces should inherit its principles rather than mechanically copying its layouts.
 
+The token values written in this guide are canonical. The board demonstrates visual relationships and component intent; implementations must not sample, infer, or copy palette values from the image. If a board swatch and this guide differ, use this guide.
+
 
 ## Logo
 
 The EndlessFS mark is an **Infinite Folder**: a refined folder silhouette whose upper geometry flows into an asymmetric continuous form suggestive of infinity. It should read as a folder first and reveal the endless motif second.
+
+The mark shown on the logo-system board is approved as the geometry reference. Production work must recreate that mark as a clean, optimized SVG, validate it at favicon and product sizes, and preserve the approved silhouette rather than redesigning it.
 
 - Monochrome by default.
 - Geometric, continuous, and restrained.
@@ -77,7 +81,7 @@ EndlessFS is predominantly monochrome. Color communicates interaction state or s
 
 ## Typography and iconography
 
-Use neutral, highly legible typography suitable for dense information display. The agreed direction uses **Inter** with Regular, Medium, and Semibold weights.
+Use neutral, highly legible typography suitable for dense information display. The selected family is **Inter v4.0**, pinned to upstream commit `2ce9119398be143fa289c3e180824db1b7ed803e`, under the SIL Open Font License 1.1. Production uses embedded WOFF2 assets for Regular 400, Medium 500, and Semibold 600 only. Record the exact asset digests and license in the repository inventory; never fetch fonts at runtime.
 
 - Prefer compact line heights appropriate to tools rather than editorial layouts.
 - Use weight and alignment before boxes, fills, or extra spacing.
@@ -107,7 +111,7 @@ Padding must have a specific functional purpose. Avoid containers inside padded 
 Every persistent element must justify the pixels it occupies. Remove trivial instructions, redundant labels, implied information, unnecessary containers, decorative copy, and irrelevant controls. Simplicity is achieved through subtraction, not by making fewer components larger.
 
 ### 6. Design for 1,000
-Every component and interaction must answer: **what happens when there are 1,000 of these?** Lists, grids, selections, menus, queues, tags, operations, activity entries, errors, and metadata must remain understandable and efficient at large quantities.
+Every container and interaction must answer: **how would this remain understandable and efficient at a very large quantity?** This is a design test, not an instruction to render 1,000 instances at once or to expose 1,000 equal-detail rows. Use virtualization, aggregation, grouping, filtering, bounded concurrency, progressive detail, and summary-plus-exception patterns as appropriate. A directory with 10,000 items must remain comfortable to navigate, 2,000 uploads must remain comfortable to monitor, and an operation affecting 1,000 selected items must remain comfortable to control and remediate.
 
 ### 7. Zero layout shift
 Interface geometry is deterministic. Loading, thumbnails, metadata, errors, progress, and asynchronous state changes must not unexpectedly move surrounding UI. Reserve geometry before content arrives.
@@ -119,13 +123,13 @@ Preserve interaction while work happens. Prefer virtualization, progressive rend
 Routine actions execute immediately when intent is clear. Avoid unnecessary confirmation dialogs, intermediate screens, and ceremony. The shortest safe path is the default.
 
 ### 10. Reversibility over confirmation
-Use reversibility as the safety mechanism for routine reversible operations. Deleting moves a file directly to Trash; a brief toast provides **Undo**. Files are soft-deleted for 30 days. Reserve confirmation for genuinely irreversible or unusually consequential actions.
+Use reversibility as the safety mechanism for routine reversible operations. Deleting moves a file directly to the application Trash; a brief toast provides **Undo**. Application Trash has no automatic retention deadline: an item remains visible there until restore, permanent deletion, or empty Trash. A storage backend may separately retain physically deleted objects under its configured provider-native soft-delete or retention policy, such as 30 days. That infrastructure policy is not application Trash, is not portable, and must not be presented as an EndlessFS restore guarantee. Reserve confirmation for genuinely irreversible or unusually consequential application actions.
 
 ### 11. Feedback without interruption
 Toasts briefly confirm outcomes and disappear quickly. Routine success feedback should not require acknowledgement or remain persistent.
 
 ### 12. Floating UI stays out of the way
-Toasts, menus, queues, popovers, and transient controls must not unnecessarily cover files or important controls. They collapse or disappear when their purpose is complete.
+Toasts, menus, queues, popovers, and transient controls must not cover the current selection, focused element, primary actions, or failure remediation. Placement responds predictably to reserved safe regions and viewport edges. Transient surfaces collapse, reposition, or disappear when their purpose is complete, and return focus to a deterministic location.
 
 ### 13. Use available surfaces
 Do not create dedicated interface regions when an existing surface naturally supports the interaction. The usable file container is the upload drop zone; no permanent upload drop area should consume screen space.
@@ -140,7 +144,7 @@ Upload queues, progress, transfer failures, and similar operational UI appear wh
 Every click, tap, confirmation, dismissal, transition, pointer movement, and interruption has a cost. Introduce interactions only when they materially improve safety, understanding, or control.
 
 ### 17. Motion communicates state
-Animation exists to communicate state, preserve spatial understanding, or replace unnecessary explanatory text. It must not decorate, delay work, shift layout, or reduce determinism.
+Motion exists to communicate state, preserve spatial understanding, or make response feel immediate and elegant. Input response is never delayed for animation. Motion uses reserved geometry and must never cause layout shift, reorder content unexpectedly, obscure state, or change the deterministic outcome of an interaction. Reduced-motion preferences remove non-essential transitions without hiding state.
 
 ### 18. Visual restraint creates clarity
 Use plain Background surfaces, Foreground typography, restrained neutral structure, minimal borders, and minimal decoration. Avoid excessive cards, shadows, gradients, rounded containers, and layered surfaces.
@@ -157,6 +161,9 @@ EndlessFS should feel dependable, fast, quiet, and exact: an instrument for work
 - Use columns for metadata when space permits.
 - Do not repeat information established by context.
 - Keep headers compact and stable.
+- Keep column widths and numeric alignment stable while data loads or updates.
+- Truncate long values predictably and expose the complete accessible value without increasing every row's height.
+- Reorganize or remove secondary columns at narrow widths; preserve item identity, primary metadata, selection, and common actions.
 - Make selection immediately legible without increasing row height.
 - Virtualize large directories or use equivalent techniques.
 
@@ -170,7 +177,7 @@ Responsive layouts may rearrange metadata, but behavior remains consistent.
 - No persistent metadata underneath thumbnails.
 - Gaps should be zero or as close to zero as implementation requires.
 - Preserve stable tile geometry.
-- Non-previewable file types use concise file-type representations.
+- Non-previewable file types use a deterministic file-type representation with a compact semantic icon and short type/extension cue; they never appear as broken images or indefinite loading placeholders.
 - Selection states overlay or minimally alter the tile rather than creating surrounding chrome.
 - The grid virtualizes and scrolls continuously through very large libraries.
 
@@ -212,6 +219,8 @@ Uploading is a natural file operation, not a separate feature.
 - The file browsing surface acts as the drop target.
 - Do not reserve permanent space for a drop zone.
 - Transfer queues are compact, collapsible, scalable, and easy to remediate.
+- Large queues aggregate routine completed work, keep active work visible, and surface failures without requiring every transfer to remain expanded.
+- Queue rendering and update work remain bounded even when monitoring 2,000 uploads.
 - Progress uses Foreground by default.
 - Errors use Error only where intervention is required.
 - Successful completion resolves into normal file state rather than persistent Success UI.
@@ -224,6 +233,7 @@ Uploading is a natural file operation, not a separate feature.
 - Prefer immediate navigation with progressive population.
 - Virtualize large collections.
 - Avoid spinners that replace entire working surfaces.
+- Use a spinner only for a compact action whose geometry is already reserved; never use one as an indefinite substitute for a directory, grid, table, or sheet.
 - Keep loaded files interactive while additional content arrives.
 - Avoid manual pagination when continuous virtualized browsing is practical.
 - Loading UI occupies the same geometry as the content it replaces.
@@ -236,7 +246,9 @@ Responsive design changes presentation, not the mental model.
 - Portrait layouts increase row depth only as necessary for useful information and touch usability.
 - Large screens favor side sheets.
 - Small screens favor full-screen secondary surfaces.
-- Controls may collapse into menus when necessary, but common actions should not become deeply buried.
+- Controls may collapse into menus when necessary, but common actions stay visible or at most one menu level deep.
+- A change in orientation preserves location, selection, active work, focus intent, and scroll context without reordering data.
+- Narrow layouts must not introduce horizontal page scrolling; tables and toolbars reorganize within the available width.
 - Density remains a principle on small screens; responsiveness is not permission for unnecessary padding.
 
 ## Accessibility
@@ -253,19 +265,17 @@ Density must not compromise operability.
 
 Solve accessibility structurally rather than making the whole visual system oversized.
 
-## Interface language
+## Interface text
 
-EndlessFS speaks only when necessary.
+EndlessFS is a tool, not a prose surface.
 
-**Voice:** direct, precise, calm, functional, brief, and non-promotional.
-
-- Remove text that merely describes visible UI.
-- Prefer verbs for actions.
-- Avoid explanatory paragraphs in routine workflows.
-- Errors state what failed and what can be done next.
-- Toasts state outcomes succinctly.
-- Do not use marketing language in operational UI.
-- Do not add helper text when a label, icon, state, or interaction already makes behavior obvious.
+- Do not place descriptive, promotional, conversational, or explanatory paragraphs in the operational interface.
+- Limit visible text to concise labels, verbs, names, values, counts, status, and the shortest useful recovery instruction.
+- Prefer an established icon with an accessible name when its meaning is unambiguous.
+- Errors identify the failed action and available recovery using the fewest clear words.
+- Toasts state outcomes or the available Undo action succinctly.
+- Accessible names, relationships, and live status remain complete even when visible text is minimal.
+- Do not expose privacy or architecture claims as interface copy; privacy is enforced by behavior.
 
 
 ## Anti-patterns
@@ -283,33 +293,11 @@ Do not introduce:
 - large empty-state illustrations;
 - UI expanded merely to occupy available space;
 - pagination where continuous virtualized browsing is practical;
-- excessive instructional copy;
+- instructional, promotional, or conversational prose;
 - Primary treatment without interaction-state meaning;
 - loading transitions that reflow the page;
 - modal dialogs that unnecessarily hide file context;
 - separate surfaces for interactions that naturally belong to the file browser.
-
-## Frontend review checklist
-
-Before accepting a component or workflow, ask:
-
-1. Are the files still the dominant interface?
-2. What happens with 1,000 items?
-3. Is any padding present only because it is conventional?
-4. Is there a container that could be removed?
-5. Is information duplicated?
-6. Could text be removed without reducing understanding?
-7. Does anything shift when asynchronous content arrives?
-8. Can the user continue working while this operation runs?
-9. Is a confirmation being used where Undo would be better?
-10. Does transient UI get out of the way quickly?
-11. Does the component stay compact instead of expanding to fill space?
-12. Is color communicating state rather than decoration?
-13. Is behavior consistent with the rest of the application?
-14. Does the interaction remain usable by keyboard and assistive technology?
-15. Is this the shortest safe path to the user's intended outcome?
-
-If a component fails these questions, it should be simplified before implementation.
 
 ## Product foundation
 

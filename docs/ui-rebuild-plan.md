@@ -36,7 +36,7 @@ The following are platform contracts, not frontend code, and remain in force:
 - data-only theme compilation and safe fallback; and
 - Nix as the only public build and test interface.
 
-The dedicated project branch may be temporarily non-releaseable after demolition. It must not merge, publish, or claim completion until the entire new UI and every required gate are green.
+The dedicated project branch may be temporarily non-releaseable after demolition. It must not merge, publish, or claim completion until the entire new UI and every required gate pass.
 
 ## Sources of truth
 
@@ -44,11 +44,13 @@ Build the new application from these inputs, in this order of precedence:
 
 1. [v1 specification](./v1-specification.md), especially sections 3.1, 6, 7, 11–14, 18, 21, 22.10, 22.11, and 24.
 2. [v1.1 media-preview specification](./v1.1-media-preview-specification.md), especially sections 8.3, 10, 11, 14, and 15.
-3. [Brand guidelines](./brand/README.md) for product voice, density, visual language, and interaction principles.
-4. [Design-system board](./brand/assets/endlessfs-design-system.png) and [logo-system board](./brand/assets/endlessfs-logo-system.png) as the visual ground truth.
+3. [Brand guidelines](./brand/README.md) for canonical token values, density, visual language, and interaction principles.
+4. [Design-system board](./brand/assets/endlessfs-design-system.png) and [logo-system board](./brand/assets/endlessfs-logo-system.png) as ground truth for visual relationships, component intent, and the approved mark geometry.
 5. Public HTTP contracts and black-box workflow tests as the behavioral boundary.
 
 The old UI is not a source of truth, a reference implementation, or a design constraint.
+
+The written brand guide, not pixels sampled from either board, is authoritative for token values. A board swatch that differs from the guide is illustrative and must not enter CSS, theme data, tests, or generated assets.
 
 The supplied PNG boards are visual references rather than production assets. Production marks, icons, and fonts must be authored or sourced as discrete files, licensed, validated through the theme pipeline, and embedded in the Go binary.
 
@@ -63,18 +65,21 @@ The new browser application is a precision filesystem instrument. Files are the 
 - Success, Warning, and Error appear only when their semantic meaning is needed.
 - Token names always describe purpose. Themes may change their values without changing their names or meaning.
 - Components consume typed semantic tokens; raw color values and hue-named aliases do not appear in component rules.
-- The Infinite Folder mark is the product identity. It must be monochrome, asymmetric, continuous, and recognizable at favicon scale.
-- Typography is compact, neutral, and legible. Inter may be used only from pinned, licensed, embedded WOFF2 assets.
-- Borders, radii, shadows, motion, whitespace, and copy are minimized and always functional.
+- The Infinite Folder mark shown on the logo board is approved. Recreate it as an optimized production SVG, then derive the monochrome product mark and favicon from that one geometry source.
+- Typography is compact, neutral, and legible. Pin Inter v4.0 at upstream commit `2ce9119398be143fa289c3e180824db1b7ed803e`; embed only licensed WOFF2 assets for Regular 400, Medium 500, and Semibold 600, with exact file digests recorded in the repository.
+- Plain surfaces, restrained neutral structure, and typography establish hierarchy. Reject decorative cards, nested containers, gradients, unnecessary shadows, gratuitous rounding, and spacing used only to fill a layout.
+- Visible text is limited to concise labels, verbs, names, values, counts, status, and minimal recovery instructions. The operational UI contains no descriptive, promotional, privacy, or conversational prose.
 
 ### Files and navigation
 
 - The application opens into the file workspace, not a dashboard.
 - A compact rail, toolbar, and breadcrumbs establish location and available actions without competing with files.
 - List rows are dense, stable, aligned, and unboxed.
-- The media grid is an edge-to-edge contact sheet with square reserved geometry, effectively zero gap, no captions, no card chrome, and overlay selection.
+- Dense tables use compact stable headers, predictable column widths, aligned numeric metadata, restrained dividers, and responsive column reorganization without changing row identity or height during updates.
+- The media grid is an edge-to-edge contact sheet with square reserved geometry, effectively zero gap, no captions, no card chrome, and overlay selection. A file without a preview receives a deterministic file-type icon and short type/extension cue, never a broken image or indefinite placeholder.
 - Collections scroll continuously while server requests remain bounded and paginated.
-- Rendering is virtualized for large directories; 1,000 rows and 10,000 tiles do not create unbounded DOM or request counts.
+- “Design for 1,000” is a scale test, not a literal rendering requirement. Each container chooses virtualization, aggregation, grouping, filtering, progressive detail, or summary-plus-exception presentation appropriate to its content.
+- A 10,000-item directory remains comfortable to browse and select without unbounded DOM or request counts; it does not render every row or tile simultaneously.
 - Loaded files remain interactive while more data, previews, or operations are in progress.
 
 ### Interaction model
@@ -83,10 +88,13 @@ The new browser application is a precision filesystem instrument. Files are the 
 - The file viewport is the upload drop target. Drag feedback appears only during an active drag and reserves no permanent space.
 - Routine reversible actions execute immediately and offer a brief Undo action.
 - Permanent deletion, empty Trash, and similarly irreversible actions require explicit confirmation.
+- Primary actions use Foreground; secondary actions use Surface or Background; icon-only controls are used only for established actions with accessible names. Hover, focus, selected, active, pressed, and disabled states are distinct without changing control geometry.
 - Substantial secondary work uses a side sheet on wide screens and a full-screen surface on narrow screens.
 - Small dialogs are reserved for short, consequential decisions.
-- Transfers use a compact, collapsible queue that prioritizes active and failed work and gets out of the way when complete.
+- Transfers use a compact, collapsible queue that aggregates routine completion, prioritizes active and failed work, remains comfortable with 2,000 items, and gets out of the way when complete. Ordinary progress uses Foreground, Error is reserved for actionable failure, and completed work creates no persistent Success decoration.
 - Feedback is concise, non-blocking, and announced accessibly without shifting the workspace.
+- Floating UI uses predictable safe regions and collision handling. It never covers the current selection, focused element, primary actions, or failure remediation; it collapses, repositions, or closes when no longer needed and restores focus deterministically.
+- Motion makes state changes feel immediate and elegant without delaying input. It uses reserved geometry, never causes layout shift or unexpected reordering, and preserves the same result when reduced motion is enabled.
 
 ### Responsive and accessible behavior
 
@@ -95,15 +103,19 @@ The new browser application is a precision filesystem instrument. Files are the 
 - Icon-only controls have application-owned accessible names.
 - Color is never the only status cue.
 - Touch hit areas remain operable without making the visible system spacious.
-- Reduced motion is respected.
-- Loading, preview, progress, error, and offline states reserve stable geometry.
+- Orientation changes preserve location, selection, active work, focus intent, and scroll context.
+- Common actions stay visible or at most one menu level deep; narrow layouts have no horizontal page scrolling.
+- Reduced motion is respected without removing state cues.
+- Loading, preview, progress, error, and offline states reserve stable geometry. Spinners are limited to compact actions; directories, grids, tables, and sheets use same-geometry placeholders or progressive content and never become workspace-wide spinner screens.
 
-## Product constraints requiring explicit decisions
+## Resolved decisions and remaining design input
 
-- The brand guide mentions automatic deletion after 30 days, while v1 section 9.11 specifies no automatic Trash retention deadline. The new UI must not promise 30-day retention. A retention policy requires its own approved product and storage specification.
-- The supplied full UI board defines light mode only. The project must deliver dark mode through the same layout and semantic roles, but cannot claim approved dark visual fidelity until a dark reference board is approved.
-- Inter is not supplied. It cannot be fetched at runtime. Approve a version, subset, license, and WOFF2 digest before it becomes a required production asset; otherwise use the embedded/system fallback.
+- Application Trash and backend object retention are separate layers. Moving a file to Trash keeps it visible and restorable until explicit restore, permanent deletion, or empty Trash; the application presents no automatic Trash deadline. After permanent deletion, a configured storage provider may retain provider-native object versions under its own soft-delete or retention policy, such as 30 days. That policy is non-portable infrastructure protection and never becomes an EndlessFS UI restore promise.
+- Inter v4.0 is selected and pinned to commit `2ce9119398be143fa289c3e180824db1b7ed803e` under the SIL Open Font License 1.1. Stage 1 imports the 400, 500, and 600 WOFF2 assets, records each digest and license, and embeds them; runtime font requests are prohibited.
+- The Infinite Folder mark on the supplied imagery is approved. Stage 1 creates and validates one production SVG source and derives the favicon/product variants from it.
+- The supplied full UI board defines light mode only. The project derives a complete dark parent from the same semantic roles and layout, but final dark-mode visual-fidelity approval remains pending until a dark reference board is supplied or the derived dark fixture is explicitly approved.
 - The browser-facing color contract is `color.background`, `color.foreground`, `color.text.muted`, `color.border`, `color.surface`, `color.primary`, `color.primary.tint`, `color.success`, `color.warning`, and `color.error`.
+- The exact values in the brand-guide table are canonical. Board pixels and board annotations do not override them.
 - Older installed theme inputs are handled, if supported, by an explicit versioned adapter in the Go theme compiler. The new frontend sees only the semantic contract and never knows an old alias such as `color.accent`.
 - Continuous browsing consumes bounded API pages progressively. Filtering remains explicitly limited to loaded metadata and never presents itself as full-drive search.
 
@@ -166,22 +178,28 @@ Every behavior begins with a failing test. Work happens on one dedicated replace
 ### Stage 0 — Demolish and establish the empty project
 
 1. Record the required product workflows as black-box acceptance tests derived from the specifications, not from old selectors or markup.
-2. Delete the entire old HTML, CSS, and JavaScript implementation and its structure-coupled tests.
-3. Remove the three-file asset-handler assumptions.
-4. Create the new directory structure, empty asset manifest, and test harness.
-5. Add a repository check that rejects reintroduction of the deleted files, selectors, or a second browser shell.
+2. Define deterministic geometry, accessibility, visual-restraint, text-sparsity, responsive, scale, and performance contracts before implementation begins.
+3. Add `nix run .#test-ui-benchmark` and committed benchmark fixtures for a 10,000-item directory, a 2,000-item transfer queue, and a 1,000-item batch operation. Calibrate and freeze the first budgets before product UI is built.
+4. Delete the entire old HTML, CSS, and JavaScript implementation and its structure-coupled tests.
+5. Remove the three-file asset-handler assumptions.
+6. Create the new directory structure, empty asset manifest, test harness, and benchmark harness.
+7. Add a repository check that rejects reintroduction of the deleted files, selectors, or a second browser shell.
 
-Exit: the repository contains no old browser implementation and one clearly bounded, intentionally unfinished new UI project.
+Exit: the repository contains no old browser implementation; the new project has measurable contracts and one clearly bounded, intentionally unfinished browser workspace.
 
 ### Stage 1 — Define the design foundation
 
-1. Define the semantic color, typography, spacing, density, radius, motion, elevation, control, row, toolbar, and thumbnail contracts.
-2. Create production Infinite Folder logo, mark, and favicon files from the logo board.
-3. Create the required semantic operation and file-type icon assets.
-4. Approve and embed licensed font assets or lock the system fallback decision.
-5. Implement the versioned Go theme-compiler boundary that emits only the new semantic contract.
-6. Build a complete component/state fixture for light and dark themes at desktop and 320px.
-7. Prove contrast, media safety, inheritance, fallback, token completeness, and checksum inventories.
+1. Define the semantic color contract from the exact written guideline values, plus typography, spacing, density, radius, motion, elevation, focus, control, row, toolbar, thumbnail, and reserved-geometry contracts.
+2. Recreate the approved Infinite Folder mark as optimized static-subset SVG, validate it against the logo board at product and favicon sizes, and derive the monochrome product mark and favicon files from that source.
+3. Create the required semantic operation and file-type icon assets, including deterministic non-previewable-file representations.
+4. Import Inter v4.0 WOFF2 assets for weights 400, 500, and 600 from the pinned upstream commit; record exact digests and the OFL-1.1 license, embed them, and prove that no runtime font request occurs.
+5. Define compact primary, secondary, icon-only, grouped, pressed, disabled, focus, selected, active, and destructive control states with no geometry changes between states.
+6. Define dense table anatomy, responsive column priorities, numeric alignment, truncation/full-value behavior, selection treatment, and row-height invariants.
+7. Define zero-shift loading geometry, compact spinner limits, floating-surface safe regions, collision behavior, closure, and focus restoration.
+8. Define short, state-driven motion using reserved geometry and equivalent reduced-motion outcomes.
+9. Implement the versioned Go theme-compiler boundary that emits only the new semantic contract.
+10. Build a complete component/state fixture for light and dark themes at desktop and 320px.
+11. Prove contrast, media safety, inheritance, fallback, token completeness, source-value authority, visual restraint, text sparsity, and checksum inventories.
 
 Exit: the visual language exists as tested primitives and production assets before any product screen is assembled.
 
@@ -190,8 +208,9 @@ Exit: the visual language exists as tested primitives and production assets befo
 1. Implement the explicit Go embedded-asset handler and content-security tests.
 2. Build the semantic document shell, pre-paint theme selection, skip navigation, live regions, and application landmarks.
 3. Build the state container, API client, session boundary, router, focus manager, status system, and feature cleanup lifecycle.
-4. Build the compact rail, toolbar, workspace, menu, toast, sheet, and irreversible-dialog primitives.
-5. Prove exact routes, MIME types, caching, CSP, external-request denial, text-only rendering, and cleanup on repeated navigation.
+4. Build the compact rail, toolbar, workspace, menu, toast, sheet, and irreversible-dialog primitives with their complete control states and floating-surface collision rules.
+5. Build a layout-stability observer in the Chromium harness and fail tests on unexpected post-render layout shift.
+6. Prove exact routes, MIME types, caching, CSP, external-request denial, text-only untrusted rendering, absence of operational prose, and cleanup on repeated navigation.
 
 Exit: a secure, responsive application frame exists with no product workflow placeholders exposed as complete.
 
@@ -207,58 +226,76 @@ Exit: every supported entry path reaches the authenticated application securely 
 ### Stage 4 — Build the file workspace
 
 1. Build breadcrumbs, directory state, progressive page loading, filtering, sorting, and stable loading/error geometry.
-2. Build the virtualized dense list and edge-to-edge virtualized media grid.
+2. Build the virtualized dense list, compact stable table headers, and edge-to-edge virtualized media grid with deterministic file-type fallbacks.
 3. Build pointer and keyboard selection for one item through thousands.
 4. Build direct toolbar/menu commands for folder creation, upload, download, share, copy, move, Trash, and Undo.
 5. Make the workspace the transient upload drop target with file, folder, recursive-drop, and multi-file fallbacks.
-6. Test 1,000-row and 10,000-tile fixtures, bounded DOM/request counts, pagination recovery, selection scale, conflicts, and no layout shift.
+6. Run the 10,000-item directory benchmark through list and grid navigation, scrolling, filtering, sorting, range selection, command invocation, preview loading, pagination recovery, and responsive reflow. Assert bounded live DOM, bounded requests, preserved context, and zero unexpected layout shift; do not render all items at once merely to satisfy the fixture size.
 
 Exit: the filesystem workspace is complete and files remain the dominant interface at every supported size.
 
 ### Stage 5 — Build transfers, previews, and the viewer
 
-1. Build the compact transfer queue with grouping, concurrency, confirmed progress, cancellation, retry, failure remediation, and automatic collapse.
+1. Build the compact transfer queue with grouping, bounded concurrency, confirmed progress, cancellation, retry, failure remediation, aggregate completion, and automatic collapse.
 2. Build visible/overscan-only preview resolution with bounded concurrency, exact artifact validation, retry limits, cache bounds, abort handling, and object-URL cleanup.
 3. Build the full-viewport viewer with previous/next navigation, Generate, Regenerate, explicit safe-original preview, Download, metadata, focus trapping/restoration, Escape, and arrow keys.
 4. Build metadata and substantial secondary actions as a wide-screen side sheet and narrow-screen full surface.
-5. Prove preview-disabled behavior, aspect-ratio preservation, dark/mobile operation, capability secrecy, CSP, offline recovery, and continued interaction during background work.
+5. Run the 2,000-item transfer-queue benchmark through enqueue, progress updates, cancellation, retry, completion aggregation, failure filtering, collapse/restore, and narrow-layout presentation. Assert bounded rendering and update work, persistent failure visibility, responsive controls, and zero unexpected layout shift.
+6. Prove preview-disabled behavior, aspect-ratio preservation, deterministic file-type fallback, dark/mobile operation, capability secrecy, CSP, offline recovery, and continued interaction during background work.
 
 Exit: transfers and previews feel continuous, compact, recoverable, and independent of ordinary file operation availability.
 
 ### Stage 6 — Build the remaining product surfaces
 
-1. Build dense Trash management with restore, conflict handling, permanent deletion, and empty Trash.
+1. Build dense Trash management with restore, conflict handling, permanent deletion, and empty Trash. UI text describes application Trash only and never presents a provider-native retention window as an application guarantee.
 2. Build profile, theme, passkey, share, and session settings.
 3. Build administration for users, roles, account state, invites, pagination, and recovery links.
 4. Build the read-only public file/folder share browser.
-5. Test one-time secret handling, final-admin protections, theme selection/fallback, invite/recovery expiry, share revocation, denied states, keyboard operation, and 320px layouts.
+5. Run the 1,000-item batch-operation benchmark through selection, immediate reversible Trash actions, aggregate progress, partial failure, retry, Undo, and irreversible confirmation where required. Assert bounded command concurrency, compact summary-plus-exception rendering, usable cancellation/remediation, and zero unexpected layout shift.
+6. Test one-time secret handling, final-admin protections, theme selection/fallback, invite/recovery expiry, share revocation, denied states, keyboard operation, and 320px layouts.
 
 Exit: every required v1 browser surface exists in the new project and uses the same design and interaction model.
 
 ### Stage 7 — Prove, package, and launch
 
 1. Audit every source file for dead code, duplicate primitives, raw values, leaked listeners, observers, timers, abort controllers, object URLs, and caches.
-2. Verify focus, contrast, target geometry, non-color cues, reduced motion, 320px overflow, layout stability, and both built-in themes.
-3. Verify large-collection bounds, continuous loading, loaded-content interactivity, operation recovery, and failure isolation.
-4. Inspect network requests, browser storage, history, DOM text, and logs for forbidden origins, provider keys, capabilities, and secrets.
-5. Run the complete Chromium workflow suite under both built-in themes.
-6. Update Theme API documentation, user documentation, threat review where boundaries changed, and v1/v1.1 evidence with exact artifacts.
-7. Run every focused Nix check followed by the authoritative `nix flake check`.
-8. Confirm that no old browser asset, route, selector, compatibility shell, or fallback implementation remains.
+2. Verify focus, complete control states, contrast, target geometry, non-color cues, equivalent reduced-motion outcomes, 320px overflow, orientation context preservation, layout stability, and both built-in themes.
+3. Verify dense-table behavior, non-previewable-file representations, floating-surface non-occlusion, compact loading behavior, visual restraint, absence of operational prose, and both built-in themes.
+4. Run the committed UI benchmark suite and verify large-collection bounds, continuous loading, loaded-content interactivity, operation recovery, queue aggregation, batch-operation control, and failure isolation against the frozen budgets.
+5. Inspect network requests, browser storage, history, DOM text, and logs for forbidden origins, provider keys, capabilities, and secrets.
+6. Run the complete Chromium workflow suite under both built-in themes.
+7. Update Theme API documentation, user documentation, threat review where boundaries changed, and v1/v1.1 evidence with exact artifacts.
+8. Run every focused Nix check followed by the authoritative `nix flake check`.
+9. Confirm that no old browser asset, route, selector, compatibility shell, or fallback implementation remains.
 
 Exit: the new UI is the only browser application in the binary and every applicable specification item has current evidence.
+
+## Scale and benchmark contract
+
+`nix run .#test-ui-benchmark` is a required project gate, not an informal profiling command. It runs without network access or wall-clock sleeps and emits a versioned result artifact suitable for release evidence.
+
+- Go benchmarks exercise directory indexing/filtering/sorting/selection with 10,000 items, transfer-state reduction with 2,000 items, and batch-command state with 1,000 items. Allocation and operation-count ceilings are committed with the fixtures.
+- Go-controlled Chromium benchmarks use fixed viewports, deterministic data, injected clocks, and repeatable input sequences. They measure first usable content, scroll and keyboard response, filter/sort response, queue-update response, batch-progress response, and orientation/context restoration.
+- Structural gates assert zero unexpected post-render layout shift, bounded live item nodes relative to viewport plus overscan, bounded request and preview concurrency, bounded command concurrency, and no workspace-wide blocking state.
+- Timing and memory budgets are calibrated on the declared Nix benchmark environment at Stage 0, recorded before implementation, and then treated as absolute regression limits. The old UI supplies no baseline and no target.
+- Large fixtures test how containers manage scale. Passing never requires all fixture items to exist simultaneously in the DOM or to receive equal visual detail.
 
 ## Acceptance matrix
 
 | Area | Required proof |
 |---|---|
-| Brand fidelity | Side-by-side review against both boards; exact semantic roles; approved mark geometry; dense rows; edge-to-edge grid; compact sheets/transfers; stable async geometry. |
+| Brand fidelity | Written guideline values override board pixels; exact semantic roles; Inter v4.0 pin/digests; approved SVG mark geometry; dense rows; edge-to-edge grid; compact sheets/transfers. |
+| Visual restraint and text | Plain hierarchy; no gratuitous cards, rounding, shadows, gradients, or space-filling; no operational prose; only concise labels, values, counts, state, and recovery text. |
+| Controls and floating UI | Complete compact control states without geometry changes; safe-region placement; no occlusion of selection, focus, actions, or failure recovery; deterministic close and focus restoration. |
+| Loading and motion | Same-geometry loading states; compact-action spinners only; immediate state-driven motion; equivalent reduced-motion outcomes; zero unexpected layout shift. |
+| Files and metadata | Stable compact columns, numeric alignment, deterministic truncation/full values, responsive column priorities, and complete non-previewable file-type representations. |
 | Product completeness | Identity, browse, transfer, preview, file operations, Trash, shares, settings, themes, administration, recovery, and public-share workflows meet the specifications. |
-| Accessibility | Keyboard-only workflows, semantic names and relationships, visible focus, sensible restoration, live status, dialog/sheet behavior, non-color cues, reduced motion, and 320px operation. |
-| Scale and continuity | Bounded rendering for 1,000 rows and 10,000 tiles, visible/overscan preview loading, progressive page consumption, no workspace-wide blocking, and no unexpected layout shift. |
+| Trash and retention | Application Trash remains until explicit action; irreversible actions are confirmed; provider-native soft-delete/retention is neither presented as Trash nor promised as an application recovery path. |
+| Accessibility and responsive behavior | Keyboard-only workflows, semantic names/relationships, visible focus, live status, non-color cues, 320px operation, no horizontal page scroll, one-level access to common actions, and preserved context across orientation. |
+| Scale and continuity | The committed benchmark gate passes for a 10,000-item directory, 2,000-item transfer queue, and 1,000-item batch operation with bounded work, usable aggregation/remediation, progressive page consumption, and loaded-content interactivity. |
 | Security and privacy | Required CSP and headers; text-only untrusted rendering; ephemeral secrets; exact-origin and CSRF enforcement; no provider-key or capability leakage; no unapproved network request. |
 | Themes | Purpose-based color names, closed data-only inputs, complete light/dark parents, contrast, inheritance, safe fallback, explicit version handling, and application-owned behavior. |
-| Reproducibility | No Node or frontend framework; all assets embedded and licensed; Nix is the only public task interface; the full release gate is green. |
+| Reproducibility | No Node or frontend framework; all assets embedded and licensed; Nix is the only public task interface; the full release gate passes. |
 | Clean replacement | No old HTML, CSS, JavaScript, selectors, hidden routes, compatibility shell, duplicate frontend, or unproved placeholder remains. |
 
 Screenshots support design review but are not the test suite. Behavioral, geometry, accessibility, security, scale, and cleanup assertions must fail deterministically when the new contract regresses.
@@ -272,8 +309,8 @@ Screenshots support design review but are not the test suite. Behavioral, geomet
 - Never restore old code to make a new-project test pass.
 - Include light desktop, light 320px, dark desktop, dark 320px, focus, loading, selected, error, and high-volume captures for every completed surface.
 - Record every deliberate deviation from a reference board and tie it to a normative accessibility, privacy, or product requirement.
-- Do not call the project complete while production assets are missing, the dark visual direction is unapproved, or any applicable v1/v1.1 evidence is unchecked.
+- Do not call the project complete while production assets are missing, UI benchmark budgets are failing, the dark visual direction is unapproved, or any applicable v1/v1.1 evidence is unchecked.
 
 ## Definition of done
 
-The project is complete when the old browser UI is gone; the new application is the sole embedded interface; every required route and workflow is built from the brand system and normative contracts; every core workflow works by keyboard at desktop and 320px under both built-in themes; large collections remain bounded and continuous; asynchronous work does not destabilize the workspace; all assets are licensed, validated, and embedded; no forbidden dependency or outbound service exists; and `nix flake check` plus the updated acceptance evidence are green.
+The project is complete when the old browser UI is gone; the new application is the sole embedded interface; every required route and workflow is built from the brand system and normative contracts; every core workflow works by keyboard at desktop and 320px under both built-in themes; the 10,000-directory, 2,000-transfer, and 1,000-operation benchmark gates pass; large collections remain bounded and continuous; motion is elegant without layout shift or nondeterminism; all assets are licensed, validated, and embedded; no forbidden dependency or outbound service exists; and `nix flake check` plus the updated acceptance evidence pass.

@@ -975,6 +975,7 @@
     if (declared && declared !== "application/octet-stream") return declared;
     const extension = name.includes(".") ? name.split(".").pop().toLocaleLowerCase() : "";
     return ({
+      gif: "image/gif", jpe: "image/jpeg", jpeg: "image/jpeg", jpg: "image/jpeg", png: "image/png", webp: "image/webp",
       arw: "image/x-sony-arw", cr2: "image/x-canon-cr2", cr3: "image/x-canon-cr3", dng: "image/x-adobe-dng",
       nef: "image/x-nikon-nef", orf: "image/x-olympus-orf", pef: "image/x-pentax-pef", raf: "image/x-fuji-raf", rw2: "image/x-panasonic-rw2",
     })[extension] || "application/octet-stream";

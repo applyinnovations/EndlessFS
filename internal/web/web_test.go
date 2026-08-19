@@ -55,6 +55,20 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 	}
 }
 
+func TestUploadMediaTypeHasDeterministicRequiredImageFallbacks(t *testing.T) {
+	t.Parallel()
+
+	script := string(mustRead("static/app.js"))
+	for _, required := range []string{
+		`gif: "image/gif"`, `jpe: "image/jpeg"`, `jpeg: "image/jpeg"`, `jpg: "image/jpeg"`,
+		`png: "image/png"`, `webp: "image/webp"`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("upload media-type fallback is missing %q", required)
+		}
+	}
+}
+
 func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *testing.T) {
 	t.Parallel()
 

@@ -47,7 +47,21 @@ func (e *Engine) CloseWrites(ctx context.Context, checkpointID string) error {
 		}
 		return domain.NewError(domain.ErrorConflict, "write gate is closed for another checkpoint")
 	}
-	if err := e.drainAdmissions(ctx, gate.Epoch); err != nil {
+	return e.finishClosingWrites(ctx, checkpointID)
+}
+
+func (e *Engine) finishClosingWrites(ctx context.Context, checkpointID string) error {
+	_, _, initialGate, err := e.readGate(ctx)
+	if err != nil {
+		return err
+	}
+	if initialGate.Mode == storageformat.GateClosed && initialGate.CheckpointID == checkpointID {
+		return nil
+	}
+	if initialGate.Mode != storageformat.GateClosing || initialGate.CheckpointID != checkpointID {
+		return domain.NewError(domain.ErrorPreconditionFailed, "write gate changed before closure drain")
+	}
+	if err := e.drainAdmissions(ctx, initialGate.Epoch); err != nil {
 		return err
 	}
 	if err := e.drainFileOperations(ctx); err != nil {
@@ -59,9 +73,12 @@ func (e *Engine) CloseWrites(ctx context.Context, checkpointID string) error {
 	if err := e.pruneStateVersions(ctx); err != nil {
 		return err
 	}
-	gateObject, gateEnvelope, gate, err = e.readGate(ctx)
+	gateObject, gateEnvelope, gate, err := e.readGate(ctx)
 	if err != nil {
 		return err
+	}
+	if gate.Mode == storageformat.GateClosed && gate.CheckpointID == checkpointID {
+		return nil
 	}
 	if gate.Mode != storageformat.GateClosing || gate.CheckpointID != checkpointID {
 		return domain.NewError(domain.ErrorPreconditionFailed, "write gate changed while closing")
@@ -72,6 +89,15 @@ func (e *Engine) CloseWrites(ctx context.Context, checkpointID string) error {
 		return err
 	}
 	_, err = e.backend.Put(ctx, storageformat.WriteGateKey(), body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: gateObject.Version})
+	if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+		_, _, winner, readErr := e.readGate(ctx)
+		if readErr == nil && winner.Mode == storageformat.GateClosed && winner.CheckpointID == checkpointID {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 	return err
 }
 
@@ -478,6 +504,13 @@ func (e *Engine) ensureMutationCopies(ctx context.Context, copies []storageforma
 		}
 		sourceInfo, err := e.fileBackend.Head(ctx, source)
 		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				winner, headErr := e.fileBackend.Head(ctx, destination)
+				if headErr == nil && winner.Size == copyIntent.Size {
+					previous = copyIntent.DestinationKey
+					continue
+				}
+			}
 			return err
 		}
 		if sourceInfo.Size != copyIntent.Size {
@@ -485,7 +518,7 @@ func (e *Engine) ensureMutationCopies(ctx context.Context, copies []storageforma
 		}
 		_, err = e.fileBackend.Copy(ctx, source, destination, objectstore.CopyCondition{SourceVersion: sourceInfo.Version, Destination: objectstore.PutCondition{Mode: objectstore.PutCreateOnly}})
 		if err != nil {
-			if !errors.Is(err, domain.ErrConflict) {
+			if !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
 				return err
 			}
 			winner, headErr := e.fileBackend.Head(ctx, destination)

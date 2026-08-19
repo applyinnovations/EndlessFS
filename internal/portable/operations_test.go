@@ -59,6 +59,117 @@ func TestPortableRecursiveOperationsAreDurableIdempotentAndIsolated(t *testing.T
 	}
 }
 
+func TestPortableRecursiveByteAggregatesTrackEveryFileMutation(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2040, 1, 3, 3, 4, 5, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(74, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engine := openEngine(t, backend, clock, 75, nil)
+	user, _ := domain.ParseUserID("V1dXV1dXV1dXV1dXV1dXVw")
+	live, _ := domain.NewScope(user, domain.AreaLive)
+	trash, _ := domain.NewScope(user, domain.AreaTrash)
+
+	for _, path := range []string{"/alpha", "/alpha/bravo"} {
+		if _, err := engine.Files().CreateDirectory(context.Background(), live, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertSizes := func(scope domain.Scope, expected map[string]int64) {
+		t.Helper()
+		for path, size := range expected {
+			entry, err := engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath(path))
+			if err != nil || entry.Size != size {
+				t.Fatalf("Stat(%s) = %+v, %v; want recursive size %d", path, entry, err, size)
+			}
+		}
+	}
+	assertSizes(live, map[string]int64{"/": 0, "/alpha": 0, "/alpha/bravo": 0})
+
+	uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath("/alpha/first.txt"), []byte("first"))
+	uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath("/alpha/bravo/second.txt"), []byte("second!"))
+	assertSizes(live, map[string]int64{"/": 12, "/alpha": 12, "/alpha/bravo": 7})
+	first, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/alpha/first.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := []byte("first-new")
+	replacementCapability, err := engine.Files().CreateUpload(context.Background(), live, domain.CreateUploadRequest{
+		Path: domain.MustParseUserPath("/alpha/first.txt"), Size: int64(len(replacement)), MediaType: "text/plain",
+		Conflict: domain.ConflictReplace, ExpectedVersion: first.Version,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementRequest, _ := http.NewRequest(replacementCapability.Method, replacementCapability.URL, bytes.NewReader(replacement))
+	for name, value := range replacementCapability.Headers {
+		replacementRequest.Header.Set(name, value)
+	}
+	replacementResponse, err := server.Client().Do(replacementRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = replacementResponse.Body.Close()
+	if _, err := engine.Files().CompleteUpload(context.Background(), live, domain.CompleteUploadRequest{
+		UploadID: replacementCapability.UploadID, Path: domain.MustParseUserPath("/alpha/first.txt"), Size: int64(len(replacement)), MediaType: "text/plain",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertSizes(live, map[string]int64{"/": 16, "/alpha": 16, "/alpha/bravo": 7})
+	page, err := engine.Files().List(context.Background(), live, domain.ListRequest{Directory: domain.MustParseUserPath("/alpha")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bravo, found := findEntry(page.Entries, "bravo"); !found || bravo.Size != 7 {
+		t.Fatalf("List(/alpha) bravo = %+v, %t; want recursive size 7", bravo, found)
+	}
+
+	copyOperation, err := engine.Files().Copy(context.Background(), live, live, domain.CopyRequest{
+		Source: domain.MustParseUserPath("/alpha"), Destination: domain.MustParseUserPath("/copy"), IdempotencyKey: "aggregate-copy-1",
+	})
+	if err != nil || copyOperation.State != domain.OperationSucceeded {
+		t.Fatalf("Copy() = %+v, %v", copyOperation, err)
+	}
+	assertSizes(live, map[string]int64{"/": 32, "/alpha": 16, "/copy": 16, "/copy/bravo": 7})
+
+	trashOperation, err := engine.Files().Move(context.Background(), live, trash, domain.MoveRequest{
+		Source: domain.MustParseUserPath("/copy/bravo"), Destination: domain.MustParseUserPath("/trashed"), IdempotencyKey: "aggregate-trash-1",
+	})
+	if err != nil || trashOperation.State != domain.OperationSucceeded {
+		t.Fatalf("trash Move() = %+v, %v", trashOperation, err)
+	}
+	assertSizes(live, map[string]int64{"/": 25, "/copy": 9})
+	assertSizes(trash, map[string]int64{"/": 7, "/trashed": 7})
+
+	restoreOperation, err := engine.Files().Move(context.Background(), trash, live, domain.MoveRequest{
+		Source: domain.MustParseUserPath("/trashed"), Destination: domain.MustParseUserPath("/restored"), IdempotencyKey: "aggregate-restore-1",
+	})
+	if err != nil || restoreOperation.State != domain.OperationSucceeded {
+		t.Fatalf("restore Move() = %+v, %v", restoreOperation, err)
+	}
+	assertSizes(live, map[string]int64{"/": 32, "/restored": 7})
+	assertSizes(trash, map[string]int64{"/": 0})
+
+	deleteOperation, err := engine.Files().Delete(context.Background(), live, domain.DeleteRequest{
+		Path: domain.MustParseUserPath("/restored"), IdempotencyKey: "aggregate-delete-1",
+	})
+	if err != nil || deleteOperation.State != domain.OperationSucceeded {
+		t.Fatalf("Delete() = %+v, %v", deleteOperation, err)
+	}
+	assertSizes(live, map[string]int64{"/": 25, "/alpha": 16, "/copy": 9})
+}
+
+func findEntry(entries []domain.Entry, name string) (domain.Entry, bool) {
+	for _, entry := range entries {
+		if entry.Name == name {
+			return entry, true
+		}
+	}
+	return domain.Entry{}, false
+}
+
 func TestReplicaDropAfterRootPrepareRecoversAtOneCommitPoint(t *testing.T) {
 	backend := objectmemory.New()
 	server := httptest.NewServer(backend)
@@ -88,6 +199,12 @@ func TestReplicaDropAfterRootPrepareRecoversAtOneCommitPoint(t *testing.T) {
 	if _, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/destination/value.txt")); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("pre-commit destination became visible: %v", err)
 	}
+	if source, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/source")); err != nil || source.Size != 5 {
+		t.Fatalf("pre-commit source aggregate = %+v, %v", source, err)
+	}
+	if destination, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/destination")); err != nil || destination.Size != 0 {
+		t.Fatalf("pre-commit destination aggregate = %+v, %v", destination, err)
+	}
 	clock.Advance(2 * time.Minute)
 	if _, err := second.CreateCheckpoint(context.Background(), "prepared-recovery"); err != nil {
 		t.Fatalf("CreateCheckpoint() recovery error = %v", err)
@@ -97,6 +214,12 @@ func TestReplicaDropAfterRootPrepareRecoversAtOneCommitPoint(t *testing.T) {
 	}
 	if _, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/destination/value.txt")); err != nil {
 		t.Fatalf("recovered destination missing: %v", err)
+	}
+	if source, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/source")); err != nil || source.Size != 0 {
+		t.Fatalf("post-commit source aggregate = %+v, %v", source, err)
+	}
+	if destination, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/destination")); err != nil || destination.Size != 5 {
+		t.Fatalf("post-commit destination aggregate = %+v, %v", destination, err)
 	}
 }
 

@@ -63,7 +63,9 @@ The v1 portability clarification is implemented without a second application pro
 | Stable encrypted state pagination across replicas and concurrent CAS | `TestPortableStateCursorMovesAcrossReplicasAndKeepsImmutableSnapshot`, `TestPortableStateCASAcrossReplicas`, `TestEightReplicaConcurrentCASHasOneWinner` |
 | Candidate admission barrier, node-loss recovery, and writer compatibility | `TestCandidateCannotAdmitAfterGateStartsClosing`, `TestReplicaDropAfterAdmissionIsFencedRecoveredAndClosed`, `TestReplicaCompatibilityRejectsWriterConfigurationDrift` |
 | Immutable multi-root preparation, one commit point, takeover fencing, and crash recovery | `TestReplicaDropAfterRootPrepareRecoversAtOneCommitPoint`, `TestSupersededReplicaCannotCommitWithTakeoverFence`, `TestReplicaDropAfterCommitOrFinalizationRecoversPostCommitView` |
-| Cross-replica upload idempotency, lost-success reconciliation, capability drain, and resumability | `TestPortableUploadInitiationIsIdempotentAcrossReplicas`, `TestConcurrentReplicaUploadInitiationHasOneIdempotentOutcome`, `TestUploadCompletionLostSuccessIsIdempotentlyReconciled`, `TestCheckpointWaitsForActiveCapabilityThenDrainsItAfterExpiry` |
+| Persisted recursive-byte aggregates at every directory and area root, with constant-metadata-read lookup, upload/replacement/move/copy/trash/restore/delete maintenance, pre/post-commit visibility, overflow/corruption denial, and raw-copy continuation | `TestPortableRecursiveByteAggregatesTrackEveryFileMutation`, `TestPortableRecursiveAggregateStatDoesNotReadManifestPages`, `TestEightReplicaConcurrentMultiFileCompletionConvergesRecursiveAggregates`, `TestEightReplicaSameUploadCompletionIsIdempotentAndAggregatedOnce`, `TestEightReplicaSameTargetUploadRacesHaveOneAggregateWinner`, `TestFailedPartialAbortedAndReplayedUploadsDoNotSkewAggregates`, `TestConcurrentReplicaUploadCompletionAndAbortNeverSkewAggregate`, `TestConcurrentReplicaFolderMutationsKeepRecursiveAggregatesAtomic`, `TestFolderMutationsRecoverAtEveryAggregateCommitBoundary`, aggregate assertions in `TestReplicaDropAfterRootPrepareRecoversAtOneCommitPoint` and `TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections`, `TestPortableDirectoryManifestCorruptionMatrixFailsClosed`, `TestPortableDirectoryEntryValidationMatrix` |
+| Automatic pre-aggregate bucket migration, old-writer fencing, split-backend support, crash resumption, concurrent starters, upload drain, and corrupt-graph denial | `TestStartupAutomaticallyMigratesLegacyRecursiveByteAggregates`, `TestStartupAutomaticallyMigratesLegacySplitBackend`, `TestStartupRecursiveByteMigrationResumesAfterEveryDurableBoundary`, `TestEightReplicasConcurrentlyMigrateOneLegacyAggregateTree`, `TestStartupRecursiveByteMigrationWaitsForAndDrainsActiveUpload`, `TestStartupRecursiveByteMigrationRejectsCorruptLegacyTrees` |
+| Cross-replica upload idempotency, ancestor-root contention retry, lost-success reconciliation, capability drain, and resumability | `TestPortableUploadInitiationIsIdempotentAcrossReplicas`, `TestConcurrentReplicaUploadInitiationHasOneIdempotentOutcome`, `TestEightReplicaConcurrentMultiFileCompletionConvergesRecursiveAggregates`, `TestEightReplicaSameUploadCompletionIsIdempotentAndAggregatedOnce`, `TestUploadCompletionLostSuccessIsIdempotentlyReconciled`, `TestCheckpointWaitsForActiveCapabilityThenDrainsItAfterExpiry` |
 | Authoritative-only raw copy, native-version replacement, read-only verification, reopen, and continued mutation both ways | `TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections`, `TestCheckpointVerifierIsStrictlyReadOnly`, `TestCheckpointVerifierRejectsMissingExtraAndUnsupportedState`, `TestCheckpointPrunesExpiredStateSnapshotsButKeepsCurrentVersions` |
 | GCS generations, conditional mutation, checksums, pagination, errors, disconnect/lost-success, and full backend contract | `TestContractGCSProtocol`, `TestGenerationConditionsFenceEveryMutation`, `TestChecksumsSizesListingsAndCursorsFailClosed`, `TestLostUploadSuccessIsUnavailableAndNotRetried`, `TestProtocolErrorsMapToStableSafeKinds` |
 | GCS direct V4/resumable capabilities, replica handoff, finalized-versus-incomplete cleanup, generation binding, exact-origin CORS, and keyless construction | `TestGCSResumableCapabilityCanMoveBetweenReplicas`, `TestGCSUploadCleanupDistinguishesFinalizedAndIncompleteSessions`, `TestGCSSignedSingleUploadAndDownloadAreGenerationBound`, `TestGCSCORSRequiresExactApplicationOriginAndTransferHeaders`, `TestWorkloadIdentityTransferConstructionRequiresNoPrivateKeyOrNetwork` |
@@ -187,19 +189,24 @@ The release coverage command is `nix run .#test-coverage`. CI first runs the cac
 
 | Boundary | Statements | Result | Required |
 |---|---:|---:|---:|
-| Repository | 8,091 / 9,426 | 85.837% | 85% |
+| Repository | 9,958 / 11,101 | 89.704% | 85% |
 | Authentication | 154 / 161 | 95.652% | 95% |
 | Authorization | 419 / 438 | 95.662% | 95% |
 | Canonical path | 207 / 212 | 97.642% | 95% |
 | Bearer token | 20 / 21 | 95.238% | 95% |
-| Provider capability | 729 / 764 | 95.419% | 95% |
-| State CAS | 204 / 209 | 97.608% | 95% |
-| Scope mapping | 729 / 764 | 95.419% | 95% |
+| Provider capability | 930 / 975 | 95.385% | 95% |
+| State CAS | 420 / 438 | 95.890% | 95% |
+| Scope mapping | 2,260 / 2,374 | 95.198% | 95% |
+| Canonical format/key/version/checkpoint | 309 / 319 | 96.865% | 95% |
+| Write gate/admission | 421 / 443 | 95.034% | 95% |
+| Operation fencing/recovery | 787 / 828 | 95.048% | 95% |
+| Directory manifest | 438 / 457 | 95.842% | 95% |
+| GCS transport | 384 / 404 | 95.050% | 95% |
 | Theme validation/sanitization | 650 / 684 | 95.029% | 95% |
-| Configuration | 264 / 270 | 97.778% | 95% |
-| Preview core | 266 / 276 | 96.377% | 95% |
-| Preview image generator | 189 / 196 | 96.429% | 95% |
-| Preview store | 158 / 166 | 95.181% | 95% |
+| Configuration | 290 / 294 | 98.639% | 95% |
+| Preview core | 573 / 602 | 95.183% | 95% |
+| Preview image generator | 467 / 490 | 95.306% | 95% |
+| Preview store | 616 / 643 | 95.801% | 95% |
 
 ### Acceptance-criterion index
 
@@ -240,6 +247,7 @@ The release coverage command is `nix run .#test-coverage`. CI first runs the cac
 | AC-033 | Provider recursive-operation contract, batch/idempotency integrations, and copy/move E2E. |
 | AC-034 | Trash service/HTTP/browser suites cover restore conflict, generated rename, permanent delete, and bounded empty. |
 | AC-035 | Share move/trash invalidation integrations. |
+| AC-036 | Recursive-byte lifecycle, operation pre/post visibility, corruption/overflow denial, and raw-copy continuation assertions in the portable filesystem, operation, and checkpoint suites. |
 | AC-040 | Provider capability contract binds method, scope, path, headers, and expiry. |
 | AC-041 | Separate mock listener and control-byte instrumentation in HTTP integration and Chromium E2E. |
 | AC-042 | Provider resumable interruption/confirmed-offset/retry/completion contract and browser workflow. |

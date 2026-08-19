@@ -187,10 +187,15 @@ func (p *Provider) CompleteUpload(ctx context.Context, scope domain.Scope, reque
 	if err != nil {
 		return domain.Entry{}, err
 	}
+	original := cloneObjects(p.scopeObjectsLocked(scope))
 	if session.targetExisted {
 		p.deleteTreeLocked(scope, session.path)
 	}
 	p.scopeObjectsLocked(scope)[session.path.String()] = object{entry: entry, data: data, materialized: session.materialized}
+	if err := p.recomputeRecursiveBytesLocked(scope); err != nil {
+		p.objects[scope] = original
+		return domain.Entry{}, err
+	}
 	delete(p.uploadTokens, session.capabilityHash)
 	delete(p.uploads, request.UploadID)
 	return entry, nil

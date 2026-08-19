@@ -70,6 +70,82 @@ func TestCanonicalEnvelopeAndLogicalVersion(t *testing.T) {
 	}
 }
 
+func TestCanonicalDirectoryRootCarriesRecursiveByteTransition(t *testing.T) {
+	root := DirectoryRoot{
+		SchemaVersion: 1, DirectoryID: RootDirectoryID, ManifestID: "manifest", RecursiveBytes: 42,
+		Pending: &DirectoryTransition{
+			OperationID: "operation", Fence: 3, PreManifestID: "manifest", PostManifestID: "next", PostRecursiveBytes: 84,
+		},
+	}
+	body, err := EncodeCanonical(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"schemaVersion":1,"directoryID":"root","manifestID":"manifest","recursiveBytes":42,"pending":{"operationID":"operation","fence":3,"preManifestID":"manifest","postManifestID":"next","postRecursiveBytes":84}}`
+	if string(body) != want {
+		t.Fatalf("directory root = %s; want %s", body, want)
+	}
+	if FeatureRecursiveBytes != "recursive-byte-aggregates-v1" {
+		t.Fatalf("recursive-byte feature = %q", FeatureRecursiveBytes)
+	}
+	manifest := DirectoryManifest{
+		SchemaVersion: 1, DirectoryID: RootDirectoryID, ManifestID: "manifest", PageIDs: []string{"page"},
+		EntryCount: 2, RecursiveBytes: 42, CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}
+	body, err = EncodeCanonical(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = `{"schemaVersion":1,"directoryID":"root","manifestID":"manifest","pageIDs":["page"],"entryCount":2,"recursiveBytes":42,"createdAt":"2026-01-02T03:04:05Z"}`
+	if string(body) != want {
+		t.Fatalf("directory manifest = %s; want %s", body, want)
+	}
+}
+
+func TestCanonicalDirectoryRootKeyParsing(t *testing.T) {
+	userID := "YWFhYWFhYWFhYWFhYWFhYQ"
+	for _, directoryID := range []string{RootDirectoryID, "YmJiYmJiYmJiYmJiYmJiYg"} {
+		key := DirectoryRootKey(userID, "live", directoryID)
+		gotUser, gotArea, gotDirectory, matched, err := ParseDirectoryRootKey(key)
+		if err != nil || !matched || gotUser != userID || gotArea != "live" || gotDirectory != directoryID {
+			t.Fatalf("ParseDirectoryRootKey(%s) = %q, %q, %q, %t, %v", key, gotUser, gotArea, gotDirectory, matched, err)
+		}
+	}
+	if _, _, _, matched, err := ParseDirectoryRootKey(DirectoryManifestKey(userID, "live", RootDirectoryID, "manifest")); err != nil || matched {
+		t.Fatalf("manifest root parse = %t, %v", matched, err)
+	}
+	valid := DirectoryRootKey(userID, "live", RootDirectoryID).String()
+	invalid := []string{
+		strings.Replace(valid, encodedPart(userID), "0", 1),
+		strings.Replace(valid, "/live/", "/other/", 1),
+		strings.Replace(valid, encodedPart(RootDirectoryID), encodedPart("short"), 1),
+		strings.Replace(valid, encodedPart(userID), encodedPart("short"), 1),
+	}
+	for _, value := range invalid {
+		key := objectstore.MustKey(value)
+		if _, _, _, matched, err := ParseDirectoryRootKey(key); !matched || !errors.Is(err, domain.ErrInvalid) {
+			t.Errorf("ParseDirectoryRootKey(%s) = matched %t, error %v", value, matched, err)
+		}
+	}
+	if FilesystemPrefix() != "endlessfs/v1/fs/" {
+		t.Fatalf("filesystem prefix = %q", FilesystemPrefix())
+	}
+}
+
+func TestWriteGateFeatureBindingValidation(t *testing.T) {
+	valid := WriteGate{SchemaVersion: 1, Epoch: 2, Mode: GateOpen, WriterFeatures: []string{"feature-a", FeatureRecursiveBytes}}
+	if err := ValidateGate(valid); err != nil {
+		t.Fatalf("ValidateGate(valid) error = %v", err)
+	}
+	for _, features := range [][]string{{"feature", "feature"}, {FeatureRecursiveBytes, "feature-a"}} {
+		candidate := valid
+		candidate.WriterFeatures = features
+		if err := ValidateGate(candidate); !errors.Is(err, domain.ErrInvalid) {
+			t.Errorf("ValidateGate(%v) error = %v", features, err)
+		}
+	}
+}
+
 func TestCanonicalDirectoryPageRemainsReadableWithoutFormatMigration(t *testing.T) {
 	key := DirectoryPageKey("AAAAAAAAAAAAAAAAAAAAAA", "live", RootDirectoryID, "legacy-page")
 	payload := v1DirectoryPageWithoutPreviewFields{

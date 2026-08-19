@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/state"
@@ -99,6 +100,40 @@ func TestReplicaCompatibilityRejectsWriterConfigurationDrift(t *testing.T) {
 		if !errors.Is(err, domain.ErrPreconditionFailed) {
 			t.Errorf("configuration %d error = %v", index, err)
 		}
+	}
+}
+
+func TestAdmissionRejectsWriteGateFeatureBindingDrift(t *testing.T) {
+	for name, features := range map[string][]string{
+		"missing":   nil,
+		"different": {"different-feature"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			backend := objectmemory.New()
+			clock := domain.NewFixedClock(time.Date(2036, 2, 5, 4, 5, 6, 0, time.UTC))
+			engine := openEngine(t, backend, clock, 19, nil)
+			key := storageformat.WriteGateKey()
+			object, err := backend.Get(context.Background(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope storageformat.Envelope
+			var gate storageformat.WriteGate
+			if err := storageformat.DecodeEnvelope(object.Body, key, "write-gate-v1", &envelope, &gate); err != nil {
+				t.Fatal(err)
+			}
+			gate.WriterFeatures = features
+			body, err := storageformat.EncodeEnvelope("write-gate-v1", key, envelope.Revision+1, gate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := backend.Put(context.Background(), key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := engine.Create(context.Background(), state.MustKey(state.NamespaceAccounts, "blocked"), []byte("value")); !errors.Is(err, domain.ErrPreconditionFailed) {
+				t.Fatalf("Create() error = %v", err)
+			}
+		})
 	}
 }
 

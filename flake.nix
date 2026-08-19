@@ -50,6 +50,26 @@
             makeWrapper ${pkgs.chromium}/bin/chromium "$out/bin/chrome-headless-shell" \
               --set FONTCONFIG_FILE ${fontConfig}
           '';
+      containerTransportPolicyFor =
+        pkgs:
+        pkgs.writeText "endlessfs-container-transport-policy.json" ''
+          {
+            "default": [
+              {
+                "type": "reject"
+              }
+            ],
+            "transports": {
+              "docker-archive": {
+                "": [
+                  {
+                    "type": "insecureAcceptAnything"
+                  }
+                ]
+              }
+            }
+          }
+        '';
       dependencyPolicyCommand = moduleClosure: ''
         vulndb_locked_url="$(jq -er '.nodes.vulndb.locked.url' flake.lock)"
         vulndb_original_url="$(jq -er '.nodes.vulndb.original.url' flake.lock)"
@@ -516,6 +536,7 @@
           go = goFor pkgs;
           packages = self.packages.${system};
           headlessBrowser = headlessBrowserFor pkgs;
+          containerTransportPolicy = containerTransportPolicyFor pkgs;
           relativePath = path: lib.removePrefix (toString ./. + "/") (toString path);
           coverageSource = lib.cleanSourceWith {
             src = ./.;
@@ -797,7 +818,7 @@
                 fi
                 printf '%s' "$GHCR_TOKEN" | skopeo login --username "$GHCR_USER" --password-stdin ghcr.io >/dev/null
                 for destination in "$@"; do
-                  skopeo copy --all "docker-archive:${packages.container}" "docker://$destination"
+                  skopeo --policy ${containerTransportPolicy} copy --all "docker-archive:${packages.container}" "docker://$destination"
                 done
               '';
         }
@@ -947,6 +968,22 @@
           testSuite = goCheck "tests" "go test ./..." [ ];
           e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
           coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
+          publishContainerPolicy =
+            pkgs.runCommand "endlessfs-publish-container-policy"
+              {
+                nativeBuildInputs = [
+                  pkgs.jq
+                  pkgs.ripgrep
+                ];
+              }
+              ''
+                rg --fixed-strings --quiet -- 'skopeo --policy ' ${self.apps.${system}.publish-container.program}
+                jq -e '
+                  .default == [{"type": "reject"}]
+                  and .transports."docker-archive"."" == [{"type": "insecureAcceptAnything"}]
+                ' ${containerTransportPolicyFor pkgs} >/dev/null
+                touch "$out"
+              '';
           linuxCiAppPolicy =
             pkgs.runCommand "endlessfs-linux-ci-app-policy"
               {
@@ -1053,13 +1090,16 @@
           theme = testSuite;
           race = raceCheck;
           coverage = coverageCompile;
-          linux-ci-app-policy = linuxCiAppPolicy;
+          publish-container-policy = publishContainerPolicy;
           fuzz = fuzzCheck;
           offline = testSuite;
           security = securityCheck;
           dependencies = securityCheck;
 
           repository-policy = repositoryPolicyCheck;
+        }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          linux-ci-app-policy = linuxCiAppPolicy;
         }
       );
 

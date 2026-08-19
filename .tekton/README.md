@@ -15,15 +15,21 @@ All active runs select `storage.xlab.now/fast-local=true`, use a 10 GiB per-run
 `fast-local` source volume, and reuse the shared Git mirror and 96 GiB v2 Nix
 store in `tekton-buildkit` on local NVMe. They run in xlab's isolated
 `tekton-buildkit` privileged/userns namespace because the ordinary
-`tekton-pipelines` namespace correctly enforces baseline Pod Security. The full
-gate requests 6 CPU/12 GiB and may burst to 12 CPU/24 GiB; coverage requests
+`tekton-pipelines` namespace correctly enforces baseline Pod Security. Cache
+placement is also fail-closed at the cluster boundary: admission denies a Pod
+in either Tekton execution namespace when it mounts `nix-store`,
+`git-repo-cache`, or `oci-layer-cache` without selecting
+`storage.xlab.now/fast-local=true`. Sirius is currently the only node carrying
+that label. The full gate requests 6 CPU/12 GiB and may burst to 12 CPU/24 GiB;
+coverage requests
 4 CPU/8 GiB and may burst to
 8 CPU/16 GiB. These values leave enough capacity for xlab system workloads
 while allowing the parallel gate to use most of the otherwise-idle node.
-One small `prepare-cache` Task seeds an empty shared Nix PVC before the three
-parallel verification tasks begin, avoiding first-run seed races without
-serializing the warm-cache gate. Releases reuse the same caches and never create
-release-specific persistent storage.
+One small `prepare-cache` Task seeds an empty shared Nix PVC before verification
+begins, avoiding first-run seed races. Fast checks and the full Nix gate run in
+parallel; coverage follows them so Chromium gets predictable resources.
+Releases reuse the same caches and never create release-specific persistent
+storage.
 
 Like Odysseus's BuildKit release path, each privileged Nix task is privileged
 only inside a Kubernetes-managed pod user namespace selected by its

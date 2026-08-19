@@ -196,6 +196,8 @@ AGENTS.md                repository instructions for implementation agents
 
 Direct dependency rationale is recorded in [docs/dependencies.md](./docs/dependencies.md). The implemented boundary review is [docs/threat-model.md](./docs/threat-model.md), operational guidance is [docs/operations.md](./docs/operations.md), and the acceptance record is [docs/v1-evidence.md](./docs/v1-evidence.md).
 
+The imported [EndlessFS brand guidelines](./docs/brand/README.md), their visual reference boards, and the [browser UI rebuild plan](./docs/ui-rebuild-plan.md) define the inputs and staged proof required for the planned interface redesign. They do not override the normative v1 or applicable extension specifications.
+
 ## CI, containers, releases, and branch protection
 
 GitHub Actions contains no project test selection or tool installation logic beyond bootstrapping Nix. Actions are pinned to immutable revisions, Nix build outputs are cached, full checks use a standard Ubuntu runner, and a bounded macOS job proves contributor-platform compatibility.

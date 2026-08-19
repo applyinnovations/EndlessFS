@@ -28,11 +28,11 @@
         "lastModified": 312732000,
         "narHash": "sha256-iAKCSWlcNuRHPoHaQjO7JHI5tFo/H+MU3sWFixA2UlE=",
         "type": "tarball",
-        "url": "https://storage.googleapis.com/go-vulndb/vulndb.zip"
+        "url": "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1787088262759230"
       },
       "original": {
         "type": "tarball",
-        "url": "https://storage.googleapis.com/go-vulndb/vulndb.zip"
+        "url": "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1787088262759230"
       }
     }
   },

@@ -43,14 +43,17 @@ task itself verifies that container UID 0 is not host UID 0 before executing.
 Pipelines-as-Code creates a per-run Secret containing a short-lived xlab.now
 GitHub App installation token. The clone task mounts its generated Git
 configuration. `nix-run-github-v2` reads the same Secret's `git-provider-token`
-key and exposes it only for the publishing step as `GH_TOKEN` and `GHCR_TOKEN`.
-The installation token is supported for cloning, release creation, and release
-asset uploads. It is also the first GHCR credential attempted now that the App
-has `packages: write`, but GitHub's published Container registry authentication
-matrix does not document general GitHub App tokens. A successful xlab push must
-prove this path before Actions are removed; if GHCR rejects it, registry
-credentials need a separate reviewed design. No fallback token is added by this
-change.
+key and exposes it only for the publishing step as `GH_TOKEN`. The installation
+token is used for cloning, release creation, and release asset uploads.
+
+GitHub Container Registry rejected that general App installation token even
+with `packages: write`. Container and release publishing therefore bind the
+shared, SOPS-encrypted `github-packages-credentials` Secret through the Task's
+optional `github-packages-auth` workspace. The workspace is read-only and
+isolated to the trusted publishing step; pull-request and merge-queue CI never
+binds it. Its classic PAT has only `write:packages`. `GHCR_USER` and
+`GHCR_TOKEN` use that credential, while `GH_TOKEN` remains the short-lived App
+token for GitHub API operations.
 
 The App needs `contents: write` and `packages: write`; those permissions do not
 grant repository administration. Applying `.github/rulesets/*.json` remains an
@@ -75,9 +78,10 @@ credential, cache, or runner, so ordinary PaC events cannot allocate a Mac.
    PipelineRuns from the default branch, so pull requests cannot replace trusted
    pipeline code.
 3. Confirm a pull-request run, a merge-queue run, and an isolated GHCR tag push
-   from the xlab App token. Do not treat `packages: write` alone as proof that
-   registry authentication works. Delete the disposable tag after verification
-   if the available package permissions permit deletion.
+   from xlab using the scoped Packages credential. The package token has no
+   deletion scope, so verification must use the ordinary immutable SHA and
+   moving `edge` tags rather than creating a disposable tag that CI cannot
+   remove.
 4. Apply the checked-in rulesets only after the successful PaC check is visible
    as `tekton-xlab / endlessfs-ci-` from GitHub App integration `949094`.
 5. Remove the remaining bootstrap GitHub workflows in the cutover PR. The Darwin

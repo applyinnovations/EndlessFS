@@ -163,6 +163,19 @@
           yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-release.yaml >/dev/null
         done
 
+        check_packages_binding() {
+          pipeline="$1"
+          task="$2"
+          yq -e ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | .workspaces[] | select(.name == \"github-packages-auth\" and .workspace == \"github-packages-auth\")" "$pipeline" >/dev/null
+          yq -e '.spec.workspaces[] | select(.name == "github-packages-auth") | .secret.secretName == "github-packages-credentials"' "$pipeline" >/dev/null
+        }
+        check_packages_binding .tekton/endlessfs-container.yaml publish
+        check_packages_binding .tekton/endlessfs-release.yaml release
+        if rg -n 'github-packages-(auth|credentials)' .tekton/endlessfs-ci.yaml; then
+          echo "pull-request and merge-queue CI must not receive the GitHub Packages credential" >&2
+          exit 1
+        fi
+
         darwin_pipeline=.tekton/endlessfs-darwin-smoke.disabled.yaml
         test -f "$darwin_pipeline" || {
           echo "missing retired Darwin workflow definition: $darwin_pipeline" >&2

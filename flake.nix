@@ -34,21 +34,15 @@
         });
       headlessBrowserFor =
         pkgs:
-        let
-          component = pkgs.playwright-driver.components."chromium-headless-shell";
-        in
         pkgs.runCommand "endlessfs-headless-browser"
           {
             nativeBuildInputs = [
-              pkgs.findutils
               pkgs.makeWrapper
             ];
           }
           ''
-            browser="$(find ${component} -type f -name chrome-headless-shell -perm -0100 -print -quit)"
-            test -n "$browser"
             mkdir -p "$out/bin"
-            makeWrapper "$browser" "$out/bin/chrome-headless-shell"
+            makeWrapper ${pkgs.chromium}/bin/chromium "$out/bin/chrome-headless-shell"
           '';
       dependencyPolicyCommand = moduleClosure: ''
         vulndb_locked_url="$(jq -er '.nodes.vulndb.locked.url' flake.lock)"

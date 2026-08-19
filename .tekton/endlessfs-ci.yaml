@@ -74,7 +74,7 @@ spec:
     - pipelineTaskName: coverage
       podTemplate:
         automountServiceAccountToken: false
-        hostUsers: true
+        hostUsers: false
       stepSpecs:
         - name: run
           computeResources:
@@ -206,7 +206,7 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-browser-run-v2
+              value: nix-run-v2
             - name: namespace
               value: tekton-buildkit
         timeout: 45m

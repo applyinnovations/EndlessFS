@@ -18,7 +18,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	stdruntime "runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -55,38 +54,6 @@ func TestVirtualAuthenticatorUsesPlatformTransport(t *testing.T) {
 	}
 }
 
-func TestBrowserNonRootUIDRejectsRootAndInvalidValues(t *testing.T) {
-	for _, value := range []string{"0", "-1", "not-a-uid", "4294967296"} {
-		if _, err := parseBrowserNonRootUID(value); err == nil {
-			t.Errorf("parseBrowserNonRootUID(%q) unexpectedly succeeded", value)
-		}
-	}
-	uid, err := parseBrowserNonRootUID("1000")
-	if err != nil || uid != 1000 {
-		t.Fatalf("parseBrowserNonRootUID(1000) = %d, %v", uid, err)
-	}
-}
-
-func TestBrowserRuntimeExistsBeforeDirectoryHandoff(t *testing.T) {
-	profile := t.TempDir()
-	downloads := t.TempDir()
-	var handedOff []string
-	runtimeDirectory, err := prepareBrowserRuntime(profile, []string{downloads}, 1000, func(path string, _, _ int) error {
-		if _, statErr := os.Stat(filepath.Join(profile, "runtime")); statErr != nil {
-			return fmt.Errorf("runtime missing before handoff: %w", statErr)
-		}
-		handedOff = append(handedOff, path)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{downloads, runtimeDirectory, profile}
-	if strings.Join(handedOff, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("handed-off directories = %v, want %v", handedOff, want)
-	}
-}
-
 func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
@@ -94,8 +61,8 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	browserPath := chromiumPath(t)
 	harness := newHarness(t)
 
-	profile := browserTempDir(t, "endlessfs-browser-profile-")
-	downloads := browserTempDir(t, "endlessfs-browser-downloads-")
+	profile := t.TempDir()
+	downloads := t.TempDir()
 	options := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.ExecPath(browserPath),
 		chromedp.UserDataDir(profile),
@@ -108,7 +75,6 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if os.Getenv("ENDLESSFS_CHROMIUM_NO_SANDBOX") == "1" {
 		options = append(options, chromedp.NoSandbox, chromedp.CombinedOutput(os.Stderr))
 	}
-	options = append(options, browserRuntimeOptions(t, profile, downloads)...)
 	allocator, cancelAllocator := chromedp.NewExecAllocator(context.Background(), options...)
 	t.Cleanup(cancelAllocator)
 	ctx, cancelBrowser := chromedp.NewContext(allocator)
@@ -985,7 +951,7 @@ type testBrowser struct {
 
 func newTestBrowser(t *testing.T) *testBrowser {
 	t.Helper()
-	profile := browserTempDir(t, "endlessfs-browser-profile-")
+	profile := t.TempDir()
 	options := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.ExecPath(chromiumPath(t)), chromedp.UserDataDir(profile),
 		chromedp.Flag("disable-background-networking", true), chromedp.Flag("disable-default-apps", true),
@@ -994,7 +960,6 @@ func newTestBrowser(t *testing.T) *testBrowser {
 	if os.Getenv("ENDLESSFS_CHROMIUM_NO_SANDBOX") == "1" {
 		options = append(options, chromedp.NoSandbox, chromedp.CombinedOutput(os.Stderr))
 	}
-	options = append(options, browserRuntimeOptions(t, profile)...)
 	allocator, cancelAllocator := chromedp.NewExecAllocator(context.Background(), options...)
 	ctx, cancelBrowser := chromedp.NewContext(allocator)
 	ctx, cancelTimeout := context.WithTimeout(ctx, 90*time.Second)
@@ -1026,89 +991,6 @@ func newTestBrowser(t *testing.T) *testBrowser {
 		t.Fatalf("prepare Chromium: %v", err)
 	}
 	return client
-}
-
-func browserTempDir(t *testing.T, pattern string) string {
-	t.Helper()
-	directory, err := os.MkdirTemp("", pattern)
-	if err != nil {
-		t.Fatalf("create browser temporary directory: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := removeBrowserTempDir(directory); err != nil {
-			t.Errorf("remove browser temporary directory: %v", err)
-		}
-	})
-	return directory
-}
-
-func removeBrowserTempDir(directory string) error {
-	rawUID := os.Getenv("CI_BROWSER_NONROOT_UID")
-	if rawUID == "" || stdruntime.GOOS != "linux" || os.Geteuid() != 0 {
-		return os.RemoveAll(directory)
-	}
-	uid, err := parseBrowserNonRootUID(rawUID)
-	if err != nil {
-		return err
-	}
-	command := exec.CommandContext(context.Background(), "rm", "-rf", "--", directory)
-	configureBrowserCommand(command, uid)
-	if output, err := command.CombinedOutput(); err != nil {
-		return fmt.Errorf("remove as browser uid %d: %w: %s", uid, err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
-
-func browserRuntimeOptions(t *testing.T, profile string, writableDirectories ...string) []chromedp.ExecAllocatorOption {
-	t.Helper()
-	rawUID := os.Getenv("CI_BROWSER_NONROOT_UID")
-	if rawUID == "" {
-		return nil
-	}
-	if stdruntime.GOOS != "linux" || os.Geteuid() != 0 {
-		t.Fatalf("CI_BROWSER_NONROOT_UID requires a Linux root test process")
-	}
-	uid, err := parseBrowserNonRootUID(rawUID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtimeDirectory, err := prepareBrowserRuntime(profile, writableDirectories, uid, os.Chown)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return []chromedp.ExecAllocatorOption{
-		chromedp.Env(
-			"HOME="+profile,
-			"XDG_CACHE_HOME="+filepath.Join(profile, ".cache"),
-			"XDG_CONFIG_HOME="+filepath.Join(profile, ".config"),
-			"XDG_RUNTIME_DIR="+runtimeDirectory,
-		),
-		chromedp.ModifyCmdFunc(func(command *exec.Cmd) {
-			configureBrowserCommand(command, uid)
-		}),
-	}
-}
-
-func prepareBrowserRuntime(profile string, writableDirectories []string, uid uint32, chown func(string, int, int) error) (string, error) {
-	runtimeDirectory := filepath.Join(profile, "runtime")
-	if err := os.Mkdir(runtimeDirectory, 0o700); err != nil {
-		return "", fmt.Errorf("create browser runtime directory: %w", err)
-	}
-	directories := append(append([]string(nil), writableDirectories...), runtimeDirectory, profile)
-	for _, directory := range directories {
-		if err := chown(directory, int(uid), int(uid)); err != nil {
-			return "", fmt.Errorf("assign browser directory %q to uid %d: %w", directory, uid, err)
-		}
-	}
-	return runtimeDirectory, nil
-}
-
-func parseBrowserNonRootUID(rawUID string) (uint32, error) {
-	parsedUID, err := strconv.ParseUint(rawUID, 10, 32)
-	if err != nil || parsedUID == 0 {
-		return 0, fmt.Errorf("invalid CI_BROWSER_NONROOT_UID %q", rawUID)
-	}
-	return uint32(parsedUID), nil
 }
 
 func (browserClient *testBrowser) requestSnapshot() []string {

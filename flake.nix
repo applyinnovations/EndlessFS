@@ -130,11 +130,11 @@
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[refs/tags/v*.*.*]"' .tekton/endlessfs-release.yaml >/dev/null
         yq -e '.spec.params[] | select(.name == "release_tag") | .value == "{{ git_tag }}"' .tekton/endlessfs-release.yaml >/dev/null
 
-        for task in prepare-cache fast-checks nix-checks; do
+        for task in prepare-cache fast-checks nix-checks coverage; do
           yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-ci.yaml >/dev/null
         done
-        yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "coverage" and .podTemplate.hostUsers == true and .podTemplate.automountServiceAccountToken == false)' .tekton/endlessfs-ci.yaml >/dev/null
-        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .taskRef.params[] | select(.name == "name" and .value == "nix-browser-run-v2")' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "coverage" and .podTemplate.automountServiceAccountToken == false)' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .taskRef.params[] | select(.name == "name" and .value == "nix-run-v2")' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .runAfter[] | select(. == "fast-checks")' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .runAfter[] | select(. == "nix-checks")' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "publish") | .podTemplate.hostUsers == false' .tekton/endlessfs-container.yaml >/dev/null

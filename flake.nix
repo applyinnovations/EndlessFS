@@ -87,7 +87,6 @@
       pipelinePolicyCommand = ''
         active_pipelines="
           .tekton/endlessfs-ci.yaml
-          .tekton/endlessfs-merge-queue.yaml
           .tekton/endlessfs-container.yaml
           .tekton/endlessfs-release.yaml
         "
@@ -109,13 +108,21 @@
           fi
         done
 
-        yq -e '.metadata.generateName == "endlessfs-ci-"' .tekton/endlessfs-ci.yaml >/dev/null
-        yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-event" == "[pull_request]"' .tekton/endlessfs-ci.yaml >/dev/null
-        yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[main]"' .tekton/endlessfs-ci.yaml >/dev/null
+        duplicate_generate_names="$({
+          for pipeline in $active_pipelines; do
+            yq -r '.metadata.generateName' "$pipeline"
+          done
+        } | LC_ALL=C sort | uniq -d)"
+        if [ -n "$duplicate_generate_names" ]; then
+          echo "active PaC PipelineRuns must have unique metadata.generateName values:" >&2
+          printf '%s\n' "$duplicate_generate_names" >&2
+          exit 1
+        fi
 
-        yq -e '.metadata.generateName == "endlessfs-ci-"' .tekton/endlessfs-merge-queue.yaml >/dev/null
-        yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-event" == "[push]"' .tekton/endlessfs-merge-queue.yaml >/dev/null
-        yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[refs/heads/gh-readonly-queue/main/*]"' .tekton/endlessfs-merge-queue.yaml >/dev/null
+        yq -e '.metadata.generateName == "endlessfs-ci-"' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-cel-expression" | contains("event == \"pull_request\" && target_branch == \"main\"")' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '(.metadata.annotations."pipelinesascode.tekton.dev/on-cel-expression" | contains("event == \"push\"")) and (.metadata.annotations."pipelinesascode.tekton.dev/on-cel-expression" | contains("target_branch.startsWith(\"refs/heads/gh-readonly-queue/main/\")"))' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.metadata.annotations | has("pipelinesascode.tekton.dev/on-event") == false and has("pipelinesascode.tekton.dev/on-target-branch") == false' .tekton/endlessfs-ci.yaml >/dev/null
 
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-event" == "[push]"' .tekton/endlessfs-container.yaml >/dev/null
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[main]"' .tekton/endlessfs-container.yaml >/dev/null
@@ -125,7 +132,6 @@
 
         for task in prepare-cache fast-checks nix-checks coverage; do
           yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-ci.yaml >/dev/null
-          yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-merge-queue.yaml >/dev/null
         done
         yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "publish") | .podTemplate.hostUsers == false' .tekton/endlessfs-container.yaml >/dev/null
         for task in verify release; do

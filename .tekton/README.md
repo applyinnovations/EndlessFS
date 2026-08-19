@@ -6,8 +6,7 @@ GKE cluster that hosts `drive.endlessfs.com`.
 
 | File | Trigger | Purpose |
 | --- | --- | --- |
-| `endlessfs-ci.yaml` | pull request to `main` | Fast policy, full Nix gate, and Chromium coverage |
-| `endlessfs-merge-queue.yaml` | `gh-readonly-queue/main/*` push | Same required gate for GitHub's merge queue |
+| `endlessfs-ci.yaml` | pull request to `main` or `gh-readonly-queue/main/*` push | Fast policy, full Nix gate, and Chromium coverage |
 | `endlessfs-container.yaml` | `main` push | Publish immutable commit and `edge` OCI tags |
 | `endlessfs-release.yaml` | `vMAJOR.MINOR.PATCH` tag push | Re-verify, publish release OCI tags, create the GitHub release, and upload every Nix release artifact |
 | `endlessfs-darwin-smoke.disabled.yaml` | none | Deprecated, inert record for the retired Darwin smoke job |

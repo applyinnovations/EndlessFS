@@ -1032,11 +1032,28 @@ func browserTempDir(t *testing.T, pattern string) string {
 		t.Fatalf("create browser temporary directory: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := os.RemoveAll(directory); err != nil {
+		if err := removeBrowserTempDir(directory); err != nil {
 			t.Errorf("remove browser temporary directory: %v", err)
 		}
 	})
 	return directory
+}
+
+func removeBrowserTempDir(directory string) error {
+	rawUID := os.Getenv("CI_BROWSER_NONROOT_UID")
+	if rawUID == "" || stdruntime.GOOS != "linux" || os.Geteuid() != 0 {
+		return os.RemoveAll(directory)
+	}
+	uid, err := parseBrowserNonRootUID(rawUID)
+	if err != nil {
+		return err
+	}
+	command := exec.Command("rm", "-rf", "--", directory)
+	configureBrowserCommand(command, uid)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("remove as browser uid %d: %w: %s", uid, err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func browserRuntimeOptions(t *testing.T, profile string, writableDirectories ...string) []chromedp.ExecAllocatorOption {

@@ -34,6 +34,11 @@
         });
       headlessBrowserFor =
         pkgs:
+        let
+          fontConfig = pkgs.makeFontsConf {
+            fontDirectories = [ pkgs.dejavu_fonts ];
+          };
+        in
         pkgs.runCommand "endlessfs-headless-browser"
           {
             nativeBuildInputs = [
@@ -42,7 +47,8 @@
           }
           ''
             mkdir -p "$out/bin"
-            makeWrapper ${pkgs.chromium}/bin/chromium "$out/bin/chrome-headless-shell"
+            makeWrapper ${pkgs.chromium}/bin/chromium "$out/bin/chrome-headless-shell" \
+              --set FONTCONFIG_FILE ${fontConfig}
           '';
       dependencyPolicyCommand = moduleClosure: ''
         vulndb_locked_url="$(jq -er '.nodes.vulndb.locked.url' flake.lock)"
@@ -951,6 +957,7 @@
                   ${self.apps.${system}.test-coverage.program}; do
                   rg --quiet '^export CGO_ENABLED=0$' "$program"
                 done
+                rg --fixed-strings --quiet 'FONTCONFIG_FILE' ${headlessBrowser}/bin/chrome-headless-shell
                 touch "$out"
               '';
           formatCheck =

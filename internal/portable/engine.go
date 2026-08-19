@@ -178,26 +178,65 @@ func (e *Engine) initialize(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, err = e.backend.Put(ctx, storageformat.SuperblockKey(), superblockBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-		if !errors.Is(err, domain.ErrConflict) {
+	created := false
+	if _, err = e.backend.Put(ctx, storageformat.SuperblockKey(), superblockBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err == nil {
+		created = true
+	} else if !errors.Is(err, domain.ErrConflict) {
+		return err
+	}
+	if created {
+		if err := e.createOrVerifyEnvelope(ctx, storageformat.WriterSetKey(), writerSetSchema, e.writer); err != nil {
 			return err
 		}
-		stored, getErr := e.backend.Get(ctx, storageformat.SuperblockKey())
-		if getErr != nil {
-			return getErr
-		}
-		var existing storageformat.Superblock
-		if decodeErr := state.DecodeJSONWithLimit(stored.Body, &existing, storageformat.MaxCanonicalBytes); decodeErr != nil {
-			return decodeErr
-		}
-		if existing.FormatID != storageformat.FormatID || existing.CanonicalEncoder != storageformat.CanonicalEncoder || existing.KeyFormatVersion != storageformat.KeyFormatVersion || existing.WriterProtocolVersion != storageformat.WriterProtocolVersion || !reflect.DeepEqual(existing.RequiredFeatures, e.writer.RequiredFeatures) {
-			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable superblock")
-		}
+		return e.createOrVerifyEnvelope(ctx, storageformat.WriteGateKey(), writeGateSchema, storageformat.WriteGate{
+			SchemaVersion: 1, Epoch: 1, Mode: storageformat.GateOpen,
+			WriterFeatures: append([]string(nil), e.writer.RequiredFeatures...),
+		})
+	}
+	stored, err := e.backend.Get(ctx, storageformat.SuperblockKey())
+	if err != nil {
+		return err
+	}
+	var existing storageformat.Superblock
+	if err := state.DecodeJSONWithLimit(stored.Body, &existing, storageformat.MaxCanonicalBytes); err != nil {
+		return err
+	}
+	if err := validateCompatibleSuperblock(existing); err != nil {
+		return err
+	}
+	if reflect.DeepEqual(existing.RequiredFeatures, legacyRecursiveByteFeatures(e.writer.RequiredFeatures)) {
+		return e.migrateRecursiveByteAggregates(ctx, stored, existing)
+	}
+	if !reflect.DeepEqual(existing.RequiredFeatures, e.writer.RequiredFeatures) {
+		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable superblock")
 	}
 	if err := e.createOrVerifyEnvelope(ctx, storageformat.WriterSetKey(), writerSetSchema, e.writer); err != nil {
 		return err
 	}
-	return e.createOrVerifyEnvelope(ctx, storageformat.WriteGateKey(), writeGateSchema, storageformat.WriteGate{SchemaVersion: 1, Epoch: 1, Mode: storageformat.GateOpen})
+	if err := e.createOrVerifyEnvelope(ctx, storageformat.WriteGateKey(), writeGateSchema, storageformat.WriteGate{
+		SchemaVersion: 1, Epoch: 1, Mode: storageformat.GateOpen,
+		WriterFeatures: append([]string(nil), e.writer.RequiredFeatures...),
+	}); err != nil {
+		return err
+	}
+	_, _, gate, err := e.readGate(ctx)
+	if err != nil {
+		return err
+	}
+	if gate.CheckpointID == recursiveByteMigrationCheckpointID && gate.Mode != storageformat.GateOpen || len(gate.WriterFeatures) == 0 {
+		return e.migrateRecursiveByteAggregates(ctx, stored, existing)
+	}
+	if !reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
+		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
+	}
+	return nil
+}
+
+func validateCompatibleSuperblock(superblock storageformat.Superblock) error {
+	if superblock.SchemaVersion != 1 || superblock.FormatID != storageformat.FormatID || superblock.BucketID == "" || superblock.CanonicalEncoder != storageformat.CanonicalEncoder || superblock.KeyFormatVersion != storageformat.KeyFormatVersion || superblock.WriterProtocolVersion != storageformat.WriterProtocolVersion || superblock.CreatedAt.IsZero() || !storageformat.SortedUnique(superblock.RequiredFeatures) {
+		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable superblock")
+	}
+	return nil
 }
 
 func (e *Engine) createOrVerifyEnvelope(ctx context.Context, key objectstore.Key, schema string, payload any) error {

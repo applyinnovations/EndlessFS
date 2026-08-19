@@ -102,6 +102,50 @@ func TestCanonicalDirectoryRootCarriesRecursiveByteTransition(t *testing.T) {
 	}
 }
 
+func TestCanonicalDirectoryRootKeyParsing(t *testing.T) {
+	userID := "YWFhYWFhYWFhYWFhYWFhYQ"
+	for _, directoryID := range []string{RootDirectoryID, "YmJiYmJiYmJiYmJiYmJiYg"} {
+		key := DirectoryRootKey(userID, "live", directoryID)
+		gotUser, gotArea, gotDirectory, matched, err := ParseDirectoryRootKey(key)
+		if err != nil || !matched || gotUser != userID || gotArea != "live" || gotDirectory != directoryID {
+			t.Fatalf("ParseDirectoryRootKey(%s) = %q, %q, %q, %t, %v", key, gotUser, gotArea, gotDirectory, matched, err)
+		}
+	}
+	if _, _, _, matched, err := ParseDirectoryRootKey(DirectoryManifestKey(userID, "live", RootDirectoryID, "manifest")); err != nil || matched {
+		t.Fatalf("manifest root parse = %t, %v", matched, err)
+	}
+	valid := DirectoryRootKey(userID, "live", RootDirectoryID).String()
+	invalid := []string{
+		strings.Replace(valid, encodedPart(userID), "0", 1),
+		strings.Replace(valid, "/live/", "/other/", 1),
+		strings.Replace(valid, encodedPart(RootDirectoryID), encodedPart("short"), 1),
+		strings.Replace(valid, encodedPart(userID), encodedPart("short"), 1),
+	}
+	for _, value := range invalid {
+		key := objectstore.MustKey(value)
+		if _, _, _, matched, err := ParseDirectoryRootKey(key); !matched || !errors.Is(err, domain.ErrInvalid) {
+			t.Errorf("ParseDirectoryRootKey(%s) = matched %t, error %v", value, matched, err)
+		}
+	}
+	if FilesystemPrefix() != "endlessfs/v1/fs/" {
+		t.Fatalf("filesystem prefix = %q", FilesystemPrefix())
+	}
+}
+
+func TestWriteGateFeatureBindingValidation(t *testing.T) {
+	valid := WriteGate{SchemaVersion: 1, Epoch: 2, Mode: GateOpen, WriterFeatures: []string{"feature-a", FeatureRecursiveBytes}}
+	if err := ValidateGate(valid); err != nil {
+		t.Fatalf("ValidateGate(valid) error = %v", err)
+	}
+	for _, features := range [][]string{{"feature", "feature"}, {FeatureRecursiveBytes, "feature-a"}} {
+		candidate := valid
+		candidate.WriterFeatures = features
+		if err := ValidateGate(candidate); !errors.Is(err, domain.ErrInvalid) {
+			t.Errorf("ValidateGate(%v) error = %v", features, err)
+		}
+	}
+}
+
 func TestCanonicalDirectoryPageRemainsReadableWithoutFormatMigration(t *testing.T) {
 	key := DirectoryPageKey("AAAAAAAAAAAAAAAAAAAAAA", "live", RootDirectoryID, "legacy-page")
 	payload := v1DirectoryPageWithoutPreviewFields{

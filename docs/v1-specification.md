@@ -686,7 +686,7 @@ Canonical object keys:
 - use lowercase base32 SHA-256 digests for untrusted names and idempotency lookup components; and
 - are created only by the canonical-format package, never by HTTP handlers, application use cases, or backend adapters.
 
-The state backend's `superblock.json` object identifies `endlessfs-portable-bucket-v1`, the immutable storage-set ID, canonical encoder version, key-format version, writer-protocol version, creation time, and required feature set. Startup MUST reject a missing, corrupt, mixed, newer-unsupported, or incompatible superblock before serving authenticated or public operations. The file backend does not define another writer set, gate, or filesystem schema.
+The state backend's `superblock.json` object identifies `endlessfs-portable-bucket-v1`, the immutable storage-set ID, canonical encoder version, key-format version, writer-protocol version, creation time, and required feature set. Startup MUST reject a missing, corrupt, mixed, newer-unsupported, or incompatible superblock before serving authenticated or public operations. The one approved exception is the reviewed automatic addition of `recursive-byte-aggregates-v1` to the exact preceding canonical feature set: startup MUST complete or resume the closed-gate migration below before readiness. The file backend does not define another writer set, gate, or filesystem schema.
 
 Each current state record also has one immutable `state-versions` snapshot addressed by its logical key and logical version. It gives paginated state enumeration a provider-independent stable view across replicas while ordinary CAS updates continue. Cursor capabilities are authenticated-encrypted, bounded, expire, bind the exact prefix/limit plus gate epoch and logical gate version, and reveal neither state keys nor provider keys. Gate closure invalidates outstanding cursors and prunes every snapshot except the current version of each live state record before checkpoint inventory is created. Snapshots are authoritative canonical bodies; no cursor token is stored in the bucket.
 
@@ -698,6 +698,8 @@ Virtual paths are resolved one validated segment at a time through directory IDs
 
 File blobs are immutable and live only under the file backend's blob namespace for their owner. File-entry records in state-backend directory pages contain the blob ID, normalized name, size, safe media type, integrity digests, timestamps, and portable logical version. Directory entries use the same `size` field for the child's recursive-byte aggregate. Every directory root aggregate MUST equal the overflow-checked sum of the sizes in its visible manifest, and every parent directory entry aggregate MUST equal the referenced child root aggregate. Upload, replacement, move, copy, live-to-trash transfer, restore, and permanent deletion update every affected ancestor through the same committed multi-root operation as the visible file-tree change. Negative, overflowing, missing, or inconsistent aggregates fail closed. Copy creates the required new portable entry/blob relationship according to the file-operation state machine; cross-user blob references and cross-user deduplication are forbidden.
 
+When the superblock and writer set match the exact preceding feature set except for `recursive-byte-aggregates-v1`, startup automatically closes and drains the canonical write gate under a reserved migration checkpoint ID. It walks every user/area graph from the fixed root, rejects missing children, cycles, multiple parents, unreachable directory roots, malformed records, and overflow, and computes totals bottom-up from authoritative file-entry sizes. New page and manifest IDs are deterministic functions of the legacy root identity so concurrent migrators create identical immutable prerequisites; each root advances by native CAS. After a complete second verification, startup conditionally updates the writer set and superblock, binds the new writer feature set into the closed gate, creates/verifies the checkpoint, and reopens at a new epoch. Every boundary is idempotent and crash-resumable. A gate bound to the new features contains a field unknown to the legacy strict decoder, so an already-running old binary fails closed before admitting a post-migration mutation. Active work can delay startup; no timeout forces it. Arbitrary provider objects outside the canonical graph are never inferred or imported.
+
 All authoritative properties are encoded in object bodies. Correctness MUST NOT depend on provider custom metadata, tags, ACLs, storage class, object versioning, soft delete, native timestamps, checksums, listing order, folder resources, or preservation of those values by a cross-cloud copy tool. Provider-side integrity and encryption features MAY add defense in depth.
 
 The `admissions`, `staging`, and `leases` namespaces are transient and are excluded from portable logical state and checkpoint inventories. Admissions and leases live in the state backend; staging lives in the file backend. Admissions contain only portable writer-gate tickets linked to durable operation records. Staging contains only immutable operation-specific data that is unreachable from committed directory manifests. Leases may contain only authenticated-encrypted, bounded backend-native resumable-session, multipart/block-upload, or rewrite/copy continuation data. Lease bodies MUST contain the backend kind and expiry and MUST NOT be required to reopen durable logical state. A checkpoint requires no admitted ticket, live staging operation, or live lease; cancelled/expired ticket objects and unreachable staging garbage may be removed before or after cutover and are never copied as authoritative state.
@@ -706,7 +708,7 @@ The `admissions`, `staging`, and `leases` namespaces are transient and are exclu
 
 `control/writer-set.json` binds the state backend and its configured file-backend role to one stable operator-configured writer-set ID, writer-protocol version, canonical feature set, security-critical configuration fingerprint, and provider-independent keyring identifiers. It contains no secret values or provider identifiers. Every replica validates it during startup and readiness. A replica with a different writer set, unsupported writer protocol/feature, origin/RP configuration, registration policy, or keyring identity MUST NOT serve any request against the storage set. A compatible rolling binary MAY join only when its declared reader and writer protocols accept the active versions; a writer-protocol or security-critical configuration change requires the closed-gate procedure.
 
-`control/write-gate.json` is a canonical state-backend CAS record containing a positive epoch and mode `open`, `closing`, or `closed`. It is the storage-set-wide mutation-admission barrier. A replica MUST NOT cache an `open` decision across mutations. Admission is:
+`control/write-gate.json` is a canonical state-backend CAS record containing a positive epoch, mode `open`, `closing`, or `closed`, and the sorted active writer feature set. It is the storage-set-wide mutation-admission barrier. A replica MUST reject a gate whose feature binding differs from its validated writer set and MUST NOT cache an `open` decision across mutations. Admission is:
 
 1. Read the gate and require `open`; capture its epoch.
 2. Create-only a `candidate` admission ticket under that epoch containing a stable operation ID, writer-set ID, replica-attempt ID, creation/expiry times, the observed gate logical version, and enough non-secret canonical intent to locate the durable operation.
@@ -895,7 +897,7 @@ The theme preference is presentation state, not identity. It MUST remain separat
 - Canonical mutable records use the envelope and logical-version algorithm in section 8.6.
 - The canonical encoder emits one deterministic UTF-8 byte representation with fixed field ordering, minimal JSON escaping, no insignificant whitespace, integers only for numeric persisted fields, and no maps with uncontrolled key ordering.
 - Backend adapters store canonical bytes unchanged and never decode/re-encode them into a provider-specific schema.
-- A future format version requires an explicit reviewed compatibility/migration design; silent in-place reinterpretation is forbidden.
+- A future format version requires an explicit reviewed compatibility/migration design; silent in-place reinterpretation is forbidden. The automatic recursive-byte migration in section 9.1 is such an explicit design and recognizes only its exact predecessor feature set.
 
 ### 9.14 Crash-safe multi-record changes
 
@@ -1636,6 +1638,7 @@ Rules:
 - The writer-set ID is a non-secret unpadded base64url identifier containing at least 128 random bits. It is not a replica/pod ID; replacing a process does not change it.
 - On first initialization, the canonical writer-set record is created conditionally. Thereafter the writer-set ID, writer protocol, security-critical configuration fingerprint, and non-secret keyed identifiers MUST match before readiness. The fingerprint covers origin/RP policy, registration policy, canonical feature set, and identifiers for every provider-independent secret/keyring needed to interpret shared state, but never contains a secret value.
 - A security-critical configuration or writer-protocol change closes the write gate, drains the prior epoch, conditionally updates the writer-set record, and opens a new epoch. Independently changing replicas while the gate is open is prohibited.
+- The exact predecessor feature set without `recursive-byte-aggregates-v1` is upgraded automatically through the reviewed closed-gate migration in section 9.1. Every other feature-set difference remains incompatible and requires a separately reviewed procedure.
 - Production/secure mode requires HTTPS and forbids wildcard origins.
 - Loopback development is explicit and cannot bind publicly.
 - Unknown `ENDLESSFS_` variables SHOULD cause a warning to catch misspellings without logging values.
@@ -2012,6 +2015,7 @@ This order is recommended because each stage establishes contracts used by the n
 - Copy/move/batch operations and idempotency.
 - Trash/restore/permanent delete.
 - Persisted overflow-checked recursive-byte aggregates for every directory and area root across upload, replace, move, copy, trash, restore, and permanent delete.
+- Automatic crash-resumable migration of the exact preceding canonical directory format computes and verifies all recursive-byte aggregates before activating the feature and reopening writes.
 
 ### Milestone 4 — Data-only theme system
 
@@ -2093,6 +2097,7 @@ Each criterion MUST have an automated test unless marked “inspection”.
 **AC-086** — Compatible rolling replicas can join one writer set; replicas with a different writer-set ID, writer protocol, security configuration fingerprint, canonical feature set, or keyring identity fail readiness before serving any bucket-backed request.
 **AC-087** — A crashed admitted operation delays gate closure until fenced recovery completes; checkpoint creation never forces lock deletion or sacrifices consistency for availability.
 **AC-088** — Every object backend proves atomic single-object mutation plus strong read-after-success and complete-prefix listing visibility; an eventually consistent backend fails the contract suite.
+**AC-089** — Opening the exact pre-recursive-aggregate canonical feature set automatically quiesces and migrates every live/trash directory graph, fences old writers, checkpoints, and reopens; crashes and two-to-eight concurrent starters converge, while corruption, overflow, undrained work, or unrelated compatibility drift fail closed.
 
 ### 21.5 Isolation and files
 
@@ -2208,6 +2213,7 @@ An implementation agent should keep this checklist current and attach test names
 - [ ] Two-to-eight-replica deterministic crash schedules cover every admission, lease, provider-response, prepare, commit, finalization, gate, and checkpoint boundary.
 - [x] The required `test-replica` Nix command is implemented and included in the umbrella gate.
 - [x] Compatible rolling replicas work; mismatched writer-set, protocol, configuration, feature, and keyring identities fail readiness.
+- [x] Exact pre-aggregate buckets automatically migrate under the closed gate; concurrent starters and crash resumption converge, old writers are fenced, and corrupt or undrained buckets fail closed.
 - [x] Node loss may delay an affected resource or checkpoint but never causes a permanent lock, split-brain commit, or forced unsafe cutover.
 
 ### 22.5 Authentication and accounts

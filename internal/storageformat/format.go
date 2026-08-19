@@ -145,10 +145,11 @@ const (
 )
 
 type WriteGate struct {
-	SchemaVersion int      `json:"schemaVersion"`
-	Epoch         uint64   `json:"epoch"`
-	Mode          GateMode `json:"mode"`
-	CheckpointID  string   `json:"checkpointID,omitempty"`
+	SchemaVersion  int      `json:"schemaVersion"`
+	Epoch          uint64   `json:"epoch"`
+	Mode           GateMode `json:"mode"`
+	CheckpointID   string   `json:"checkpointID,omitempty"`
+	WriterFeatures []string `json:"writerFeatures,omitempty"`
 }
 
 type AdmissionState string
@@ -377,6 +378,9 @@ func Digest(data []byte) string {
 func ValidateGate(gate WriteGate) error {
 	if gate.SchemaVersion != 1 || gate.Epoch == 0 || (gate.Mode != GateOpen && gate.Mode != GateClosing && gate.Mode != GateClosed) {
 		return domain.NewError(domain.ErrorInvalid, "invalid write gate")
+	}
+	if len(gate.WriterFeatures) > 0 && !SortedUnique(gate.WriterFeatures) {
+		return domain.NewError(domain.ErrorInvalid, "invalid write-gate feature binding")
 	}
 	return nil
 }

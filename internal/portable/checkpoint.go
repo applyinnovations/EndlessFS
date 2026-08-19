@@ -67,6 +67,10 @@ func (e *Engine) CreateCheckpoint(ctx context.Context, checkpointID string) (sto
 	if err := e.CloseWrites(ctx, checkpointID); err != nil {
 		return storageformat.Checkpoint{}, err
 	}
+	return e.createCheckpointWhileClosed(ctx, checkpointID)
+}
+
+func (e *Engine) createCheckpointWhileClosed(ctx context.Context, checkpointID string) (storageformat.Checkpoint, error) {
 	_, _, gate, err := e.readGate(ctx)
 	if err != nil {
 		return storageformat.Checkpoint{}, err

@@ -129,7 +129,7 @@ spec:
           storageClassName: fast-local
           resources:
             requests:
-              storage: 20Gi
+              storage: 10Gi
     - name: git-cache
       persistentVolumeClaim:
         claimName: git-repo-cache

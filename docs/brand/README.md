@@ -50,26 +50,29 @@ EndlessFS is predominantly monochrome. Color communicates interaction state or s
 
 | Token | Value | Purpose |
 |---|---:|---|
-| Canvas | `#FFFFFF` | Primary workspace and surfaces |
-| Ink | `#111111` | Primary text, strong controls, primary actions, ordinary progress |
-| Muted | `#6B6B6B` | Secondary metadata |
-| Subtle | `#E8E8E8` | Dividers, disabled structure, skeletons |
-| Wash | `#F6F6F6` | Hover and quiet surfaces |
-| Blue | `#2563EB` | Active, focus, and selected states only |
-| Blue Tint | `#EFF6FF` | Selected/active background treatment |
+| Background | `#FFFFFF` | Primary workspace behind content |
+| Foreground | `#111111` | Primary text, strong controls, primary actions, ordinary progress |
+| Text Muted | `#6B6B6B` | Secondary text and metadata |
+| Border | `#E8E8E8` | Dividers, disabled structure, and skeletons |
+| Surface | `#F6F6F6` | Hover and quiet surfaces |
+| Primary | `#2563EB` | Active, focus, and selected states only |
+| Primary Tint | `#EFF6FF` | Selected and active background treatment |
 | Success | `#16803A` | Successful semantic states |
 | Warning | `#D97706` | Warning semantic states |
 | Error | `#D92D20` | Failure and destructive semantic states |
 
 ### Color rules
 
-- The application should read as black, white, and neutral gray at first glance.
-- Blue is an interaction-state color, not a decorative brand wash.
-- Primary actions are black; secondary actions are light.
-- Links use typography and interaction treatment rather than default blue.
-- Normal progress bars use Ink.
-- Success, warning, and error colors are strictly semantic.
-- Avoid persistent green success decoration for routine operations.
+- Token names describe purpose, never their current hue or appearance.
+- Themes may change a token's value without changing its name or meaning.
+- Components consume semantic tokens only; do not embed raw values or hue-named aliases in component rules.
+- The application should be governed by Background, Foreground, Text Muted, Border, and Surface at first glance.
+- Primary is an interaction-state role, not a decorative brand field.
+- Primary actions use Foreground; secondary actions use Surface or Background.
+- Links use typography and interaction treatment rather than a browser-default color.
+- Normal progress bars use Foreground.
+- Success, Warning, and Error are strictly semantic.
+- Avoid persistent Success decoration for routine operations.
 - Avoid large decorative color fields that compete with file content.
 
 ## Typography and iconography
@@ -140,7 +143,7 @@ Every click, tap, confirmation, dismissal, transition, pointer movement, and int
 Animation exists to communicate state, preserve spatial understanding, or replace unnecessary explanatory text. It must not decorate, delay work, shift layout, or reduce determinism.
 
 ### 18. Visual restraint creates clarity
-Use plain white surfaces, black typography, restrained neutral structure, minimal borders, and minimal decoration. Avoid excessive cards, shadows, gradients, rounded containers, and layered surfaces.
+Use plain Background surfaces, Foreground typography, restrained neutral structure, minimal borders, and minimal decoration. Avoid excessive cards, shadows, gradients, rounded containers, and layered surfaces.
 
 ### 19. The interface is a precision tool
 EndlessFS should feel dependable, fast, quiet, and exact: an instrument for working with files rather than an experience demanding attention for itself.
@@ -175,12 +178,12 @@ The reference behavior is closer to a dense photo library/contact sheet than a c
 
 ## Selection, focus, and active states
 
-Use `#2563EB` for strong active/focus/selected state and `#EFF6FF` for quiet selected/active surfaces. Focus must remain accessible, selection must not create layout shift, and blue must not be diluted through unrelated decoration. Selection patterns must scale from one item to thousands.
+Use Primary for strong active, focus, and selected states and Primary Tint for quiet selected and active surfaces. Focus must remain accessible, selection must not create layout shift, and Primary must not be diluted through unrelated decoration. Selection patterns must scale from one item to thousands. The theme assigns their concrete values.
 
 ## Buttons and controls
 
-- Primary actions: Ink (`#111111`) with high-contrast text.
-- Secondary actions: light or transparent treatment with restrained structure.
+- Primary actions: Foreground with a high-contrast label.
+- Secondary actions: Surface or transparent treatment with restrained structure.
 - Keep controls compact.
 - Never inflate controls to fill containers.
 - Use icon-only controls when meaning is established and accessible naming exists.
@@ -195,7 +198,7 @@ Tables should behave like professional file-management tools rather than spaciou
 
 - Tight row heights and minimal horizontal padding.
 - Stable columns and consistent numeric alignment.
-- Muted secondary metadata.
+- Text Muted for secondary metadata.
 - Borders only where they improve scanning.
 - Prefer subtle row states to boxing every row.
 - Remove/reorganize columns responsively without changing underlying behavior.
@@ -209,9 +212,9 @@ Uploading is a natural file operation, not a separate feature.
 - The file browsing surface acts as the drop target.
 - Do not reserve permanent space for a drop zone.
 - Transfer queues are compact, collapsible, scalable, and easy to remediate.
-- Progress uses Ink by default.
+- Progress uses Foreground by default.
 - Errors use Error only where intervention is required.
-- Successful completion resolves into normal file state rather than persistent green UI.
+- Successful completion resolves into normal file state rather than persistent Success UI.
 - Failed items are obvious without expanding every successful item.
 
 ## Loading and performance perception
@@ -281,7 +284,7 @@ Do not introduce:
 - UI expanded merely to occupy available space;
 - pagination where continuous virtualized browsing is practical;
 - excessive instructional copy;
-- blue accents without interaction-state meaning;
+- Primary treatment without interaction-state meaning;
 - loading transitions that reflow the page;
 - modal dialogs that unnecessarily hide file context;
 - separate surfaces for interactions that naturally belong to the file browser.

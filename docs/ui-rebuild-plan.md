@@ -24,12 +24,12 @@ The supplied PNG boards are reference artifacts, not production assets. Producti
 
 The reference boards establish these non-negotiable visual qualities:
 
-- Monochrome canvas, typography, and structure dominate. Blue appears only for active, focused, and selected states; semantic colors appear only when their meaning is needed.
+- Background, Foreground, Text Muted, Border, and Surface dominate. Primary appears only for active, focused, and selected states; Success, Warning, and Error appear only when their meaning is needed.
 - File content dominates a compact navigation rail and toolbar. Controls are aligned, restrained, and no larger than operability requires.
 - List rows are dense and scan like a professional filesystem table, with stable columns, subtle dividers, aligned metadata, and no per-row cards.
 - Media tiles form an edge-to-edge contact sheet with stable square geometry, effectively no gaps, no captions, and selection drawn as an overlay instead of surrounding chrome.
 - Secondary work happens in a contextual side sheet on wide screens and a full-screen surface on narrow screens. Small centered dialogs are reserved for short, consequential decisions.
-- Transfer and outcome UI is compact and transient. Routine success does not become persistent green decoration.
+- Transfer and outcome UI is compact and transient. Routine success does not become persistent Success decoration.
 - The Infinite Folder mark is monochrome, asymmetric, continuous, and recognizable before the infinity motif becomes apparent. The current text `∞` placeholder is not acceptable production branding.
 - Corners, borders, shadows, copy, and whitespace are used sparingly. Geometry remains stable while data and previews load.
 
@@ -50,7 +50,7 @@ The presentation conflicts with the new direction in several concrete ways:
 | Panels, settings cards, dialogs, spacing, and headings use a spacious SaaS treatment. | Dense filesystem-tool geometry, sheets for substantial secondary UI, and compact type hierarchy. |
 | Moving ordinary files to Trash asks for confirmation. | Execute the reversible action immediately and offer a brief Undo path; keep confirmation for permanent deletion and empty Trash. |
 | Manual “Load more” controls expose API pagination as the primary browsing model. | Preserve bounded server pagination but progressively fetch into a continuous virtualized presentation. |
-| Current built-in light tokens use a blue-gray palette and large radii. | Adopt the brand’s exact neutral and interaction palette, then tune typed density/radius tokens without weakening custom-theme safety. |
+| The current Theme API uses ambiguous roles such as `color.accent`, while some component fallbacks embed raw values. | Move components to a canonical purpose-based color contract and tune typed density/radius tokens without weakening custom-theme safety. |
 | Loading and routine workflow copy is often explanatory or promotional. | Direct, brief, functional language that appears only when it helps the user act or recover. |
 
 ## Product and specification decisions
@@ -58,6 +58,8 @@ The presentation conflicts with the new direction in several concrete ways:
 - The brand guide mentions automatic deletion after 30 days, but v1 section 9.11 explicitly says Trash has no automatic retention deadline. The rebuild must not display or imply a 30-day policy. Such retention needs its own approved specification and storage-lifecycle implementation.
 - The light-mode board is the only supplied full UI reference. Layout and interaction must remain identical in dark mode, but dark colors should continue through the current safe built-in theme until an approved dark visual board exists. Dark mode cannot be omitted or treated as complete based on the light board.
 - Inter is not included in the attachment, and runtime-fetched fonts are forbidden. Use Inter only after adding pinned, licensed WOFF2 files to the validated built-in theme assets and recording their license; otherwise retain the neutral embedded/system fallback.
+- Color token identities describe purpose, never a hue or the current rendered appearance. The target roles are `color.background`, `color.foreground`, `color.text.muted`, `color.border`, `color.surface`, `color.primary`, `color.primary.tint`, `color.success`, `color.warning`, and `color.error`. Components must not consume raw hex values or hue-named aliases.
+- Replacing the existing Theme API 1.x `color.accent` contract is a versioned compatibility change, not a search-and-replace. Specify and test the migration before removing old names so installed themes either map deterministically to the new roles or fail compatibility checks clearly; never silently reinterpret a token.
 - Continuous browsing does not remove bounded server pagination. The client requests successive pages as needed, virtualizes rendered rows/tiles, preserves errors and retry boundaries, and never claims that loaded-item filtering searches unloaded content.
 - A compact visible control may use a larger invisible hit area where appropriate, but keyboard focus, semantic names, pointer behavior, and the 320 CSS-pixel layout remain application-owned and testable.
 
@@ -106,10 +108,10 @@ Exit: the regression and visual acceptance matrix is reviewed before implementat
 
 ### Phase 1 — Brand assets and typed foundations
 
-1. Write failing theme/media tests for the required logo, mark, favicon, file-operation icons, exact brand colors, compact density, contrast, and safe fallback.
+1. Write failing theme/media tests for the required logo, mark, favicon, file-operation icons, exact semantic color roles and values, compact density, contrast, and safe fallback.
 2. Produce clean, individually addressable SVG assets from the logo and UI reference boards. Validate favicon-scale legibility and the static SVG subset; never ship a crop of the reference board as an application asset.
 3. Decide and document the Inter font source, version, subset, license, WOFF2 hashes, and inventory entry before embedding it. If those inputs are not approved, keep the system fallback.
-4. Update existing typed theme tokens first. Add a Theme API token or semantic media slot only when no existing typed contract can express a required visual role; bump the compatible minor API and prove older-theme inheritance when adding one.
+4. Specify the purpose-based color contract and its Theme API compatibility path before changing consumers. Add a token or semantic media slot only when no existing typed contract can express a required role; use a compatible minor addition or a deliberate major migration according to the compatibility rules, and prove older-theme handling either way.
 5. Update both immutable built-in themes through the ordinary compiler and update the theme conformance fixture before application CSS consumes the new values.
 
 Exit: `theme-check`, `test-theme`, media validation, contrast, inheritance, and fallback tests pass, and the light foundation matches the reference palette and mark.
@@ -181,12 +183,12 @@ Exit: every item in the acceptance matrix and specification section 24 is eviden
 
 | Area | Required proof |
 |---|---|
-| Visual fidelity | Side-by-side review against both imported boards; exact light tokens; approved mark geometry; dense rows; edge-to-edge grid; compact sheets/transfers; stable async geometry. |
+| Visual fidelity | Side-by-side review against both imported boards; exact purpose-based light tokens; approved mark geometry; dense rows; edge-to-edge grid; compact sheets/transfers; stable async geometry. |
 | Functional parity | Existing identity, browse, transfer, preview, file operation, Trash, share, settings, theme, admin, recovery, and public-share workflows pass without backend regression. |
 | Accessibility | Keyboard-only workflows, semantic names/relationships, visible focus, sensible restoration, live status, dialog/sheet behavior, non-color cues, reduced motion, and 320px operation. |
 | Scale and continuity | Bounded rendered DOM for 1,000 rows and 10,000 tiles, visible/overscan preview loading, progressive page fetch, no whole-workspace blocking, no unexpected layout shift. |
 | Security and privacy | CSP and headers unchanged or stronger; text-only rendering of untrusted values; no persistent secrets; exact-origin/CSRF behavior preserved; no provider key/capability leakage; no unapproved network request. |
-| Themes | Closed data-only boundary remains intact; complete light/dark parents; contrast and fallback pass; older compatible themes inherit any additive slots; application owns layout and behavior. |
+| Themes | Closed data-only boundary remains intact; all color names encode purpose; complete light/dark parents; contrast and fallback pass; compatibility behavior is explicit; application owns layout and behavior. |
 | Reproducibility | No Node or frontend framework; all assets embedded and licensed; Nix remains the only public task interface; `nix flake check` is green. |
 
 Screenshots are review evidence, not the only test. Behavioral, geometry, accessibility, security, and scale assertions must fail deterministically when the contract regresses.

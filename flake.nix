@@ -661,6 +661,7 @@
             mkTask "endlessfs-test-coverage"
               (goTools ++ [ pkgs.gawk ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
               ''
+                export CGO_ENABLED=0
                 export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
                 export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
                 export ENDLESSFS_RUN_E2E=1
@@ -744,6 +745,7 @@
           ] (dependencyPolicyCommand packages.default.goModules);
 
           pr-check = mkTask "endlessfs-pr-check" qualityTools ''
+            export CGO_ENABLED=0
             unformatted="$(gofmt -l .)"
             if [ -n "$unformatted" ]; then
               echo "Go files need formatting:" >&2
@@ -942,6 +944,19 @@
           testSuite = goCheck "tests" "go test ./..." [ ];
           e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
           coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
+          linuxCiAppPolicy =
+            pkgs.runCommand "endlessfs-linux-ci-app-policy"
+              {
+                nativeBuildInputs = [ pkgs.ripgrep ];
+              }
+              ''
+                for program in \
+                  ${self.apps.${system}.pr-check.program} \
+                  ${self.apps.${system}.test-coverage.program}; do
+                  rg --quiet '^export CGO_ENABLED=0$' "$program"
+                done
+                touch "$out"
+              '';
           formatCheck =
             goCheckWithSource "format" formatSource
               ''
@@ -1034,6 +1049,7 @@
           theme = testSuite;
           race = raceCheck;
           coverage = coverageCompile;
+          linux-ci-app-policy = linuxCiAppPolicy;
           fuzz = fuzzCheck;
           offline = testSuite;
           security = securityCheck;

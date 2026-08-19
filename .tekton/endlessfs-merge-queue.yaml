@@ -226,10 +226,10 @@ spec:
               storage: 20Gi
     - name: git-cache
       persistentVolumeClaim:
-        claimName: endlessfs-git-repo-cache
+        claimName: git-repo-cache
     - name: nix-store
       persistentVolumeClaim:
-        claimName: endlessfs-nix-store
+        claimName: nix-store
     - name: basic-auth
       secret:
         secretName: "{{ git_auth_secret }}"

@@ -13,17 +13,18 @@ GKE cluster that hosts `drive.endlessfs.com`.
 | `endlessfs-darwin-smoke.disabled.yaml` | none | Deprecated, inert record for the retired Darwin smoke job |
 
 All active runs select `storage.xlab.now/fast-local=true`, use a per-run
-`fast-local` source volume, a repository-keyed 10 GiB Git mirror, and a
-dedicated 256 GiB Nix store on local NVMe. They run in xlab's isolated
+`fast-local` source volume, and reuse the shared Git mirror and 256 GiB v2 Nix
+store in `tekton-buildkit` on local NVMe. They run in xlab's isolated
 `tekton-buildkit` privileged/userns namespace because the ordinary
 `tekton-pipelines` namespace correctly enforces baseline Pod Security. The full
 gate requests 6 CPU/12 GiB and may burst to 12 CPU/24 GiB; coverage requests
 4 CPU/8 GiB and may burst to
 8 CPU/16 GiB. These values leave enough capacity for xlab system workloads
 while allowing the parallel gate to use most of the otherwise-idle node.
-One small `prepare-cache` Task seeds a new Nix PVC before the three parallel
-verification tasks begin, avoiding first-run seed races without serializing the
-warm-cache gate.
+One small `prepare-cache` Task seeds an empty shared Nix PVC before the three
+parallel verification tasks begin, avoiding first-run seed races without
+serializing the warm-cache gate. Releases reuse the same caches and never create
+release-specific persistent storage.
 
 Like Odysseus's BuildKit release path, each privileged Nix task is privileged
 only inside a Kubernetes-managed pod user namespace selected by its

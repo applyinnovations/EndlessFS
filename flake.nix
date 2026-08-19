@@ -81,7 +81,8 @@
           yq -e '.metadata.annotations."pipelinesascode.tekton.dev/target-namespace" == "tekton-buildkit"' "$pipeline" >/dev/null
           yq -e '.spec.taskRunTemplate.podTemplate.nodeSelector."storage.xlab.now/fast-local" == "true"' "$pipeline" >/dev/null
           yq -e '.spec.taskRunTemplate.podTemplate.securityContext.fsGroup == 1000' "$pipeline" >/dev/null
-          yq -e '.spec.workspaces[] | select(.name == "nix-store") | .persistentVolumeClaim.claimName == "endlessfs-nix-store"' "$pipeline" >/dev/null
+          yq -e '.spec.workspaces[] | select(.name == "nix-store") | .persistentVolumeClaim.claimName == "nix-store"' "$pipeline" >/dev/null
+          yq -e '.spec.workspaces[] | select(.name == "git-cache") | .persistentVolumeClaim.claimName == "git-repo-cache"' "$pipeline" >/dev/null
           if rg -ni 'gke|drive\.endlessfs\.com|namespace-macos-fastlane|runs-on:[[:space:]]*macos' "$pipeline"; then
             echo "active CI must stay on xlab Linux compute: $pipeline" >&2
             exit 1

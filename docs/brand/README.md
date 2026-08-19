@@ -111,7 +111,7 @@ Padding must have a specific functional purpose. Avoid containers inside padded 
 Every persistent element must justify the pixels it occupies. Remove trivial instructions, redundant labels, implied information, unnecessary containers, decorative copy, and irrelevant controls. Simplicity is achieved through subtraction, not by making fewer components larger.
 
 ### 6. Design for 1,000
-Every container and interaction must answer: **how would this remain understandable and efficient at a very large quantity?** This is a design test, not an instruction to render 1,000 instances at once or to expose 1,000 equal-detail rows. Use virtualization, aggregation, grouping, filtering, bounded concurrency, progressive detail, and summary-plus-exception patterns as appropriate. A directory with 10,000 items must remain comfortable to navigate, 2,000 uploads must remain comfortable to monitor, and an operation affecting 1,000 selected items must remain comfortable to control and remediate.
+Every container and interaction must answer: **how would this remain understandable and efficient if its contents became disproportionately large?** “1,000” communicates a way of thinking, not a universal fixture size, rendering requirement, or acceptance threshold. Choose virtualization, aggregation, grouping, filtering, bounded concurrency, progressive detail, or summary-plus-exception presentation according to the container. Large directories must remain comfortable to navigate, large transfer sets comfortable to monitor, and large selections comfortable to operate on and remediate without exposing every item at equal detail.
 
 ### 7. Zero layout shift
 Interface geometry is deterministic. Loading, thumbnails, metadata, errors, progress, and asynchronous state changes must not unexpectedly move surrounding UI. Reserve geometry before content arrives.
@@ -220,7 +220,7 @@ Uploading is a natural file operation, not a separate feature.
 - Do not reserve permanent space for a drop zone.
 - Transfer queues are compact, collapsible, scalable, and easy to remediate.
 - Large queues aggregate routine completed work, keep active work visible, and surface failures without requiring every transfer to remain expanded.
-- Queue rendering and update work remain bounded even when monitoring 2,000 uploads.
+- Queue rendering and update work remain bounded as the transfer set grows.
 - Progress uses Foreground by default.
 - Errors use Error only where intervention is required.
 - Successful completion resolves into normal file state rather than persistent Success UI.

@@ -78,8 +78,8 @@ The new browser application is a precision filesystem instrument. Files are the 
 - Dense tables use compact stable headers, predictable column widths, aligned numeric metadata, restrained dividers, and responsive column reorganization without changing row identity or height during updates.
 - The media grid is an edge-to-edge contact sheet with square reserved geometry, effectively zero gap, no captions, no card chrome, and overlay selection. A file without a preview receives a deterministic file-type icon and short type/extension cue, never a broken image or indefinite placeholder.
 - Collections scroll continuously while server requests remain bounded and paginated.
-- “Design for 1,000” is a scale test, not a literal rendering requirement. Each container chooses virtualization, aggregation, grouping, filtering, progressive detail, or summary-plus-exception presentation appropriate to its content.
-- A 10,000-item directory remains comfortable to browse and select without unbounded DOM or request counts; it does not render every row or tile simultaneously.
+- “Design for 1,000” is a scale mindset, not a universal fixture size, literal rendering requirement, or acceptance threshold. Each container anticipates disproportionate growth and chooses virtualization, aggregation, grouping, filtering, progressive detail, or summary-plus-exception presentation appropriate to its content.
+- Large directories remain comfortable to browse and select without unbounded DOM or request counts; they do not render every row or tile simultaneously merely to prove scale.
 - Loaded files remain interactive while more data, previews, or operations are in progress.
 
 ### Interaction model
@@ -91,7 +91,7 @@ The new browser application is a precision filesystem instrument. Files are the 
 - Primary actions use Foreground; secondary actions use Surface or Background; icon-only controls are used only for established actions with accessible names. Hover, focus, selected, active, pressed, and disabled states are distinct without changing control geometry.
 - Substantial secondary work uses a side sheet on wide screens and a full-screen surface on narrow screens.
 - Small dialogs are reserved for short, consequential decisions.
-- Transfers use a compact, collapsible queue that aggregates routine completion, prioritizes active and failed work, remains comfortable with 2,000 items, and gets out of the way when complete. Ordinary progress uses Foreground, Error is reserved for actionable failure, and completed work creates no persistent Success decoration.
+- Transfers use a compact, collapsible queue that aggregates routine completion, prioritizes active and failed work, remains comfortable as the transfer set grows, and gets out of the way when complete. Ordinary progress uses Foreground, Error is reserved for actionable failure, and completed work creates no persistent Success decoration.
 - Feedback is concise, non-blocking, and announced accessibly without shifting the workspace.
 - Floating UI uses predictable safe regions and collision handling. It never covers the current selection, focused element, primary actions, or failure remediation; it collapses, repositions, or closes when no longer needed and restores focus deterministically.
 - Motion makes state changes feel immediate and elegant without delaying input. It uses reserved geometry, never causes layout shift or unexpected reordering, and preserves the same result when reduced motion is enabled.
@@ -179,7 +179,7 @@ Every behavior begins with a failing test. Work happens on one dedicated replace
 
 1. Record the required product workflows as black-box acceptance tests derived from the specifications, not from old selectors or markup.
 2. Define deterministic geometry, accessibility, visual-restraint, text-sparsity, responsive, scale, and performance contracts before implementation begins.
-3. Add `nix run .#test-ui-benchmark` and committed benchmark fixtures for a 10,000-item directory, a 2,000-item transfer queue, and a 1,000-item batch operation. Calibrate and freeze the first budgets before product UI is built.
+3. Add `nix run .#test-ui-benchmark` and a committed benchmark method for representative and stress workloads chosen according to each container's data shape, interaction model, and plausible operating scale. Calibrate and freeze each component's first budgets before that component is built.
 4. Delete the entire old HTML, CSS, and JavaScript implementation and its structure-coupled tests.
 5. Remove the three-file asset-handler assumptions.
 6. Create the new directory structure, empty asset manifest, test harness, and benchmark harness.
@@ -230,7 +230,7 @@ Exit: every supported entry path reaches the authenticated application securely 
 3. Build pointer and keyboard selection for one item through thousands.
 4. Build direct toolbar/menu commands for folder creation, upload, download, share, copy, move, Trash, and Undo.
 5. Make the workspace the transient upload drop target with file, folder, recursive-drop, and multi-file fallbacks.
-6. Run the 10,000-item directory benchmark through list and grid navigation, scrolling, filtering, sorting, range selection, command invocation, preview loading, pagination recovery, and responsive reflow. Assert bounded live DOM, bounded requests, preserved context, and zero unexpected layout shift; do not render all items at once merely to satisfy the fixture size.
+6. Benchmark representative and stress-scale directories through list and grid navigation, scrolling, filtering, sorting, range selection, command invocation, preview loading, pagination recovery, and responsive reflow. Assert bounded live DOM, bounded requests, preserved context, and zero unexpected layout shift; do not render all items at once merely to satisfy a fixture.
 
 Exit: the filesystem workspace is complete and files remain the dominant interface at every supported size.
 
@@ -240,7 +240,7 @@ Exit: the filesystem workspace is complete and files remain the dominant interfa
 2. Build visible/overscan-only preview resolution with bounded concurrency, exact artifact validation, retry limits, cache bounds, abort handling, and object-URL cleanup.
 3. Build the full-viewport viewer with previous/next navigation, Generate, Regenerate, explicit safe-original preview, Download, metadata, focus trapping/restoration, Escape, and arrow keys.
 4. Build metadata and substantial secondary actions as a wide-screen side sheet and narrow-screen full surface.
-5. Run the 2,000-item transfer-queue benchmark through enqueue, progress updates, cancellation, retry, completion aggregation, failure filtering, collapse/restore, and narrow-layout presentation. Assert bounded rendering and update work, persistent failure visibility, responsive controls, and zero unexpected layout shift.
+5. Benchmark representative and stress-scale transfer queues through enqueue, progress updates, cancellation, retry, completion aggregation, failure filtering, collapse/restore, and narrow-layout presentation. Assert bounded rendering and update work, persistent failure visibility, responsive controls, and zero unexpected layout shift.
 6. Prove preview-disabled behavior, aspect-ratio preservation, deterministic file-type fallback, dark/mobile operation, capability secrecy, CSP, offline recovery, and continued interaction during background work.
 
 Exit: transfers and previews feel continuous, compact, recoverable, and independent of ordinary file operation availability.
@@ -251,7 +251,7 @@ Exit: transfers and previews feel continuous, compact, recoverable, and independ
 2. Build profile, theme, passkey, share, and session settings.
 3. Build administration for users, roles, account state, invites, pagination, and recovery links.
 4. Build the read-only public file/folder share browser.
-5. Run the 1,000-item batch-operation benchmark through selection, immediate reversible Trash actions, aggregate progress, partial failure, retry, Undo, and irreversible confirmation where required. Assert bounded command concurrency, compact summary-plus-exception rendering, usable cancellation/remediation, and zero unexpected layout shift.
+5. Benchmark representative and stress-scale batch operations through selection, immediate reversible Trash actions, aggregate progress, partial failure, retry, Undo, and irreversible confirmation where required. Assert bounded command concurrency, compact summary-plus-exception rendering, usable cancellation/remediation, and zero unexpected layout shift.
 6. Test one-time secret handling, final-admin protections, theme selection/fallback, invite/recovery expiry, share revocation, denied states, keyboard operation, and 320px layouts.
 
 Exit: every required v1 browser surface exists in the new project and uses the same design and interaction model.
@@ -274,11 +274,11 @@ Exit: the new UI is the only browser application in the binary and every applica
 
 `nix run .#test-ui-benchmark` is a required project gate, not an informal profiling command. It runs without network access or wall-clock sleeps and emits a versioned result artifact suitable for release evidence.
 
-- Go benchmarks exercise directory indexing/filtering/sorting/selection with 10,000 items, transfer-state reduction with 2,000 items, and batch-command state with 1,000 items. Allocation and operation-count ceilings are committed with the fixtures.
+- Go benchmarks exercise directory indexing/filtering/sorting/selection, transfer-state reduction, and batch-command state at representative and stress workloads selected for each component. The rationale, data shape, allocation ceiling, and operation-count ceiling are committed with each fixture.
 - Go-controlled Chromium benchmarks use fixed viewports, deterministic data, injected clocks, and repeatable input sequences. They measure first usable content, scroll and keyboard response, filter/sort response, queue-update response, batch-progress response, and orientation/context restoration.
 - Structural gates assert zero unexpected post-render layout shift, bounded live item nodes relative to viewport plus overscan, bounded request and preview concurrency, bounded command concurrency, and no workspace-wide blocking state.
 - Timing and memory budgets are calibrated on the declared Nix benchmark environment at Stage 0, recorded before implementation, and then treated as absolute regression limits. The old UI supplies no baseline and no target.
-- Large fixtures test how containers manage scale. Passing never requires all fixture items to exist simultaneously in the DOM or to receive equal visual detail.
+- Workloads test how each container manages growth; they do not turn illustrative quantities into product-wide criteria. Passing never requires every fixture item to exist simultaneously in the DOM or to receive equal visual detail.
 
 ## Acceptance matrix
 
@@ -292,7 +292,7 @@ Exit: the new UI is the only browser application in the binary and every applica
 | Product completeness | Identity, browse, transfer, preview, file operations, Trash, shares, settings, themes, administration, recovery, and public-share workflows meet the specifications. |
 | Trash and retention | Application Trash remains until explicit action; irreversible actions are confirmed; provider-native soft-delete/retention is neither presented as Trash nor promised as an application recovery path. |
 | Accessibility and responsive behavior | Keyboard-only workflows, semantic names/relationships, visible focus, live status, non-color cues, 320px operation, no horizontal page scroll, one-level access to common actions, and preserved context across orientation. |
-| Scale and continuity | The committed benchmark gate passes for a 10,000-item directory, 2,000-item transfer queue, and 1,000-item batch operation with bounded work, usable aggregation/remediation, progressive page consumption, and loaded-content interactivity. |
+| Scale and continuity | Component-appropriate representative and stress benchmarks pass with bounded work, usable aggregation/remediation, progressive page consumption, and loaded-content interactivity; no illustrative quantity becomes a universal threshold. |
 | Security and privacy | Required CSP and headers; text-only untrusted rendering; ephemeral secrets; exact-origin and CSRF enforcement; no provider-key or capability leakage; no unapproved network request. |
 | Themes | Purpose-based color names, closed data-only inputs, complete light/dark parents, contrast, inheritance, safe fallback, explicit version handling, and application-owned behavior. |
 | Reproducibility | No Node or frontend framework; all assets embedded and licensed; Nix is the only public task interface; the full release gate passes. |
@@ -313,4 +313,4 @@ Screenshots support design review but are not the test suite. Behavioral, geomet
 
 ## Definition of done
 
-The project is complete when the old browser UI is gone; the new application is the sole embedded interface; every required route and workflow is built from the brand system and normative contracts; every core workflow works by keyboard at desktop and 320px under both built-in themes; the 10,000-directory, 2,000-transfer, and 1,000-operation benchmark gates pass; large collections remain bounded and continuous; motion is elegant without layout shift or nondeterminism; all assets are licensed, validated, and embedded; no forbidden dependency or outbound service exists; and `nix flake check` plus the updated acceptance evidence pass.
+The project is complete when the old browser UI is gone; the new application is the sole embedded interface; every required route and workflow is built from the brand system and normative contracts; every core workflow works by keyboard at desktop and 320px under both built-in themes; component-appropriate benchmark gates pass; growing collections remain bounded, understandable, and continuous; motion is elegant without layout shift or nondeterminism; all assets are licensed, validated, and embedded; no forbidden dependency or outbound service exists; and `nix flake check` plus the updated acceptance evidence pass.

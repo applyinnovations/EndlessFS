@@ -4,8 +4,9 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.vulndb = {
     # The canonical vuln.go.dev hostname rejects GitHub-hosted runner IPs;
-    # this is the same immutable bulk object at the Go database's backing bucket.
-    url = "https://storage.googleapis.com/go-vulndb/vulndb.zip";
+    # pin the official bulk object by its immutable GCS generation as well as
+    # the Nix content hash recorded in flake.lock.
+    url = "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1787088262759230";
     flake = false;
   };
 
@@ -50,6 +51,25 @@
             makeWrapper "$browser" "$out/bin/chrome-headless-shell"
           '';
       dependencyPolicyCommand = moduleClosure: ''
+        vulndb_locked_url="$(jq -er '.nodes.vulndb.locked.url' flake.lock)"
+        vulndb_original_url="$(jq -er '.nodes.vulndb.original.url' flake.lock)"
+        if [ "$vulndb_locked_url" != "$vulndb_original_url" ]; then
+          echo "vulnerability database lock URL differs from the declared input" >&2
+          exit 1
+        fi
+        vulndb_prefix='https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation='
+        case "$vulndb_locked_url" in
+          "$vulndb_prefix"*) vulndb_generation="''${vulndb_locked_url#"$vulndb_prefix"}" ;;
+          *)
+            echo "vulnerability database must use a generation-pinned official GCS media URL" >&2
+            exit 1
+            ;;
+        esac
+        if ! printf '%s\n' "$vulndb_generation" | grep -Eq '^[0-9]+$'; then
+          echo "vulnerability database generation must be numeric" >&2
+          exit 1
+        fi
+
         dependency_inventory="$(mktemp -t endlessfs-dependencies.XXXXXX)"
         trap 'rm -f "$dependency_inventory"' EXIT
         module_closure=${nixpkgs.lib.escapeShellArg (toString moduleClosure)}
@@ -622,6 +642,7 @@
                   pkgs.gawk
                   pkgs.gnugrep
                   pkgs.govulncheck
+                  pkgs.jq
                   pkgs.nix
                 ]
               )
@@ -641,6 +662,7 @@
             pkgs.findutils
             pkgs.gawk
             pkgs.gnugrep
+            pkgs.jq
           ] (dependencyPolicyCommand packages.default.goModules);
 
           pr-check = mkTask "endlessfs-pr-check" qualityTools ''
@@ -873,6 +895,7 @@
                 pkgs.gnugrep
                 pkgs.gosec
                 pkgs.govulncheck
+                pkgs.jq
               ];
           repositoryPolicyCheck =
             goCheckWithSource "repository-policy" policySource "go run ./tools/repository-policy check"

@@ -20,6 +20,32 @@ func customManifest() Manifest {
 	return Manifest{SchemaVersion: 2, ThemeAPI: APIVersion{Major: 2, Minor: 0}, ID: "com.example.theme", Name: "Example", Version: "2.0.0", Extends: "endlessfs-light", Appearance: AppearanceLight, Author: "Example", License: "CC-BY-4.0", Tokens: map[string]json.RawMessage{}, Assets: map[string]AssetReference{}}
 }
 
+func TestBuiltinBrandMarksShareApprovedGeometry(t *testing.T) {
+	light, err := os.ReadFile("builtin/light/assets/brand.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dark, err := os.ReadFile("builtin/dark/assets/brand.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lightGeometry := strings.ReplaceAll(string(light), "#111111", "currentColor")
+	darkGeometry := strings.ReplaceAll(string(dark), "#f5f5f5", "currentColor")
+	if lightGeometry != darkGeometry {
+		t.Fatal("built-in light and dark brand marks do not share identical geometry")
+	}
+	for _, required := range []string{
+		`viewBox="0 0 160 120"`,
+		`M94 34C111 26 130 25 139 33C142 36 144 42 144 50V94C144 102 138 108 130 108H30C22 108 16 102 16 94V44`,
+		`M16 44V28C16 19 23 12 32 12H58C69 12 78 16 86 23L107 40C118 49 130 52 144 52`,
+		`M16 44C29 55 47 58 64 52L82 44`,
+	} {
+		if !strings.Contains(lightGeometry, required) {
+			t.Errorf("built-in brand mark is missing approved geometry %q", required)
+		}
+	}
+}
+
 func TestThemeAPITwoIsANewPurposeOnlyContract(t *testing.T) {
 	if APIMajor != 2 || APIMinor != 0 {
 		t.Fatalf("Theme API = %d.%d, want 2.0", APIMajor, APIMinor)

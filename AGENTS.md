@@ -37,6 +37,7 @@ nix build .#container
 nix build .#release
 nix flake check
 nix run .#dev
+nix run .#dev-fixture
 nix run .#fmt
 nix run .#fmt-check
 nix run .#lint

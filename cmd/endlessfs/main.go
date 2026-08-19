@@ -22,6 +22,7 @@ import (
 
 	"github.com/applyinnovations/endlessfs/internal/auth"
 	"github.com/applyinnovations/endlessfs/internal/config"
+	"github.com/applyinnovations/endlessfs/internal/devfixture"
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/httpapi"
@@ -238,6 +239,17 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	var fixtureSession auth.IssuedSession
+	if cfg.LocalFixture {
+		fixture, seedErr := devfixture.Seed(ctx, repository, driveService, dataHandler, clock)
+		if seedErr != nil {
+			return seedErr
+		}
+		fixtureSession, err = sessions.Issue(ctx, fixture.UserID, fixture.CredentialID)
+		if err != nil {
+			return domain.NewError(domain.ErrorInternal, "could not issue local fixture session")
+		}
+	}
 	var previewService *preview.Service
 	if previewEnabled {
 		rawDecoderPath, decoderErr := imagegen.PackagedRawDecoderPath()
@@ -282,6 +294,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if previewService != nil {
 		applicationHandler = httpapi.NewCompleteApplicationWithPreviewAndLogger(cfg, version, identityService, sessions, driveService, previewService, logger, themeManager)
 	}
+	if cfg.LocalFixture {
+		applicationHandler = devfixture.LoginHandler(applicationHandler, sessions, fixtureSession)
+	}
 	writeTimeout := controlWriteTimeout(previewEnabled, cfg.PreviewOperationTimeout)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
@@ -305,6 +320,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	}
 	go func() {
 		logger.Info("server_started", "listenAddress", cfg.ListenAddr, "version", version)
+		if cfg.LocalFixture {
+			logger.Info("local_fixture_ready", "url", cfg.BaseURL+devfixture.LoginPath)
+		}
 		errCh <- server.ListenAndServe()
 	}()
 

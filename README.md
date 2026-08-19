@@ -59,6 +59,14 @@ nix run .#dev
 
 The development control server listens on `http://127.0.0.1:8080` by default. It also opens a separate ephemeral loopback data-plane listener; upload/download bytes use only that listener. Set `ENDLESSFS_MOCK_PROVIDER_URL=http://127.0.0.1:9090` to select a stable loopback data-plane port for browser testing.
 
+For UI evaluation without a passkey bootstrap, start the explicit ephemeral fixture:
+
+```console
+nix run .#dev-fixture
+```
+
+Then open `http://127.0.0.1:8080/__endlessfs/local-fixture`. The loopback-only route installs a pre-issued local session and opens a seeded workspace with mixed file types, previewable images, nested directories, a paged collection, Trash items, a public share, and admin account states. All fixture state disappears when the process stops.
+
 Build the binary, OCI archive, or complete release record without Docker:
 
 ```console
@@ -92,6 +100,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix build .#container` | Build a minimal, shell-free OCI archive. |
 | `nix flake check` | Run the authoritative current build, format, lint, test, fuzz, race, security, policy, offline-sandbox, and OCI hardening gates. |
 | `nix run .#dev` | Run the loopback-only development control plane. |
+| `nix run .#dev-fixture` | Run the loopback-only ephemeral UI fixture with mock previews and one-click local access. |
 | `nix run .#generate-secret` | Generate one canonical 256-bit base64url environment secret. |
 | `nix run .#fmt` / `.#fmt-check` | Apply or verify Go and Nix formatting. |
 | `nix run .#lint` | Run `actionlint`, `go vet`, and `staticcheck`. |
@@ -135,6 +144,7 @@ Only settings that have validation and tests are parsed by the current binary:
 | `ENDLESSFS_GCS_PREVIEW_BUCKET` | Unset | Required when `ENDLESSFS_PREVIEW_PROVIDER=gcs`; distinct private bucket for disposable generated-preview artifacts and manifests. |
 | `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` | ADC discovery | Optional lowercase service-account email used by the official client for keyless IAM `signBlob` signed URLs. |
 | `ENDLESSFS_WRITER_SET_ID` | Local mock identifier | Stable canonical base64url identifier of at least 128 bits; required with `gcs` and identical across all replicas and provider cutovers. |
+| `ENDLESSFS_LOCAL_FIXTURE` | `false` | Explicit local UI fixture; accepted only with mock storage on an HTTP loopback origin and listener. Prefer `nix run .#dev-fixture`. |
 | `ALLOW_REGISTRATION` | `false` | Exact `true` or `false`; exposed as non-secret public policy. |
 | `INVITE_REGISTRATION` | `true` | Exact `true` or `false`; exposed as non-secret public policy. |
 | `ENDLESSFS_BOOTSTRAP_TOKEN` | Unset | Optional canonical 256-bit base64url token; enables only the unused first-admin bootstrap. |

@@ -60,8 +60,66 @@ func TestParseDefaults(t *testing.T) {
 	if cfg.PreviewProvider != "disabled" || cfg.PreviewAutomatic {
 		t.Fatalf("preview defaults = %+v", cfg.Public())
 	}
+	if cfg.LocalFixture {
+		t.Fatal("LocalFixture = true, want false")
+	}
 	if strings.Join(cfg.PreviewFormats, ",") != "image" || strings.Join(intStrings(cfg.PreviewResolutions), ",") != "256,512,1600" {
 		t.Fatalf("preview capability defaults = formats %v resolutions %v", cfg.PreviewFormats, cfg.PreviewResolutions)
+	}
+}
+
+func TestParseLocalFixtureIsExplicitAndLoopbackOnly(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := Parse(mapLookup(map[string]string{"ENDLESSFS_LOCAL_FIXTURE": "true"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.LocalFixture {
+		t.Fatal("LocalFixture = false, want true")
+	}
+
+	tests := []struct {
+		name   string
+		values map[string]string
+	}{
+		{
+			name: "secure origin",
+			values: map[string]string{
+				"ENDLESSFS_LOCAL_FIXTURE": "true",
+				"ENDLESSFS_BASE_URL":      "https://127.0.0.1:8080",
+			},
+		},
+		{
+			name: "non-loopback listener",
+			values: map[string]string{
+				"ENDLESSFS_LOCAL_FIXTURE": "true",
+				"ENDLESSFS_LISTEN_ADDR":   "0.0.0.0:8080",
+				"ENDLESSFS_BASE_URL":      "https://drive.example.test",
+			},
+		},
+		{
+			name: "production provider",
+			values: map[string]string{
+				"ENDLESSFS_LOCAL_FIXTURE":    "true",
+				"ENDLESSFS_LISTEN_ADDR":      "127.0.0.1:8080",
+				"ENDLESSFS_BASE_URL":         "https://127.0.0.1:8080",
+				"ENDLESSFS_STORAGE_PROVIDER": "gcs",
+				"ENDLESSFS_GCS_FILE_BUCKET":  "fixture-files",
+				"ENDLESSFS_GCS_STATE_BUCKET": "fixture-state",
+				"ENDLESSFS_WRITER_SET_ID":    "EREREREREREREREREREREQ",
+			},
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse(mapLookup(test.values))
+			if err == nil || !strings.Contains(err.Error(), "ENDLESSFS_LOCAL_FIXTURE") {
+				t.Fatalf("Parse() error = %v, want local-fixture boundary error", err)
+			}
+		})
 	}
 }
 
@@ -172,6 +230,7 @@ func TestURLAndLoopbackHelperBoundaryMatrix(t *testing.T) {
 func TestLoadReadsValidatedProcessEnvironment(t *testing.T) {
 	keys := []string{
 		"ENDLESSFS_LISTEN_ADDR", "ENDLESSFS_BASE_URL", "ALLOW_REGISTRATION", "INVITE_REGISTRATION",
+		"ENDLESSFS_LOCAL_FIXTURE",
 		"ENDLESSFS_STORAGE_PROVIDER", "ENDLESSFS_MOCK_PROVIDER_URL", "ENDLESSFS_BOOTSTRAP_TOKEN",
 		"ENDLESSFS_GCS_FILE_BUCKET", "ENDLESSFS_GCS_STATE_BUCKET", "ENDLESSFS_GCS_PREVIEW_BUCKET", "ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT", "ENDLESSFS_WRITER_SET_ID",
 		"ENDLESSFS_SESSION_SECRET", "ENDLESSFS_WEBAUTHN_RP_ID", "ENDLESSFS_WEBAUTHN_RP_NAME",

@@ -11,6 +11,15 @@ EndlessFS keeps direct dependencies deliberately small. Every addition must docu
 - **License:** SIL Open Font License 1.1; the upstream notice and complete license are retained in [`licenses/Inter-OFL-1.1.txt`](./licenses/Inter-OFL-1.1.txt).
 - **Security posture:** The three validated WOFF2 files are compile-time embedded in the Go binary and served only from immutable same-origin asset routes. The UI makes no runtime request to a font CDN or other third party.
 
+## Tabler Icons `3.46.0`
+
+- **Purpose:** A coherent application-owned outline vocabulary for compact file, navigation, identity, security, and administrative actions.
+- **Why a maintained icon set is necessary:** Unicode glyphs vary by platform, provide inconsistent geometry, and make related actions difficult to distinguish. Recreating a broad filesystem and administration icon vocabulary locally would increase ambiguity and ongoing design maintenance.
+- **Source pin:** Official `tabler/tabler-icons` release `v3.46.0`, commit `8ac7d81b72ece11072ef25ea9fd92e80c6f3c9fc`.
+- **Maintenance:** Tabler Icons is actively maintained, has a large contributor community, and provides more than 6,000 icons in one consistent 24 px outline system. Upgrades remain explicit review changes.
+- **License:** MIT; the upstream notice and complete license are retained in [`licenses/Tabler-Icons-MIT.txt`](./licenses/Tabler-Icons-MIT.txt).
+- **Security posture:** EndlessFS embeds only the reviewed path data for icons it uses. The application imports no JavaScript package, icon font, build plugin, CDN, remote asset, or runtime parser. SVG elements are constructed through fixed DOM operations and inherit semantic application colors through `currentColor`.
+
 ## `golang.org/x/text`
 
 - **Purpose:** Unicode NFC normalization for canonical virtual paths, display names, and passkey labels.

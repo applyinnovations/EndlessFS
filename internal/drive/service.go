@@ -224,8 +224,16 @@ type BatchResult struct {
 }
 
 type TrashPage struct {
-	Items      []model.Trash `json:"items"`
-	NextCursor string        `json:"nextCursor,omitempty"`
+	Items      []TrashItem `json:"items"`
+	NextCursor string      `json:"nextCursor,omitempty"`
+}
+
+// TrashItem adds live provider-validated display metadata to the durable trash
+// record without changing the canonical record stored by the repository.
+type TrashItem struct {
+	model.Trash
+	MediaType string `json:"mediaType,omitempty"`
+	Size      int64  `json:"size"`
 }
 
 func (s *Service) Trash(ctx context.Context, userID domain.UserID, paths []domain.UserPath, idempotencyKey string) (BatchResult, error) {
@@ -335,7 +343,24 @@ func (s *Service) TrashPage(ctx context.Context, userID domain.UserID, limit int
 	if err != nil {
 		return TrashPage{}, err
 	}
-	return TrashPage{Items: records, NextCursor: next}, nil
+	scope, err := trashScope(userID)
+	if err != nil {
+		return TrashPage{}, err
+	}
+	items := make([]TrashItem, len(records))
+	for index, record := range records {
+		items[index].Trash = record
+		if record.Kind != domain.EntryFile {
+			continue
+		}
+		entry, statErr := s.storage.Stat(ctx, scope, record.TrashedPath)
+		if statErr != nil {
+			return TrashPage{}, statErr
+		}
+		items[index].MediaType = entry.MediaType
+		items[index].Size = entry.Size
+	}
+	return TrashPage{Items: items, NextCursor: next}, nil
 }
 
 func (s *Service) Restore(ctx context.Context, userID domain.UserID, trashID string, conflict domain.ConflictMode, idempotencyKey string) (domain.Operation, error) {

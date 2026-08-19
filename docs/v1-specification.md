@@ -1069,7 +1069,7 @@ Requirements:
 
 - Normal delete means move to trash, not permanent deletion.
 - Trash is not addressable by normal file paths and is exposed through dedicated endpoints.
-- Trash listings include original path and trash time.
+- Trash listings include original path, trash time, kind, and the provider-validated media type for files. The media type is read from the isolated trashed entry and is not duplicated into the canonical trash record.
 - Restore returns to the original path by default.
 - Restore conflicts fail unless the user explicitly chooses generated-name restore.
 - Permanent deletion requires an explicit confirmation action and deletes only the selected trash ID.

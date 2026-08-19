@@ -19,20 +19,59 @@
           <img class="brand-mark" src="/assets/brand/endlessfs-mark.svg" width="36" height="28" alt="">
           <span class="brand-name">EndlessFS</span>
         </a>
+        <nav id="workspace-tabs" class="app-tabs" aria-label="Workspace">
+          <a href="/" data-route="drive">Files</a>
+          <a href="/trash" data-route="trash">Trash</a>
+          <a href="/settings" data-route="settings">Settings</a>
+          <a id="admin-nav" href="/admin" data-route="admin" hidden>Admin</a>
+        </nav>
         <div class="header-status">
-          <span id="connection-status" class="connection" role="status">Starting</span>
           <div id="account-actions" class="account-actions" hidden>
             <span id="account-name"></span>
-            <button id="logout-button" class="icon-button" type="button" aria-label="Sign out">↗</button>
+            <button id="logout-button" class="icon-button" type="button" aria-label="Sign out" data-icon="logout"></button>
           </div>
         </div>
       </header>
 
       <main id="workspace" tabindex="-1">
-        <section id="loading-view" class="entry-view" aria-labelledby="loading-title">
-          <img class="entry-mark" src="/assets/brand/endlessfs-mark.svg" width="96" height="75" alt="">
-          <h1 id="loading-title">Opening</h1>
-        </section>
+        <div id="loading-view" class="app-frame loading-shell" aria-labelledby="loading-title" aria-busy="true">
+          <div class="app-content" aria-hidden="true">
+            <section class="view loading-content">
+              <div class="surface-header drive-header">
+                <div class="location-heading"><h1 id="loading-title">Files</h1></div>
+                <div class="heading-actions command-bar">
+                  <button class="icon-button" type="button" aria-label="Create folder" data-icon="folder-plus" disabled></button>
+                  <button class="icon-button" type="button" aria-label="Upload files" data-icon="upload" disabled></button>
+                  <button class="icon-button" type="button" aria-label="Upload folder" data-icon="folder-up" disabled></button>
+                </div>
+              </div>
+              <div class="drive-control-stack">
+                <div class="drive-controls">
+                  <label class="search-field"><span aria-hidden="true">⌕</span><input type="search" placeholder="Filter loaded files" disabled></label>
+                  <label class="compact-field"><span>Sort</span><select disabled><option>Name A–Z</option></select></label>
+                  <fieldset class="presentation-choice" aria-label="File presentation" disabled><input type="radio" checked><label aria-label="List view" data-icon="list"></label><input type="radio"><label aria-label="Grid view" data-icon="layout-grid"></label></fieldset>
+                  <button class="secondary" type="button" disabled>Filter</button>
+                </div>
+              </div>
+              <nav class="breadcrumbs drive-breadcrumbs" aria-label="Current folder">Files</nav>
+              <section class="file-workspace">
+                <div class="loading-table table-scroll">
+                  <table><caption class="visually-hidden">Files in the current folder</caption><thead><tr><th class="select-column" scope="col"><input type="checkbox" aria-label="Select all files on this page" disabled></th><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Mime type</th><th scope="col">Changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+                    <tbody aria-busy="true">
+                      <tr class="loading-item-row loading-file-row"><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td></tr>
+                      <tr class="loading-item-row loading-file-row"><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td></tr>
+                      <tr class="loading-item-row loading-file-row"><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td></tr>
+                      <tr class="loading-item-row loading-file-row"><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td></tr>
+                      <tr class="loading-item-row loading-file-row"><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td></tr>
+                      <tr class="loading-item-row loading-file-row"><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+              <div class="pagination"></div>
+            </section>
+          </div>
+        </div>
 
         <section id="auth-view" class="entry-view" hidden aria-labelledby="auth-title">
           <img class="entry-mark" src="/assets/brand/endlessfs-mark.svg" width="112" height="87" alt="">
@@ -45,76 +84,141 @@
         </section>
 
         <section id="registration-view" class="entry-view" hidden aria-labelledby="registration-title">
-          <a class="brand entry-brand" href="/" aria-label="EndlessFS sign in"><img class="brand-mark" src="/assets/brand/endlessfs-mark.svg" width="36" height="28" alt=""><span class="brand-name">EndlessFS</span></a>
-          <p class="eyebrow" id="registration-eyebrow">Account</p>
           <h1 id="registration-title">Create account</h1>
           <p id="registration-help" class="visually-hidden">Enter a display name.</p>
           <form id="registration-form" class="entry-form">
-            <label for="display-name">Display name</label>
-            <input id="display-name" name="displayName" type="text" minlength="1" maxlength="100" autocomplete="name" required>
-            <div id="bootstrap-token-field" hidden>
+            <div id="display-name-field" class="entry-field">
+              <label for="display-name">Display name</label>
+              <input id="display-name" name="displayName" type="text" minlength="1" maxlength="100" autocomplete="name" required>
+            </div>
+            <div id="bootstrap-token-field" class="entry-field" hidden>
               <label for="bootstrap-token">Bootstrap token</label>
               <input id="bootstrap-token" name="bootstrapToken" type="text" autocomplete="off" spellcheck="false">
             </div>
-            <button class="primary wide" type="submit">Create passkey</button>
+            <button id="registration-submit" class="primary wide" type="submit">Create passkey</button>
           </form>
-          <a class="text-link" href="/">Sign in</a>
+          <a id="registration-signin" class="text-link" href="/">Sign in</a>
         </section>
 
-        <section id="public-view" class="public-layout" hidden aria-labelledby="public-title">
-          <div class="surface-header"><h1 id="public-title" tabindex="-1">Shared files</h1></div>
-          <nav id="public-breadcrumbs" class="breadcrumbs" aria-label="Shared folder path"></nav>
-          <div id="public-state" class="state-panel" hidden></div>
-          <div class="table-scroll"><table id="public-table"><caption class="visually-hidden">Shared files and folders</caption><thead><tr><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead><tbody id="public-rows"></tbody></table></div>
-          <button id="public-next" class="secondary more-button" type="button" hidden>More</button>
-        </section>
+        <section id="public-view" class="public-layout" hidden aria-labelledby="browser-title"><div id="public-browser-host"></div></section>
 
         <div id="authenticated-view" class="app-frame" hidden>
-          <nav class="app-rail sidebar" aria-label="Workspace">
-            <a href="/" data-route="drive"><span class="rail-icon" aria-hidden="true">▤</span><span>Files</span></a>
-            <a href="/trash" data-route="trash"><span class="rail-icon" aria-hidden="true">⌫</span><span>Trash</span></a>
-            <a href="/settings" data-route="settings"><span class="rail-icon" aria-hidden="true">⌘</span><span>Settings</span></a>
-            <a id="admin-nav" href="/admin" data-route="admin" hidden><span class="rail-icon" aria-hidden="true">◇</span><span>Admin</span></a>
-          </nav>
-
           <div class="app-content">
-            <section id="drive-view" class="view" hidden aria-labelledby="drive-title">
+            <section id="drive-view" class="view" hidden aria-labelledby="browser-title">
+              <div id="owner-browser-host">
+                <div id="file-browser-surface" data-access="owner">
               <div class="surface-header drive-header">
-                <div class="location-heading"><h1 id="drive-title" tabindex="-1">Files</h1><nav id="breadcrumbs" class="breadcrumbs" aria-label="Current folder"></nav></div>
-                <div class="heading-actions command-bar">
-                  <button id="new-folder-button" class="secondary" type="button">New folder</button>
-                  <label class="button primary" for="upload-input">Upload</label>
+                <div class="location-heading"><h1 id="browser-title" tabindex="-1">Files</h1></div>
+                <div class="heading-actions command-bar owner-only">
+                  <button id="new-folder-button" class="icon-button" type="button" aria-label="Create folder" data-icon="folder-plus"></button>
+                  <label class="button icon-button" for="upload-input" aria-label="Upload files" data-icon="upload"></label>
                   <input id="upload-input" class="visually-hidden" type="file" multiple>
-                  <label class="button icon-button" for="folder-input" aria-label="Upload folder">↥</label>
+                  <label class="button icon-button" for="folder-input" aria-label="Upload folder" data-icon="folder-up"></label>
                   <input id="folder-input" class="visually-hidden" type="file" multiple webkitdirectory>
+                </div>
+                <div class="heading-actions command-bar trash-only">
+                  <button id="empty-trash" class="danger icon-button" type="button" aria-label="Empty trash" data-icon="trash-x"></button>
                 </div>
               </div>
 
-              <div class="drive-controls">
-                <label class="search-field" for="file-filter"><span class="visually-hidden">Filter loaded files</span><span aria-hidden="true">⌕</span><input id="file-filter" type="search" placeholder="Filter loaded files"></label>
-                <label class="compact-field" for="file-sort"><span>Sort</span><select id="file-sort"><option value="name:asc">Name A–Z</option><option value="name:desc">Name Z–A</option><option value="modified:desc">Newest</option><option value="modified:asc">Oldest</option><option value="size:desc">Largest</option><option value="size:asc">Smallest</option><option value="kind:asc">Type</option></select></label>
-                <fieldset id="file-presentation" class="presentation-choice" aria-label="File presentation"><legend class="visually-hidden">File presentation</legend><input id="file-view-list" name="file-view" type="radio" value="list" checked><label for="file-view-list" aria-label="List view">☷</label><input id="file-view-grid" name="file-view" type="radio" value="grid"><label for="file-view-grid" aria-label="Grid view">▦</label></fieldset>
-                <details class="filter-disclosure"><summary>Filter</summary><div id="metadata-filters" class="metadata-filters"><label for="filter-kind">Kind<select id="filter-kind"><option value="">All</option><option value="directory">Folders</option><option value="file">Files</option></select></label><label for="filter-media">Media<select id="filter-media"><option value="">All</option><option value="image">Images</option><option value="video">Videos</option><option value="pdf">PDFs</option><option value="audio">Audio</option><option value="document">Documents</option><option value="archive">Archives</option><option value="unknown">Other</option></select></label><label for="filter-min-size">Min bytes<input id="filter-min-size" type="number" min="0" inputmode="numeric"></label><label for="filter-max-size">Max bytes<input id="filter-max-size" type="number" min="0" inputmode="numeric"></label><label for="filter-modified-after">After<input id="filter-modified-after" type="date"></label><label for="filter-modified-before">Before<input id="filter-modified-before" type="date"></label><label for="filter-preview">Preview<select id="filter-preview"><option value="">Any</option><option value="ready">Ready</option><option value="missing">Missing</option><option value="ineligible">Excluded</option><option value="unsupported">Unsupported</option><option value="unavailable">Unavailable</option></select></label></div></details>
+              <div id="drive-control-stack" class="drive-control-stack">
+                <div class="drive-controls">
+                  <label class="search-field" for="file-filter"><span class="visually-hidden">Filter loaded files</span><span aria-hidden="true">⌕</span><input id="file-filter" type="search" placeholder="Filter loaded files"></label>
+                  <label class="compact-field" for="file-sort"><span>Sort</span><select id="file-sort"><option value="name:asc">Name A–Z</option><option value="name:desc">Name Z–A</option><option value="modified:desc">Newest</option><option value="modified:asc">Oldest</option><option value="size:desc">Largest</option><option value="size:asc">Smallest</option><option value="kind:asc">Type</option></select></label>
+                  <fieldset id="file-presentation" class="presentation-choice" aria-label="File presentation"><legend class="visually-hidden">File presentation</legend><input id="file-view-list" name="file-view" type="radio" value="list" checked><label for="file-view-list" aria-label="List view" data-icon="list"></label><input id="file-view-grid" name="file-view" type="radio" value="grid"><label for="file-view-grid" aria-label="Grid view" data-icon="layout-grid"></label></fieldset>
+                  <details class="filter-disclosure"><summary>Filter</summary><div id="metadata-filters" class="metadata-filters"><label for="filter-kind">Kind<select id="filter-kind"><option value="">All</option><option value="directory">Folders</option><option value="file">Files</option></select></label><label for="filter-media">Media<select id="filter-media"><option value="">All</option><option value="image">Images</option><option value="video">Videos</option><option value="pdf">PDFs</option><option value="audio">Audio</option><option value="document">Documents</option><option value="archive">Archives</option><option value="unknown">Other</option></select></label><label for="filter-min-size">Min bytes<input id="filter-min-size" type="number" min="0" inputmode="numeric"></label><label for="filter-max-size">Max bytes<input id="filter-max-size" type="number" min="0" inputmode="numeric"></label><label for="filter-modified-after">After<input id="filter-modified-after" type="date"></label><label for="filter-modified-before">Before<input id="filter-modified-before" type="date"></label><label class="owner-only" for="filter-preview">Preview<select id="filter-preview"><option value="">Any</option><option value="ready">Ready</option><option value="missing">Missing</option><option value="ineligible">Excluded</option><option value="unsupported">Unsupported</option><option value="unavailable">Unavailable</option></select></label></div></details>
+                </div>
+
+                <div id="selection-bar" class="selection-bar owner-only" role="toolbar" aria-label="Selection actions" hidden><strong id="selection-count">0 selected</strong><button id="download-selected" class="icon-button" type="button" aria-label="Download selected" data-icon="download"></button><button id="share-selected" class="icon-button" type="button" aria-label="Share selected" data-icon="share-3"></button><button id="copy-selected" class="icon-button" type="button" aria-label="Copy selected" data-icon="copy"></button><button id="move-selected" class="icon-button" type="button" aria-label="Move selected" data-icon="folder-symlink"></button><button id="trash-selected" class="danger icon-button" type="button" aria-label="Move selected to trash" data-icon="trash"></button><button id="clear-selection" class="icon-button" type="button" aria-label="Clear selection" data-icon="x"></button></div>
               </div>
 
-              <div id="selection-bar" class="selection-bar" hidden><strong id="selection-count">0 selected</strong><button id="download-selected" type="button">Download</button><button id="share-selected" type="button">Share</button><button id="copy-selected" type="button">Copy</button><button id="move-selected" type="button">Move</button><button id="trash-selected" class="danger-quiet" type="button">Trash</button><button id="clear-selection" class="icon-button" type="button" aria-label="Clear selection">×</button></div>
+              <nav id="breadcrumbs" class="breadcrumbs drive-breadcrumbs" aria-label="Current folder"></nav>
 
-              <section id="drop-target" class="file-workspace drop-target" aria-describedby="drop-help">
-                <span id="drop-help" class="drop-hint">Drop to upload</span>
-                <div id="drive-state" class="state-panel" hidden></div>
-                <div id="list-presentation" class="table-scroll"><table id="file-table"><caption class="visually-hidden">Files in the current folder</caption><thead><tr><th class="select-column" scope="col"><input id="select-all" type="checkbox" aria-label="Select all files on this page"></th><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead><tbody id="file-rows"></tbody></table></div>
+              <section id="drop-target" class="file-workspace drop-target" data-presentation="list" aria-describedby="drop-help">
+                <span id="drop-help" class="drop-hint owner-only">Drop to upload</span>
+                <div id="list-presentation" class="table-scroll"><table id="file-table"><caption id="file-table-caption" class="visually-hidden">Files in the current folder</caption><thead><tr><th class="select-column owner-only" scope="col"><input id="select-all" type="checkbox" aria-label="Select all files on this page"></th><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Mime type</th><th scope="col">Changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead><tbody id="file-rows"></tbody></table></div>
                 <div id="media-grid" class="media-grid" role="grid" aria-label="Files in the current folder" tabindex="0" hidden><div id="media-grid-content" class="media-grid-content"></div></div>
+                <div id="drive-state" class="state-panel" hidden></div>
               </section>
 
               <div class="pagination"><button id="next-page" class="secondary more-button" type="button" hidden>More</button></div>
-              <aside id="transfer-panel" class="transfer-panel" hidden aria-labelledby="transfer-title"><div class="panel-heading"><h2 id="transfer-title">Transfers</h2><div class="heading-actions"><button id="clear-transfers" class="quiet" type="button">Clear finished</button><button id="transfer-toggle" class="icon-button" type="button" aria-label="Collapse transfers" aria-expanded="true">⌄</button></div></div><label class="compact-field" for="transfer-concurrency"><span>Concurrent</span><input id="transfer-concurrency" type="number" min="1" max="8" value="4" inputmode="numeric"></label><ul id="transfer-list" class="transfer-list"></ul></aside>
+                </div>
+              </div>
+              <aside id="transfer-panel" class="transfer-panel" hidden aria-labelledby="transfer-title">
+                <div class="panel-heading transfer-heading">
+                  <div class="transfer-heading-copy"><h2 id="transfer-title">Transfers</h2><span id="transfer-compact-metrics" class="transfer-compact-metrics">0% · ETA — · —/s</span></div>
+                  <div class="heading-actions"><button id="clear-transfers" class="icon-button" type="button" aria-label="Clear finished transfers" data-icon="trash"></button><button id="transfer-toggle" class="icon-button" type="button" aria-label="Collapse transfers" aria-expanded="true" data-icon="chevron-down"></button></div>
+                </div>
+                <progress id="transfer-progress" class="transfer-overall-progress" max="1" value="0" aria-label="Overall upload progress"></progress>
+                <div class="transfer-overview" aria-live="polite">
+                  <div class="transfer-overview-primary"><strong id="transfer-percent">0%</strong><span id="transfer-eta">ETA —</span><span id="transfer-speed">—/s</span></div>
+                  <div class="transfer-overview-secondary"><span id="transfer-volume">0 B of 0 B</span><span id="transfer-counts">0 files</span></div>
+                </div>
+                <label class="transfer-filter-field" for="transfer-filter"><span class="visually-hidden">Show transfers</span><select id="transfer-filter"><option value="current">Current</option><option value="failed">Failed</option><option value="complete">Complete</option><option value="all">All</option></select></label>
+                <ul id="transfer-list" class="transfer-list"></ul>
+              </aside>
             </section>
 
-            <section id="trash-view" class="view" hidden aria-labelledby="trash-title"><div class="surface-header"><h1 id="trash-title" tabindex="-1">Trash</h1><button id="empty-trash" class="danger" type="button">Empty trash</button></div><div id="trash-state" class="state-panel" hidden></div><div class="table-scroll"><table><caption class="visually-hidden">Items in trash</caption><thead><tr><th scope="col">Original location</th><th scope="col">Type</th><th scope="col">Trashed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead><tbody id="trash-rows"></tbody></table></div><button id="trash-next" class="secondary more-button" type="button" hidden>More</button></section>
+            <section id="trash-view" class="view" hidden aria-labelledby="browser-title"><div id="trash-browser-host"></div></section>
 
-            <section id="settings-view" class="view" hidden aria-labelledby="settings-title"><div class="surface-header"><h1 id="settings-title" tabindex="-1">Settings</h1></div><div class="settings-list"><form id="profile-form" class="settings-section"><h2>Account</h2><label for="profile-name">Display name</label><input id="profile-name" type="text" maxlength="100" required><button class="primary" type="submit">Save</button></form><form id="theme-form" class="settings-section"><h2>Theme</h2><label for="theme-select">Appearance</label><select id="theme-select"></select><label class="checkbox-label"><input id="safe-theme" type="checkbox"> Safe theme</label><button class="primary" type="submit">Apply</button><p id="theme-note" class="field-help"></p></form><section class="settings-section settings-wide"><div class="panel-heading"><h2>Passkeys</h2><button id="add-passkey" class="secondary" type="button">Add</button></div><ul id="passkey-list" class="record-list"></ul></section><section class="settings-section settings-wide"><div class="panel-heading"><h2>Shares</h2><button id="refresh-shares" class="secondary" type="button">Refresh</button></div><ul id="share-list" class="record-list"></ul></section><section class="settings-section settings-wide"><h2>Session</h2><button id="settings-logout" class="danger" type="button">Sign out</button></section></div></section>
+            <section id="settings-view" class="view" hidden aria-labelledby="settings-title">
+              <div class="surface-header"><h1 id="settings-title" tabindex="-1">Settings</h1></div>
+              <div class="settings-list">
+                <form id="profile-form" class="settings-section settings-form settings-wide">
+                  <div class="panel-heading"><h2>Account</h2><button class="icon-button" type="submit" aria-label="Save account" data-icon="device-floppy"></button></div>
+                  <div class="settings-form-body">
+                    <label class="settings-field" for="profile-name"><span>Display name</span><input id="profile-name" type="text" maxlength="100" required></label>
+                  </div>
+                </form>
+                <form id="theme-form" class="settings-section settings-form settings-wide">
+                  <div class="panel-heading"><h2>Theme</h2><button class="icon-button" type="submit" aria-label="Apply theme" data-icon="check"></button></div>
+                  <div class="settings-form-body">
+                    <label class="settings-field" for="theme-select"><span>Appearance</span><select id="theme-select"></select></label>
+                    <label class="checkbox-label"><input id="safe-theme" type="checkbox"> Safe theme</label>
+                    <p id="theme-note" class="field-help"></p>
+                  </div>
+                </form>
+                <section class="settings-section settings-wide">
+                  <div class="panel-heading"><h2>Passkeys</h2><button id="add-passkey" class="icon-button" type="button" aria-label="Add passkey" data-icon="key-plus"></button></div>
+                  <div id="passkey-table-scroll" class="table-scroll settings-table-scroll" tabindex="0" aria-label="Passkeys table">
+                    <table id="passkey-table">
+                      <caption class="visually-hidden">Passkeys</caption>
+                      <thead><tr><th scope="col">Label</th><th scope="col">Added</th><th scope="col">Last used</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+                      <tbody id="passkey-list"></tbody>
+                    </table>
+                  </div>
+                </section>
+                <section class="settings-section settings-wide">
+                  <div class="panel-heading"><h2>Shares</h2><button id="refresh-shares" class="icon-button" type="button" aria-label="Refresh shares" data-icon="refresh"></button></div>
+                  <div id="share-table-scroll" class="table-scroll settings-table-scroll" tabindex="0" aria-label="Public shares table">
+                    <table id="share-table">
+                      <caption class="visually-hidden">Public shares</caption>
+                      <thead><tr><th scope="col">Location</th><th scope="col">Status</th><th scope="col">Type</th><th scope="col">Created</th><th scope="col">Expires</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+                      <tbody id="share-list"></tbody>
+                    </table>
+                  </div>
+                </section>
+                <section class="settings-section settings-wide"><div class="panel-heading"><h2>Session</h2><button id="settings-logout" class="danger icon-button" type="button" aria-label="Sign out" data-icon="logout"></button></div></section>
+              </div>
+            </section>
 
-            <section id="admin-view" class="view" hidden aria-labelledby="admin-title"><div class="surface-header"><h1 id="admin-title" tabindex="-1">Admin</h1></div><div class="settings-list"><section class="settings-section settings-wide"><div class="panel-heading"><h2>Invites</h2><button id="create-invite" class="primary" type="button">Create</button></div><div id="invite-link-result" class="secret-result" hidden><output id="invite-link"></output><button id="copy-invite" type="button">Copy</button></div><ul id="invite-list" class="record-list"></ul></section><section class="settings-section settings-wide"><div class="panel-heading"><h2>Users</h2><button id="refresh-users" class="secondary" type="button">Refresh</button></div><ul id="user-list" class="record-list"></ul><button id="users-next" class="secondary more-button" type="button" hidden>More</button></section></div></section>
+            <section id="admin-view" class="view" hidden aria-labelledby="admin-title">
+              <div class="surface-header"><h1 id="admin-title" tabindex="-1">Admin</h1></div>
+              <div class="settings-list">
+                <section class="settings-section settings-wide"><div class="panel-heading"><h2>Invites</h2><button id="create-invite" class="icon-button" type="button" aria-label="Create invite" data-icon="user-plus"></button></div><div id="invite-link-result" class="secret-result" hidden><output id="invite-link"></output><button id="copy-invite" class="icon-button" type="button" aria-label="Copy invite link" data-icon="copy"></button></div><ul id="invite-list" class="record-list"></ul></section>
+                <section class="settings-section settings-wide admin-users-section">
+                  <div class="panel-heading"><h2>Users</h2><button id="refresh-users" class="icon-button" type="button" aria-label="Refresh users" data-icon="refresh"></button></div>
+                  <div class="table-scroll">
+                    <table id="users-table">
+                      <caption class="visually-hidden">Instance users</caption>
+                      <thead><tr><th scope="col">Name</th><th scope="col">Status</th><th scope="col">Role</th><th scope="col">Added</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+                      <tbody id="user-list"></tbody>
+                    </table>
+                  </div>
+                  <button id="users-next" class="icon-button more-button" type="button" aria-label="Load more users" data-icon="chevron-down" hidden></button>
+                </section>
+              </div>
+            </section>
           </div>
         </div>
       </main>
@@ -122,10 +226,31 @@
       <div id="live-status" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
       <div id="urgent-status" class="visually-hidden" role="alert" aria-live="assertive" aria-atomic="true"></div>
       <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+      <div id="action-tooltip" class="action-tooltip" role="tooltip" hidden></div>
+      <dialog id="action-dialog" class="action-sheet" role="dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description"><form id="dialog-form" method="dialog"><div class="sheet-heading"><h2 id="dialog-title">Confirm</h2><button id="dialog-cancel" class="icon-button" value="cancel" type="button" aria-label="Close" data-icon="x"></button></div><p id="dialog-description"></p><div id="dialog-fields"></div><div class="dialog-actions"><button id="dialog-confirm" class="icon-button" value="confirm" type="submit" aria-label="Continue" data-icon="check"></button></div></form></dialog>
 
-      <dialog id="action-dialog" role="dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description"><form id="dialog-form" method="dialog"><h2 id="dialog-title">Confirm</h2><p id="dialog-description"></p><div id="dialog-fields"></div><div class="dialog-actions"><button id="dialog-cancel" value="cancel" type="button">Cancel</button><button id="dialog-confirm" class="primary" value="confirm" type="submit">Continue</button></div></form></dialog>
-
-      <dialog id="preview-dialog" class="media-viewer" role="dialog" aria-labelledby="preview-title" aria-describedby="preview-status"><div class="preview-heading"><button id="preview-previous" class="icon-button" type="button" aria-label="Previous file">←</button><h2 id="preview-title">Preview</h2><button id="preview-next" class="icon-button" type="button" aria-label="Next file">→</button><button id="preview-close" class="icon-button" type="button" aria-label="Close preview">×</button></div><p id="preview-status" class="muted" role="status" aria-live="polite"></p><div class="preview-actions"><button id="preview-generate" class="secondary" type="button">Generate</button><button id="preview-regenerate" class="secondary" type="button">Regenerate</button><button id="preview-original" class="secondary" type="button">Original</button><button id="preview-download" class="primary" type="button">Download</button></div><dl id="preview-metadata" class="metadata-list"></dl><div id="preview-content" class="preview-content"></div></dialog>
+      <dialog id="preview-dialog" class="media-viewer" role="dialog" aria-labelledby="preview-title">
+        <div class="preview-heading">
+          <button id="preview-previous" class="icon-button" type="button" aria-label="Previous file" data-icon="arrow-left"></button>
+          <h2 id="preview-title">Preview</h2>
+          <button id="preview-next" class="icon-button" type="button" aria-label="Next file" data-icon="arrow-right"></button>
+          <button id="preview-close" class="icon-button" type="button" aria-label="Close preview" data-icon="x"></button>
+        </div>
+        <div class="preview-layout">
+          <div id="preview-content" class="preview-content"></div>
+          <aside class="preview-details" aria-label="File details">
+            <div class="preview-actions" aria-label="Preview actions">
+              <span id="preview-generation-action" class="preview-generation-action">
+                <button id="preview-generate" class="icon-button" type="button" aria-label="Generate preview" data-icon="eye"></button>
+                <button id="preview-regenerate" class="icon-button" type="button" aria-label="Regenerate preview" data-icon="refresh"></button>
+              </span>
+              <button id="preview-original" class="icon-button" type="button" aria-label="Show original" data-icon="file"></button>
+              <button id="preview-download" class="icon-button" type="button" aria-label="Download" data-icon="download"></button>
+            </div>
+            <dl id="preview-metadata" class="metadata-list"></dl>
+          </aside>
+        </div>
+      </dialog>
     </div>
     <noscript><main class="entry-view"><h1>JavaScript required</h1></main></noscript>
   </body>

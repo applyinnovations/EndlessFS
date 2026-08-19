@@ -92,6 +92,8 @@ Use neutral, highly legible typography suitable for dense information display. T
 - Prefer recognizable icons over icon-plus-label duplication when meaning is unambiguous.
 - Avoid decorative iconography.
 
+Application action icons use a curated static subset of **Tabler Icons v3.46.0**, pinned to upstream commit `8ac7d81b72ece11072ef25ea9fd92e80c6f3c9fc` under the MIT License. The 24 px source geometry is rendered as a restrained 16 px outline system using `currentColor`. Only used SVG paths are embedded in the application; no icon package, font, CDN, or runtime network dependency is permitted. See `docs/licenses/Tabler-Icons-MIT.txt`.
+
 
 ## Product and UI principles
 

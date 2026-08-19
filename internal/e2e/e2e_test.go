@@ -41,6 +41,7 @@ import (
 	"github.com/chromedp/cdproto/emulation"
 	cdplog "github.com/chromedp/cdproto/log"
 	"github.com/chromedp/cdproto/network"
+	cdppage "github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	cdpwebauthn "github.com/chromedp/cdproto/webauthn"
 	"github.com/chromedp/chromedp"
@@ -141,6 +142,40 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		mu.Unlock()
 		t.Fatalf("open bootstrap: %v (%s) exceptions=%v origins=%v", err, browserStatus(ctx), failureSnapshot, originSnapshot)
 	}
+	var bootstrapLayoutCorrect bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const displayName = document.querySelector("#display-name").getBoundingClientRect();
+		const token = document.querySelector("#bootstrap-token").getBoundingClientRect();
+		const submit = document.querySelector("#registration-form button[type='submit']").getBoundingClientRect();
+		return document.querySelector("#registration-title").textContent === "Initialize EndlessFS" &&
+			document.querySelector("#registration-eyebrow") === null &&
+			document.querySelector("#registration-view .entry-brand") === null &&
+			document.querySelector("#connection-status") === null &&
+			document.querySelector("#registration-signin").hidden &&
+			Math.abs(displayName.left - token.left) < 1 && Math.abs(displayName.right - token.right) < 1 &&
+			Math.abs(displayName.left - submit.left) < 1 && Math.abs(displayName.right - submit.right) < 1;
+	})()`, &bootstrapLayoutCorrect)); err != nil {
+		t.Fatalf("inspect bootstrap layout: %v", err)
+	}
+	if !bootstrapLayoutCorrect {
+		t.Fatal("bootstrap layout is not a single aligned initialization path")
+	}
+	var mobileBootstrapLayoutCorrect bool
+	if err := chromedp.Run(ctx,
+		emulation.SetDeviceMetricsOverride(320, 720, 1, false),
+		chromedp.Evaluate(`(() => {
+			const displayName = document.querySelector("#display-name").getBoundingClientRect();
+			const token = document.querySelector("#bootstrap-token").getBoundingClientRect();
+			return document.documentElement.scrollWidth <= 320 && displayName.left >= 16 && displayName.right <= 304 &&
+				Math.abs(displayName.left - token.left) < 1 && Math.abs(displayName.right - token.right) < 1;
+		})()`, &mobileBootstrapLayoutCorrect),
+		emulation.SetDeviceMetricsOverride(800, 600, 1, false),
+	); err != nil {
+		t.Fatalf("inspect mobile bootstrap layout: %v", err)
+	}
+	if !mobileBootstrapLayoutCorrect {
+		t.Fatal("bootstrap layout did not remain aligned at 320 CSS pixels")
+	}
 	if err := chromedp.Run(ctx, bootstrapKeyboardActions(harness.bootstrapToken)); err != nil {
 		t.Fatalf("submit keyboard bootstrap: %v", err)
 	}
@@ -159,6 +194,57 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 	if err := waitVisible(ctx, "#drive-view", 15*time.Second); err != nil {
 		t.Fatalf("keyboard sign-in: %v (%s)", err, browserStatus(ctx))
+	}
+
+	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		_, err := cdppage.AddScriptToEvaluateOnNewDocument(`
+			window.__endlessfsLayoutShifts = [];
+			window.__endlessfsLoadingGeometry = null;
+			document.addEventListener("DOMContentLoaded", () => {
+				const rect = document.querySelector("#loading-view").getBoundingClientRect();
+				window.__endlessfsLoadingGeometry = [rect.left, rect.top, rect.width, rect.height];
+			}, {once: true});
+			new PerformanceObserver((list) => {
+				for (const entry of list.getEntries()) {
+					if (!entry.hadRecentInput) window.__endlessfsLayoutShifts.push({
+						value: entry.value,
+						sources: entry.sources.map((source) => ({
+							node: source.node ? source.node.tagName.toLowerCase() + "#" + source.node.id + "." + source.node.className : "unknown",
+							previous: source.previousRect.toJSON(),
+							current: source.currentRect.toJSON(),
+						})),
+					});
+				}
+			}).observe({type: "layout-shift", buffered: true});
+		`).Do(ctx)
+		return err
+	}), chromedp.Reload(), chromedp.WaitVisible("#drive-view", chromedp.ByQuery)); err != nil {
+		t.Fatalf("reload authenticated workspace for layout-shift proof: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#loading-view").hidden && document.querySelector("#file-rows").dataset.itemCount !== undefined`, 10*time.Second); err != nil {
+		t.Fatalf("wait for reloaded workspace geometry: %v (%s)", err, browserStatus(ctx))
+	}
+	var reloadGeometryMatches bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const initial = window.__endlessfsLoadingGeometry;
+		const loaded = document.querySelector("#authenticated-view").getBoundingClientRect();
+		return initial && [loaded.left, loaded.top, loaded.width, loaded.height].every((value, index) => Math.abs(value - initial[index]) < 1);
+	})()`, &reloadGeometryMatches)); err != nil {
+		t.Fatalf("compare loading and loaded workspace geometry: %v", err)
+	}
+	if !reloadGeometryMatches {
+		var reloadGeometry string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`JSON.stringify({loading: window.__endlessfsLoadingGeometry, loaded: document.querySelector("#authenticated-view").getBoundingClientRect().toJSON()})`, &reloadGeometry))
+		t.Fatalf("loading workspace geometry does not match the loaded workspace: %s", reloadGeometry)
+	}
+	var reloadLayoutShift float64
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(window.__endlessfsLayoutShifts || []).reduce((total, entry) => total + entry.value, 0)`, &reloadLayoutShift)); err != nil {
+		t.Fatalf("measure authenticated reload layout shift: %v", err)
+	}
+	if reloadLayoutShift != 0 {
+		var reloadLayoutShiftDetails string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`JSON.stringify(window.__endlessfsLayoutShifts || [])`, &reloadLayoutShiftDetails))
+		t.Fatalf("authenticated reload layout shift = %f, want exactly zero: %s", reloadLayoutShift, reloadLayoutShiftDetails)
 	}
 
 	uploadPath := filepath.Join(t.TempDir(), "browser-proof.txt")
@@ -186,6 +272,9 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 
 	var shareLink string
+	if err := chromedp.Run(ctx, emulation.SetDeviceMetricsOverride(1200, 800, 1, false)); err != nil {
+		t.Fatalf("set wide action-sheet viewport: %v", err)
+	}
 	if err := runStage(ctx, 5*time.Second,
 		chromedp.WaitEnabled("#share-selected", chromedp.ByQuery),
 		chromedp.Focus("#share-selected", chromedp.ByQuery),
@@ -200,6 +289,18 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		failures := append([]string(nil), browserFailures...)
 		mu.Unlock()
 		t.Fatalf("wait for share dialog: %v (%s) selection=%q exceptions=%v", err, browserStatus(ctx), selection, failures)
+	}
+	var wideActionSheet bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const dialog = document.querySelector("#action-dialog");
+		const rect = dialog.getBoundingClientRect();
+		const style = getComputedStyle(dialog);
+		return dialog.classList.contains("action-sheet") && style.top === "0px" && style.right === "0px" && style.marginRight === "0px" && Math.abs(rect.height - innerHeight) < 1 && rect.width < innerWidth;
+	})()`, &wideActionSheet)); err != nil {
+		t.Fatalf("inspect wide action sheet: %v", err)
+	}
+	if !wideActionSheet {
+		t.Fatal("substantial action did not preserve file context in a wide-screen side sheet")
 	}
 	if err := chromedp.Run(ctx, chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
 		t.Fatalf("submit share creation: %v (%s)", err, browserStatus(ctx))
@@ -220,6 +321,9 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 	if !strings.HasPrefix(shareLink, harness.origin+"/s/") {
 		t.Fatalf("share link = %q, want same-origin public link", shareLink)
+	}
+	if err := chromedp.Run(ctx, emulation.SetDeviceMetricsOverride(800, 600, 1, false)); err != nil {
+		t.Fatalf("restore standard browser viewport: %v", err)
 	}
 
 	if err := chromedp.Run(ctx, chromedp.Focus("#trash-selected", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
@@ -255,15 +359,36 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.Click("a[data-route='trash']", chromedp.ByQuery)); err != nil {
 		t.Fatalf("open trash: %v", err)
 	}
-	if err := waitVisible(ctx, "#trash-rows .row-actions button:first-child", 10*time.Second); err != nil {
+	if err := waitVisible(ctx, "#file-browser-surface[data-access='trash'] #file-rows .row-actions button:first-child", 10*time.Second); err != nil {
 		var trashState string
-		_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => { const rect=(selector)=>document.querySelector(selector)?.getBoundingClientRect().toJSON(); const button=document.querySelector("#trash-rows .row-actions button:first-child"); const view=document.querySelector("#trash-view"); return JSON.stringify({state:document.querySelector("#trash-state")?.textContent,rows:document.querySelector("#trash-rows")?.textContent,urgent:document.querySelector("#urgent-status")?.textContent,toast:document.querySelector("#toast-region")?.textContent,authenticatedHidden:document.querySelector("#authenticated-view")?.hidden,authenticatedRect:rect("#authenticated-view"),viewHidden:view?.hidden,viewDisplay:getComputedStyle(view).display,viewRect:rect("#trash-view"),tableRect:rect("#trash-view table"),rowRect:rect("#trash-rows tr"),cellRect:rect("#trash-rows td:last-child"),actionsRect:rect("#trash-rows .row-actions"),buttonRect:button?.getBoundingClientRect().toJSON(),buttonDisplay:button ? getComputedStyle(button).display : null,buttonVisibility:button ? getComputedStyle(button).visibility : null,buttonDisabled:button?.disabled}); })()`, &trashState))
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => { const rect=(selector)=>document.querySelector(selector)?.getBoundingClientRect().toJSON(); const button=document.querySelector("#file-rows .row-actions button:first-child"); const view=document.querySelector("#trash-view"); return JSON.stringify({state:document.querySelector("#drive-state")?.textContent,rows:document.querySelector("#file-rows")?.textContent,urgent:document.querySelector("#urgent-status")?.textContent,toast:document.querySelector("#toast-region")?.textContent,authenticatedHidden:document.querySelector("#authenticated-view")?.hidden,authenticatedRect:rect("#authenticated-view"),viewHidden:view?.hidden,viewDisplay:getComputedStyle(view).display,viewRect:rect("#trash-view"),tableRect:rect("#trash-view table"),rowRect:rect("#file-rows tr"),cellRect:rect("#file-rows td:last-child"),actionsRect:rect("#file-rows .row-actions"),buttonRect:button?.getBoundingClientRect().toJSON(),buttonDisplay:button ? getComputedStyle(button).display : null,buttonVisibility:button ? getComputedStyle(button).visibility : null,buttonDisabled:button?.disabled}); })()`, &trashState))
 		mu.Lock()
 		requests := append([]string(nil), requestedURLs...)
 		mu.Unlock()
 		t.Fatalf("wait for trash listing: %v (%s) trash=%s requests=%v", err, browserStatus(ctx), trashState, requests)
 	}
-	if err := chromedp.Run(ctx, chromedp.Focus("#trash-rows .row-actions button:first-child", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+	var trashActionsContained bool
+	var permanentDeleteLabel string
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`(() => {
+			const cell = document.querySelector("#file-rows td:last-child").getBoundingClientRect();
+			const buttons = Array.from(document.querySelectorAll("#file-rows .row-actions button"));
+			return buttons.length === 2 && buttons.every((button) => {
+				const bounds = button.getBoundingClientRect();
+				return bounds.left >= cell.left && bounds.right <= cell.right && button.scrollWidth <= button.clientWidth;
+			});
+		})()`, &trashActionsContained),
+		chromedp.AttributeValue("#file-rows .row-actions button:last-child", "aria-label", &permanentDeleteLabel, nil, chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("inspect trash row actions: %v", err)
+	}
+	if !trashActionsContained {
+		t.Fatal("trash row actions are clipped by their table cell")
+	}
+	if permanentDeleteLabel != "Delete Permanently" {
+		t.Fatalf("trash deletion label = %q, want Delete Permanently", permanentDeleteLabel)
+	}
+	if err := chromedp.Run(ctx, chromedp.Focus("#file-rows .row-actions button:first-child", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatalf("open restore confirmation: %v", err)
 	}
 	if err := waitVisible(ctx, "#action-dialog", 5*time.Second); err != nil {
@@ -272,7 +397,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
 		t.Fatalf("confirm restore: %v", err)
 	}
-	if err := runStage(ctx, 10*time.Second, chromedp.WaitNotPresent("#trash-rows tr", chromedp.ByQuery)); err != nil {
+	if err := runStage(ctx, 10*time.Second, chromedp.WaitNotPresent("#file-rows tr", chromedp.ByQuery)); err != nil {
 		t.Fatalf("wait for restored file to leave trash: %v (%s)", err, browserStatus(ctx))
 	}
 
@@ -365,8 +490,15 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if !squareFrame || previewAspect != "96x48" {
 		t.Fatalf("media geometry: squareFrame=%v intrinsic=%q", squareFrame, previewAspect)
 	}
-	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Preview ready") && document.querySelector("#preview-content img")?.naturalWidth > 0`, 15*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector("#preview-content img")?.naturalWidth > 0 && !document.querySelector("#preview-regenerate").hidden`, 15*time.Second); err != nil {
 		t.Fatalf("wait for full-screen generated preview: %v (%s)", err, browserStatus(ctx))
+	}
+	var readyPreviewActionsCorrect bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("#preview-generate").hidden && document.querySelector("#preview-generate").dataset.icon === "eye" && !document.querySelector("#preview-regenerate").hidden`, &readyPreviewActionsCorrect)); err != nil {
+		t.Fatalf("inspect ready preview actions: %v", err)
+	}
+	if !readyPreviewActionsCorrect {
+		t.Fatal("ready preview exposes Generate or hides Regenerate")
 	}
 	mu.Lock()
 	resolveRequestsBeforeViewerReopen := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
@@ -379,7 +511,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	); err != nil {
 		t.Fatalf("reopen verified generated preview: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Preview ready") && document.querySelector("#preview-content img")?.naturalWidth > 0`, time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector("#preview-content img")?.naturalWidth > 0 && !document.querySelector("#preview-regenerate").hidden`, time.Second); err != nil {
 		t.Fatalf("verified generated preview was not reused immediately: %v (%s)", err, browserStatus(ctx))
 	}
 	mu.Lock()
@@ -402,7 +534,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	})()`, nil)); err != nil {
 		t.Fatalf("reopen expired document-memory preview: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Preview ready") && document.querySelector("#preview-content img")?.naturalWidth > 0`, 15*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector("#preview-content img")?.naturalWidth > 0 && !document.querySelector("#preview-regenerate").hidden`, 15*time.Second); err != nil {
 		t.Fatalf("expired generated preview was not reacquired: %v (%s)", err, browserStatus(ctx))
 	}
 	mu.Lock()
@@ -415,13 +547,13 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.Click("#preview-regenerate", chromedp.ByQuery)); err != nil {
 		t.Fatalf("regenerate preview: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("generation is running")`, 5*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector("#toast-region .toast.info")?.textContent.includes("Preview generation continues") && document.querySelector("#preview-regenerate").disabled`, 5*time.Second); err != nil {
 		t.Fatalf("wait for contending preview operation: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := harness.previewStore.Commit(context.Background(), binding, claim, artifact); err != nil {
 		t.Fatalf("complete contending preview generation: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector("#preview-status").textContent.includes("Preview ready")`, 15*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector("#preview-content img")?.naturalWidth > 0 && !document.querySelector("#preview-regenerate").disabled`, 15*time.Second); err != nil {
 		t.Fatalf("wait for regenerated preview: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := chromedp.Run(ctx, chromedp.KeyEvent(kb.ArrowLeft), chromedp.KeyEvent(kb.ArrowRight), chromedp.KeyEvent(kb.Escape)); err != nil {
@@ -566,6 +698,30 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		t.Fatalf("accessibility result: fitsMobile=%v namedControls=%v focus=%q focusOutline=%q", fitsMobile, namedControls, focusID, focusOutline)
 	}
 	if err := chromedp.Run(ctx,
+		chromedp.Focus("#new-folder-button", chromedp.ByQuery),
+		chromedp.KeyEvent(kb.Enter),
+		chromedp.WaitVisible("#action-dialog", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("open mobile action sheet: %v", err)
+	}
+	var mobileActionSheet bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const dialog = document.querySelector("#action-dialog");
+		const rect = dialog.getBoundingClientRect();
+		const style = getComputedStyle(dialog);
+		return style.top === "0px" && style.right === "0px" && style.bottom === "0px" && style.left === "0px" && Math.abs(rect.width - innerWidth) < 1 && Math.abs(rect.height - innerHeight) < 1;
+	})()`, &mobileActionSheet)); err != nil {
+		t.Fatalf("inspect mobile action sheet: %v", err)
+	}
+	if !mobileActionSheet {
+		t.Fatal("substantial action did not fill the 320-pixel viewport")
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.KeyEvent(kb.Escape),
+	); err != nil {
+		t.Fatalf("dismiss mobile action sheet: %v", err)
+	}
+	if err := chromedp.Run(ctx,
 		chromedp.Click("#logout-button", chromedp.ByQuery),
 		chromedp.WaitVisible("#auth-view", chromedp.ByQuery),
 	); err != nil {
@@ -679,6 +835,77 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	if err := chromedp.Run(member.ctx,
 		chromedp.Click("a[data-route='settings']", chromedp.ByQuery),
 		chromedp.WaitVisible("#settings-view", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("open settings: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.querySelector("#passkey-list").children.length === 1`, 10*time.Second); err != nil {
+		t.Fatalf("wait for settings records: %v", err)
+	}
+	var settingsTablesReady bool
+	if err := chromedp.Run(member.ctx, chromedp.Evaluate(`(() => {
+		const passkeyHeaders = Array.from(document.querySelectorAll("#passkey-table th")).map((node) => node.textContent.trim());
+		const shareHeaders = Array.from(document.querySelectorAll("#share-table th")).map((node) => node.textContent.trim());
+		const passkeys = document.querySelector("#passkey-list");
+		const shares = document.querySelector("#share-list");
+		const passkeyScroll = getComputedStyle(document.querySelector("#passkey-table-scroll"));
+		const shareScroll = getComputedStyle(document.querySelector("#share-table-scroll"));
+		return JSON.stringify(passkeyHeaders) === JSON.stringify(["Label", "Added", "Last used", "Actions"]) &&
+			JSON.stringify(shareHeaders) === JSON.stringify(["Location", "Status", "Type", "Created", "Expires", "Actions"]) &&
+			Number(passkeys.dataset.renderedCount) <= Number(passkeys.dataset.itemCount) &&
+			Number(shares.dataset.renderedCount) <= Number(shares.dataset.itemCount) &&
+			passkeyScroll.overflowY === "auto" && shareScroll.overflowY === "auto" &&
+			passkeyScroll.maxHeight !== "none" && shareScroll.maxHeight !== "none";
+	})()`, &settingsTablesReady)); err != nil {
+		t.Fatalf("inspect settings tables: %v", err)
+	}
+	if !settingsTablesReady {
+		t.Fatal("passkeys and shares are not presented as bounded tables with persistent headers")
+	}
+	var settingsFormsAligned bool
+	if err := chromedp.Run(member.ctx, chromedp.Evaluate(`(() => {
+		const accountHeading = document.querySelector("#profile-form .panel-heading");
+		const themeHeading = document.querySelector("#theme-form .panel-heading");
+		const remove = document.querySelector("#passkey-list .danger");
+		if (!accountHeading || !themeHeading || !remove) return false;
+		const account = accountHeading.getBoundingClientRect();
+		const theme = themeHeading.getBoundingClientRect();
+		const profile = document.querySelector("#profile-name").getBoundingClientRect();
+		const save = document.querySelector("#profile-form button[type='submit']").getBoundingClientRect();
+		const appearance = document.querySelector("#theme-select").getBoundingClientRect();
+		const apply = document.querySelector("#theme-form button[type='submit']").getBoundingClientRect();
+		return Math.abs(account.left - theme.left) < 1 && Math.abs(account.width - theme.width) < 1 &&
+			Math.abs(profile.left - account.left) < 1 && Math.abs(appearance.left - theme.left) < 1 &&
+			Math.abs(profile.left - appearance.left) < 1 && Math.abs(profile.width - appearance.width) < 1 &&
+			Math.abs(save.right - apply.right) < 1 && profile.top > account.bottom && appearance.top > theme.bottom &&
+			getComputedStyle(remove).backgroundColor !== "rgba(0, 0, 0, 0)";
+	})()`, &settingsFormsAligned)); err != nil {
+		t.Fatalf("inspect settings layout: %v", err)
+	}
+	if !settingsFormsAligned {
+		t.Fatal("account and theme controls are not organized into aligned form groups")
+	}
+	var mobileSettingsAligned bool
+	if err := chromedp.Run(member.ctx,
+		emulation.SetDeviceMetricsOverride(320, 720, 1, false),
+		chromedp.Evaluate(`(() => {
+			const heading = document.querySelector("#profile-form .panel-heading").getBoundingClientRect();
+			const field = document.querySelector("#profile-name").getBoundingClientRect();
+			const action = document.querySelector("#profile-form button[type='submit']").getBoundingClientRect();
+			const passkeys = document.querySelector("#passkey-table-scroll");
+			const shares = document.querySelector("#share-table-scroll");
+			return document.documentElement.scrollWidth <= 320 && Math.abs(heading.left - field.left) < 1 &&
+				field.top > heading.bottom && action.right <= 312 && field.left >= 8 && field.right <= 312 &&
+				passkeys.getBoundingClientRect().right <= 312 && shares.getBoundingClientRect().right <= 312 &&
+				passkeys.scrollWidth <= passkeys.clientWidth && shares.scrollWidth <= shares.clientWidth;
+		})()`, &mobileSettingsAligned),
+		emulation.SetDeviceMetricsOverride(800, 600, 1, false),
+	); err != nil {
+		t.Fatalf("inspect mobile settings layout: %v", err)
+	}
+	if !mobileSettingsAligned {
+		t.Fatal("settings forms did not collapse into an aligned 320-pixel layout")
+	}
+	if err := chromedp.Run(member.ctx,
 		chromedp.SetValue("#profile-name", "Renamed Member", chromedp.ByQuery),
 		chromedp.Evaluate(`document.querySelector("#profile-form").requestSubmit()`, nil),
 	); err != nil {
@@ -694,6 +921,29 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	}
 	if err := waitFor(member.ctx, `document.documentElement.dataset.theme === "endlessfs-dark"`, 10*time.Second); err != nil {
 		t.Fatalf("wait for dark theme: %v (%s)", err, browserStatus(member.ctx))
+	}
+	if err := chromedp.Run(member.ctx, chromedp.Click("#safe-theme", chromedp.ByQuery)); err != nil {
+		t.Fatalf("enable safe theme: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.documentElement.dataset.theme === "endlessfs-light"`, 10*time.Second); err != nil {
+		t.Fatalf("wait for safe theme: %v (%s)", err, browserStatus(member.ctx))
+	}
+	if err := chromedp.Run(member.ctx,
+		chromedp.Click("a[data-route='drive']", chromedp.ByQuery),
+		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
+		chromedp.Click("a[data-route='settings']", chromedp.ByQuery),
+		chromedp.WaitVisible("#settings-view", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("return to settings with safe theme: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.documentElement.dataset.theme === "endlessfs-light" && document.querySelector("#safe-theme").checked && new URL(location.href).searchParams.get("safe-theme") === "1"`, 10*time.Second); err != nil {
+		t.Fatalf("safe theme did not survive route navigation: %v (%s)", err, browserStatus(member.ctx))
+	}
+	if err := chromedp.Run(member.ctx, chromedp.Reload(), chromedp.WaitVisible("#settings-view", chromedp.ByQuery)); err != nil {
+		t.Fatalf("reload safe-theme settings: %v", err)
+	}
+	if err := waitFor(member.ctx, `document.documentElement.dataset.theme === "endlessfs-light" && document.querySelector("#safe-theme").checked`, 10*time.Second); err != nil {
+		t.Fatalf("safe theme did not survive reload: %v (%s)", err, browserStatus(member.ctx))
 	}
 
 	if err := chromedp.Run(member.ctx,
@@ -798,35 +1048,95 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	if err := chromedp.Run(admin.ctx, chromedp.Navigate(harness.origin+"/admin"), chromedp.WaitVisible("#admin-view", chromedp.ByQuery)); err != nil {
 		t.Fatalf("open user administration: %v", err)
 	}
-	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list li")).some((node) => node.textContent.includes("Renamed Member"))`, 10*time.Second); err != nil {
+	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list tr")).some((node) => node.textContent.includes("Renamed Member"))`, 10*time.Second); err != nil {
 		t.Fatalf("wait for invited user: %v (%s)", err, browserStatus(admin.ctx))
 	}
-	if err := chromedp.Run(admin.ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll("#user-list li")).find((node) => node.textContent.includes("Renamed Member")).querySelector("button").click()`, nil), chromedp.WaitVisible("#action-dialog", chromedp.ByQuery), chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
+	var adminUsersDeterministic bool
+	if err := chromedp.Run(admin.ctx, chromedp.Evaluate(`(() => {
+		const section = document.querySelector(".admin-users-section");
+		const rows = Array.from(document.querySelectorAll("#users-table #user-list tr"));
+		if (!section || rows.length < 2 || getComputedStyle(section).borderTopWidth !== "0px") return false;
+		const positions = rows.map((row) => Array.from(row.querySelectorAll(".user-actions button")).map((button) => button.getBoundingClientRect().left));
+		return positions.every((row) => row.length === 3 && row.every((left, index) => Math.abs(left - positions[0][index]) < 1));
+	})()`, &adminUsersDeterministic)); err != nil {
+		t.Fatalf("inspect admin user table: %v", err)
+	}
+	if !adminUsersDeterministic {
+		t.Fatal("admin users are not presented in deterministic table columns")
+	}
+	var adminUsersFitNarrow bool
+	if err := chromedp.Run(admin.ctx,
+		emulation.SetDeviceMetricsOverride(320, 720, 1, false),
+		chromedp.Evaluate(`(() => {
+			const scroller = document.querySelector("#users-table").parentElement;
+			const table = document.querySelector("#users-table");
+			const headings = Array.from(table.querySelectorAll("th"));
+			const rows = Array.from(table.querySelectorAll("#user-list tr"));
+			return document.documentElement.scrollWidth <= 320 &&
+				table.scrollWidth <= scroller.clientWidth &&
+				getComputedStyle(headings[0]).display !== "none" &&
+				getComputedStyle(headings[1]).display !== "none" &&
+				getComputedStyle(headings[2]).display === "none" &&
+				getComputedStyle(headings[3]).display === "none" &&
+				rows.every((row) => Array.from(row.querySelectorAll(".user-actions button")).every((button) => {
+					const rect = button.getBoundingClientRect();
+					return rect.left >= 0 && rect.right <= innerWidth;
+				}));
+		})()`, &adminUsersFitNarrow),
+		emulation.SetDeviceMetricsOverride(800, 600, 1, false),
+	); err != nil {
+		t.Fatalf("inspect narrow admin user table: %v", err)
+	}
+	if !adminUsersFitNarrow {
+		t.Fatal("admin users table overflows or loses primary controls at 320 CSS pixels")
+	}
+	if err := chromedp.Run(admin.ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll("#user-list tr")).find((node) => node.textContent.includes("Renamed Member")).querySelector("button").click()`, nil), chromedp.WaitVisible("#action-dialog", chromedp.ByQuery)); err != nil {
 		t.Fatalf("disable invited user: %v", err)
 	}
-	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list li")).some((node) => node.textContent.includes("Renamed Member") && node.textContent.includes("disabled"))`, 10*time.Second); err != nil {
+	var confirmationSettled bool
+	if err := runStage(admin.ctx, 5*time.Second, chromedp.Poll(`(() => {
+		const dialog = document.querySelector("#action-dialog");
+		const rect = dialog.getBoundingClientRect();
+		const style = getComputedStyle(dialog);
+		const fillsHeight = rect.top === 0 && Math.abs(rect.height - innerHeight) < 1;
+		if (innerWidth <= 760) return dialog.classList.contains("action-sheet") && fillsHeight && rect.left === 0 && rect.width >= innerWidth;
+		return dialog.classList.contains("action-sheet") && fillsHeight && style.right === "0px" && style.marginRight === "0px" && rect.width < innerWidth;
+	})()`, &confirmationSettled, chromedp.WithPollingInterval(10*time.Millisecond), chromedp.WithPollingTimeout(5*time.Second))); err != nil {
+		var confirmationGeometry string
+		_ = chromedp.Run(admin.ctx, chromedp.Evaluate(`(() => {
+			const dialog = document.querySelector("#action-dialog");
+			const rect = dialog.getBoundingClientRect();
+			const style = getComputedStyle(dialog);
+			return JSON.stringify({className: dialog.className, viewport: [innerWidth, innerHeight], rect: [rect.left, rect.top, rect.right, rect.bottom, rect.width, rect.height], inset: [style.top, style.right, style.bottom, style.left], margin: [style.marginTop, style.marginRight, style.marginBottom, style.marginLeft]});
+		})()`, &confirmationGeometry))
+		t.Fatalf("short confirmation did not settle into its responsive sheet: %v (%s)", err, confirmationGeometry)
+	}
+	if err := chromedp.Run(admin.ctx, chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
+		t.Fatalf("confirm disabling invited user: %v", err)
+	}
+	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list tr")).some((node) => node.textContent.includes("Renamed Member") && node.textContent.includes("disabled"))`, 10*time.Second); err != nil {
 		t.Fatalf("wait for disabled user: %v", err)
 	}
 	if err := chromedp.Run(admin.ctx, chromedp.Navigate(shareLink)); err != nil {
 		t.Fatalf("open disabled-owner share: %v", err)
 	}
-	if err := waitFor(admin.ctx, `document.querySelector("#public-state").textContent.includes("unavailable")`, 10*time.Second); err != nil {
+	if err := waitFor(admin.ctx, `document.querySelector("#drive-state").textContent.includes("unavailable")`, 10*time.Second); err != nil {
 		t.Fatalf("disabled owner share was not denied: %v (%s)", err, browserStatus(admin.ctx))
 	}
 
 	if err := chromedp.Run(admin.ctx, chromedp.Navigate(harness.origin+"/admin"), chromedp.WaitVisible("#admin-view", chromedp.ByQuery)); err != nil {
 		t.Fatalf("return to administration: %v", err)
 	}
-	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list li")).some((node) => node.textContent.includes("Renamed Member"))`, 10*time.Second); err != nil {
+	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list tr")).some((node) => node.textContent.includes("Renamed Member"))`, 10*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(admin.ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll("#user-list li")).find((node) => node.textContent.includes("Renamed Member")).querySelector("button").click()`, nil), chromedp.WaitVisible("#action-dialog", chromedp.ByQuery), chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(admin.ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll("#user-list tr")).find((node) => node.textContent.includes("Renamed Member")).querySelector("button").click()`, nil), chromedp.WaitVisible("#action-dialog", chromedp.ByQuery), chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
 		t.Fatalf("enable invited user: %v", err)
 	}
-	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list li")).some((node) => node.textContent.includes("Renamed Member") && node.textContent.includes("enabled"))`, 10*time.Second); err != nil {
+	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list tr")).some((node) => node.textContent.includes("Renamed Member") && node.textContent.includes("enabled"))`, 10*time.Second); err != nil {
 		t.Fatalf("wait for enabled user: %v", err)
 	}
-	if err := chromedp.Run(admin.ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll("#user-list li")).find((node) => node.textContent.includes("Renamed Member")).querySelectorAll("button")[2].click()`, nil), chromedp.WaitVisible("#action-dialog", chromedp.ByQuery), chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(admin.ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll("#user-list tr")).find((node) => node.textContent.includes("Renamed Member")).querySelectorAll("button")[2].click()`, nil), chromedp.WaitVisible("#action-dialog", chromedp.ByQuery), chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
 		t.Fatalf("create recovery link: %v", err)
 	}
 	if err := waitFor(admin.ctx, `document.querySelector("#dialog-output") !== null`, 10*time.Second); err != nil {
@@ -872,7 +1182,7 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	if err := chromedp.Run(admin.ctx, chromedp.Navigate(shareLink)); err != nil {
 		t.Fatalf("reopen revoked share: %v", err)
 	}
-	if err := waitFor(admin.ctx, `document.querySelector("#public-state").textContent.includes("unavailable")`, 10*time.Second); err != nil {
+	if err := waitFor(admin.ctx, `document.querySelector("#drive-state").textContent.includes("unavailable")`, 10*time.Second); err != nil {
 		t.Fatalf("revoked share was not denied: %v (%s)", err, browserStatus(admin.ctx))
 	}
 
@@ -900,12 +1210,19 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	); err != nil {
 		t.Fatalf("open dark mobile viewer by keyboard: %v", err)
 	}
-	if err := waitFor(member.ctx, `document.querySelector("#preview-status").textContent.includes("Preview ready")`, 15*time.Second); err != nil {
+	if err := waitFor(member.ctx, `document.querySelector("#preview-content img")?.naturalWidth > 0 && !document.querySelector("#preview-regenerate").hidden`, 15*time.Second); err != nil {
 		t.Fatalf("wait for dark mobile viewer: %v (%s)", err, browserStatus(member.ctx))
 	}
 	var darkMobileViewer bool
 	if err := chromedp.Run(member.ctx,
-		chromedp.Evaluate(`document.documentElement.dataset.theme === "endlessfs-dark" && document.documentElement.scrollWidth <= 320 && document.querySelector("#preview-dialog").getBoundingClientRect().width <= 320`, &darkMobileViewer),
+		chromedp.Evaluate(`(() => {
+			const bounds = document.querySelector("#preview-dialog").getBoundingClientRect();
+			return document.documentElement.dataset.theme === "endlessfs-dark" &&
+				document.documentElement.scrollWidth <= 320 &&
+				Math.abs(bounds.top) < 1 && Math.abs(bounds.left) < 1 &&
+				Math.abs(bounds.right - window.innerWidth) < 1 &&
+				Math.abs(bounds.bottom - window.innerHeight) < 1;
+		})()`, &darkMobileViewer),
 		chromedp.KeyEvent(kb.ArrowLeft),
 		chromedp.KeyEvent(kb.ArrowRight),
 		chromedp.KeyEvent(kb.Escape),
@@ -913,7 +1230,7 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 		t.Fatalf("navigate dark mobile viewer by keyboard: %v", err)
 	}
 	if !darkMobileViewer {
-		t.Fatal("dark media viewer did not fit the 320-pixel viewport")
+		t.Fatal("dark media viewer did not meet every edge of the 320-pixel viewport")
 	}
 
 	admin.assertNoExternalRequests(t, harness)
@@ -937,6 +1254,37 @@ func TestE2EMediaBrowserIsAvailableWithoutGeneratedPreviews(t *testing.T) {
 	if err := waitFor(client.ctx, `document.querySelector("#file-rows").textContent.includes("icon-only.png")`, 15*time.Second); err != nil {
 		t.Fatalf("wait for icon-only fixture: %v (%s)", err, browserStatus(client.ctx))
 	}
+	var rowTopBeforeSelection float64
+	var rowTopAfterSelection float64
+	var selectionSurfaceCanonical bool
+	if err := chromedp.Run(client.ctx,
+		chromedp.Evaluate(`document.querySelector("#file-rows tr").getBoundingClientRect().top`, &rowTopBeforeSelection),
+		chromedp.Click("#file-rows input[type='checkbox']", chromedp.ByQuery),
+		chromedp.WaitVisible("#selection-bar", chromedp.ByQuery),
+		chromedp.Evaluate(`document.querySelector("#file-rows tr").getBoundingClientRect().top`, &rowTopAfterSelection),
+		chromedp.Evaluate(`(() => {
+			const bar = document.querySelector("#selection-bar");
+			const controls = document.querySelector(".drive-controls");
+			const buttons = Array.from(bar.querySelectorAll("button"));
+			return getComputedStyle(bar).position === "fixed" &&
+				getComputedStyle(controls).visibility === "visible" &&
+				buttons.every((button) => {
+					const style = getComputedStyle(button);
+					return style.backgroundColor === "rgba(0, 0, 0, 0)" && parseFloat(style.borderTopWidth) === 0 && button.textContent.trim() === "";
+				});
+		})()`, &selectionSurfaceCanonical),
+	); err != nil {
+		t.Fatalf("measure selection layout stability: %v", err)
+	}
+	if shift := rowTopAfterSelection - rowTopBeforeSelection; shift < -0.5 || shift > 0.5 {
+		t.Fatalf("selecting a file shifted the first row by %.1f CSS pixels", shift)
+	}
+	if !selectionSurfaceCanonical {
+		t.Fatal("selection actions are not a floating canonical transparent-icon surface")
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Click("#clear-selection", chromedp.ByQuery)); err != nil {
+		t.Fatalf("clear measured selection: %v", err)
+	}
 	if err := chromedp.Run(client.ctx,
 		chromedp.Focus("#file-view-grid", chromedp.ByQuery),
 		chromedp.KeyEvent(" "),
@@ -950,7 +1298,7 @@ func TestE2EMediaBrowserIsAvailableWithoutGeneratedPreviews(t *testing.T) {
 	}
 	var correctBoundary bool
 	if err := chromedp.Run(client.ctx,
-		chromedp.Evaluate(`!document.querySelector("#file-presentation").hidden && !document.querySelector("#metadata-filters").hidden && document.querySelector("#preview-generate").hidden && document.querySelector("#preview-regenerate").hidden && document.querySelector("#preview-status").textContent.includes("not configured")`, &correctBoundary),
+		chromedp.Evaluate(`!document.querySelector("#file-presentation").hidden && !document.querySelector("#metadata-filters").hidden && document.querySelector("#preview-generate").hidden && document.querySelector("#preview-regenerate").hidden && !document.querySelector("#preview-status") && document.querySelector("#toast-region .toast.info")?.textContent.includes("not configured")`, &correctBoundary),
 		chromedp.KeyEvent(kb.ArrowLeft),
 		chromedp.KeyEvent(kb.ArrowRight),
 		chromedp.KeyEvent(kb.Escape),

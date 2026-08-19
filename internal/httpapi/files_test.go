@@ -468,7 +468,7 @@ func TestIntegrationBatchUploadEmptyTrashAndPublicDownloadRoutes(t *testing.T) {
 		t.Fatalf("trash = %d %s", trashed.Code, trashed.Body.String())
 	}
 	listing := performRequest(t, env.handler, http.MethodGet, "/api/v1/trash", "", "", []*http.Cookie{env.session}, nil)
-	if listing.Code != http.StatusOK || !bytes.Contains(listing.Body.Bytes(), []byte("public.txt")) {
+	if listing.Code != http.StatusOK || !bytes.Contains(listing.Body.Bytes(), []byte("public.txt")) || !bytes.Contains(listing.Body.Bytes(), []byte(`"mediaType":"text/plain"`)) || !bytes.Contains(listing.Body.Bytes(), []byte(`"size":6`)) {
 		t.Fatalf("trash listing = %d %s", listing.Code, listing.Body.String())
 	}
 	unconfirmed := performRequest(t, env.handler, http.MethodPost, "/api/v1/trash/empty", origin, `{"confirm":false}`, cookies, driveMutationHeaders(env.csrf.Value, "empty-trash-route-00002"))

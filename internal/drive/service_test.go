@@ -470,7 +470,7 @@ func TestUploadAbortBatchMoveTrashPagingAndEmptyTrash(t *testing.T) {
 		t.Fatalf("trash batch = %+v, %v", trashed, err)
 	}
 	page, err := env.service.TrashPage(ctx, env.owner, 1, "")
-	if err != nil || len(page.Items) != 1 || page.NextCursor == "" {
+	if err != nil || len(page.Items) != 1 || page.Items[0].MediaType != "text/plain" || page.Items[0].Size != 3 || page.NextCursor == "" {
 		t.Fatalf("trash page = %+v, %v", page, err)
 	}
 	page, err = env.service.TrashPage(ctx, env.owner, 1, page.NextCursor)

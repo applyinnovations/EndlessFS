@@ -501,6 +501,15 @@
             exec go run ./cmd/endlessfs "$@"
           '';
 
+          dev-fixture = goTask "endlessfs-dev-fixture" ''
+            export ENDLESSFS_LOCAL_FIXTURE=true
+            export ENDLESSFS_PREVIEW_PROVIDER=mock
+            export ENDLESSFS_PREVIEW_AUTOMATIC=true
+            ENDLESSFS_SESSION_SECRET="$(go run ./tools/generate-secret)"
+            export ENDLESSFS_SESSION_SECRET
+            exec go run ./cmd/endlessfs "$@"
+          '';
+
           generate-secret = goTask "endlessfs-generate-secret" ''
             exec go run ./tools/generate-secret
           '';

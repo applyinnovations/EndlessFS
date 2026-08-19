@@ -14,10 +14,20 @@
     transferGroups: new Map(),
     directoryPromises: new Map(),
     activeTransfers: 0,
+    transferFilter: "current",
+    transferRenderFrame: 0,
+    transferVisibleLimits: new Map(),
     themes: [],
+    passkeys: [],
+    shares: [],
     publicToken: "",
     publicPath: "/",
     publicCursor: "",
+    publicLoading: false,
+    trashCursor: "",
+    trashLoading: false,
+    trashRequest: 0,
+    browserAccess: "owner",
     inviteToken: "",
     recoveryToken: "",
     dialogOpener: null,
@@ -36,6 +46,8 @@
     gridObserver: null,
     gridRenderFrame: 0,
     listRenderFrame: 0,
+    passkeyRenderFrame: 0,
+    shareRenderFrame: 0,
     viewerEntries: [],
     viewerIndex: -1,
     viewerObjectURL: "",
@@ -44,11 +56,14 @@
     viewerEntry: null,
     viewerController: null,
     viewerOpener: null,
+    safeTheme: new URLSearchParams(location.search).get("safe-theme") === "1",
   };
 
   const gridOverscanRows = 3;
   const listOverscanRows = 8;
   const listRowHeight = 36;
+  const settingsOverscanRows = 6;
+  const settingsRowHeight = 36;
   const previewRetryDelays = [250, 500, 1000, 2000, 4000, 5000];
   const maximumPreviewPolls = 14;
   const maximumViewerPreviewCacheEntries = 8;
@@ -56,6 +71,7 @@
   const maximumRenderedStandaloneTransfers = 32;
   const maximumRenderedTransferGroups = 24;
   const maximumRenderedGroupFiles = 20;
+  const transferProgressSampleWeight = 0.35;
   let toastTimer = 0;
 
   class APIError extends Error {
@@ -81,6 +97,121 @@
     node.addEventListener("click", action);
     return node;
   };
+  const iconPaths = Object.freeze({
+    "arrow-left": ["M5 12l14 0", "M5 12l6 6", "M5 12l6 -6"],
+    "arrow-right": ["M5 12l14 0", "M13 18l6 -6", "M13 6l6 6"],
+    check: ["M5 12l5 5l10 -10"],
+    "chevron-down": ["M6 9l6 6l6 -6"],
+    "chevron-up": ["M6 15l6 -6l6 6"],
+    copy: ["M7 9.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667l0 -8.666", "M4.012 16.737a2.005 2.005 0 0 1 -1.012 -1.737v-10c0 -1.1 .9 -2 2 -2h10c.75 0 1.158 .385 1.5 1"],
+    "device-floppy": ["M6 4h9l5 5v9a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2", "M8 4v6h8v-4", "M8 20v-6h8v6"],
+    download: ["M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2", "M7 11l5 5l5 -5", "M12 4l0 12"],
+    eye: ["M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0", "M21 12c-2.4 4 -5.4 6 -9 6s-6.6 -2 -9 -6c2.4 -4 5.4 -6 9 -6s6.6 2 9 6"],
+    file: ["M14 3v4a1 1 0 0 0 1 1h4", "M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2"],
+    "folder-plus": ["M12 19h-7a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v3.5", "M16 19h6", "M19 16v6"],
+    "folder-symlink": ["M3 21v-4a3 3 0 0 1 3 -3h5", "M8 17l3 -3l-3 -3", "M3 11v-5a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8"],
+    "folder-up": ["M12 19h-7a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2h4l3 3h7a2 2 0 0 1 2 2v3.5", "M19 22v-6", "M22 19l-3 -3l-3 3"],
+    key: ["M16.555 3.843l3.602 3.602a2.877 2.877 0 0 1 0 4.069l-2.643 2.643a2.877 2.877 0 0 1 -4.069 0l-.301 -.301l-6.558 6.558a2 2 0 0 1 -1.239 .578l-.175 .008h-1.172a1 1 0 0 1 -.993 -.883l-.007 -.117v-1.172a2 2 0 0 1 .467 -1.284l.119 -.13l.414 -.414h2v-2h2v-2l2.144 -2.144l-.301 -.301a2.877 2.877 0 0 1 0 -4.069l2.643 -2.643a2.877 2.877 0 0 1 4.069 0", "M15 9h.01"],
+    "key-off": ["M10.144 10.856l-.301 -.301a2.877 2.877 0 0 1 -.251 -3.76m1.908 -1.908l.986 -1.044a2.877 2.877 0 0 1 4.069 0l3.602 3.602a2.877 2.877 0 0 1 0 4.069l-1.043 .986m-2.914 2.914a2.877 2.877 0 0 1 -2.755 -1.257l-.301 -.301l-6.558 6.558a2 2 0 0 1 -1.239 .578l-.175 .008h-1.172a1 1 0 0 1 -1 -1v-1.172a2 2 0 0 1 .586 -1.414l.414 -.414h2v-2h2v-2l2.144 -2.144", "M3 3l18 18"],
+    "key-plus": ["M16.555 3.843l3.602 3.602a2.877 2.877 0 0 1 0 4.069l-2.643 2.643a2.877 2.877 0 0 1 -4.069 0l-.301 -.301l-6.558 6.558a2 2 0 0 1 -1.239 .578l-.175 .008h-1.172a1 1 0 0 1 -.993 -.883l-.007 -.117v-1.172a2 2 0 0 1 .467 -1.284l.119 -.13l.414 -.414h2v-2h2v-2l2.144 -2.144l-.301 -.301a2.877 2.877 0 0 1 0 -4.069l2.643 -2.643a2.877 2.877 0 0 1 4.069 0", "M15 9h.01", "M18 16v6", "M15 19h6"],
+    "layout-grid": ["M4 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4", "M14 5a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4", "M4 15a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4", "M14 15a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v4a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1l0 -4"],
+    list: ["M9 6l11 0", "M9 12l11 0", "M9 18l11 0", "M5 6l0 .01", "M5 12l0 .01", "M5 18l0 .01"],
+    "link-off": ["M10 13a5 5 0 0 0 7.54 .54l1 -1a5 5 0 0 0 -7.07 -7.07l-.57 .57", "M14 11a5 5 0 0 0 -7.54 -.54l-1 1a5 5 0 0 0 7.07 7.07l.57 -.57", "M3 3l18 18"],
+    logout: ["M14 8v-2a2 2 0 0 0 -2 -2h-7a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2 -2v-2", "M9 12h12l-3 -3", "M18 15l3 -3"],
+    refresh: ["M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4", "M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"],
+    restore: ["M3.06 13a9 9 0 1 0 .49 -4.087", "M3 4.001v5h5", "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"],
+    "share-3": ["M13 4v4c-6.575 1.028 -9.02 6.788 -10 12c-.037 .206 5.384 -5.962 10 -6v4l8 -7l-8 -7"],
+    "shield-minus": ["M12.46 20.871c-.153 .046 -.306 .089 -.46 .129a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3a12 12 0 0 0 8.5 3a12 12 0 0 1 -.916 9.015", "M16 19h6"],
+    "shield-plus": ["M12.462 20.87c-.153 .047 -.307 .09 -.462 .13a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3a12 12 0 0 0 8.5 3a12 12 0 0 1 .11 6.37", "M16 19h6", "M19 16v6"],
+    trash: ["M4 7l16 0", "M10 11l0 6", "M14 11l0 6", "M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2 -2l1 -12", "M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3"],
+    "trash-x": ["M4 7h16", "M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2 -2l1 -12", "M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3", "M10 12l4 4m0 -4l-4 4"],
+    upload: ["M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2", "M7 9l5 -5l5 5", "M12 4l0 12"],
+    "user-check": ["M8 7a4 4 0 1 0 8 0a4 4 0 0 0 -8 0", "M6 21v-2a4 4 0 0 1 4 -4h4", "M15 19l2 2l4 -4"],
+    "user-off": ["M8.18 8.189a4.01 4.01 0 0 0 2.616 2.627m3.507 -.545a4 4 0 1 0 -5.59 -5.552", "M6 21v-2a4 4 0 0 1 4 -4h4c.412 0 .81 .062 1.183 .178m2.633 2.618c.12 .38 .184 .785 .184 1.204v2", "M3 3l18 18"],
+    "user-plus": ["M8 7a4 4 0 1 0 8 0a4 4 0 0 0 -8 0", "M6 21v-2a4 4 0 0 1 4 -4h4", "M16 19h6", "M19 16v6"],
+    x: ["M18 6l-12 12", "M6 6l12 12"],
+  });
+  const applicationIcon = (name) => {
+    const namespace = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(namespace, "svg");
+    svg.setAttribute("class", "app-icon"); svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true"); svg.setAttribute("focusable", "false");
+    for (const pathData of iconPaths[name] || iconPaths.x) {
+      const path = document.createElementNS(namespace, "path"); path.setAttribute("d", pathData); svg.append(path);
+    }
+    return svg;
+  };
+  const setIconControl = (node, name, label = node.getAttribute("aria-label")) => {
+    node.replaceChildren(applicationIcon(name)); node.dataset.icon = name;
+    if (label) { node.setAttribute("aria-label", label); node.dataset.tooltip = label; }
+    if (label && node === actionTooltipTarget) activeActionTooltip().textContent = label;
+    node.removeAttribute("title");
+    return node;
+  };
+  const iconButton = (name, label, action, className = "", tooltip = label) => {
+    const node = button("", action, `${className}${className ? " " : ""}icon-button`);
+    setIconControl(node, name, label);
+    node.dataset.tooltip = tooltip;
+    return node;
+  };
+  function wireIconControls() {
+    document.querySelectorAll("[data-icon]").forEach((control) => setIconControl(control, control.dataset.icon));
+  }
+  let actionTooltipTarget = null;
+  function hideActionTooltip(target = null) {
+    if (target && target !== actionTooltipTarget) return;
+    actionTooltipTarget = null;
+    const tooltip = byID("action-tooltip");
+    tooltip.hidden = true;
+    tooltip.textContent = "";
+    if (tooltip.parentElement !== byID("app")) byID("urgent-status").after(tooltip);
+  }
+  function activeActionTooltip() {
+    const tooltip = byID("action-tooltip");
+    const openDialogs = [...document.querySelectorAll("dialog[open]")];
+    const host = openDialogs[openDialogs.length - 1] || byID("app");
+    if (tooltip.parentElement !== host) host.append(tooltip);
+    return tooltip;
+  }
+  function showActionTooltip(target) {
+    const label = target.dataset.tooltip;
+    if (!label || target.disabled) return;
+    const tooltip = activeActionTooltip();
+    actionTooltipTarget = target;
+    tooltip.textContent = label;
+    tooltip.style.visibility = "hidden";
+    tooltip.hidden = false;
+    const targetRect = target.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const inset = 6;
+    const gap = 6;
+    const centered = targetRect.left + ((targetRect.width - tooltipRect.width) / 2);
+    const left = Math.max(inset, Math.min(centered, window.innerWidth - tooltipRect.width - inset));
+    let top = targetRect.top - tooltipRect.height - gap;
+    if (top < inset) top = targetRect.bottom + gap;
+    top = Math.max(inset, Math.min(top, window.innerHeight - tooltipRect.height - inset));
+    tooltip.style.left = `${Math.round(left)}px`;
+    tooltip.style.top = `${Math.round(top)}px`;
+    tooltip.style.visibility = "visible";
+  }
+  const tooltipTarget = (event) => event.target instanceof Element ? event.target.closest("[data-tooltip]") : null;
+  function wireActionTooltips() {
+    document.addEventListener("pointerover", (event) => {
+      const target = tooltipTarget(event);
+      if (target && !target.contains(event.relatedTarget)) showActionTooltip(target);
+    });
+    document.addEventListener("pointerout", (event) => {
+      const target = tooltipTarget(event);
+      if (target && !target.contains(event.relatedTarget)) hideActionTooltip(target);
+    });
+    document.addEventListener("focusin", (event) => {
+      const target = tooltipTarget(event);
+      if (target) showActionTooltip(target);
+    });
+    document.addEventListener("focusout", (event) => hideActionTooltip(tooltipTarget(event)));
+    document.addEventListener("pointerdown", () => hideActionTooltip());
+    window.addEventListener("scroll", () => hideActionTooltip(), true);
+    window.addEventListener("resize", () => hideActionTooltip());
+  }
   const cookie = (name) => {
     const prefix = `${name}=`;
     const item = document.cookie.split("; ").find((part) => part.startsWith(prefix));
@@ -137,9 +268,111 @@
     target.hidden = !message;
   }
 
+  function renderTableLoadingRows(targetID, kind, columns, count = 5) {
+    const target = byID(targetID);
+    const fragment = document.createDocumentFragment();
+    for (let rowIndex = 0; rowIndex < count; rowIndex += 1) {
+      const row = document.createElement("tr");
+      row.className = `loading-item-row loading-${kind}-row`;
+      row.setAttribute("aria-hidden", "true");
+      for (let columnIndex = 0; columnIndex < columns; columnIndex += 1) {
+        const cell = document.createElement("td");
+        if (kind === "file" && columnIndex === 0) cell.className = "owner-only";
+        if (columnIndex === columns - 1) cell.className = "table-icon-action-cell";
+        cell.append(document.createElement("span"));
+        row.append(cell);
+      }
+      fragment.append(row);
+    }
+    target.replaceChildren(fragment);
+    target.setAttribute("aria-busy", "true");
+  }
+
+  function renderRecordLoadingItems(targetID, count = 1) {
+    const target = byID(targetID);
+    const fragment = document.createDocumentFragment();
+    for (let index = 0; index < count; index += 1) {
+      const item = document.createElement("li");
+      item.className = "loading-record-row";
+      item.setAttribute("aria-hidden", "true");
+      const main = document.createElement("div");
+      main.className = "record-main";
+      const copy = document.createElement("div");
+      copy.className = "loading-record-copy";
+      copy.append(text("span", "", "loading-record-line"), text("span", "", "loading-record-line"));
+      main.append(copy, text("span", "", "loading-record-action"));
+      item.append(main);
+      fragment.append(item);
+    }
+    target.replaceChildren(fragment);
+    target.setAttribute("aria-busy", "true");
+  }
+
+  function finishListLoading(targetID) {
+    byID(targetID).removeAttribute("aria-busy");
+  }
+
+  function syncFilePresentation() {
+    const gridEnabled = state.viewMode === "grid";
+    byID("drop-target").dataset.presentation = gridEnabled ? "grid" : "list";
+    byID("list-presentation").hidden = gridEnabled;
+    byID("media-grid").hidden = !gridEnabled;
+    return gridEnabled;
+  }
+
+  function renderFileLoadingItems() {
+    const gridEnabled = syncFilePresentation();
+    if (!gridEnabled) {
+      renderTableLoadingRows("file-rows", "file", 6, 6);
+      return;
+    }
+    const layer = document.createElement("div");
+    layer.className = "loading-media-layer";
+    layer.setAttribute("aria-hidden", "true");
+    for (let index = 0; index < 12; index += 1) layer.append(text("span", "", "loading-media-item"));
+    const content = byID("media-grid-content");
+    content.replaceChildren(layer);
+    content.setAttribute("aria-busy", "true");
+  }
+
   function clearToast() {
     window.clearTimeout(toastTimer);
-    byID("toast-region").replaceChildren();
+    const region = byID("toast-region");
+    region.replaceChildren();
+    if (region.parentElement !== byID("app")) byID("urgent-status").after(region);
+  }
+
+  function activeToastRegion() {
+    const region = byID("toast-region");
+    const openDialogs = [...document.querySelectorAll("dialog[open]")];
+    const host = openDialogs[openDialogs.length - 1] || byID("app");
+    if (region.parentElement !== host) host.append(region);
+    return region;
+  }
+
+  function showTopLayerDialog(dialog) {
+    dialog.showModal();
+    if (byID("toast-region").childElementCount) activeToastRegion();
+  }
+
+  function closeTopLayerDialog(dialog) {
+    dialog.close();
+    if (byID("toast-region").childElementCount) activeToastRegion();
+  }
+
+  function showToast(message, level, duration = 8000) {
+    clearToast();
+    const toast = document.createElement("div");
+    toast.className = `toast ${level}`;
+    toast.append(text("span", message), iconButton("x", "Dismiss notification", clearToast, "", "Dismiss"));
+    activeToastRegion().append(toast);
+    announce(message, level === "error");
+    toastTimer = window.setTimeout(clearToast, duration);
+  }
+
+  function showActionErrorToast(action, error, fallback) {
+    const message = `${action} failed. ${friendlyError(error, fallback)}`;
+    showToast(message, "error", 12000);
   }
 
   function showTrashUndo(items) {
@@ -147,7 +380,7 @@
     if (!recoverable.length) return;
     clearToast();
     const toast = document.createElement("div");
-    toast.className = "toast";
+    toast.className = "toast success";
     toast.append(text("span", `${recoverable.length} item${recoverable.length === 1 ? "" : "s"} moved to Trash`));
     const undo = button("Undo", async () => {
       undo.disabled = true;
@@ -169,7 +402,7 @@
       }
     }, "quiet");
     toast.append(undo);
-    byID("toast-region").append(toast);
+    activeToastRegion().append(toast);
     toastTimer = window.setTimeout(clearToast, 10000);
   }
 
@@ -192,6 +425,28 @@
   function showOnly(id) {
     for (const view of ["loading-view", "auth-view", "registration-view", "public-view", "authenticated-view"]) {
       byID(view).hidden = view !== id;
+    }
+    byID("app").dataset.state = id.replace("-view", "");
+  }
+
+  function syncFileBrowserAccess(access) {
+    const surface = byID("file-browser-surface");
+    const host = byID(`${access}-browser-host`);
+    if (surface.parentElement !== host) host.append(surface);
+    state.browserAccess = access;
+    surface.dataset.access = access;
+    byID("breadcrumbs").setAttribute("aria-label", access === "public" ? "Shared folder path" : "Current folder");
+    const collectionLabel = access === "trash" ? "Items in trash" : access === "public" ? "Files in shared folder" : "Files in the current folder";
+    byID("file-table-caption").textContent = collectionLabel;
+    byID("media-grid").setAttribute("aria-label", collectionLabel);
+    if (access !== "trash") state.trashRequest += 1;
+    if (access !== "owner") {
+      state.directoryRequest += 1;
+      state.selected.clear();
+      updateSelection();
+      byID("drop-target").removeAttribute("aria-describedby");
+    } else {
+      byID("drop-target").setAttribute("aria-describedby", "drop-help");
     }
   }
 
@@ -352,26 +607,60 @@
     return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unit]}`;
   }
 
+  function formatRate(value) {
+    return Number.isFinite(value) && value > 0 ? `${formatBytes(value)}/s` : "—/s";
+  }
+
+  function formatDuration(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return "ETA —";
+    const rounded = Math.max(1, Math.round(seconds));
+    if (rounded < 60) return `${rounded}s remaining`;
+    if (rounded < 3600) return `${Math.round(rounded / 60)}m remaining`;
+    const hours = Math.floor(rounded / 3600);
+    const minutes = Math.round((rounded % 3600) / 60);
+    return `${hours}h${minutes ? ` ${minutes}m` : ""} remaining`;
+  }
+
   function formatDate(value) {
     const date = new Date(value);
-    return Number.isNaN(date.valueOf()) ? "Unknown" : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
+    if (Number.isNaN(date.valueOf())) return "Unknown";
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+    const sameCalendarDate = (candidate, reference) => candidate.getFullYear() === reference.getFullYear()
+      && candidate.getMonth() === reference.getMonth()
+      && candidate.getDate() === reference.getDate();
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const dayLabel = sameCalendarDate(date, today) ? "Today"
+      : sameCalendarDate(date, yesterday) ? "Yesterday"
+        : `${date.getDate()} ${months[date.getMonth()]} ${date.getFullYear()}`;
+    const period = date.getHours() < 12 ? "am" : "pm";
+    const hour = date.getHours() % 12 || 12;
+    const minute = String(date.getMinutes()).padStart(2, "0");
+    return `${dayLabel} at ${hour}:${minute} ${period}`;
   }
 
   function setRoute(route, push = true) {
-    if (!state.user) return;
+    if (!state.user) return Promise.resolve();
     const paths = { drive: "/", trash: "/trash", settings: "/settings", admin: "/admin" };
     if (route === "admin" && !(state.user.roles || []).includes("admin")) route = "drive";
-    if (push && location.pathname !== paths[route]) history.pushState({ route }, "", paths[route]);
+    if (route === "drive") syncFileBrowserAccess("owner");
+    if (route === "trash") syncFileBrowserAccess("trash");
+    if (route === "drive" || route === "trash") byID("browser-title").textContent = route === "trash" ? "Trash" : "Files";
+    const routeURL = `${paths[route]}${state.safeTheme ? "?safe-theme=1" : ""}`;
+    if (push && `${location.pathname}${location.search}` !== routeURL) history.pushState({ route }, "", routeURL);
     for (const name of Object.keys(paths)) byID(`${name}-view`).hidden = name !== route;
     document.querySelectorAll("[data-route]").forEach((link) => {
-      if (link.closest(".sidebar")) link.setAttribute("aria-current", link.dataset.route === route ? "page" : "false");
+      if (link.closest(".app-tabs")) link.setAttribute("aria-current", link.dataset.route === route ? "page" : "false");
     });
-    const heading = byID(`${route}-title`);
+    const heading = route === "drive" || route === "trash" ? byID("browser-title") : byID(`${route}-title`);
     if (heading) heading.focus({ preventScroll: true });
-    if (route === "drive") loadDirectory(state.currentDirectory);
-    if (route === "trash") loadTrash();
-    if (route === "settings") loadSettings();
-    if (route === "admin") loadAdmin();
+    if (route === "drive") return loadDirectory(state.currentDirectory);
+    if (route === "trash") return loadTrash();
+    if (route === "settings") return loadSettings();
+    if (route === "admin") return loadAdmin();
+    return Promise.resolve();
   }
 
   function routeFromPath() {
@@ -379,6 +668,19 @@
     if (location.pathname === "/settings") return "settings";
     if (location.pathname === "/admin") return "admin";
     return "drive";
+  }
+
+  function themePreferenceURL(dark) {
+    const query = new URLSearchParams({ dark: String(dark) });
+    if (state.safeTheme) query.set("safe-theme", "1");
+    return `/api/v1/me/preferences/theme?${query.toString()}`;
+  }
+
+  function syncSafeThemeURL() {
+    const current = new URL(location.href);
+    if (state.safeTheme) current.searchParams.set("safe-theme", "1");
+    else current.searchParams.delete("safe-theme");
+    history.replaceState(history.state, "", `${current.pathname}${current.search}${current.hash}`);
   }
 
   function renderBreadcrumbs(targetID, directory, navigate) {
@@ -413,7 +715,8 @@
       byID("list-presentation").scrollTop = 0;
       byID("media-grid").scrollTop = 0;
       updateSelection();
-      showState("drive-state", "Loading files…");
+      showState("drive-state", "");
+      renderFileLoadingItems();
     }
     renderBreadcrumbs("breadcrumbs", directory, (path) => loadDirectory(path));
     const [sort, order] = byID("file-sort").value.split(":");
@@ -431,6 +734,9 @@
       else {
         showState("drive-state", friendlyError(error, "Files could not be loaded."), "error");
         byID("file-rows").replaceChildren();
+        byID("media-grid-content").replaceChildren();
+        finishListLoading("file-rows");
+        finishListLoading("media-grid-content");
         announce(friendlyError(error), true);
       }
     } finally {
@@ -441,27 +747,36 @@
   function renderFiles() {
     const visible = filterLoadedEntries(state.entries);
     state.filteredEntries = visible;
-    const gridEnabled = state.viewMode === "grid";
-    byID("list-presentation").hidden = gridEnabled;
-    byID("media-grid").hidden = !gridEnabled;
+    finishListLoading("file-rows");
+    finishListLoading("media-grid-content");
+    const gridEnabled = syncFilePresentation();
     if (gridEnabled) renderVirtualGrid(visible);
     else {
       cleanupGridMedia(new Set());
       renderVirtualList(visible);
     }
-    showState("drive-state", visible.length ? "" : (state.entries.length ? "No loaded items match this filter." : "This folder is empty. Upload a file or create a folder."));
-    byID("next-page").hidden = !state.nextCursor;
-    const selectedVisible = visible.filter((entry) => state.selected.has(entry.path)).length;
-    byID("select-all").checked = visible.length > 0 && selectedVisible === visible.length;
-    byID("select-all").indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
+    const emptyMessages = {
+      owner: "This folder is empty. Upload a file or create a folder.",
+      public: "This shared folder is empty.",
+      trash: "Trash is empty.",
+    };
+    const emptyMessage = emptyMessages[state.browserAccess] || emptyMessages.owner;
+    showState("drive-state", visible.length ? "" : (state.entries.length ? "No loaded items match this filter." : emptyMessage));
+    const nextCursor = state.browserAccess === "public" ? state.publicCursor : state.browserAccess === "trash" ? state.trashCursor : state.nextCursor;
+    byID("next-page").hidden = !nextCursor;
+    if (state.browserAccess === "owner") {
+      const selectedVisible = visible.filter((entry) => state.selected.has(entry.path)).length;
+      byID("select-all").checked = visible.length > 0 && selectedVisible === visible.length;
+      byID("select-all").indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
+    }
   }
 
-  function listSpacerRow(height) {
+  function listSpacerRow(height, columns = 6) {
     const row = document.createElement("tr");
     row.className = "list-spacer";
     row.setAttribute("aria-hidden", "true");
     const cell = document.createElement("td");
-    cell.colSpan = 5;
+    cell.colSpan = columns;
     const spacer = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     spacer.setAttribute("width", "1");
     spacer.setAttribute("height", String(Math.max(0, Math.round(height))));
@@ -487,16 +802,57 @@
     rows.dataset.renderedCount = String(end - start);
   }
 
+  function emptyTableRow(message, columns) {
+    const row = document.createElement("tr");
+    row.className = "empty-table-row";
+    const cell = document.createElement("td");
+    cell.colSpan = columns;
+    cell.textContent = message;
+    row.append(cell);
+    return row;
+  }
+
+  function renderVirtualSettingsTable(scrollerID, targetID, entries, columns, rowFactory, emptyMessage, force = false) {
+    const scroller = byID(scrollerID);
+    const rows = byID(targetID);
+    const fragment = document.createDocumentFragment();
+    if (!entries.length) {
+      if (!force && rows.dataset.windowKey === "empty") return;
+      fragment.append(emptyTableRow(emptyMessage, columns));
+      rows.replaceChildren(fragment);
+      rows.dataset.itemCount = "0";
+      rows.dataset.renderedCount = "0";
+      rows.dataset.windowKey = "empty";
+      finishListLoading(targetID);
+      return;
+    }
+    const headingHeight = scroller.querySelector("thead").getBoundingClientRect().height || settingsRowHeight;
+    const viewportHeight = Math.max(settingsRowHeight, scroller.clientHeight - headingHeight);
+    const firstVisible = Math.max(0, Math.floor(scroller.scrollTop / settingsRowHeight));
+    const start = Math.max(0, firstVisible - settingsOverscanRows);
+    const end = Math.min(entries.length, firstVisible + Math.ceil(viewportHeight / settingsRowHeight) + settingsOverscanRows);
+    const windowKey = `${entries.length}:${start}:${end}`;
+    if (!force && rows.dataset.windowKey === windowKey) return;
+    if (start > 0) fragment.append(listSpacerRow(start * settingsRowHeight, columns));
+    for (let index = start; index < end; index += 1) fragment.append(rowFactory(entries[index]));
+    if (end < entries.length) fragment.append(listSpacerRow((entries.length - end) * settingsRowHeight, columns));
+    rows.replaceChildren(fragment);
+    rows.dataset.itemCount = String(entries.length);
+    rows.dataset.renderedCount = String(end - start);
+    rows.dataset.windowKey = windowKey;
+    finishListLoading(targetID);
+  }
+
   function filterLoadedEntries(entries) {
     const query = byID("file-filter").value.trim().toLocaleLowerCase();
     const kind = byID("filter-kind").value;
     const media = byID("filter-media").value;
-    const previewState = byID("filter-preview").value;
+    const previewState = state.browserAccess === "owner" ? byID("filter-preview").value : "";
     const minimumSize = Number.parseInt(byID("filter-min-size").value, 10);
     const maximumSize = Number.parseInt(byID("filter-max-size").value, 10);
     const modifiedAfter = byID("filter-modified-after").value ? new Date(`${byID("filter-modified-after").value}T00:00:00`).valueOf() : Number.NEGATIVE_INFINITY;
     const modifiedBefore = byID("filter-modified-before").value ? new Date(`${byID("filter-modified-before").value}T23:59:59.999`).valueOf() : Number.POSITIVE_INFINITY;
-    return entries.filter((entry) => {
+    const filtered = entries.filter((entry) => {
       const changed = new Date(entry.modifiedAt).valueOf();
       const knownPreviewState = state.previewStates.get(entry.path);
       return (!query || entry.name.toLocaleLowerCase().includes(query)) &&
@@ -507,6 +863,15 @@
         (!Number.isFinite(changed) || (changed >= modifiedAfter && changed <= modifiedBefore)) &&
         (!previewState || (knownPreviewState ? knownPreviewState.state : "missing") === previewState);
     });
+    const [sort, order] = byID("file-sort").value.split(":");
+    const direction = order === "desc" ? -1 : 1;
+    const compare = (left, right) => {
+      if (sort === "modified") return direction * (new Date(left.modifiedAt).valueOf() - new Date(right.modifiedAt).valueOf());
+      if (sort === "size") return direction * ((left.size || 0) - (right.size || 0));
+      if (sort === "kind") return direction * (left.kind.localeCompare(right.kind) || left.name.localeCompare(right.name));
+      return direction * left.name.localeCompare(right.name);
+    };
+    return filtered.map((entry, index) => ({ entry, index })).sort((left, right) => compare(left.entry, right.entry) || left.index - right.index).map((item) => item.entry);
   }
 
   function mediaCategory(entry) {
@@ -597,11 +962,15 @@
 
   function mediaTile(entry, index, columns) {
     const tile = document.createElement("article");
-    tile.className = `media-tile${state.selected.has(entry.path) ? " selected" : ""}`;
+    const ownerAccess = state.browserAccess === "owner";
+    const trashAccess = state.browserAccess === "trash";
+    tile.className = `media-tile${ownerAccess && state.selected.has(entry.path) ? " selected" : ""}`;
     tile.setAttribute("role", "gridcell");
     tile.setAttribute("aria-rowindex", String(Math.floor(index / columns) + 1));
     tile.setAttribute("aria-colindex", String(index % columns + 1));
+    if (trashAccess) tile.setAttribute("aria-label", `Trashed ${entry.name}`);
     const checkbox = document.createElement("input");
+    checkbox.className = "owner-only";
     checkbox.type = "checkbox";
     checkbox.checked = state.selected.has(entry.path);
     checkbox.setAttribute("aria-label", `Select ${entry.name}`);
@@ -609,21 +978,22 @@
       if (checkbox.checked) state.selected.set(entry.path, entry); else state.selected.delete(entry.path);
       renderFiles(); updateSelection();
     });
-    const open = document.createElement("button");
-    open.type = "button";
+    const open = document.createElement(trashAccess ? "div" : "button");
+    if (!trashAccess) open.type = "button";
     open.className = "media-tile-open";
-    open.setAttribute("aria-label", `${entry.kind === "directory" ? "Open folder" : "View file"} ${entry.name}`);
+    if (!trashAccess) open.setAttribute("aria-label", `${entry.kind === "directory" ? "Open folder" : "View file"} ${entry.name}`);
     const frame = document.createElement("span");
     frame.className = "media-frame";
     frame.entry = entry;
     frame.dataset.path = entry.path;
-    if (previewEligible(entry)) frame.dataset.previewCandidate = "true";
+    if (ownerAccess && previewEligible(entry)) frame.dataset.previewCandidate = "true";
     const objectURL = state.previewObjectURLs.get(entry.path);
     if (objectURL) setPreviewImage(frame, entry, objectURL, state.previewStates.get(entry.path));
     else frame.append(fileTypeIcon(entry, "media-fallback-icon"));
-    open.append(frame, text("strong", entry.name, "media-tile-name"), text("span", entry.kind === "directory" ? "Folder" : formatBytes(entry.size), "media-tile-meta"));
-    open.addEventListener("click", () => entry.kind === "directory" ? loadDirectory(entry.path) : openMediaViewer(entry));
+    open.append(frame, text("strong", entry.name, "media-tile-name"), text("span", entry.kind === "directory" ? "" : formatBytes(entry.size), "media-tile-meta"));
+    if (!trashAccess) open.addEventListener("click", () => openBrowserEntry(entry));
     tile.append(checkbox, open);
+    if (trashAccess) tile.append(trashActionGroup(entry.trash, "trash-media-actions"));
     return tile;
   }
 
@@ -798,8 +1168,11 @@
 
   function fileRow(entry) {
     const row = document.createElement("tr");
-    if (state.selected.has(entry.path)) row.className = "selected";
+    const ownerAccess = state.browserAccess === "owner";
+    const trashAccess = state.browserAccess === "trash";
+    if (ownerAccess && state.selected.has(entry.path)) row.className = "selected";
     const selectCell = document.createElement("td");
+    selectCell.className = "owner-only";
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.checked = state.selected.has(entry.path);
@@ -811,25 +1184,64 @@
     });
     selectCell.append(checkbox);
     const nameCell = document.createElement("td");
-    const open = button(entry.name, () => entry.kind === "directory" ? loadDirectory(entry.path) : preview(entry), "file-name");
-    open.prepend(fileTypeIcon(entry));
-    open.setAttribute("aria-label", `${entry.kind === "directory" ? "Open folder" : "Preview file"} ${entry.name}`);
-    nameCell.append(open);
-    const sizeCell = text("td", entry.kind === "directory" ? "Folder" : formatBytes(entry.size));
+    if (trashAccess) {
+      const name = text("span", entry.name, "file-name trash-file-name");
+      name.prepend(fileTypeIcon(entry));
+      nameCell.append(name);
+    } else {
+      const open = button(entry.name, () => openBrowserEntry(entry), "file-name");
+      open.prepend(fileTypeIcon(entry));
+      open.setAttribute("aria-label", `${entry.kind === "directory" ? "Open folder" : "Preview file"} ${entry.name}`);
+      nameCell.append(open);
+    }
+    const sizeCell = text("td", entry.kind === "directory" ? "" : formatBytes(entry.size));
+    const mediaTypeCell = text("td", entry.kind === "directory" ? "—" : entry.mediaType || "application/octet-stream");
     const dateCell = text("td", formatDate(entry.modifiedAt));
     const actionCell = document.createElement("td");
+    actionCell.className = "table-icon-action-cell";
     const actions = document.createElement("div");
-    actions.className = "row-actions";
-    if (entry.kind === "file") actions.append(button("Download", () => download(entry), "quiet"));
-    actions.append(button("More", () => openItemActions(entry), "quiet"));
+    actions.className = "row-actions file-row-actions";
+    if (!trashAccess && entry.kind === "file") actions.append(iconButton("download", `Download ${entry.name}`, () => download(entry, ownerAccess ? "" : state.publicToken), "file-row-action", "Download"));
+    if (ownerAccess) {
+      actions.append(
+        iconButton("share-3", `Create public share for ${entry.name}`, () => createShare(entry), "file-row-action", "Share"),
+        iconButton("copy", `Copy ${entry.name}`, () => copyMove(false, [entry], false), "file-row-action", "Copy"),
+        iconButton("folder-symlink", `Move ${entry.name}`, () => copyMove(true, [entry], false), "file-row-action", "Move"),
+        iconButton("trash", `Move ${entry.name} to trash`, () => trashEntries([entry], false), "file-row-action danger", "Move to trash"),
+      );
+    }
+    if (trashAccess) actions.append(...trashActionGroup(entry.trash).children);
     actionCell.append(actions);
-    row.append(selectCell, nameCell, sizeCell, dateCell, actionCell);
+    row.append(selectCell, nameCell, sizeCell, mediaTypeCell, dateCell, actionCell);
     return row;
+  }
+
+  function trashActionGroup(item, className = "") {
+    const actions = document.createElement("div");
+    actions.className = `row-actions${className ? ` ${className}` : ""}`;
+    actions.append(
+      iconButton("restore", "Restore", () => restoreTrash(item), "file-row-action"),
+      iconButton("trash-x", "Delete Permanently", () => deleteTrash(item), "file-row-action danger"),
+    );
+    return actions;
+  }
+
+  function openBrowserEntry(entry) {
+    if (entry.kind === "directory") {
+      if (state.browserAccess === "public") {
+        state.publicPath = entry.path;
+        loadPublicShare();
+      } else loadDirectory(entry.path);
+      return;
+    }
+    preview(entry, state.browserAccess === "public" ? state.publicToken : "");
   }
 
   function updateSelection() {
     const count = state.selected.size;
     byID("selection-bar").hidden = count === 0;
+    if (count > 0) byID("app").dataset.selectionActive = "true";
+    else delete byID("app").dataset.selectionActive;
     byID("selection-count").textContent = `${count} selected`;
     byID("download-selected").disabled = count !== 1 || [...state.selected.values()][0].kind !== "file";
     byID("share-selected").disabled = count !== 1;
@@ -856,7 +1268,7 @@
     const baseDirectory = state.currentDirectory;
     const inputs = Array.from(files).map((value) => value instanceof File ? { file: value, relativePath: value.webkitRelativePath || value.name } : value)
       .filter((value) => value && value.file instanceof File && typeof value.relativePath === "string");
-    const groupID = options.groupName ? idempotencyKey() : "";
+    const groupID = options.groupName || inputs.length > 1 ? idempotencyKey() : "";
     const queued = [];
     for (const input of inputs) {
       const components = validUploadComponents(input.relativePath);
@@ -870,15 +1282,19 @@
       queued.push({
         id: idempotencyKey(), file: input.file, name, directory, baseDirectory, relativeDirectory,
         relativePath: input.relativePath, groupID, state: "queued", confirmed: 0, error: "", controller: null, uploadID: "",
+        speedBps: 0, lastProgressAt: 0, lastProgressBytes: 0, recoveryFailures: 0,
       });
     }
     const directories = Array.from(new Set(options.directories || [])).filter((relative) => validUploadComponents(relative));
     if (!queued.length && !directories.length) return;
     state.transfers.push(...queued);
+    state.transferFilter = "current";
+    byID("transfer-filter").value = "current";
+    state.transferVisibleLimits.clear();
     if (groupID) {
       const group = {
-        id: groupID, name: options.groupName, baseDirectory, directories, transferIDs: queued.map((transfer) => transfer.id),
-        totalSize: queued.reduce((total, transfer) => total + transfer.file.size, 0), state: "preparing", error: "", refreshed: false, cancelled: false,
+        id: groupID, name: options.groupName || `${queued.length} files`, baseDirectory, directories, transferIDs: queued.map((transfer) => transfer.id),
+        totalSize: queued.reduce((total, transfer) => total + transfer.file.size, 0), state: "preparing", error: "", refreshed: false, cancelled: false, failureAnnounced: false,
       };
       state.transferGroups.set(groupID, group);
       prepareTransferGroup(group);
@@ -887,8 +1303,7 @@
     panel.hidden = false;
     panel.classList.remove("collapsed");
     byID("transfer-toggle").setAttribute("aria-expanded", "true");
-    byID("transfer-toggle").setAttribute("aria-label", "Collapse transfers");
-    byID("transfer-toggle").textContent = "⌄";
+    setIconControl(byID("transfer-toggle"), "chevron-down", "Collapse transfers");
     renderTransfers();
     if (!groupID) pumpTransfers();
   }
@@ -1043,16 +1458,79 @@
         transfer.state = "failed";
         transfer.error = group.error;
       }
+      group.failureAnnounced = true;
       announce(`${group.name} failed to upload.`, true);
     }
     renderTransfers();
   }
 
+  function automaticTransferConcurrency() {
+    const configuredMaximum = Number(state.config && state.config.maximumTransferConcurrency);
+    const maximum = Math.max(1, Math.min(8, Number.isFinite(configuredMaximum) ? configuredMaximum : 8));
+    const pending = state.transfers.filter((transfer) => ["queued", "preparing", "uploading"].includes(transfer.state));
+    if (pending.length <= 1) return 1;
+
+    const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    let networkCeiling = maximum;
+    if (connection && connection.saveData) networkCeiling = 1;
+    else if (connection && ["slow-2g", "2g"].includes(connection.effectiveType)) networkCeiling = 1;
+    else if (connection && connection.effectiveType === "3g") networkCeiling = Math.min(networkCeiling, 2);
+    else if (connection && Number.isFinite(connection.downlink)) {
+      if (connection.downlink < 1.5) networkCeiling = Math.min(networkCeiling, 1);
+      else if (connection.downlink < 5) networkCeiling = Math.min(networkCeiling, 2);
+      else if (connection.downlink < 20) networkCeiling = Math.min(networkCeiling, 3);
+      else if (connection.downlink < 50) networkCeiling = Math.min(networkCeiling, 4);
+    }
+
+    const hardware = Number(navigator.hardwareConcurrency);
+    const fallback = Number(state.config && state.config.defaultTransferConcurrency) || 4;
+    const hardwareCeiling = Number.isFinite(hardware) && hardware > 0 ? Math.max(2, Math.ceil(hardware / 2)) : fallback;
+    const ceiling = Math.max(1, Math.min(maximum, networkCeiling, hardwareCeiling));
+    const averageSize = pending.reduce((total, transfer) => total + transfer.file.size, 0) / pending.length;
+    let desired = Math.min(ceiling, 4);
+    if (averageSize <= 256 * 1024) desired = Math.min(ceiling, pending.length > 500 ? ceiling : 6);
+    else if (averageSize >= 256 * 1024 * 1024) desired = Math.min(ceiling, 2);
+    else if (averageSize >= 64 * 1024 * 1024) desired = Math.min(ceiling, 3);
+
+    const active = pending.filter((transfer) => ["preparing", "uploading"].includes(transfer.state));
+    const recovering = active.filter((transfer) => transfer.recoveryFailures > 0).length;
+    if (active.length && recovering >= Math.ceil(active.length / 2)) desired = Math.min(desired, Math.max(1, Math.floor(active.length / 2)));
+    return Math.max(1, Math.min(desired, pending.length));
+  }
+
+  function beginTransferMeasurement(transfer) {
+    transfer.speedBps = 0;
+    transfer.lastProgressBytes = Math.min(transfer.confirmed, transfer.file.size);
+    transfer.lastProgressAt = performance.now();
+    transfer.recoveryFailures = 0;
+  }
+
+  function recordTransferProgress(transfer, confirmed) {
+    const next = Math.max(transfer.confirmed, Math.min(confirmed, transfer.file.size));
+    const now = performance.now();
+    const elapsed = now - transfer.lastProgressAt;
+    const transferred = next - transfer.lastProgressBytes;
+    if (transferred > 0 && elapsed > 0) {
+      const instantaneous = transferred * 1000 / elapsed;
+      transfer.speedBps = transfer.speedBps > 0
+        ? transfer.speedBps * (1 - transferProgressSampleWeight) + instantaneous * transferProgressSampleWeight
+        : instantaneous;
+    }
+    transfer.confirmed = next;
+    transfer.lastProgressBytes = next;
+    transfer.lastProgressAt = now;
+  }
+
+  function scheduleTransferRender() {
+    if (state.transferRenderFrame) return;
+    state.transferRenderFrame = requestAnimationFrame(() => {
+      state.transferRenderFrame = 0;
+      renderTransfers();
+    });
+  }
+
   function pumpTransfers() {
-    const configured = Number.parseInt(byID("transfer-concurrency").value, 10);
-    const maximum = state.config ? state.config.maximumTransferConcurrency : 8;
-    const concurrency = Math.min(maximum, Math.max(1, Number.isFinite(configured) ? configured : 4));
-    byID("transfer-concurrency").value = String(concurrency);
+    const concurrency = automaticTransferConcurrency();
     while (state.activeTransfers < concurrency) {
       const transfer = state.transfers.find((item) => item.state === "queued" && (!item.groupID || state.transferGroups.get(item.groupID)?.state !== "preparing"));
       if (!transfer) break;
@@ -1088,13 +1566,14 @@
       const capability = await api("/api/v1/uploads", { method: "POST", headers: { "Idempotency-Key": transfer.id }, body: { path: transfer.directory, name: transfer.name, size: transfer.file.size, mediaType, conflict: "rename", resumable: true }, signal: transfer.controller.signal });
       transfer.uploadID = capability.uploadID;
       transfer.state = "uploading";
+      beginTransferMeasurement(transfer);
       updateTransferGroup(transfer.groupID);
       renderTransfers();
       await sendFileData(transfer, capability);
       await api(`/api/v1/uploads/${encodeURIComponent(capability.uploadID)}/complete`, { method: "POST", body: { path: joinPath(transfer.directory, transfer.name), size: transfer.file.size, mediaType }, signal: transfer.controller.signal });
-      transfer.confirmed = transfer.file.size;
+      recordTransferProgress(transfer, transfer.file.size);
       transfer.state = "complete";
-      announce(`${transfer.name} uploaded.`);
+      if (!transfer.groupID) announce(`${transfer.name} uploaded.`);
       if (transfer.directory === state.currentDirectory) await loadDirectory(state.currentDirectory);
     } catch (error) {
       if (error.name === "AbortError") {
@@ -1103,7 +1582,7 @@
       } else {
         transfer.state = "failed";
         transfer.error = friendlyError(error, "Upload interrupted. Retry to resume from a confirmed offset.");
-        announce(`${transfer.name} failed to upload.`, true);
+        if (!transfer.groupID) announce(`${transfer.name} failed to upload.`, true);
       }
     }
   }
@@ -1144,17 +1623,19 @@
           confirmed = status.confirmedOffset;
         }
         offset = Math.max(offset, confirmed);
-        transfer.confirmed = offset;
+        recordTransferProgress(transfer, offset);
         failures = 0;
-        renderTransfers();
+        transfer.recoveryFailures = 0;
+        scheduleTransferRender();
         if (transfer.file.size === 0) break;
         continue;
       }
       const status = await api(`/api/v1/uploads/${encodeURIComponent(capability.uploadID)}`);
       offset = status.confirmedOffset;
-      transfer.confirmed = offset;
-      renderTransfers();
+      recordTransferProgress(transfer, offset);
       failures += 1;
+      transfer.recoveryFailures = failures;
+      scheduleTransferRender();
       if (failures > 3) throw new Error("Upload interrupted after three recovery attempts.");
       await new Promise((resolve) => window.setTimeout(resolve, 250 * (2 ** (failures - 1)) + Math.floor(Math.random() * 100)));
     }
@@ -1167,6 +1648,7 @@
     }
     transfer.state = "cancelled";
     transfer.error = "Cancelled";
+    transfer.speedBps = 0;
     renderTransfers();
     announce(`${transfer.name} cancelled.`);
   }
@@ -1187,6 +1669,10 @@
       if (state.currentDirectory === group.baseDirectory) loadDirectory(group.baseDirectory);
       announce(`${group.name} uploaded with ${transfers.length} files.`);
     }
+    if (group.state === "failed" && !group.failureAnnounced) {
+      group.failureAnnounced = true;
+      announce(`${group.name} has ${transfers.filter((transfer) => transfer.state === "failed").length} failed uploads.`, true);
+    }
   }
 
   async function cancelTransferGroup(group) {
@@ -1200,6 +1686,7 @@
   function retryTransferGroup(group) {
     group.cancelled = false;
     group.refreshed = false;
+    group.failureAnnounced = false;
     for (const transfer of state.transfers.filter((item) => item.groupID === group.id && ["failed", "cancelled"].includes(item.state))) {
       if (transfer.state === "cancelled") {
         transfer.id = idempotencyKey();
@@ -1208,98 +1695,249 @@
       }
       transfer.state = "queued";
       transfer.error = "";
+      transfer.speedBps = 0;
+      transfer.lastProgressAt = 0;
+      transfer.lastProgressBytes = transfer.confirmed;
+      transfer.recoveryFailures = 0;
     }
     prepareTransferGroup(group);
+  }
+
+  function transferStateLabel(value) {
+    return ({ queued: "Queued", preparing: "Preparing", uploading: "Uploading", complete: "Complete", failed: "Failed", cancelled: "Cancelled" })[value] || "Waiting";
+  }
+
+  function aggregateTransferSummary(transfers) {
+    const counts = { queued: 0, preparing: 0, uploading: 0, complete: 0, failed: 0, cancelled: 0 };
+    let totalBytes = 0;
+    let confirmedBytes = 0;
+    let remainingBytes = 0;
+    let speedBps = 0;
+    for (const transfer of transfers) {
+      if (Object.hasOwn(counts, transfer.state)) counts[transfer.state] += 1;
+      totalBytes += transfer.file.size;
+      confirmedBytes += Math.min(transfer.confirmed, transfer.file.size);
+      if (["queued", "preparing", "uploading"].includes(transfer.state)) remainingBytes += Math.max(0, transfer.file.size - transfer.confirmed);
+      if (transfer.state === "uploading" && Number.isFinite(transfer.speedBps)) speedBps += transfer.speedBps;
+    }
+    const totalCount = transfers.length;
+    const percent = totalBytes > 0
+      ? Math.round(confirmedBytes / totalBytes * 100)
+      : totalCount > 0 ? Math.round(counts.complete / totalCount * 100) : 0;
+    const active = counts.preparing + counts.uploading;
+    let eta = "ETA —";
+    if (totalCount > 0 && counts.complete === totalCount) eta = "Complete";
+    else if (!navigator.onLine && active + counts.queued > 0) eta = "Offline";
+    else if (speedBps > 0 && remainingBytes > 0) eta = formatDuration(remainingBytes / speedBps);
+    else if (active > 0) eta = "Calculating ETA";
+    else if (counts.queued > 0) eta = "Waiting";
+    else if (counts.failed > 0) eta = "Needs attention";
+    return { counts, totalCount, totalBytes, confirmedBytes, remainingBytes, speedBps, percent, active, eta };
+  }
+
+  function transferMetricText(transfer) {
+    const total = transfer.file.size;
+    const confirmed = Math.min(transfer.confirmed, total);
+    const percent = total > 0 ? Math.round(confirmed / total * 100) : transfer.state === "complete" ? 100 : 0;
+    let eta = "Waiting";
+    if (transfer.state === "uploading") eta = transfer.speedBps > 0 ? formatDuration((total - confirmed) / transfer.speedBps) : "Calculating ETA";
+    else if (transfer.state === "preparing") eta = "Preparing";
+    else if (transfer.state === "complete") eta = "Complete";
+    else if (transfer.state === "failed") eta = "Needs attention";
+    else if (transfer.state === "cancelled") eta = "Cancelled";
+    return `${percent}% · ${eta} · ${formatRate(transfer.speedBps)}`;
   }
 
   function transferRow(transfer) {
     const row = document.createElement("div");
     row.className = `transfer-row ${transfer.state}`;
     const label = transfer.groupID ? transfer.relativePath : transfer.name;
-    row.append(text("strong", label), text("span", transfer.state === "uploading" ? `${formatBytes(transfer.confirmed)} of ${formatBytes(transfer.file.size)}` : transfer.state));
+    const tail = document.createElement("div");
+    tail.className = "transfer-row-tail";
+    tail.append(text("span", transferStateLabel(transfer.state), "transfer-row-state"));
+    if (["queued", "preparing", "uploading"].includes(transfer.state)) tail.append(iconButton("x", `Cancel upload ${label}`, () => cancelTransfer(transfer), "transfer-row-actions", "Cancel upload"));
+    if (transfer.state === "failed" || (!transfer.groupID && transfer.state === "cancelled")) {
+      tail.append(iconButton("refresh", `Retry upload ${label}`, () => {
+        transfer.state = "queued";
+        transfer.error = "";
+        transfer.speedBps = 0;
+        transfer.lastProgressAt = 0;
+        transfer.lastProgressBytes = transfer.confirmed;
+        transfer.recoveryFailures = 0;
+        pumpTransfers();
+        renderTransfers();
+      }, "transfer-row-actions", "Retry upload"));
+    }
+    const metrics = document.createElement("div");
+    metrics.className = "transfer-row-metrics";
+    metrics.append(text("span", transferMetricText(transfer)), text("span", `${formatBytes(transfer.confirmed)} of ${formatBytes(transfer.file.size)}`));
     const progress = document.createElement("progress");
     progress.max = Math.max(1, transfer.file.size);
     progress.value = transfer.file.size === 0 && transfer.state === "complete" ? 1 : transfer.confirmed;
     progress.setAttribute("aria-label", `Upload progress for ${label}`);
-    row.append(progress);
-    if (transfer.error) row.append(text("span", transfer.error, "field-help"));
-    if (["queued", "preparing", "uploading"].includes(transfer.state)) row.append(button("Cancel", () => cancelTransfer(transfer), "quiet"));
-    if (!transfer.groupID && ["failed", "cancelled"].includes(transfer.state)) row.append(button("Retry", () => { transfer.state = "queued"; transfer.error = ""; pumpTransfers(); renderTransfers(); }, "secondary"));
+    row.append(text("strong", label, "transfer-row-main"), tail, metrics, progress);
+    if (transfer.error) row.append(text("span", transfer.error, "transfer-row-error"));
     return row;
+  }
+
+  function groupDisplayState(group, transfers) {
+    if (group.error) return "failed";
+    if (["preparing", "queued", "uploading"].includes(group.state)) return group.state;
+    if (transfers.some((transfer) => transfer.state === "failed")) return "failed";
+    return group.state;
+  }
+
+  function groupPriorityState(group, transfers) {
+    return group.error || transfers.some((transfer) => transfer.state === "failed") ? "failed" : groupDisplayState(group, transfers);
   }
 
   function transferGroupRow(group, transfers) {
+    const summary = aggregateTransferSummary(transfers);
+    const displayState = groupDisplayState(group, transfers);
     const row = document.createElement("div");
-    row.className = `transfer-group-row ${group.state}`;
-    const confirmed = transfers.reduce((total, transfer) => total + Math.min(transfer.confirmed, transfer.file.size), 0);
-    const complete = transfers.filter((transfer) => transfer.state === "complete").length;
-    const failed = transfers.filter((transfer) => transfer.state === "failed").length;
-    const status = `${formatBytes(confirmed)} of ${formatBytes(group.totalSize)} • ${complete} of ${transfers.length} files${failed ? ` • ${failed} failed` : ""}`;
-    row.append(text("strong", group.name), text("span", group.state === "preparing" ? "Preparing folders…" : status));
+    row.className = `transfer-group-row ${displayState}`;
+    const tail = document.createElement("div");
+    tail.className = "transfer-row-tail";
+    tail.append(text("span", transferStateLabel(displayState), "transfer-row-state"));
+    if (["preparing", "queued", "uploading"].includes(group.state)) tail.append(iconButton("x", `Cancel folder upload ${group.name}`, () => cancelTransferGroup(group), "transfer-row-actions", "Cancel folder upload"));
+    if (["failed", "cancelled"].includes(group.state)) tail.append(iconButton("refresh", `Retry folder upload ${group.name}`, () => retryTransferGroup(group), "transfer-row-actions", "Retry folder upload"));
+    const metrics = document.createElement("div");
+    metrics.className = "transfer-row-metrics";
+    const metricText = group.state === "preparing" && !transfers.some((transfer) => transfer.state !== "queued")
+      ? `${summary.percent}% · Preparing · ${formatRate(summary.speedBps)}`
+      : `${summary.percent}% · ${summary.eta} · ${formatRate(summary.speedBps)}`;
+    metrics.append(text("span", metricText), text("span", `${summary.counts.complete} of ${transfers.length} files${summary.counts.failed ? ` · ${summary.counts.failed} failed` : ""}`));
     const progress = document.createElement("progress");
     progress.max = group.totalSize > 0 ? group.totalSize : Math.max(1, transfers.length);
-    progress.value = group.totalSize > 0 ? confirmed : transfers.length ? complete : group.state === "complete" ? 1 : 0;
+    progress.value = group.totalSize > 0 ? summary.confirmedBytes : transfers.length ? summary.counts.complete : group.state === "complete" ? 1 : 0;
     progress.setAttribute("aria-label", `Upload progress for folder ${group.name}`);
-    row.append(progress);
-    if (group.error) row.append(text("span", group.error, "field-help"));
-    if (["preparing", "queued", "uploading"].includes(group.state)) row.append(button("Cancel folder", () => cancelTransferGroup(group), "quiet"));
-    if (["failed", "cancelled"].includes(group.state)) row.append(button("Retry folder", () => retryTransferGroup(group), "secondary"));
+    row.append(text("strong", group.name, "transfer-row-main"), tail, metrics, progress);
+    if (group.error) row.append(text("span", group.error, "transfer-row-error"));
     return row;
   }
 
-  function prioritizedTransferRows(items, limit) {
-    const actionable = items.filter((item) => !["complete", "cancelled"].includes(item.state));
-    const recent = items.filter((item) => ["complete", "cancelled"].includes(item.state)).slice().reverse();
-    const visible = actionable.slice(0, limit);
-    if (visible.length < limit) visible.push(...recent.slice(0, limit - visible.length));
-    return { visible, hidden: Math.max(0, items.length - visible.length) };
+  function transferMatchesFilter(item, filter) {
+    if (filter === "failed") return item.state === "failed";
+    if (filter === "complete") return item.state === "complete";
+    if (filter === "current") return !["complete", "cancelled"].includes(item.state);
+    return true;
   }
 
-  function summarizeTransferRows(parent, hidden, noun) {
+  function prioritizedTransferRows(items, limit) {
+    const rank = { failed: 0, uploading: 1, preparing: 2, queued: 3, cancelled: 4, complete: 5 };
+    const ordered = items.map((item, index) => ({ item, index })).sort((left, right) => {
+      const stateOrder = (rank[left.item.state] ?? 6) - (rank[right.item.state] ?? 6);
+      if (stateOrder) return stateOrder;
+      if (["complete", "cancelled"].includes(left.item.state)) return right.index - left.index;
+      return left.index - right.index;
+    }).map(({ item }) => item);
+    return { visible: ordered.slice(0, limit), hidden: Math.max(0, ordered.length - limit) };
+  }
+
+  function transferVisibleLimit(key, initial) {
+    return state.transferVisibleLimits.get(key) || initial;
+  }
+
+  function summarizeTransferRows(parent, hidden, noun, key, increment) {
     if (!hidden) return;
     const item = document.createElement("li");
     item.className = "transfer-summary";
-    item.textContent = `${hidden} more ${noun}`;
+    item.append(text("span", `${hidden} more ${noun}`), iconButton("chevron-down", `Show more ${noun}`, () => {
+      state.transferVisibleLimits.set(key, transferVisibleLimit(key, increment) + increment);
+      renderTransfers();
+    }));
     parent.append(item);
+  }
+
+  function renderTransferOverview(summary) {
+    const progress = byID("transfer-progress");
+    progress.max = summary.totalBytes > 0 ? summary.totalBytes : Math.max(1, summary.totalCount);
+    progress.value = summary.totalBytes > 0 ? summary.confirmedBytes : summary.counts.complete;
+    progress.setAttribute("aria-valuetext", `${summary.percent}% uploaded`);
+    byID("transfer-percent").textContent = `${summary.percent}%`;
+    byID("transfer-eta").textContent = summary.eta;
+    byID("transfer-speed").textContent = formatRate(summary.speedBps);
+    byID("transfer-compact-metrics").textContent = `${summary.percent}% · ${summary.eta} · ${formatRate(summary.speedBps)}`;
+    byID("transfer-volume").textContent = `${formatBytes(summary.confirmedBytes)} of ${formatBytes(summary.totalBytes)}`;
+    const parts = [];
+    if (summary.active) parts.push(`${summary.active} active`);
+    if (summary.counts.queued) parts.push(`${summary.counts.queued} queued`);
+    if (summary.counts.failed) parts.push(`${summary.counts.failed} failed`);
+    if (summary.counts.complete) parts.push(`${summary.counts.complete} complete`);
+    if (summary.counts.cancelled) parts.push(`${summary.counts.cancelled} cancelled`);
+    byID("transfer-counts").textContent = parts.join(" · ") || "0 files";
+    const filter = byID("transfer-filter");
+    filter.options[0].textContent = `Current (${summary.active + summary.counts.queued + summary.counts.failed})`;
+    filter.options[1].textContent = `Failed (${summary.counts.failed})`;
+    filter.options[2].textContent = `Complete (${summary.counts.complete})`;
+    filter.options[3].textContent = `All (${summary.totalCount})`;
+    byID("clear-transfers").disabled = summary.counts.complete + summary.counts.cancelled === 0;
   }
 
   function renderTransfers() {
     const list = byID("transfer-list");
     list.replaceChildren();
-    const standalone = prioritizedTransferRows(state.transfers.filter((item) => !item.groupID), maximumRenderedStandaloneTransfers);
+    const allTransfers = state.transfers.length > 0 && state.transfers.every((item) => ["complete", "cancelled"].includes(item.state));
+    const allGroups = [...state.transferGroups.values()].every((group) => ["complete", "cancelled"].includes(group.state));
+    if (allTransfers && allGroups) {
+      state.transferFilter = "all";
+      byID("transfer-filter").value = "all";
+    }
+    const filter = state.transferFilter;
+    const summary = aggregateTransferSummary(state.transfers);
+    renderTransferOverview(summary);
+    const standaloneTransfers = [];
+    const transfersByGroup = new Map();
+    for (const transfer of state.transfers) {
+      if (!transfer.groupID) {
+        standaloneTransfers.push(transfer);
+        continue;
+      }
+      if (!transfersByGroup.has(transfer.groupID)) transfersByGroup.set(transfer.groupID, []);
+      transfersByGroup.get(transfer.groupID).push(transfer);
+    }
+    const standaloneKey = `standalone:${filter}`;
+    const standaloneItems = standaloneTransfers.filter((item) => transferMatchesFilter(item, filter));
+    const standalone = prioritizedTransferRows(standaloneItems, transferVisibleLimit(standaloneKey, maximumRenderedStandaloneTransfers));
     for (const transfer of standalone.visible) {
       const item = document.createElement("li");
       item.append(transferRow(transfer));
       list.append(item);
     }
-    summarizeTransferRows(list, standalone.hidden, "transfers");
-    const groups = prioritizedTransferRows([...state.transferGroups.values()], maximumRenderedTransferGroups);
-    for (const group of groups.visible) {
-      const transfers = state.transfers.filter((item) => item.groupID === group.id);
+    summarizeTransferRows(list, standalone.hidden, "transfers", standaloneKey, maximumRenderedStandaloneTransfers);
+    const groupItems = [...state.transferGroups.values()].filter((group) => {
+      const transfers = transfersByGroup.get(group.id) || [];
+      return transfers.some((item) => transferMatchesFilter(item, filter))
+        || (!transfers.length && (filter === "all" || transferMatchesFilter(group, filter)));
+    });
+    const groupsKey = `groups:${filter}`;
+    const groups = prioritizedTransferRows(groupItems.map((group) => ({ ...group, state: groupPriorityState(group, transfersByGroup.get(group.id) || []) })), transferVisibleLimit(groupsKey, maximumRenderedTransferGroups));
+    for (const groupView of groups.visible) {
+      const group = state.transferGroups.get(groupView.id);
+      const transfers = transfersByGroup.get(group.id) || [];
       const item = document.createElement("li");
       item.append(transferGroupRow(group, transfers));
       const files = document.createElement("ul");
       files.className = "transfer-file-list";
-      const groupFiles = prioritizedTransferRows(transfers, maximumRenderedGroupFiles);
+      const filesKey = `files:${group.id}:${filter}`;
+      const filteredFiles = transfers.filter((transfer) => transferMatchesFilter(transfer, filter));
+      const groupFiles = prioritizedTransferRows(filteredFiles, transferVisibleLimit(filesKey, maximumRenderedGroupFiles));
       for (const transfer of groupFiles.visible) {
         const fileItem = document.createElement("li");
         fileItem.append(transferRow(transfer));
         files.append(fileItem);
       }
-      summarizeTransferRows(files, groupFiles.hidden, "files");
+      summarizeTransferRows(files, groupFiles.hidden, "files", filesKey, maximumRenderedGroupFiles);
       item.append(files);
       list.append(item);
     }
-    summarizeTransferRows(list, groups.hidden, "upload groups");
+    summarizeTransferRows(list, groups.hidden, "upload groups", groupsKey, maximumRenderedTransferGroups);
 
-    const allTransfers = state.transfers.length > 0 && state.transfers.every((item) => ["complete", "cancelled"].includes(item.state));
-    const allGroups = [...state.transferGroups.values()].every((group) => ["complete", "cancelled"].includes(group.state));
     if (allTransfers && allGroups) {
       const panel = byID("transfer-panel");
       panel.classList.add("collapsed");
       byID("transfer-toggle").setAttribute("aria-expanded", "false");
-      byID("transfer-toggle").setAttribute("aria-label", "Expand transfers");
-      byID("transfer-toggle").textContent = "⌃";
+      setIconControl(byID("transfer-toggle"), "chevron-up", "Expand transfers");
     }
   }
 
@@ -1315,7 +1953,7 @@
       link.click();
       link.remove();
       announce(`Download started for ${entry.name}.`);
-    } catch (error) { announce(friendlyError(error, "Download could not start."), true); }
+    } catch (error) { showActionErrorToast("Download", error, "Download could not start."); }
   }
 
   async function preview(entry, publicToken = "") {
@@ -1337,44 +1975,61 @@
     }
   }
 
+  function syncViewerNavigation(standalone = false) {
+    byID("preview-previous").hidden = false;
+    byID("preview-next").hidden = false;
+    byID("preview-previous").disabled = standalone || state.viewerIndex <= 0;
+    byID("preview-next").disabled = standalone || state.viewerIndex < 0 || state.viewerIndex >= state.viewerEntries.length - 1;
+  }
+
   async function openSafeOriginalPreview(entry, publicToken = "") {
     if (entry.kind !== "file") return;
+    clearToast();
     const dialog = byID("preview-dialog");
+    state.viewerEntry = entry;
+    if (state.viewerController) state.viewerController.abort();
+    state.viewerController = new AbortController();
+    const signal = state.viewerController.signal;
+    releaseViewerObjectURL();
     populatePreviewMetadata(entry);
-    byID("preview-previous").hidden = true;
-    byID("preview-next").hidden = true;
-    byID("preview-generate").hidden = true;
-    byID("preview-regenerate").hidden = true;
-    byID("preview-original").hidden = true;
+    syncViewerNavigation(Boolean(publicToken) || state.viewerIndex < 0);
+    syncPreviewGenerationActions(false, false);
+    byID("preview-original").hidden = false;
+    byID("preview-original").disabled = true;
     byID("preview-download").hidden = false;
     byID("preview-download").onclick = () => download(entry, publicToken);
-    byID("preview-status").textContent = "Loading the original through an explicit safe-preview capability.";
     const content = byID("preview-content");
-    content.replaceChildren(text("p", "Preparing a safe preview…", "state-panel"));
-    if (!dialog.open) dialog.showModal();
+    showViewerFallback(entry);
+    if (!dialog.open) { state.viewerOpener = document.activeElement; showTopLayerDialog(dialog); }
     try {
       const endpoint = publicToken ? `/api/v1/public/shares/${encodeURIComponent(publicToken)}/downloads` : "/api/v1/downloads";
-      const created = await api(endpoint, { method: "POST", body: { path: entry.path, version: entry.version, preview: true } });
+      const created = await api(endpoint, { method: "POST", body: { path: entry.path, version: entry.version, preview: true }, signal });
       content.replaceChildren();
       if (created.mode === "text") {
-        const response = await fetch(created.capability.url, { headers: created.capability.headers || {} });
+        const response = await fetch(created.capability.url, { headers: created.capability.headers || {}, signal });
         if (!response.ok) throw new Error("Preview data was unavailable.");
         content.append(text("pre", await response.text()));
       } else if (created.mode === "image") {
+        if (signal.aborted) return;
         const image = document.createElement("img");
         image.src = created.capability.url;
         image.alt = `Preview of ${entry.name}`;
         content.append(image);
       } else if (created.mode === "pdf") {
+        if (signal.aborted) return;
         const frame = document.createElement("iframe");
         frame.src = created.capability.url;
         frame.title = `Preview of ${entry.name}`;
         content.append(frame);
       } else {
-        content.append(text("p", "A browser preview is not available for this file. Use Download instead.", "state-panel"));
+        showViewerFallback(entry);
+        showToast("Browser preview unavailable. Download the original.", "info");
       }
-      byID("preview-status").textContent = "Original preview loaded.";
-    } catch (error) { content.replaceChildren(text("p", friendlyError(error, "Preview is unavailable."), "state-panel error")); }
+    } catch (error) {
+      if (error.name === "AbortError") return;
+      showViewerFallback(entry);
+      showActionErrorToast("Show original", error, "Preview is unavailable.");
+    }
   }
 
   function openMediaViewer(entry) {
@@ -1384,7 +2039,7 @@
     if (state.viewerIndex < 0) { state.viewerEntries = [entry]; state.viewerIndex = 0; }
     state.viewerOpener = document.activeElement;
     const dialog = byID("preview-dialog");
-    if (!dialog.open) dialog.showModal();
+    if (!dialog.open) showTopLayerDialog(dialog);
     showViewerEntry(state.viewerEntries[state.viewerIndex]);
   }
 
@@ -1429,26 +2084,31 @@
     state.viewerPreviewCacheBytes = 0;
   }
 
+  function syncPreviewGenerationActions(canGenerate, generated) {
+    byID("preview-generation-action").hidden = !canGenerate;
+    byID("preview-generate").hidden = !canGenerate || generated;
+    byID("preview-regenerate").hidden = !canGenerate || !generated;
+  }
+
   async function showViewerEntry(entry) {
+    clearToast();
     state.viewerEntry = entry;
     if (state.viewerController) state.viewerController.abort();
     state.viewerController = new AbortController();
     releaseViewerObjectURL();
     populatePreviewMetadata(entry);
-    byID("preview-previous").hidden = false;
-    byID("preview-next").hidden = false;
-    byID("preview-previous").disabled = state.viewerIndex <= 0;
-    byID("preview-next").disabled = state.viewerIndex >= state.viewerEntries.length - 1;
+    syncViewerNavigation();
     const canGenerate = Boolean(state.config && state.config.previewConfigured && mediaCategory(entry) === "image");
-    byID("preview-generate").hidden = !canGenerate;
-    byID("preview-regenerate").hidden = !canGenerate;
+    const knownPreview = state.previewStates.get(entry.path);
+    syncPreviewGenerationActions(canGenerate, knownPreview?.state === "ready");
     byID("preview-original").hidden = false;
+    byID("preview-original").disabled = false;
     byID("preview-download").hidden = false;
     byID("preview-download").onclick = () => download(entry);
     const variant = previewVariant(Math.max(window.innerWidth, window.innerHeight));
     const cached = cachedViewerPreview(entry, variant);
     if (cached) {
-      byID("preview-status").textContent = "Opening verified preview…";
+      syncPreviewGenerationActions(canGenerate, true);
       try {
         await displayViewerBlob(entry, cached.artifact, cached.blob, state.viewerController.signal);
         return;
@@ -1458,10 +2118,9 @@
         releaseViewerObjectURL();
       }
     }
-    byID("preview-status").textContent = "Loading generated preview…";
     showViewerFallback(entry);
     if (!state.config || !state.config.previewConfigured) {
-      byID("preview-status").textContent = "Generated thumbnails are not configured. The file-type icon is shown; the original remains available on request.";
+      showToast("Generated previews are not configured.", "info");
       return;
     }
     try {
@@ -1469,7 +2128,7 @@
       await displayViewerResult(entry, response.items[0], state.viewerController.signal, variant);
     } catch (error) {
       if (error.name !== "AbortError") {
-        byID("preview-status").textContent = friendlyError(error, "Generated preview is unavailable.");
+        showActionErrorToast("Preview", error, "Generated preview is unavailable.");
         showViewerFallback(entry);
       }
     }
@@ -1483,18 +2142,26 @@
     byID("preview-content").replaceChildren(fallback);
   }
 
+  function showPreviewIssue(result) {
+    if (result.state === "unsupported") return;
+    const issues = {
+      disabled: ["Generated previews are not configured.", "info"],
+      ineligible: ["Automatic preview generation is disabled for this file.", "info"],
+      missing: ["No preview has been generated.", "info"],
+      generating: ["Preview generation continues.", "info"],
+      unavailable: ["Preview unavailable. Original file unaffected.", "warning"],
+      failed: ["Preview generation failed.", "error"],
+    };
+    const issue = issues[result.state] || ["Preview unavailable.", "error"];
+    showToast(issue[0], issue[1]);
+  }
+
   async function displayViewerResult(entry, result, signal, variant) {
     state.previewStates.set(entry.path, result);
+    const canGenerate = Boolean(state.config && state.config.previewConfigured && mediaCategory(entry) === "image");
+    syncPreviewGenerationActions(canGenerate, result.state === "ready");
     if (result.state !== "ready" || !result.capability) {
-      const messages = {
-        disabled: "Generated previews are not configured. The original remains available on request.",
-        unsupported: "This file type uses its built-in icon in v1.1.",
-        ineligible: `Automatic generation is excluded by the ${result.reason || "configured"} policy. You can generate it explicitly.`,
-        missing: "No generated preview exists yet. You can generate it explicitly.",
-        unavailable: "The preview store is unavailable. Original files are unaffected.",
-        failed: "Preview generation did not complete. You can try again.",
-      };
-      byID("preview-status").textContent = messages[result.state] || "Generated preview is unavailable.";
+      showPreviewIssue(result);
       showViewerFallback(entry);
       return;
     }
@@ -1520,15 +2187,16 @@
       throw error;
     }
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+    clearToast();
     byID("preview-content").replaceChildren(image);
-    byID("preview-status").textContent = "Preview ready.";
   }
 
   async function generateViewerPreview(regenerate) {
     const entry = state.viewerEntry;
     if (!entry) return;
     const action = regenerate ? "regenerate" : "generate";
-    byID("preview-status").textContent = `${regenerate ? "Regenerating" : "Generating"} preview…`;
+    const control = byID(regenerate ? "preview-regenerate" : "preview-generate");
+    control.disabled = true;
     try {
       const variant = previewVariant(Math.max(window.innerWidth, window.innerHeight));
       const requestIdentity = `${entry.path}\u0000${entry.version}\u0000${variant}\u0000${action}`;
@@ -1542,24 +2210,26 @@
         method: "POST", headers: { "Idempotency-Key": pending.idempotencyKey }, body: pending.body, signal: state.viewerController.signal,
       });
       let operation = await postGeneration();
-      if (operation.state === "running") byID("preview-status").textContent = "Preview generation is running and will be recovered safely if its replica stops.";
+      if (operation.state === "running") showToast("Preview generation continues.", "info");
       operation = await waitForPreviewOperation(operation, postGeneration, state.viewerController.signal);
       if (operation.state === "succeeded" && operation.result) {
         state.previewGenerationRequests.delete(requestIdentity);
         await displayViewerResult(entry, operation.result, state.viewerController.signal, variant);
       } else if (operation.state === "failed") {
         state.previewGenerationRequests.delete(requestIdentity);
-        byID("preview-status").textContent = "Preview generation failed. You can try again.";
+        showActionErrorToast(regenerate ? "Regenerate preview" : "Generate preview", null, "Preview generation did not complete. Try again.");
         showViewerFallback(entry);
       } else {
-        byID("preview-status").textContent = "Preview generation is still running. Choose Generate again to resume this operation.";
+        showToast("Preview generation is still running.", "warning", 10000);
         showViewerFallback(entry);
       }
     } catch (error) {
       if (error.name !== "AbortError") {
-        byID("preview-status").textContent = friendlyError(error, "Preview generation did not complete. Choose Generate again to safely retry it.");
+        showActionErrorToast(regenerate ? "Regenerate preview" : "Generate preview", error, "Preview generation did not complete. Try again.");
         showViewerFallback(entry);
       }
+    } finally {
+      control.disabled = false;
     }
   }
 
@@ -1586,19 +2256,7 @@
     state.viewerObjectURL = "";
   }
 
-  async function openItemActions(entry) {
-    const result = await ask({ title: entry.name, description: `${entry.kind === "directory" ? "Folder" : formatBytes(entry.size)} at ${entry.path}`, confirm: "Continue", choiceField: { id: "item-action", label: "Action", options: [["share", "Create public share"], ["copy", "Copy"], ["move", "Move"], ["trash", "Move to trash"]] } });
-    if (!result) return;
-    state.selected.clear();
-    state.selected.set(entry.path, entry);
-    if (result["item-action"] === "share") createShare(entry);
-    if (result["item-action"] === "copy") copyMove(false);
-    if (result["item-action"] === "move") copyMove(true);
-    if (result["item-action"] === "trash") trashSelected();
-  }
-
-  async function copyMove(move) {
-    const entries = [...state.selected.values()];
+  async function copyMove(move, entries = [...state.selected.values()], clearSelection = true) {
     const result = await ask({ title: `${move ? "Move" : "Copy"} ${entries.length} item${entries.length === 1 ? "" : "s"}`, description: "Enter a destination folder path. Names are kept unchanged.", confirm: move ? "Move" : "Copy", fields: [{ id: "destination", label: "Destination folder", value: state.currentDirectory, required: true }], conflictField: true });
     if (!result) return;
     const items = entries.map((entry) => ({ source: entry.path, destination: joinPath(result.destination.replace(/\/$/, "") || "/", entry.name), conflict: result.conflict }));
@@ -1606,18 +2264,26 @@
       const endpoint = move ? "/api/v1/files/move" : "/api/v1/files/copy";
       const operation = await api(endpoint, { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: items.length === 1 ? items[0] : { items } });
       announce(`${move ? "Move" : "Copy"} started for ${items.length} item${items.length === 1 ? "" : "s"}.`);
-      state.selected.clear(); updateSelection();
+      if (clearSelection) state.selected.clear();
+      else if (move) for (const entry of entries) state.selected.delete(entry.path);
+      updateSelection();
       await watchOperation(operation.operationID || operation.id);
       await loadDirectory(state.currentDirectory);
     } catch (error) { announce(friendlyError(error), true); }
   }
 
   async function trashSelected() {
-    const paths = [...state.selected.keys()];
+    return trashEntries([...state.selected.values()], true);
+  }
+
+  async function trashEntries(entries, clearSelection) {
+    const paths = entries.map((entry) => entry.path);
     if (!paths.length) return;
     try {
       const result = await api("/api/v1/files/trash", { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: { paths } });
-      state.selected.clear(); updateSelection();
+      if (clearSelection) state.selected.clear();
+      else for (const entry of entries) state.selected.delete(entry.path);
+      updateSelection();
       if (result.operationID) await watchOperation(result.operationID);
       await loadDirectory(state.currentDirectory);
       showTrashUndo(result.items || []);
@@ -1637,27 +2303,58 @@
   }
 
   async function loadTrash(append = false) {
-    if (!append) { showState("trash-state", "Loading trash…"); byID("trash-rows").replaceChildren(); }
+    if (append && state.trashLoading) return;
+    const request = state.trashRequest + 1;
+    state.trashRequest = request;
+    state.trashLoading = true;
+    if (!append) {
+      cleanupGridMedia(new Set());
+      state.previewStates.clear();
+      state.entries = [];
+      state.trashCursor = "";
+      byID("list-presentation").scrollTop = 0;
+      byID("media-grid").scrollTop = 0;
+      showState("drive-state", "");
+      renderFileLoadingItems();
+    }
     try {
-      const cursor = append && byID("trash-next").dataset.cursor ? `&cursor=${encodeURIComponent(byID("trash-next").dataset.cursor)}` : "";
+      const cursor = append && state.trashCursor ? `&cursor=${encodeURIComponent(state.trashCursor)}` : "";
       const page = await api(`/api/v1/trash?limit=100${cursor}`);
-      if (!append) byID("trash-rows").replaceChildren();
-      for (const item of page.items || []) byID("trash-rows").append(trashRow(item));
-      const empty = !byID("trash-rows").children.length;
-      showState("trash-state", empty ? "Trash is empty." : "");
-      byID("trash-next").hidden = !page.nextCursor;
-      byID("trash-next").dataset.cursor = page.nextCursor || "";
-      byID("empty-trash").disabled = empty;
-    } catch (error) { showState("trash-state", friendlyError(error, "Trash could not be loaded."), "error"); }
+      if (request !== state.trashRequest || state.browserAccess !== "trash") return;
+      const entries = (page.items || []).map(trashBrowserEntry);
+      state.entries = append ? state.entries.concat(entries) : entries;
+      state.trashCursor = page.nextCursor || "";
+      renderFiles();
+      byID("empty-trash").disabled = state.entries.length === 0;
+      announce(entries.length ? `${entries.length} trashed item${entries.length === 1 ? "" : "s"} loaded.` : "Trash is empty.");
+    } catch (error) {
+      if (request !== state.trashRequest || state.browserAccess !== "trash") return;
+      if (append) announce(friendlyError(error, "More trashed items could not be loaded."), true);
+      else {
+        state.entries = [];
+        byID("file-rows").replaceChildren();
+        byID("media-grid-content").replaceChildren();
+        finishListLoading("file-rows");
+        finishListLoading("media-grid-content");
+        showState("drive-state", friendlyError(error, "Trash could not be loaded."), "error");
+        byID("empty-trash").disabled = true;
+      }
+    } finally {
+      if (request === state.trashRequest) state.trashLoading = false;
+    }
   }
 
-  function trashRow(item) {
-    const row = document.createElement("tr");
-    row.append(text("td", item.originalPath), text("td", item.kind), text("td", formatDate(item.trashedAt)));
-    const actionCell = document.createElement("td");
-    const actions = document.createElement("div"); actions.className = "row-actions";
-    actions.append(button("Restore", () => restoreTrash(item), "secondary"), button("Delete forever", () => deleteTrash(item), "danger-quiet"));
-    actionCell.append(actions); row.append(actionCell); return row;
+  function trashBrowserEntry(item) {
+    return {
+      path: item.originalPath,
+      name: item.originalPath,
+      kind: item.kind,
+      size: item.size || 0,
+      mediaType: item.mediaType || "",
+      modifiedAt: item.trashedAt,
+      version: item.originalVersion,
+      trash: item,
+    };
   }
 
   async function restoreTrash(item) {
@@ -1670,7 +2367,7 @@
   }
 
   async function deleteTrash(item) {
-    const confirmed = await ask({ title: `Permanently delete ${item.originalPath}?`, description: "This cannot be undone. The file data will be permanently removed.", confirm: "Delete permanently", danger: true });
+    const confirmed = await ask({ title: `Permanently delete ${item.originalPath}?`, description: "This cannot be undone. The file data will be permanently removed.", confirm: "Delete Permanently", danger: true });
     if (!confirmed) return;
     try {
       const operation = await api(`/api/v1/trash/${encodeURIComponent(item.trashID)}`, { method: "DELETE", headers: { "Idempotency-Key": idempotencyKey() }, body: {} });
@@ -1679,7 +2376,7 @@
   }
 
   async function emptyTrash() {
-    const confirmed = await ask({ title: "Permanently delete every trashed item?", description: "All items in Trash will be removed. This cannot be undone.", confirm: "Empty trash permanently", danger: true });
+    const confirmed = await ask({ title: "Permanently delete every trashed item?", description: "All items in Trash will be removed. This cannot be undone.", confirm: "Empty Trash Permanently", danger: true });
     if (!confirmed) return;
     try {
       const result = await api("/api/v1/trash/empty", { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: { confirm: true } });
@@ -1702,21 +2399,34 @@
 
   async function loadSettings() {
     byID("profile-name").value = state.user.displayName;
+    byID("passkey-table-scroll").scrollTop = 0;
+    byID("share-table-scroll").scrollTop = 0;
+    renderTableLoadingRows("passkey-list", "passkey", 4, 3);
+    renderTableLoadingRows("share-list", "share", 6, 3);
     try {
       const dark = matchMedia("(prefers-color-scheme: dark)").matches;
       const [catalog, preference, passkeys, shares] = await Promise.all([
-        api("/api/v1/themes"), api(`/api/v1/me/preferences/theme?dark=${dark}`), api("/api/v1/me/passkeys"), api("/api/v1/shares"),
+        api("/api/v1/themes"), api(themePreferenceURL(dark)), api("/api/v1/me/passkeys"), api("/api/v1/shares"),
       ]);
       state.themes = catalog.themes || [];
       const select = byID("theme-select"); select.replaceChildren();
       const system = text("option", "Follow system"); system.value = "system"; select.append(system);
       for (const theme of state.themes) { const option = text("option", `${theme.name} (${theme.appearance})`); option.value = theme.id; select.append(option); }
       select.value = preference.preference;
+      byID("safe-theme").checked = state.safeTheme;
       applyTheme(preference);
       byID("theme-note").textContent = preference.fallback ? "The selected theme was unavailable, so a built-in theme is active." : `Using ${preference.resolved.name}.`;
       renderPasskeys(passkeys.passkeys || []);
       renderShares(shares.shares || []);
-    } catch (error) { announce(friendlyError(error, "Settings could not be loaded."), true); }
+    } catch (error) {
+      state.passkeys = [];
+      state.shares = [];
+      byID("passkey-list").replaceChildren(emptyTableRow("Passkeys unavailable", 4));
+      byID("share-list").replaceChildren(emptyTableRow("Shares unavailable", 6));
+      finishListLoading("passkey-list");
+      finishListLoading("share-list");
+      announce(friendlyError(error, "Settings could not be loaded."), true);
+    }
   }
 
   function applyTheme(selection) {
@@ -1750,47 +2460,75 @@
   }
 
   function renderPasskeys(passkeys) {
-    const list = byID("passkey-list"); list.replaceChildren();
-    for (const passkey of passkeys) {
-      const item = document.createElement("li"); const main = document.createElement("div"); main.className = "record-main";
-      const details = document.createElement("div"); details.append(text("strong", passkey.label || "Passkey"), text("p", `Added ${formatDate(passkey.createdAt)} · Last used ${formatDate(passkey.lastUsedAt)}`, "field-help"));
-      main.append(details, button("Remove", () => removePasskey(passkey), "danger-quiet")); item.append(main); list.append(item);
-    }
+    if (passkeys) state.passkeys = passkeys;
+    renderVirtualSettingsTable("passkey-table-scroll", "passkey-list", state.passkeys, 4, (passkey) => {
+      const row = document.createElement("tr");
+      const label = document.createElement("td");
+      label.append(text("strong", passkey.label || "Passkey"));
+      const added = text("td", formatDate(passkey.createdAt));
+      const lastUsed = text("td", formatDate(passkey.lastUsedAt));
+      const actions = document.createElement("td");
+      actions.className = "table-icon-action-cell";
+      const controls = document.createElement("div");
+      controls.className = "row-actions";
+      controls.append(iconButton("key-off", `Remove ${passkey.label || "passkey"}`, () => removePasskey(passkey), "danger", "Remove passkey"));
+      actions.append(controls);
+      row.append(label, added, lastUsed, actions);
+      return row;
+    }, "No passkeys", passkeys !== undefined);
   }
 
   function renderShares(shares) {
-    const list = byID("share-list"); list.replaceChildren();
-    for (const share of shares) {
-      const item = document.createElement("li"); const main = document.createElement("div"); main.className = "record-main";
-      const details = document.createElement("div");
+    if (shares) state.shares = shares;
+    renderVirtualSettingsTable("share-table-scroll", "share-list", state.shares, 6, (share) => {
+      const row = document.createElement("tr");
       const status = share.revokedAt ? "Revoked" : share.expiresAt && new Date(share.expiresAt) <= new Date() ? "Expired" : "Active";
-      details.append(text("strong", `${share.rootPath} · ${status}`), text("p", `${share.kind} share created ${formatDate(share.createdAt)}${share.expiresAt ? ` · Expires ${formatDate(share.expiresAt)}` : ""}`, "field-help"));
-      main.append(details);
-      if (status === "Active") main.append(button("Revoke", () => revokeShare(share), "danger-quiet"));
-      item.append(main); list.append(item);
-    }
-    if (!shares.length) list.append(text("li", "No public shares."));
+      const location = document.createElement("td");
+      location.append(text("strong", share.rootPath));
+      const statusCell = text("td", status);
+      const kind = text("td", share.kind);
+      const created = text("td", formatDate(share.createdAt));
+      const expires = text("td", share.expiresAt ? formatDate(share.expiresAt) : "—");
+      const actions = document.createElement("td");
+      if (status === "Active") {
+        actions.className = "table-icon-action-cell";
+        const controls = document.createElement("div");
+        controls.className = "row-actions";
+        controls.append(iconButton("link-off", `Revoke share for ${share.rootPath}`, () => revokeShare(share), "danger", "Revoke share"));
+        actions.append(controls);
+      }
+      row.append(location, statusCell, kind, created, expires, actions);
+      return row;
+    }, "No public shares", shares !== undefined);
   }
 
   async function revokeShare(share) {
-    const confirmed = await ask({ title: `Revoke share for ${share.rootPath}?`, description: "Anyone using the existing link will immediately see the same generic unavailable state.", confirm: "Revoke share", danger: true });
+    const confirmed = await ask({ title: `Revoke share for ${share.rootPath}?`, description: "Anyone using the existing link will immediately see the same generic unavailable state.", confirm: "Revoke Share", danger: true });
     if (!confirmed) return;
     try { await api(`/api/v1/shares/${encodeURIComponent(share.shareID)}`, { method: "DELETE", body: {} }); announce(`Share for ${share.rootPath} revoked.`); await loadSettings(); }
     catch (error) { announce(friendlyError(error), true); }
   }
 
   async function removePasskey(passkey) {
-    const confirmed = await ask({ title: `Remove ${passkey.label || "this passkey"}?`, description: "A recently authenticated session is required, and your final passkey cannot be removed.", confirm: "Remove passkey", danger: true });
+    const confirmed = await ask({ title: `Remove ${passkey.label || "this passkey"}?`, description: "A recently authenticated session is required, and your final passkey cannot be removed.", confirm: "Remove Passkey", danger: true });
     if (!confirmed) return;
     try { await api(`/api/v1/me/passkeys/${encodeURIComponent(passkey.credentialID)}`, { method: "DELETE" }); announce("Passkey removed."); await loadSettings(); }
     catch (error) { announce(friendlyError(error), true); }
   }
 
   async function loadAdmin() {
+    renderRecordLoadingItems("invite-list");
+    renderTableLoadingRows("user-list", "user", 5, 3);
     try {
       const [invites, users] = await Promise.all([api("/api/v1/admin/invites"), api("/api/v1/admin/users?limit=100")]);
       renderInvites(invites.invites || []); renderUsers(users.users || [], false); byID("users-next").hidden = !users.nextCursor; byID("users-next").dataset.cursor = users.nextCursor || "";
-    } catch (error) { announce(friendlyError(error, "Administration could not be loaded."), true); }
+    } catch (error) {
+      byID("invite-list").replaceChildren();
+      byID("user-list").replaceChildren();
+      finishListLoading("invite-list");
+      finishListLoading("user-list");
+      announce(friendlyError(error, "Administration could not be loaded."), true);
+    }
   }
 
   function renderInvites(invites) {
@@ -1799,26 +2537,34 @@
       const item = document.createElement("li"); const main = document.createElement("div"); main.className = "record-main";
       const status = invite.revokedAt ? "Revoked" : invite.usedAt ? "Used" : invite.expiresAt && new Date(invite.expiresAt) <= new Date() ? "Expired" : "Available";
       const details = document.createElement("div"); details.append(text("strong", `Invite · ${status}`), text("p", `Created ${formatDate(invite.createdAt)}${invite.expiresAt ? ` · Expires ${formatDate(invite.expiresAt)}` : ""}`, "field-help"));
-      main.append(details); if (status === "Available") main.append(button("Revoke", () => revokeInvite(invite), "danger-quiet")); item.append(main); list.append(item);
+      main.append(details); if (status === "Available") main.append(iconButton("link-off", "Revoke invite", () => revokeInvite(invite), "danger", "Revoke invite")); item.append(main); list.append(item);
     }
     if (!invites.length) list.append(text("li", "No invites have been created."));
+    finishListLoading("invite-list");
   }
 
   function renderUsers(users, append) {
     const list = byID("user-list"); if (!append) list.replaceChildren();
     for (const user of users) {
-      const item = document.createElement("li"); const main = document.createElement("div"); main.className = "record-main";
-      const details = document.createElement("div"); details.append(text("strong", user.displayName), text("p", `${user.status}${user.admin ? " · Administrator" : ""} · Added ${formatDate(user.createdAt)}`, "field-help"));
-      const actions = document.createElement("div"); actions.className = "record-actions";
-      actions.append(button(user.status === "enabled" ? "Disable" : "Enable", () => adminUserAction(user, user.status === "enabled" ? "disable" : "enable"), user.status === "enabled" ? "danger-quiet" : "secondary"));
-      actions.append(button(user.admin ? "Remove admin" : "Make admin", () => adminUserAction(user, "admin", user.admin ? "DELETE" : "POST"), "secondary"));
-      actions.append(button("Recovery link", () => createRecovery(user), "secondary")); main.append(details, actions); item.append(main); list.append(item);
+      const row = document.createElement("tr");
+      row.append(text("td", user.displayName), text("td", user.status), text("td", user.admin ? "Administrator" : "Member"), text("td", formatDate(user.createdAt)));
+      const actionCell = document.createElement("td"); actionCell.className = "table-icon-action-cell"; const actions = document.createElement("div"); actions.className = "user-actions";
+      actions.append(iconButton(user.status === "enabled" ? "user-off" : "user-check", `${user.status === "enabled" ? "Disable" : "Enable"} ${user.displayName}`, () => adminUserAction(user, user.status === "enabled" ? "disable" : "enable"), `admin-row-action${user.status === "enabled" ? " danger" : ""}`, user.status === "enabled" ? "Disable user" : "Enable user"));
+      actions.append(iconButton(user.admin ? "shield-minus" : "shield-plus", user.admin ? `Remove administrator access from ${user.displayName}` : `Make ${user.displayName} an administrator`, () => adminUserAction(user, "admin", user.admin ? "DELETE" : "POST"), `admin-row-action${user.admin ? " danger" : ""}`, user.admin ? "Remove administrator" : "Make administrator"));
+      actions.append(iconButton("key", `Create recovery link for ${user.displayName}`, () => createRecovery(user), "admin-row-action", "Create recovery link")); actionCell.append(actions); row.append(actionCell); list.append(row);
     }
+    finishListLoading("user-list");
   }
 
   async function adminUserAction(user, action, method = "POST") {
+    const removingAdministrator = action === "admin" && method === "DELETE";
+    const title = action === "disable" ? `Disable ${user.displayName}?` :
+      action === "enable" ? `Enable ${user.displayName}?` :
+      removingAdministrator ? `Remove administrator access from ${user.displayName}?` :
+      `Make ${user.displayName} an administrator?`;
+    const confirm = action === "disable" ? "Disable" : action === "enable" ? "Enable" : removingAdministrator ? "Remove Administrator" : "Make Administrator";
     const description = action === "disable" ? "This immediately invalidates the user’s active sessions." : action === "admin" ? "Administrator access changes instance-wide controls." : "This changes the user’s account access.";
-    const confirmed = await ask({ title: `${action === "admin" && method === "DELETE" ? "Remove administrator access from" : action} ${user.displayName}?`, description, confirm: "Confirm change", danger: action === "disable" || method === "DELETE" });
+    const confirmed = await ask({ title, description, confirm, danger: action === "disable" || removingAdministrator });
     if (!confirmed) return;
     try { await api(`/api/v1/admin/users/${encodeURIComponent(user.userID)}/${action}`, { method, body: method === "POST" ? {} : undefined }); announce(`${user.displayName} updated.`); await loadAdmin(); }
     catch (error) { announce(friendlyError(error), true); }
@@ -1839,37 +2585,61 @@
   }
 
   async function loadPublicShare(append = false) {
+    if (append && state.publicLoading) return;
+    syncFileBrowserAccess("public");
     showOnly("public-view");
-    if (!append) { state.publicCursor = ""; showState("public-state", "Loading shared items…"); byID("public-rows").replaceChildren(); }
+    state.publicLoading = true;
+    if (!append) {
+      cleanupGridMedia(new Set());
+      state.previewStates.clear();
+      state.entries = [];
+      state.publicCursor = "";
+      byID("list-presentation").scrollTop = 0;
+      byID("media-grid").scrollTop = 0;
+      showState("drive-state", "");
+      renderFileLoadingItems();
+    }
     const query = new URLSearchParams({ path: state.publicPath, limit: "100" });
     if (append && state.publicCursor) query.set("cursor", state.publicCursor);
     try {
       const page = await api(`/api/v1/public/shares/${encodeURIComponent(state.publicToken)}?${query.toString()}`);
-      byID("public-title").textContent = page.root.name || "Shared files";
-      renderBreadcrumbs("public-breadcrumbs", state.publicPath, (path) => { state.publicPath = path; loadPublicShare(); });
-      if (!append) byID("public-rows").replaceChildren();
+      byID("browser-title").textContent = page.root.name || "Shared files";
+      renderBreadcrumbs("breadcrumbs", state.publicPath, (path) => { state.publicPath = path; loadPublicShare(); });
       const entries = page.entries && page.entries.length ? page.entries : (page.root.kind === "file" ? [page.root] : []);
-      for (const entry of entries) byID("public-rows").append(publicRow(entry));
-      showState("public-state", byID("public-rows").children.length ? "" : "This shared folder is empty.");
-      state.publicCursor = page.nextCursor || ""; byID("public-next").hidden = !state.publicCursor;
+      state.entries = append ? state.entries.concat(entries) : entries;
+      state.publicCursor = page.nextCursor || "";
+      renderFiles();
     } catch (error) {
       const message = error instanceof APIError && [403, 404, 410].includes(error.status) ? "This share is unavailable. It may have expired, moved, entered trash, or been revoked." : friendlyError(error, "The share could not be loaded.");
-      showState("public-state", message, "error"); byID("public-table").hidden = true;
+      if (!append) {
+        state.entries = [];
+        byID("file-rows").replaceChildren();
+        byID("media-grid-content").replaceChildren();
+        finishListLoading("file-rows");
+        finishListLoading("media-grid-content");
+      }
+      showState("drive-state", message, "error");
+    } finally {
+      state.publicLoading = false;
     }
-  }
-
-  function publicRow(entry) {
-    const row = document.createElement("tr"); const nameCell = document.createElement("td");
-    const action = button(entry.name, () => { if (entry.kind === "directory") { state.publicPath = entry.path; loadPublicShare(); } else preview(entry, state.publicToken); }, "file-name");
-    action.prepend(text("span", entry.kind === "directory" ? "▰" : "▤", "file-icon")); nameCell.append(action);
-    row.append(nameCell, text("td", entry.kind === "directory" ? "Folder" : formatBytes(entry.size)), text("td", formatDate(entry.modifiedAt)));
-    const actions = document.createElement("td"); if (entry.kind === "file") actions.append(button("Download", () => download(entry, state.publicToken), "secondary")); row.append(actions); return row;
   }
 
   function ask(options) {
     const dialog = byID("action-dialog"); const fields = byID("dialog-fields"); fields.replaceChildren();
     byID("dialog-title").textContent = options.title; byID("dialog-description").textContent = options.description || "";
-    byID("dialog-confirm").textContent = options.confirm || "Continue"; byID("dialog-confirm").className = options.danger ? "danger" : "primary";
+    const confirmLabel = options.confirm || "Continue";
+    const confirmControl = byID("dialog-confirm");
+    if (options.danger) {
+      confirmControl.className = "danger";
+      confirmControl.replaceChildren(document.createTextNode(confirmLabel));
+      confirmControl.setAttribute("aria-label", confirmLabel);
+      delete confirmControl.dataset.icon;
+      delete confirmControl.dataset.tooltip;
+      confirmControl.removeAttribute("title");
+    } else {
+      confirmControl.className = "icon-button";
+      setIconControl(confirmControl, options.confirmIcon || "check", confirmLabel);
+    }
     for (const field of options.fields || []) {
       const label = text("label", field.label); label.htmlFor = field.id;
       const input = document.createElement("input"); input.id = field.id; input.name = field.id; input.type = field.type || "text"; input.value = field.value || ""; input.required = Boolean(field.required); if (field.maxLength) input.maxLength = field.maxLength;
@@ -1877,8 +2647,8 @@
     }
     if (options.choiceField) fields.append(selectField(options.choiceField));
     if (options.conflictField) fields.append(selectField({ id: "conflict", label: "If a name is already in use", options: [["fail", "Stop and leave everything unchanged"], ["rename", "Choose a non-conflicting name"], ["replace", "Replace the existing item"]] }));
-    if (options.output) { const output = text("output", options.output); output.id = "dialog-output"; fields.append(output); if (options.copyOutput) fields.append(button("Copy link", () => copyText(options.output), "secondary")); }
-    state.dialogOpener = document.activeElement; dialog.showModal();
+    if (options.output) { const output = text("output", options.output); output.id = "dialog-output"; fields.append(output); if (options.copyOutput) fields.append(iconButton("copy", "Copy link", () => copyText(options.output))); }
+    state.dialogOpener = document.activeElement; showTopLayerDialog(dialog);
     const first = fields.querySelector("input, select, button"); if (first) first.focus(); else byID("dialog-confirm").focus();
     return new Promise((resolve) => {
       const cleanup = () => {
@@ -1886,7 +2656,7 @@
         byID("dialog-form").removeEventListener("submit", submit);
         dialog.removeEventListener("cancel", onCancel);
       };
-      const finish = (value) => { cleanup(); dialog.close(); fields.replaceChildren(); if (state.dialogOpener && state.dialogOpener.focus) state.dialogOpener.focus(); resolve(value); };
+      const finish = (value) => { cleanup(); closeTopLayerDialog(dialog); fields.replaceChildren(); if (state.dialogOpener && state.dialogOpener.focus) state.dialogOpener.focus(); resolve(value); };
       const cancel = () => finish(null);
       const onCancel = (event) => { event.preventDefault(); cancel(); };
       const submit = (event) => {
@@ -1932,16 +2702,22 @@
     byID("upload-input").addEventListener("change", (event) => { queueFiles(event.target.files); event.target.value = ""; });
     byID("folder-input").addEventListener("change", (event) => { queueFolderFiles(event.target.files); event.target.value = ""; });
     const drop = byID("drop-target");
-    drop.addEventListener("dragover", (event) => { event.preventDefault(); drop.classList.add("dragging"); });
+    drop.addEventListener("dragover", (event) => { if (state.browserAccess !== "owner") return; event.preventDefault(); drop.classList.add("dragging"); });
     drop.addEventListener("dragleave", () => drop.classList.remove("dragging"));
     drop.addEventListener("drop", async (event) => {
+      if (state.browserAccess !== "owner") return;
       event.preventDefault();
       drop.classList.remove("dragging");
       try { await queueDroppedItems(event.dataTransfer); }
       catch (error) { announce(friendlyError(error, "Dropped files could not be read."), true); }
     });
-    drop.addEventListener("keydown", (event) => { if (event.target === drop && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); byID("upload-input").click(); } });
-    byID("transfer-concurrency").addEventListener("change", pumpTransfers);
+    drop.addEventListener("keydown", (event) => { if (state.browserAccess === "owner" && event.target === drop && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); byID("upload-input").click(); } });
+    byID("transfer-filter").addEventListener("change", (event) => {
+      state.transferFilter = event.target.value;
+      renderTransfers();
+    });
+    const transferConnection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (transferConnection && transferConnection.addEventListener) transferConnection.addEventListener("change", pumpTransfers);
     byID("clear-transfers").addEventListener("click", () => {
       for (const [groupID, group] of state.transferGroups) {
         if (["complete", "cancelled"].includes(group.state)) {
@@ -1950,6 +2726,7 @@
         }
       }
       state.transfers = state.transfers.filter((item) => item.groupID || !["complete", "cancelled"].includes(item.state));
+      state.transferVisibleLimits.clear();
       renderTransfers();
       byID("transfer-panel").hidden = !state.transfers.length && !state.transferGroups.size;
     });
@@ -1957,36 +2734,51 @@
       const panel = byID("transfer-panel");
       const collapsed = panel.classList.toggle("collapsed");
       byID("transfer-toggle").setAttribute("aria-expanded", String(!collapsed));
-      byID("transfer-toggle").setAttribute("aria-label", collapsed ? "Expand transfers" : "Collapse transfers");
-      byID("transfer-toggle").textContent = collapsed ? "⌃" : "⌄";
+      setIconControl(byID("transfer-toggle"), collapsed ? "chevron-up" : "chevron-down", collapsed ? "Expand transfers" : "Collapse transfers");
+      if (!collapsed) renderTransfers();
     });
-    byID("file-filter").addEventListener("input", renderFiles); byID("file-sort").addEventListener("change", () => loadDirectory(state.currentDirectory));
+    byID("file-filter").addEventListener("input", renderFiles); byID("file-sort").addEventListener("change", () => state.browserAccess === "owner" ? loadDirectory(state.currentDirectory) : renderFiles());
     for (const id of ["filter-kind", "filter-media", "filter-min-size", "filter-max-size", "filter-modified-after", "filter-modified-before", "filter-preview"]) byID(id).addEventListener("input", renderFiles);
     for (const id of ["file-view-list", "file-view-grid"]) byID(id).addEventListener("change", (event) => { if (event.target.checked) { state.viewMode = event.target.value; renderFiles(); } });
     byID("media-grid").addEventListener("scroll", () => { if (state.gridRenderFrame) return; state.gridRenderFrame = requestAnimationFrame(() => { state.gridRenderFrame = 0; if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries); }); });
     byID("list-presentation").addEventListener("scroll", () => {
       if (!state.listRenderFrame) state.listRenderFrame = requestAnimationFrame(() => { state.listRenderFrame = 0; if (state.viewMode === "list") renderVirtualList(state.filteredEntries); });
       const scroller = byID("list-presentation");
-      if (state.nextCursor && !state.directoryLoading && scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - (listRowHeight * 6)) loadDirectory(state.currentDirectory, true);
+      if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - (listRowHeight * 6)) {
+        if (state.browserAccess === "public" && state.publicCursor && !state.publicLoading) loadPublicShare(true);
+        else if (state.browserAccess === "trash" && state.trashCursor && !state.trashLoading) loadTrash(true);
+        else if (state.browserAccess === "owner" && state.nextCursor && !state.directoryLoading) loadDirectory(state.currentDirectory, true);
+      }
     });
-    window.addEventListener("resize", () => { if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries); });
+    window.addEventListener("resize", () => {
+      if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries);
+      if (!byID("settings-view").hidden) { renderPasskeys(); renderShares(); }
+    });
     byID("select-all").addEventListener("change", (event) => { for (const entry of filterLoadedEntries(state.entries)) { if (event.target.checked) state.selected.set(entry.path, entry); else state.selected.delete(entry.path); } renderFiles(); updateSelection(); });
     byID("clear-selection").addEventListener("click", () => { state.selected.clear(); renderFiles(); updateSelection(); });
     byID("download-selected").addEventListener("click", () => download([...state.selected.values()][0]));
     byID("share-selected").addEventListener("click", () => createShare([...state.selected.values()][0]));
     byID("copy-selected").addEventListener("click", () => copyMove(false)); byID("move-selected").addEventListener("click", () => copyMove(true)); byID("trash-selected").addEventListener("click", trashSelected);
-    byID("next-page").addEventListener("click", () => loadDirectory(state.currentDirectory, true)); byID("trash-next").addEventListener("click", () => loadTrash(true)); byID("empty-trash").addEventListener("click", emptyTrash);
+    byID("next-page").addEventListener("click", () => state.browserAccess === "public" ? loadPublicShare(true) : state.browserAccess === "trash" ? loadTrash(true) : loadDirectory(state.currentDirectory, true)); byID("empty-trash").addEventListener("click", emptyTrash);
     byID("profile-form").addEventListener("submit", async (event) => { event.preventDefault(); try { const profile = await api("/api/v1/me", { method: "PATCH", body: { displayName: byID("profile-name").value } }); state.user.displayName = profile.displayName; byID("account-name").textContent = profile.displayName; announce("Display name saved."); } catch (error) { announce(friendlyError(error), true); } });
-    byID("theme-form").addEventListener("submit", async (event) => { event.preventDefault(); try { const dark = matchMedia("(prefers-color-scheme: dark)").matches; const selection = byID("safe-theme").checked ? await api(`/api/v1/me/preferences/theme?dark=${dark}&safe-theme=1`) : await api("/api/v1/me/preferences/theme", { method: "PUT", body: { themeID: byID("theme-select").value, dark } }); applyTheme(selection); byID("theme-note").textContent = `Using ${selection.resolved.name}.`; announce("Theme applied."); } catch (error) { announce(friendlyError(error), true); } });
+    byID("theme-form").addEventListener("submit", async (event) => { event.preventDefault(); try { const dark = matchMedia("(prefers-color-scheme: dark)").matches; state.safeTheme = byID("safe-theme").checked; syncSafeThemeURL(); const selection = state.safeTheme ? await api(themePreferenceURL(dark)) : await api("/api/v1/me/preferences/theme", { method: "PUT", body: { themeID: byID("theme-select").value, dark } }); applyTheme(selection); byID("theme-note").textContent = `Using ${selection.resolved.name}.`; announce("Theme applied."); } catch (error) { announce(friendlyError(error), true); } });
     byID("safe-theme").addEventListener("change", () => byID("theme-form").requestSubmit());
+    byID("theme-select").addEventListener("change", () => { byID("safe-theme").checked = false; });
     byID("refresh-shares").addEventListener("click", loadSettings);
-    byID("add-passkey").addEventListener("click", async () => { const result = await ask({ title: "Add a passkey", description: "Give this passkey an optional device label.", confirm: "Create passkey", fields: [{ id: "passkey-label", label: "Label (optional)", maxLength: 100 }] }); if (!result) return; try { await register("add", "", "", result["passkey-label"]); announce("Passkey added and session renewed."); await loadSettings(); } catch (error) { announce(friendlyError(error), true); } });
-    byID("create-invite").addEventListener("click", async () => { const result = await ask({ title: "Create an invite", description: "The link can create one account. Optionally set an expiry.", confirm: "Create invite", fields: [{ id: "invite-expires", label: "Expiry (optional)", type: "datetime-local" }] }); if (!result) return; try { const body = {}; if (result["invite-expires"]) body.expiresAt = new Date(result["invite-expires"]).toISOString(); const created = await api("/api/v1/admin/invites", { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body }); await revealLink("Invite link", created.link); announce("Invite created."); await loadAdmin(); } catch (error) { announce(friendlyError(error), true); } });
+    byID("passkey-table-scroll").addEventListener("scroll", () => {
+      if (state.passkeyRenderFrame) return;
+      state.passkeyRenderFrame = requestAnimationFrame(() => { state.passkeyRenderFrame = 0; renderPasskeys(); });
+    });
+    byID("share-table-scroll").addEventListener("scroll", () => {
+      if (state.shareRenderFrame) return;
+      state.shareRenderFrame = requestAnimationFrame(() => { state.shareRenderFrame = 0; renderShares(); });
+    });
+    byID("add-passkey").addEventListener("click", async () => { const result = await ask({ title: "Add a passkey", description: "Give this passkey an optional device label.", confirm: "Create passkey", confirmIcon: "key-plus", fields: [{ id: "passkey-label", label: "Label (optional)", maxLength: 100 }] }); if (!result) return; try { await register("add", "", "", result["passkey-label"]); announce("Passkey added and session renewed."); await loadSettings(); } catch (error) { announce(friendlyError(error), true); } });
+    byID("create-invite").addEventListener("click", async () => { const result = await ask({ title: "Create an invite", description: "The link can create one account. Optionally set an expiry.", confirm: "Create invite", confirmIcon: "user-plus", fields: [{ id: "invite-expires", label: "Expiry (optional)", type: "datetime-local" }] }); if (!result) return; try { const body = {}; if (result["invite-expires"]) body.expiresAt = new Date(result["invite-expires"]).toISOString(); const created = await api("/api/v1/admin/invites", { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body }); await revealLink("Invite link", created.link); announce("Invite created."); await loadAdmin(); } catch (error) { announce(friendlyError(error), true); } });
     byID("copy-invite").addEventListener("click", () => copyText(byID("invite-link").textContent));
     byID("refresh-users").addEventListener("click", loadAdmin);
     byID("users-next").addEventListener("click", async () => { try { const page = await api(`/api/v1/admin/users?limit=100&cursor=${encodeURIComponent(byID("users-next").dataset.cursor)}`); renderUsers(page.users || [], true); byID("users-next").hidden = !page.nextCursor; byID("users-next").dataset.cursor = page.nextCursor || ""; } catch (error) { announce(friendlyError(error), true); } });
-    byID("public-next").addEventListener("click", () => loadPublicShare(true));
-    const closePreview = () => { if (state.viewerController) state.viewerController.abort(); state.viewerController = null; releaseViewerObjectURL(); byID("preview-content").replaceChildren(); byID("preview-dialog").close(); if (state.viewerOpener && state.viewerOpener.focus) state.viewerOpener.focus(); state.viewerEntry = null; };
+    const closePreview = () => { if (state.viewerController) state.viewerController.abort(); state.viewerController = null; releaseViewerObjectURL(); byID("preview-content").replaceChildren(); closeTopLayerDialog(byID("preview-dialog")); if (state.viewerOpener && state.viewerOpener.focus) state.viewerOpener.focus(); state.viewerEntry = null; };
     byID("preview-previous").addEventListener("click", () => navigateViewer(-1));
     byID("preview-next").addEventListener("click", () => navigateViewer(1));
     byID("preview-generate").addEventListener("click", () => generateViewerPreview(false));
@@ -1996,12 +2788,12 @@
     byID("preview-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closePreview(); });
     byID("preview-dialog").addEventListener("keydown", (event) => { if (event.key === "ArrowLeft") { event.preventDefault(); navigateViewer(-1); } if (event.key === "ArrowRight") { event.preventDefault(); navigateViewer(1); } });
     window.addEventListener("popstate", () => { if (state.user) setRoute(routeFromPath(), false); });
-    window.addEventListener("online", () => { byID("connection-status").textContent = "Online"; byID("connection-status").classList.remove("offline"); announce("Connection restored."); });
-    window.addEventListener("offline", () => { byID("connection-status").textContent = "Offline"; byID("connection-status").classList.add("offline"); announce("You are offline. Active transfers may pause.", true); });
+    window.addEventListener("online", () => announce("Connection restored."));
+    window.addEventListener("offline", () => announce("You are offline. Active transfers may pause.", true));
   }
 
   async function revokeInvite(invite) {
-    const confirmed = await ask({ title: "Revoke this invite?", description: "The invite link will stop working immediately.", confirm: "Revoke invite", danger: true }); if (!confirmed) return;
+    const confirmed = await ask({ title: "Revoke this invite?", description: "The invite link will stop working immediately.", confirm: "Revoke Invite", danger: true }); if (!confirmed) return;
     try { await api(`/api/v1/admin/invites/${encodeURIComponent(invite.inviteID)}`, { method: "DELETE" }); announce("Invite revoked."); await loadAdmin(); } catch (error) { announce(friendlyError(error), true); }
   }
 
@@ -2010,27 +2802,35 @@
     const recovery = location.pathname === "/recover" || Boolean(state.recoveryToken);
     byID("bootstrap-token-field").hidden = !bootstrap;
     byID("bootstrap-token").required = bootstrap;
-    if (bootstrap) { byID("registration-eyebrow").textContent = "Instance setup"; byID("registration-title").textContent = "Create the first administrator"; }
-    else if (recovery) { byID("registration-eyebrow").textContent = "Account recovery"; byID("registration-title").textContent = "Create a replacement passkey"; byID("registration-help").textContent = "The recovery link identifies your account. No display name is requested."; byID("display-name").closest("form").querySelector("label[for='display-name']").hidden = true; byID("display-name").hidden = true; byID("display-name").required = false; }
-    else if (state.inviteToken) { byID("registration-eyebrow").textContent = "Invited registration"; byID("registration-title").textContent = "Accept your invite"; }
+    byID("display-name-field").hidden = recovery;
+    byID("display-name").required = !recovery;
+    byID("registration-signin").hidden = bootstrap;
+    byID("registration-title").textContent = bootstrap ? "Initialize EndlessFS" : recovery ? "Replace passkey" : state.inviteToken ? "Accept invite" : "Create account";
+    byID("registration-submit").textContent = bootstrap ? "Create administrator" : recovery ? "Create replacement passkey" : "Create passkey";
+    byID("registration-help").textContent = recovery ? "The recovery link identifies your account. No display name is requested." : "Enter a display name.";
   }
 
-  function enterApplication() {
-    showOnly("authenticated-view"); byID("account-actions").hidden = false; byID("account-name").textContent = state.user.displayName;
+  async function enterApplication() {
+    byID("auth-view").hidden = true; byID("registration-view").hidden = true; byID("public-view").hidden = true;
+    byID("authenticated-view").hidden = false; byID("loading-view").hidden = false;
+    byID("account-actions").hidden = false; byID("account-name").textContent = state.user.displayName;
     const admin = (state.user.roles || []).includes("admin"); byID("admin-nav").hidden = !admin;
-    byID("connection-status").textContent = navigator.onLine ? "Online" : "Offline";
-    setRoute(routeFromPath(), false);
+    const routeLoad = setRoute(routeFromPath(), false);
     const dark = matchMedia("(prefers-color-scheme: dark)").matches;
-    api(`/api/v1/me/preferences/theme?dark=${dark}`).then(applyTheme).catch(() => announce("Your selected theme could not be loaded; a built-in appearance remains active."));
+    const themeLoad = api(themePreferenceURL(dark)).then(applyTheme).catch(() => announce("Your selected theme could not be loaded; a built-in appearance remains active."));
+    await Promise.all([routeLoad, themeLoad]);
+    if (document.fonts && document.fonts.ready) await document.fonts.ready;
+    byID("loading-view").hidden = true;
+    byID("app").dataset.state = "authenticated";
   }
 
   async function start() {
-    consumePathTokens(); wireEvents();
-    try { state.config = await api("/api/v1/config"); byID("transfer-concurrency").value = String(state.config.defaultTransferConcurrency || 4); }
-    catch (error) { showState("drive-state", friendlyError(error, "EndlessFS configuration is unavailable."), "error"); byID("connection-status").textContent = "Unavailable"; }
+    consumePathTokens(); wireIconControls(); wireActionTooltips(); wireEvents();
+    try { state.config = await api("/api/v1/config"); }
+    catch (error) { showState("drive-state", friendlyError(error, "EndlessFS configuration is unavailable."), "error"); }
     if (state.publicToken) { loadPublicShare(); return; }
     if (["/bootstrap", "/register", "/recover"].includes(location.pathname) || state.inviteToken || state.recoveryToken) { configureRegistration(); showOnly("registration-view"); byID("display-name").focus(); return; }
-    try { state.user = await api("/api/v1/me"); enterApplication(); }
+    try { state.user = await api("/api/v1/me"); await enterApplication(); }
     catch (error) {
       if (!(error instanceof APIError) || error.status !== 401) announce(friendlyError(error), true);
       showOnly("auth-view"); byID("account-actions").hidden = true; byID("register-link").hidden = state.config ? !state.config.allowRegistration : false; byID("signin-button").focus();

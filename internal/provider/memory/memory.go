@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -311,8 +312,12 @@ func (p *Provider) Stat(ctx context.Context, scope domain.Scope, path domain.Use
 
 func (p *Provider) statLocked(scope domain.Scope, path domain.UserPath) (domain.Entry, error) {
 	if path.IsRoot() {
+		recursiveBytes, err := p.rootRecursiveBytesLocked(scope)
+		if err != nil {
+			return domain.Entry{}, err
+		}
 		return domain.Entry{
-			Path: path, Kind: domain.EntryDirectory, ModifiedAt: time.Unix(0, 0).UTC(), Version: "root",
+			Path: path, Kind: domain.EntryDirectory, Size: recursiveBytes, ModifiedAt: time.Unix(0, 0).UTC(), Version: "root",
 		}, nil
 	}
 	item, found := p.scopeObjectsLocked(scope)[path.String()]
@@ -345,8 +350,13 @@ func (p *Provider) CreateDirectory(ctx context.Context, scope domain.Scope, requ
 	if err != nil {
 		return domain.Entry{}, err
 	}
+	original := cloneObjects(p.scopeObjectsLocked(scope))
 	entry := p.newEntryLocked(path, domain.EntryDirectory, 0, "")
 	p.scopeObjectsLocked(scope)[path.String()] = object{entry: entry, materialized: true}
+	if err := p.recomputeRecursiveBytesLocked(scope); err != nil {
+		p.objects[scope] = original
+		return domain.Entry{}, err
+	}
 	return entry, nil
 }
 
@@ -455,6 +465,60 @@ func (p *Provider) deleteTreeLocked(scope domain.Scope, path domain.UserPath) {
 			delete(objects, candidate)
 		}
 	}
+}
+
+func (p *Provider) rootRecursiveBytesLocked(scope domain.Scope) (int64, error) {
+	var total int64
+	for _, item := range p.scopeObjectsLocked(scope) {
+		if item.entry.Kind != domain.EntryFile {
+			continue
+		}
+		if item.entry.Size < 0 || item.entry.Size > math.MaxInt64-total {
+			return 0, domain.NewError(domain.ErrorInvalid, "directory recursive byte aggregate overflows")
+		}
+		total += item.entry.Size
+	}
+	return total, nil
+}
+
+func (p *Provider) recomputeRecursiveBytesLocked(scope domain.Scope) error {
+	if _, err := p.rootRecursiveBytesLocked(scope); err != nil {
+		return err
+	}
+	objects := p.scopeObjectsLocked(scope)
+	totals := make(map[string]int64)
+	for _, item := range objects {
+		if item.entry.Kind != domain.EntryFile {
+			continue
+		}
+		parent := item.entry.Path.Parent()
+		for !parent.IsRoot() {
+			current := totals[parent.String()]
+			if item.entry.Size < 0 || item.entry.Size > math.MaxInt64-current {
+				return domain.NewError(domain.ErrorInvalid, "directory recursive byte aggregate overflows")
+			}
+			totals[parent.String()] = current + item.entry.Size
+			parent = parent.Parent()
+		}
+	}
+	for path, item := range objects {
+		if item.entry.Kind != domain.EntryDirectory || item.entry.Size == totals[path] {
+			continue
+		}
+		item.entry.Size = totals[path]
+		p.versions++
+		item.entry.Version = domain.Version(fmt.Sprintf("p%016x", p.versions))
+		objects[path] = item
+	}
+	return nil
+}
+
+func cloneObjects(objects map[string]object) map[string]object {
+	cloned := make(map[string]object, len(objects))
+	for path, item := range objects {
+		cloned[path] = item
+	}
+	return cloned
 }
 
 func (p *Provider) beforeLocked(operation string) error {

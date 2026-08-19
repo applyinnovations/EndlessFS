@@ -460,6 +460,7 @@ Required semantics:
 
 - `List` is one directory only, stable within a page sequence, paginated with an opaque cursor, and never leaks another scope.
 - `Stat` returns `ErrNotFound` for missing entries without leaking whether an out-of-scope provider key exists.
+- `Entry.Size` is the immutable object length for a file and the persisted recursive sum of every descendant file byte for a directory. The root directory's size is the total logical file-byte consumption of that area.
 - `CreateDirectory` supports empty directories independent of how a provider represents them.
 - `CreateUpload` binds a capability to one authenticated scope, one destination path, declared size, safe media type, and expiration.
 - `CompleteUpload` verifies that the uploaded object matches the initiated destination and declared constraints before making it visible as complete.
@@ -689,13 +690,13 @@ The state backend's `superblock.json` object identifies `endlessfs-portable-buck
 
 Each current state record also has one immutable `state-versions` snapshot addressed by its logical key and logical version. It gives paginated state enumeration a provider-independent stable view across replicas while ordinary CAS updates continue. Cursor capabilities are authenticated-encrypted, bounded, expire, bind the exact prefix/limit plus gate epoch and logical gate version, and reveal neither state keys nor provider keys. Gate closure invalidates outstanding cursors and prunes every snapshot except the current version of each live state record before checkpoint inventory is created. Snapshots are authoritative canonical bodies; no cursor token is stored in the bucket.
 
-The root directory ID is a fixed format constant. Every other directory and blob ID is a stable opaque random identifier stored in canonical records. Each mutable `directory.json` root points to one immutable manifest whose immutable pages contain the directory's sorted child entries. The root also contains its logical revision and any operation-owned pending pre/post-manifest transition. A page entry is addressed by the digest of its normalized child name and stores the complete normalized name. On every read, list, create, move, copy, restore, or delete, the stored name MUST hash to its recorded digest and match the requested name; a mismatch is a collision or corruption and fails closed.
+The root directory ID is a fixed format constant. Every other directory and blob ID is a stable opaque random identifier stored in canonical records. Each mutable `directory.json` root points to one immutable manifest whose immutable pages contain the directory's sorted child entries. The root contains its logical revision, its non-negative persisted recursive-byte aggregate, and any operation-owned pending pre/post-manifest and pre/post-aggregate transition; the selected immutable manifest header repeats the aggregate so `Stat` can verify it without loading manifest pages. A page entry is addressed by the digest of its normalized child name and stores the complete normalized name. On every read, list, create, move, copy, restore, or delete, the stored name MUST hash to its recorded digest and match the requested name; a mismatch is a collision or corruption and fails closed.
 
-A single-directory content change writes new immutable page/manifest objects and conditionally replaces `directory.json`; that root replacement is its visibility point. Unreferenced pages or manifests are garbage, never visible entries. A multi-directory operation first CAS-locks every affected root in canonical resource-ID order, records immutable pre/post manifests and the current operation fence in each pending transition, and then conditionally changes the durable operation record to `committed`. Readers encountering a pending transition use the pre-manifest before that commit and the post-manifest after it. Root finalization and garbage collection are idempotent consequences of the operation state, so a node failure cannot expose a half-move, duplicate tree, or partially deleted directory.
+A single-directory content change writes new immutable page/manifest objects and conditionally replaces `directory.json`; that root replacement is its visibility point. Unreferenced pages or manifests are garbage, never visible entries. A multi-directory operation first CAS-locks every affected root in canonical resource-ID order, records immutable pre/post manifests, pre/post recursive-byte aggregates, and the current operation fence in each pending transition, and then conditionally changes the durable operation record to `committed`. Readers encountering a pending transition use the pre-manifest and pre-aggregate before that commit and the post-manifest and post-aggregate after it. Root finalization and garbage collection are idempotent consequences of the operation state, so a node failure cannot expose a half-move, duplicate tree, partially deleted directory, or aggregate that describes a different visible tree.
 
 Virtual paths are resolved one validated segment at a time through directory IDs. Provider object-key length therefore does not grow with virtual-path depth, and the full 4096-byte `UserPath` contract remains available on backends with shorter object-name limits. Empty directories exist as canonical directory and parent-entry records; they do not depend on provider folders, delimiter behavior, or zero-byte marker conventions.
 
-File blobs are immutable and live only under the file backend's blob namespace for their owner. File-entry records in state-backend directory pages contain the blob ID, normalized name, size, safe media type, integrity digests, timestamps, and portable logical version. Copy creates the required new portable entry/blob relationship according to the file-operation state machine; cross-user blob references and cross-user deduplication are forbidden.
+File blobs are immutable and live only under the file backend's blob namespace for their owner. File-entry records in state-backend directory pages contain the blob ID, normalized name, size, safe media type, integrity digests, timestamps, and portable logical version. Directory entries use the same `size` field for the child's recursive-byte aggregate. Every directory root aggregate MUST equal the overflow-checked sum of the sizes in its visible manifest, and every parent directory entry aggregate MUST equal the referenced child root aggregate. Upload, replacement, move, copy, live-to-trash transfer, restore, and permanent deletion update every affected ancestor through the same committed multi-root operation as the visible file-tree change. Negative, overflowing, missing, or inconsistent aggregates fail closed. Copy creates the required new portable entry/blob relationship according to the file-operation state machine; cross-user blob references and cross-user deduplication are forbidden.
 
 All authoritative properties are encoded in object bodies. Correctness MUST NOT depend on provider custom metadata, tags, ACLs, storage class, object versioning, soft delete, native timestamps, checksums, listing order, folder resources, or preservation of those values by a cross-cloud copy tool. Provider-side integrity and encryption features MAY add defense in depth.
 
@@ -1039,6 +1040,7 @@ Requirements:
 - A failed or expired upload does not create a visible complete file.
 - Durable upload intent, scope, destination, size, integrity expectations, and logical progress use canonical records. Provider-native resumable session URLs, multipart IDs, block IDs, and confirmed-native offsets are encrypted transient leases and cannot be required after a portability checkpoint.
 - Completed bytes are committed as an immutable canonical blob before the portable file-entry record becomes visible. A completion race or failed descriptor commit leaves an unreferenced blob for bounded idempotent cleanup, never a visible corrupt entry.
+- Upload publication and replacement update the destination directory and every changed ancestor recursive-byte aggregate at the same durable operation commit point.
 - Upload status survives page navigation only if the provider/session supports it; cross-browser persistence is not required in v1.
 - Large-object tests simulate offsets above 1 TiB without allocating equivalent storage.
 
@@ -1062,6 +1064,7 @@ Requirements:
 - Batch requests contain at most 100 selected source items and return per-item results plus an overall operation ID.
 - Repeating a request with the same user-scoped idempotency key returns the original outcome.
 - Durable operation manifests, request fingerprints, item progress, compensation state, and final outcomes are canonical and provider independent. Native rewrite/copy continuation tokens are encrypted transient leases only.
+- Move and copy transfer or duplicate the source recursive-byte aggregate and update all affected ancestor aggregates at the operation's existing single commit point.
 - Source and destination are reauthorized when an asynchronous operation begins and before final commit where feasible.
 - The UI displays progress for asynchronous operations and exposes actionable failures.
 
@@ -1076,6 +1079,7 @@ Requirements:
 - Empty trash is a separate confirmed batch action.
 - Trashed content cannot be downloaded or shared through normal file/share APIs.
 - Existing share links to trashed content become unavailable.
+- Trash and restore transfer recursive bytes between the live and trash area roots; permanent deletion subtracts them from the trash tree. Neither transition scans descendant blobs to answer later size lookups.
 
 ### 11.6 Safe previews
 
@@ -2006,6 +2010,7 @@ This order is recommended because each stage establishes contracts used by the n
 - Upload/download capability lifecycle and control-plane byte exclusion.
 - Copy/move/batch operations and idempotency.
 - Trash/restore/permanent delete.
+- Persisted overflow-checked recursive-byte aggregates for every directory and area root across upload, replace, move, copy, trash, restore, and permanent delete.
 
 ### Milestone 4 — Data-only theme system
 
@@ -2096,6 +2101,7 @@ Each criterion MUST have an automated test unless marked “inspection”.
 **AC-033** — Rename, move, copy, and batch selection work for files and directory trees with deterministic conflict modes and idempotency.  
 **AC-034** — Normal delete moves content to isolated trash; restore, rename-on-conflict, permanent delete, and empty-trash behave as specified.  
 **AC-035** — Trashed or moved share roots no longer issue share capabilities.
+**AC-036** — `Stat` and listing return an overflow-checked persisted recursive byte total for every directory, each area root returns that tree's total logical file bytes, and upload/replacement/move/copy/trash/restore/permanent-delete plus crash recovery and raw-copy cutover preserve the aggregates at the same visibility point as the file tree. Corrupt or inconsistent aggregates fail closed.
 
 ### 21.6 Direct transfer behavior
 

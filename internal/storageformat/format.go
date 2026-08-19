@@ -22,6 +22,7 @@ const (
 	KeyFormatVersion      = 1
 	WriterProtocolVersion = 1
 	MaxCanonicalBytes     = 1 << 20
+	FeatureRecursiveBytes = "recursive-byte-aggregates-v1"
 )
 
 type Envelope struct {
@@ -220,26 +221,29 @@ type StateVersionRecord struct {
 }
 
 type DirectoryRoot struct {
-	SchemaVersion int                  `json:"schemaVersion"`
-	DirectoryID   string               `json:"directoryID"`
-	ManifestID    string               `json:"manifestID"`
-	Pending       *DirectoryTransition `json:"pending,omitempty"`
+	SchemaVersion  int                  `json:"schemaVersion"`
+	DirectoryID    string               `json:"directoryID"`
+	ManifestID     string               `json:"manifestID"`
+	RecursiveBytes int64                `json:"recursiveBytes"`
+	Pending        *DirectoryTransition `json:"pending,omitempty"`
 }
 
 type DirectoryTransition struct {
-	OperationID    string `json:"operationID"`
-	Fence          uint64 `json:"fence"`
-	PreManifestID  string `json:"preManifestID,omitempty"`
-	PostManifestID string `json:"postManifestID"`
+	OperationID        string `json:"operationID"`
+	Fence              uint64 `json:"fence"`
+	PreManifestID      string `json:"preManifestID,omitempty"`
+	PostManifestID     string `json:"postManifestID"`
+	PostRecursiveBytes int64  `json:"postRecursiveBytes"`
 }
 
 type DirectoryManifest struct {
-	SchemaVersion int       `json:"schemaVersion"`
-	DirectoryID   string    `json:"directoryID"`
-	ManifestID    string    `json:"manifestID"`
-	PageIDs       []string  `json:"pageIDs"`
-	EntryCount    int       `json:"entryCount"`
-	CreatedAt     time.Time `json:"createdAt"`
+	SchemaVersion  int       `json:"schemaVersion"`
+	DirectoryID    string    `json:"directoryID"`
+	ManifestID     string    `json:"manifestID"`
+	PageIDs        []string  `json:"pageIDs"`
+	EntryCount     int       `json:"entryCount"`
+	RecursiveBytes int64     `json:"recursiveBytes"`
+	CreatedAt      time.Time `json:"createdAt"`
 }
 
 type DirectoryPage struct {
@@ -271,24 +275,25 @@ const (
 )
 
 type UploadRecord struct {
-	SchemaVersion   int                 `json:"schemaVersion"`
-	UploadID        string              `json:"uploadID"`
-	UserID          string              `json:"userID"`
-	Area            string              `json:"area"`
-	RequestedPath   string              `json:"requestedPath"`
-	ResolvedPath    string              `json:"resolvedPath"`
-	StagingKey      string              `json:"stagingKey"`
-	BackendKind     string              `json:"backendKind,omitempty"`
-	LeaseKey        string              `json:"leaseKey,omitempty"`
-	Size            int64               `json:"size"`
-	MediaType       string              `json:"mediaType"`
-	Conflict        domain.ConflictMode `json:"conflict"`
-	ExpectedVersion domain.Version      `json:"expectedVersion,omitempty"`
-	TargetExisted   bool                `json:"targetExisted"`
-	Resumable       bool                `json:"resumable"`
-	State           UploadState         `json:"state"`
-	CreatedAt       time.Time           `json:"createdAt"`
-	ExpiresAt       time.Time           `json:"expiresAt"`
+	SchemaVersion         int                 `json:"schemaVersion"`
+	UploadID              string              `json:"uploadID"`
+	CompletionOperationID string              `json:"completionOperationID"`
+	UserID                string              `json:"userID"`
+	Area                  string              `json:"area"`
+	RequestedPath         string              `json:"requestedPath"`
+	ResolvedPath          string              `json:"resolvedPath"`
+	StagingKey            string              `json:"stagingKey"`
+	BackendKind           string              `json:"backendKind,omitempty"`
+	LeaseKey              string              `json:"leaseKey,omitempty"`
+	Size                  int64               `json:"size"`
+	MediaType             string              `json:"mediaType"`
+	Conflict              domain.ConflictMode `json:"conflict"`
+	ExpectedVersion       domain.Version      `json:"expectedVersion,omitempty"`
+	TargetExisted         bool                `json:"targetExisted"`
+	Resumable             bool                `json:"resumable"`
+	State                 UploadState         `json:"state"`
+	CreatedAt             time.Time           `json:"createdAt"`
+	ExpiresAt             time.Time           `json:"expiresAt"`
 }
 
 type TransferLease struct {

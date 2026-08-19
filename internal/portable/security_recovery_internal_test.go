@@ -983,12 +983,7 @@ func TestFileOperationValidationAndRecoveryMatrix(t *testing.T) {
 	t.Run("operation-building-guards", func(t *testing.T) {
 		_, _, engine := newEngine(t)
 		rootKey := storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID).String()
-		updates := map[string]struct {
-			scope       domain.Scope
-			directoryID string
-			snapshot    directorySnapshot
-			entries     []storageformat.DirectoryEntry
-		}{rootKey: {scope: scope, directoryID: storageformat.RootDirectoryID, snapshot: directorySnapshot{pending: true}}}
+		updates := map[string]directoryUpdate{rootKey: {scope: scope, directoryID: storageformat.RootDirectoryID, snapshot: directorySnapshot{pending: true}}}
 		if _, _, err := engine.Files().buildFileOperation(ctx, user, "operation", "owner", operationDelete, updates, nil, nil); !errors.Is(err, domain.ErrUnavailable) {
 			t.Fatalf("buildFileOperation(pending) error = %v", err)
 		}

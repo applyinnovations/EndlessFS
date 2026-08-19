@@ -70,6 +70,38 @@ func TestCanonicalEnvelopeAndLogicalVersion(t *testing.T) {
 	}
 }
 
+func TestCanonicalDirectoryRootCarriesRecursiveByteTransition(t *testing.T) {
+	root := DirectoryRoot{
+		SchemaVersion: 1, DirectoryID: RootDirectoryID, ManifestID: "manifest", RecursiveBytes: 42,
+		Pending: &DirectoryTransition{
+			OperationID: "operation", Fence: 3, PreManifestID: "manifest", PostManifestID: "next", PostRecursiveBytes: 84,
+		},
+	}
+	body, err := EncodeCanonical(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"schemaVersion":1,"directoryID":"root","manifestID":"manifest","recursiveBytes":42,"pending":{"operationID":"operation","fence":3,"preManifestID":"manifest","postManifestID":"next","postRecursiveBytes":84}}`
+	if string(body) != want {
+		t.Fatalf("directory root = %s; want %s", body, want)
+	}
+	if FeatureRecursiveBytes != "recursive-byte-aggregates-v1" {
+		t.Fatalf("recursive-byte feature = %q", FeatureRecursiveBytes)
+	}
+	manifest := DirectoryManifest{
+		SchemaVersion: 1, DirectoryID: RootDirectoryID, ManifestID: "manifest", PageIDs: []string{"page"},
+		EntryCount: 2, RecursiveBytes: 42, CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+	}
+	body, err = EncodeCanonical(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = `{"schemaVersion":1,"directoryID":"root","manifestID":"manifest","pageIDs":["page"],"entryCount":2,"recursiveBytes":42,"createdAt":"2026-01-02T03:04:05Z"}`
+	if string(body) != want {
+		t.Fatalf("directory manifest = %s; want %s", body, want)
+	}
+}
+
 func TestCanonicalDirectoryPageRemainsReadableWithoutFormatMigration(t *testing.T) {
 	key := DirectoryPageKey("AAAAAAAAAAAAAAAAAAAAAA", "live", RootDirectoryID, "legacy-page")
 	payload := v1DirectoryPageWithoutPreviewFields{

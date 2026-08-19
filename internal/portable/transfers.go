@@ -55,12 +55,13 @@ func (s *FileStore) CreateUpload(ctx context.Context, scope domain.Scope, reques
 	if err != nil {
 		return domain.UploadCapability{}, err
 	}
+	completionOperationID := uploadID + "-complete"
 	operationKey := storageformat.OperationKey(scope.UserID().String(), uploadID)
 	stagingKey := storageformat.StagingKey(scope.UserID().String(), uploadID, "upload")
 	leaseKey := storageformat.LeaseKey(transfers.BackendKind(), uploadID)
 	now := s.engine.clock.Now().UTC()
 	record := storageformat.UploadRecord{
-		SchemaVersion: 1, UploadID: uploadID, UserID: scope.UserID().String(), Area: areaName(scope.Area()),
+		SchemaVersion: 1, UploadID: uploadID, CompletionOperationID: completionOperationID, UserID: scope.UserID().String(), Area: areaName(scope.Area()),
 		RequestedPath: request.Path.String(), ResolvedPath: resolved.String(), StagingKey: stagingKey.String(),
 		BackendKind: transfers.BackendKind(), LeaseKey: leaseKey.String(),
 		Size: request.Size, MediaType: mediaType, Conflict: conflict, ExpectedVersion: request.ExpectedVersion,
@@ -336,10 +337,23 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 	if err != nil {
 		return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "stored upload destination is invalid")
 	}
-	parentID, parent, err := s.resolveDirectory(ctx, scope, resolvedPath.Parent())
+	if record.State == storageformat.UploadActive {
+		if resumed, found, resumeErr := s.resumeUploadCompletion(ctx, scope, record); found || resumeErr != nil {
+			if resumeErr != nil {
+				return domain.Entry{}, resumeErr
+			}
+			if err := s.finishUpload(ctx, operationObject, operationEnvelope, record); err != nil {
+				return domain.Entry{}, err
+			}
+			return resumed, nil
+		}
+	}
+	parentTrail, err := s.resolveDirectoryTrail(ctx, scope, resolvedPath.Parent())
 	if err != nil {
 		return domain.Entry{}, err
 	}
+	parentNode := parentTrail[len(parentTrail)-1]
+	parent := parentNode.snapshot
 	if parent.pending {
 		return domain.Entry{}, domain.NewError(domain.ErrorUnavailable, "upload destination has a pending operation")
 	}
@@ -395,11 +409,11 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 		existingPointer = &current
 	}
 	updated := replaceDirectoryEntry(parent.entries, existingPointer, entry)
-	parentRevision := uint64(1)
-	if parent.exists {
-		parentRevision = parent.envelope.Revision + 1
+	updates := make(map[string]directoryUpdate)
+	if err := applyDirectoryChange(updates, parentTrail, updated); err != nil {
+		return domain.Entry{}, err
 	}
-	prepared, err := s.prepareDirectory(ctx, scope, parentID, updated, parentRevision)
+	ownerID, err := s.engine.ids.OpaqueID()
 	if err != nil {
 		return domain.Entry{}, err
 	}
@@ -408,28 +422,27 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 		return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "stored staging key is invalid")
 	}
 	copyIntent := storageformat.MutationCopy{SourceKey: stagingKey.String(), DestinationKey: blobKey.String(), Size: record.Size, SHA256: progress.SHA256}
-	parentKey := storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), parentID)
-	action := storageformat.MutationCreate
-	expected := ""
-	condition := objectstore.PutCondition{Mode: objectstore.PutCreateOnly}
-	if parent.exists {
-		action = storageformat.MutationCAS
-		expected = parent.envelope.LogicalVersion
-		condition = objectstore.PutCondition{Mode: objectstore.PutMatch, Version: parent.object.Version}
-	}
-	intent := storageformat.MutationIntent{Action: action, TargetKey: parentKey.String(), ExpectedLogicalVersion: expected, TargetBody: prepared.rootBody, Prerequisites: prepared.prerequisites, Copies: []storageformat.MutationCopy{copyIntent}}
-	err = s.engine.withAdmission(ctx, intent, func() error {
-		if err := s.engine.ensureMutationPrerequisites(ctx, prepared.prerequisites); err != nil {
-			return err
-		}
-		if err := s.engine.ensureMutationCopies(ctx, intent.Copies); err != nil {
-			return err
-		}
-		_, putErr := s.engine.backend.Put(ctx, parentKey, prepared.rootBody, condition)
-		return putErr
-	})
+	operation, operationBody, err := s.buildFileOperation(ctx, scope.UserID(), record.CompletionOperationID, ownerID, "upload-complete", updates, nil, []storageformat.MutationCopy{copyIntent})
 	if err != nil {
 		return domain.Entry{}, err
+	}
+	result, err := s.startFileOperation(ctx, operation, operationBody, "", "")
+	if errors.Is(err, domain.ErrConflict) {
+		if resumed, found, resumeErr := s.resumeUploadCompletion(ctx, scope, record); found || resumeErr != nil {
+			if resumeErr != nil {
+				return domain.Entry{}, resumeErr
+			}
+			if err := s.finishUpload(ctx, operationObject, operationEnvelope, record); err != nil {
+				return domain.Entry{}, err
+			}
+			return resumed, nil
+		}
+	}
+	if err != nil || result.State != domain.OperationSucceeded {
+		if err != nil {
+			return domain.Entry{}, err
+		}
+		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload completion operation failed")
 	}
 	if err := s.finishUpload(ctx, operationObject, operationEnvelope, record); err != nil {
 		return domain.Entry{}, err
@@ -439,6 +452,37 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 
 func matchesUploadEntry(record storageformat.UploadRecord, entry storageformat.DirectoryEntry) bool {
 	return entry.Kind == domain.EntryFile && entry.BlobID == record.UploadID && entry.Size == record.Size && entry.MediaType == record.MediaType
+}
+
+func (s *FileStore) resumeUploadCompletion(ctx context.Context, scope domain.Scope, record storageformat.UploadRecord) (domain.Entry, bool, error) {
+	key := storageformat.OperationKey(record.UserID, record.CompletionOperationID)
+	if _, err := s.engine.backend.Get(ctx, key); errors.Is(err, domain.ErrNotFound) {
+		return domain.Entry{}, false, nil
+	} else if err != nil {
+		return domain.Entry{}, true, err
+	}
+	if err := s.executeFileOperation(ctx, key); err != nil {
+		return domain.Entry{}, true, err
+	}
+	operation, err := s.readFileOperation(ctx, scope.UserID(), record.CompletionOperationID)
+	if err != nil {
+		return domain.Entry{}, true, err
+	}
+	if operation.State == storageformat.FileOperationFailed {
+		return domain.Entry{}, true, domain.NewError(domain.ErrorPreconditionFailed, "upload completion operation failed")
+	}
+	path, err := domain.ParseUserPath(record.ResolvedPath)
+	if err != nil {
+		return domain.Entry{}, true, domain.NewError(domain.ErrorInvalid, "stored upload destination is invalid")
+	}
+	entry, err := s.resolveEntry(ctx, scope, path)
+	if err != nil {
+		return domain.Entry{}, true, err
+	}
+	if !matchesUploadEntry(record, entry) {
+		return domain.Entry{}, true, domain.NewError(domain.ErrorPreconditionFailed, "completed upload destination changed")
+	}
+	return domainEntry(path, entry), true, nil
 }
 
 func (s *FileStore) finishUpload(ctx context.Context, object objectstore.Object, envelope storageformat.Envelope, record storageformat.UploadRecord) error {
@@ -545,7 +589,7 @@ func (s *FileStore) readUploadRecord(ctx context.Context, userID domain.UserID, 
 	if err := storageformat.DecodeEnvelope(object.Body, key, uploadRecordSchema, &envelope, &record); err != nil {
 		return objectstore.Object{}, storageformat.Envelope{}, storageformat.UploadRecord{}, err
 	}
-	if record.SchemaVersion != 1 || record.UploadID != uploadID || record.UserID != userID.String() || record.Size < 0 || record.StagingKey == "" || record.BackendKind == "" || record.LeaseKey == "" || record.ExpiresAt.IsZero() || record.CreatedAt.IsZero() || (record.State != storageformat.UploadActive && record.State != storageformat.UploadCompleted && record.State != storageformat.UploadAborted) {
+	if record.SchemaVersion != 1 || record.UploadID != uploadID || record.CompletionOperationID == "" || record.UserID != userID.String() || record.Size < 0 || record.StagingKey == "" || record.BackendKind == "" || record.LeaseKey == "" || record.ExpiresAt.IsZero() || record.CreatedAt.IsZero() || (record.State != storageformat.UploadActive && record.State != storageformat.UploadCompleted && record.State != storageformat.UploadAborted) {
 		return objectstore.Object{}, storageformat.Envelope{}, storageformat.UploadRecord{}, domain.NewError(domain.ErrorInvalid, "invalid stored upload record")
 	}
 	return object, envelope, record, nil

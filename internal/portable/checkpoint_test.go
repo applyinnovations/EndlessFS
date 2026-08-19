@@ -105,8 +105,21 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 	if _, err := destinationEngine.Files().Stat(context.Background(), trashScope, domain.MustParseUserPath("/trash-folder/deleted.txt")); err != nil {
 		t.Fatalf("destination trash file missing: %v", err)
 	}
+	for path, expected := range map[string]int64{"/": 28, "/documents": 14, "/copy": 14} {
+		entry, statErr := destinationEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath(path))
+		if statErr != nil || entry.Size != expected {
+			t.Fatalf("raw-copy aggregate %s = %+v, %v; want %d", path, entry, statErr, expected)
+		}
+	}
+	if entry, statErr := destinationEngine.Files().Stat(context.Background(), trashScope, domain.MustParseUserPath("/")); statErr != nil || entry.Size != 11 {
+		t.Fatalf("raw-copy trash aggregate = %+v, %v; want 11", entry, statErr)
+	}
 	if _, err := destinationEngine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/after-cutover")}); err != nil {
 		t.Fatalf("destination continued mutation error = %v", err)
+	}
+	uploadPortableFile(t, destinationServer.Client(), destinationEngine.Files(), scope, domain.MustParseUserPath("/after-cutover/new.txt"), []byte("continued"))
+	if entry, statErr := destinationEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/")); statErr != nil || entry.Size != 37 {
+		t.Fatalf("continued aggregate = %+v, %v; want 37", entry, statErr)
 	}
 	returnCheckpoint, err := destinationEngine.CreateCheckpoint(context.Background(), "return-checkpoint")
 	if err != nil {
@@ -123,6 +136,9 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 	}
 	if _, err := returnedEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/after-cutover")); err != nil {
 		t.Fatalf("reverse-copy continued state missing: %v", err)
+	}
+	if entry, err := returnedEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/")); err != nil || entry.Size != 37 {
+		t.Fatalf("reverse-copy aggregate = %+v, %v; want 37", entry, err)
 	}
 }
 

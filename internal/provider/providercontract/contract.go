@@ -326,6 +326,59 @@ func Run(t *testing.T, factory Factory) {
 		}
 	})
 
+	t.Run("recursive byte aggregate lifecycle", func(t *testing.T) {
+		harness := factory(t)
+		live := testScope(t, 0x73, domain.AreaLive)
+		trash := testScope(t, 0x73, domain.AreaTrash)
+		for _, path := range []string{"/tree", "/tree/nested"} {
+			if _, err := harness.Storage.CreateDirectory(context.Background(), live, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		uploadFile(t, harness, live, domain.MustParseUserPath("/tree/nested/file.txt"), []byte("four"), false)
+		assertAggregate := func(scope domain.Scope, path string, size int64) {
+			t.Helper()
+			entry, err := harness.Storage.Stat(context.Background(), scope, domain.MustParseUserPath(path))
+			if err != nil || entry.Size != size {
+				t.Fatalf("Stat(%s) = %+v, %v; want recursive size %d", path, entry, err, size)
+			}
+		}
+		assertAggregate(live, "/", 4)
+		assertAggregate(live, "/tree", 4)
+		assertAggregate(live, "/tree/nested", 4)
+		page, err := harness.Storage.List(context.Background(), live, domain.ListRequest{Directory: domain.MustParseUserPath("/tree")})
+		if err != nil || len(page.Entries) != 1 || page.Entries[0].Size != 4 {
+			t.Fatalf("List(/tree) = %+v, %v; want child recursive size 4", page, err)
+		}
+		if operation, err := harness.Storage.Copy(context.Background(), live, live, domain.CopyRequest{
+			Source: domain.MustParseUserPath("/tree"), Destination: domain.MustParseUserPath("/copy"), IdempotencyKey: "aggregate-copy",
+		}); err != nil || operation.State != domain.OperationSucceeded {
+			t.Fatalf("Copy() = %+v, %v", operation, err)
+		}
+		assertAggregate(live, "/", 8)
+		assertAggregate(live, "/copy", 4)
+		if operation, err := harness.Storage.Move(context.Background(), live, trash, domain.MoveRequest{
+			Source: domain.MustParseUserPath("/copy/nested"), Destination: domain.MustParseUserPath("/trashed"), IdempotencyKey: "aggregate-trash",
+		}); err != nil || operation.State != domain.OperationSucceeded {
+			t.Fatalf("trash Move() = %+v, %v", operation, err)
+		}
+		assertAggregate(live, "/", 4)
+		assertAggregate(trash, "/", 4)
+		if operation, err := harness.Storage.Move(context.Background(), trash, live, domain.MoveRequest{
+			Source: domain.MustParseUserPath("/trashed"), Destination: domain.MustParseUserPath("/restored"), IdempotencyKey: "aggregate-restore",
+		}); err != nil || operation.State != domain.OperationSucceeded {
+			t.Fatalf("restore Move() = %+v, %v", operation, err)
+		}
+		assertAggregate(live, "/", 8)
+		assertAggregate(trash, "/", 0)
+		if operation, err := harness.Storage.Delete(context.Background(), live, domain.DeleteRequest{
+			Path: domain.MustParseUserPath("/restored"), IdempotencyKey: "aggregate-delete",
+		}); err != nil || operation.State != domain.OperationSucceeded {
+			t.Fatalf("Delete() = %+v, %v", operation, err)
+		}
+		assertAggregate(live, "/", 4)
+	})
+
 	t.Run("preview content identity lifecycle", func(t *testing.T) {
 		harness := factory(t)
 		live := testScope(t, 0x79, domain.AreaLive)

@@ -25,6 +25,10 @@ const (
 	StepOperationAfterPrepared  = "operation:after-prepared"
 	StepOperationAfterCommitted = "operation:after-committed"
 	StepOperationAfterFinalized = "operation:after-finalized"
+
+	StepUploadCompletionAfterPrepared  = "upload-completion:after-prepared"
+	StepUploadCompletionAfterCommitted = "upload-completion:after-committed"
+	StepUploadCompletionAfterFinalized = "upload-completion:after-finalized"
 )
 
 type treePreparation struct {
@@ -76,10 +80,12 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 		return existing, err
 	}
 
-	sourceParentID, sourceParent, err := s.resolveDirectory(ctx, from, request.Source.Parent())
+	sourceTrail, err := s.resolveDirectoryTrail(ctx, from, request.Source.Parent())
 	if err != nil {
 		return domain.Operation{}, err
 	}
+	sourceParentNode := sourceTrail[len(sourceTrail)-1]
+	sourceParentID, sourceParent := sourceParentNode.directoryID, sourceParentNode.snapshot
 	if sourceParent.pending {
 		return domain.Operation{}, domain.NewError(domain.ErrorUnavailable, "source directory has a pending operation")
 	}
@@ -90,10 +96,24 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 	if request.ExpectedSource != "" && request.ExpectedSource != domain.Version(sourceEntry.LogicalVersion) {
 		return domain.Operation{}, domain.NewError(domain.ErrorPreconditionFailed, "source version does not match")
 	}
-	destinationParentID, destinationParent, err := s.resolveDirectory(ctx, to, request.Destination.Parent())
+	if sourceEntry.Kind == domain.EntryDirectory {
+		sourceDirectory, err := s.readDirectory(ctx, from, sourceEntry.DirectoryID, false)
+		if err != nil {
+			return domain.Operation{}, err
+		}
+		if sourceDirectory.pending {
+			return domain.Operation{}, domain.NewError(domain.ErrorUnavailable, "source tree has a pending operation")
+		}
+		if sourceDirectory.recursiveBytes != sourceEntry.Size {
+			return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "source directory recursive byte aggregate mismatch")
+		}
+	}
+	destinationTrail, err := s.resolveDirectoryTrail(ctx, to, request.Destination.Parent())
 	if err != nil {
 		return domain.Operation{}, err
 	}
+	destinationParentNode := destinationTrail[len(destinationTrail)-1]
+	destinationParentID, destinationParent := destinationParentNode.directoryID, destinationParentNode.snapshot
 	if destinationParent.pending {
 		return domain.Operation{}, domain.NewError(domain.ErrorUnavailable, "destination directory has a pending operation")
 	}
@@ -127,12 +147,7 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 	if err != nil {
 		return domain.Operation{}, err
 	}
-	rootUpdates := make(map[string]struct {
-		scope       domain.Scope
-		directoryID string
-		snapshot    directorySnapshot
-		entries     []storageformat.DirectoryEntry
-	})
+	rootUpdates := make(map[string]directoryUpdate)
 	sourceRootKey := storageformat.DirectoryRootKey(from.UserID().String(), areaName(from.Area()), sourceParentID).String()
 	destinationRootKey := storageformat.DirectoryRootKey(to.UserID().String(), areaName(to.Area()), destinationParentID).String()
 	if sourceRootKey == destinationRootKey {
@@ -144,32 +159,23 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 			entries = removeDirectoryEntry(entries, destinationExisting.Name)
 		}
 		entries = replaceDirectoryEntry(entries, nil, preparation.entry)
-		rootUpdates[sourceRootKey] = struct {
-			scope       domain.Scope
-			directoryID string
-			snapshot    directorySnapshot
-			entries     []storageformat.DirectoryEntry
-		}{from, sourceParentID, sourceParent, entries}
+		if err := applyDirectoryChange(rootUpdates, sourceTrail, entries); err != nil {
+			return domain.Operation{}, err
+		}
 	} else {
 		if move {
-			rootUpdates[sourceRootKey] = struct {
-				scope       domain.Scope
-				directoryID string
-				snapshot    directorySnapshot
-				entries     []storageformat.DirectoryEntry
-			}{from, sourceParentID, sourceParent, removeDirectoryEntry(sourceParent.entries, sourceEntry.Name)}
+			if err := applyDirectoryChange(rootUpdates, sourceTrail, removeDirectoryEntry(sourceParent.entries, sourceEntry.Name)); err != nil {
+				return domain.Operation{}, err
+			}
 		}
-		destinationEntries := append([]storageformat.DirectoryEntry(nil), destinationParent.entries...)
+		destinationEntries := currentDirectoryEntries(rootUpdates, destinationParentNode)
 		if destinationExisting != nil {
 			destinationEntries = removeDirectoryEntry(destinationEntries, destinationExisting.Name)
 		}
 		destinationEntries = replaceDirectoryEntry(destinationEntries, nil, preparation.entry)
-		rootUpdates[destinationRootKey] = struct {
-			scope       domain.Scope
-			directoryID string
-			snapshot    directorySnapshot
-			entries     []storageformat.DirectoryEntry
-		}{to, destinationParentID, destinationParent, destinationEntries}
+		if err := applyDirectoryChange(rootUpdates, destinationTrail, destinationEntries); err != nil {
+			return domain.Operation{}, err
+		}
 	}
 
 	operation, body, err := s.buildFileOperation(ctx, from.UserID(), operationID, ownerID, kind, rootUpdates, preparation.prerequisites, preparation.copies)
@@ -193,10 +199,12 @@ func (s *FileStore) Delete(ctx context.Context, scope domain.Scope, request doma
 	if existing, found, err := s.lookupIdempotentOperation(ctx, scope.UserID(), operationDelete, request.IdempotencyKey, fingerprint); found || err != nil {
 		return existing, err
 	}
-	parentID, parent, err := s.resolveDirectory(ctx, scope, request.Path.Parent())
+	parentTrail, err := s.resolveDirectoryTrail(ctx, scope, request.Path.Parent())
 	if err != nil {
 		return domain.Operation{}, err
 	}
+	parentNode := parentTrail[len(parentTrail)-1]
+	parent := parentNode.snapshot
 	if parent.pending {
 		return domain.Operation{}, domain.NewError(domain.ErrorUnavailable, "directory has a pending operation")
 	}
@@ -207,6 +215,18 @@ func (s *FileStore) Delete(ctx context.Context, scope domain.Scope, request doma
 	if request.ExpectedVersion != "" && request.ExpectedVersion != domain.Version(entry.LogicalVersion) {
 		return domain.Operation{}, domain.NewError(domain.ErrorPreconditionFailed, "entry version does not match")
 	}
+	if entry.Kind == domain.EntryDirectory {
+		directory, err := s.readDirectory(ctx, scope, entry.DirectoryID, false)
+		if err != nil {
+			return domain.Operation{}, err
+		}
+		if directory.pending {
+			return domain.Operation{}, domain.NewError(domain.ErrorUnavailable, "directory has a pending operation")
+		}
+		if directory.recursiveBytes != entry.Size {
+			return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "directory recursive byte aggregate mismatch")
+		}
+	}
 	operationID, err := s.engine.ids.OpaqueID()
 	if err != nil {
 		return domain.Operation{}, err
@@ -215,13 +235,10 @@ func (s *FileStore) Delete(ctx context.Context, scope domain.Scope, request doma
 	if err != nil {
 		return domain.Operation{}, err
 	}
-	key := storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), parentID).String()
-	updates := map[string]struct {
-		scope       domain.Scope
-		directoryID string
-		snapshot    directorySnapshot
-		entries     []storageformat.DirectoryEntry
-	}{key: {scope, parentID, parent, removeDirectoryEntry(parent.entries, entry.Name)}}
+	updates := make(map[string]directoryUpdate)
+	if err := applyDirectoryChange(updates, parentTrail, removeDirectoryEntry(parent.entries, entry.Name)); err != nil {
+		return domain.Operation{}, err
+	}
 	operation, body, err := s.buildFileOperation(ctx, scope.UserID(), operationID, ownerID, operationDelete, updates, nil, nil)
 	if err != nil {
 		return domain.Operation{}, err
@@ -293,6 +310,9 @@ func (s *FileStore) cloneTree(ctx context.Context, from, to domain.Scope, source
 	result.prerequisites = append(result.prerequisites, prepared.prerequisites...)
 	result.prerequisites = append(result.prerequisites, storageformat.MutationObject{Key: rootKey.String(), Body: prepared.rootBody})
 	result.entry.DirectoryID = directoryID
+	if prepared.recursiveBytes != source.Size {
+		return treePreparation{}, domain.NewError(domain.ErrorInvalid, "source directory recursive byte aggregate mismatch")
+	}
 	result.entry.ModifiedAt = now
 	return result, nil
 }
@@ -301,12 +321,7 @@ func (s *FileStore) buildFileOperation(
 	ctx context.Context,
 	userID domain.UserID,
 	operationID, ownerID, kind string,
-	updates map[string]struct {
-		scope       domain.Scope
-		directoryID string
-		snapshot    directorySnapshot
-		entries     []storageformat.DirectoryEntry
-	},
+	updates map[string]directoryUpdate,
 	prerequisites []storageformat.MutationObject,
 	copies []storageformat.MutationCopy,
 ) (storageformat.FileOperation, []byte, error) {
@@ -334,20 +349,20 @@ func (s *FileStore) buildFileOperation(
 		}
 		prerequisites = append(prerequisites, prepared.prerequisites...)
 		key := objectstore.MustKey(keyValue)
-		pendingRoot := storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: preManifest, Pending: &storageformat.DirectoryTransition{
-			OperationID: operationID, Fence: 1, PreManifestID: preManifest, PostManifestID: prepared.manifestID,
+		pendingRoot := storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: preManifest, RecursiveBytes: update.snapshot.recursiveBytes, Pending: &storageformat.DirectoryTransition{
+			OperationID: operationID, Fence: 1, PreManifestID: preManifest, PostManifestID: prepared.manifestID, PostRecursiveBytes: prepared.recursiveBytes,
 		}}
 		pendingBody, err := storageformat.EncodeEnvelope(directoryRootSchema, key, currentRevision+1, pendingRoot)
 		if err != nil {
 			return storageformat.FileOperation{}, nil, err
 		}
-		finalBody, err := storageformat.EncodeEnvelope(directoryRootSchema, key, currentRevision+2, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: prepared.manifestID})
+		finalBody, err := storageformat.EncodeEnvelope(directoryRootSchema, key, currentRevision+2, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: prepared.manifestID, RecursiveBytes: prepared.recursiveBytes})
 		if err != nil {
 			return storageformat.FileOperation{}, nil, err
 		}
 		var rollbackBody []byte
 		if update.snapshot.exists {
-			rollbackBody, err = storageformat.EncodeEnvelope(directoryRootSchema, key, currentRevision+2, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: preManifest})
+			rollbackBody, err = storageformat.EncodeEnvelope(directoryRootSchema, key, currentRevision+2, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: preManifest, RecursiveBytes: update.snapshot.recursiveBytes})
 			if err != nil {
 				return storageformat.FileOperation{}, nil, err
 			}
@@ -453,7 +468,11 @@ func (s *FileStore) executeFileOperation(ctx context.Context, key objectstore.Ke
 				return err
 			}
 		}
-		if err := s.engine.step(ctx, StepOperationAfterPrepared); err != nil {
+		preparedStep := StepOperationAfterPrepared
+		if operation.Kind == "upload-complete" {
+			preparedStep = StepUploadCompletionAfterPrepared
+		}
+		if err := s.engine.step(ctx, preparedStep); err != nil {
 			return err
 		}
 		object, envelope, operation, err = s.readFileOperationObject(ctx, key)
@@ -475,7 +494,11 @@ func (s *FileStore) executeFileOperation(ctx context.Context, key objectstore.Ke
 		if _, err = s.engine.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
 			return err
 		}
-		if err := s.engine.step(ctx, StepOperationAfterCommitted); err != nil {
+		committedStep := StepOperationAfterCommitted
+		if operation.Kind == "upload-complete" {
+			committedStep = StepUploadCompletionAfterCommitted
+		}
+		if err := s.engine.step(ctx, committedStep); err != nil {
 			return err
 		}
 	}
@@ -484,7 +507,11 @@ func (s *FileStore) executeFileOperation(ctx context.Context, key objectstore.Ke
 			return err
 		}
 	}
-	if err := s.engine.step(ctx, StepOperationAfterFinalized); err != nil {
+	finalizedStep := StepOperationAfterFinalized
+	if operation.Kind == "upload-complete" {
+		finalizedStep = StepUploadCompletionAfterFinalized
+	}
+	if err := s.engine.step(ctx, finalizedStep); err != nil {
 		return err
 	}
 	object, envelope, operation, err = s.readFileOperationObject(ctx, key)

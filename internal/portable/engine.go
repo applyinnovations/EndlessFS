@@ -124,6 +124,16 @@ func canonicalWriterConfiguration(configuration WriterConfiguration) (storagefor
 	}
 	keyrings := append([]string(nil), configuration.KeyringIdentifiers...)
 	features := append([]string(nil), configuration.RequiredFeatures...)
+	foundRecursiveBytes := false
+	for _, feature := range features {
+		if feature == storageformat.FeatureRecursiveBytes {
+			foundRecursiveBytes = true
+			break
+		}
+	}
+	if !foundRecursiveBytes {
+		features = append(features, storageformat.FeatureRecursiveBytes)
+	}
 	sort.Strings(keyrings)
 	sort.Strings(features)
 	for index, value := range keyrings {

@@ -970,6 +970,16 @@
     }
   }
 
+  function uploadMediaType(file, name) {
+    const declared = String(file.type || "").trim().toLocaleLowerCase();
+    if (declared && declared !== "application/octet-stream") return declared;
+    const extension = name.includes(".") ? name.split(".").pop().toLocaleLowerCase() : "";
+    return ({
+      arw: "image/x-sony-arw", cr2: "image/x-canon-cr2", cr3: "image/x-canon-cr3", dng: "image/x-adobe-dng",
+      nef: "image/x-nikon-nef", orf: "image/x-olympus-orf", pef: "image/x-pentax-pef", raf: "image/x-fuji-raf", rw2: "image/x-panasonic-rw2",
+    })[extension] || "application/octet-stream";
+  }
+
   async function uploadTransfer(transfer) {
     transfer.state = "preparing";
     transfer.error = "";
@@ -978,7 +988,7 @@
     renderTransfers();
     try {
       if (!transfer.groupID) await ensureDirectories(transfer.baseDirectory, transfer.relativeDirectory);
-      const mediaType = transfer.file.type || "application/octet-stream";
+      const mediaType = uploadMediaType(transfer.file, transfer.name);
       const capability = await api("/api/v1/uploads", { method: "POST", headers: { "Idempotency-Key": transfer.id }, body: { path: transfer.directory, name: transfer.name, size: transfer.file.size, mediaType, conflict: "rename", resumable: true }, signal: transfer.controller.signal });
       transfer.uploadID = capability.uploadID;
       transfer.state = "uploading";

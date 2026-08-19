@@ -13,6 +13,7 @@ import (
 	"image/png"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,14 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	switch filepath.Base(os.Args[0]) {
+	case "endlessfs-invalid-raw-decoder":
+		_, _ = os.Stdout.WriteString("invalid decoder output")
+		os.Exit(0)
+	case "endlessfs-blocking-raw-decoder":
+		time.Sleep(time.Hour)
+		os.Exit(1)
+	}
 	if os.Getenv("ENDLESSFS_TEST_BLOCK_PREVIEW_WORKER") == "1" {
 		time.Sleep(time.Hour)
 		os.Exit(1)
@@ -50,6 +59,45 @@ func TestWorkerGeneratorRunsCodecOutOfProcessAndHonorsCancellation(t *testing.T)
 	cancel()
 	if _, err := worker.Generate(canceled, preview.GenerationRequest{Source: bytes.NewReader(input), SourceSize: int64(len(input)), MediaType: "image/png", Variant: 64}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled worker error = %v", err)
+	}
+}
+
+func TestWorkerGeneratorDecodesClosedCameraRAWFormatsAndRejectsMismatchedBytes(t *testing.T) {
+	decoder := os.Getenv("ENDLESSFS_TEST_RAW_DECODER")
+	if decoder == "" {
+		t.Fatal("ENDLESSFS_TEST_RAW_DECODER is required by the Nix test environment")
+	}
+	worker, err := imagegen.NewWorker(imagegen.Options{RawDecoderPath: decoder})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.SelfTest(context.Background()); err != nil {
+		t.Fatalf("RAW worker self-test: %v", err)
+	}
+	for _, mediaType := range []string{
+		"image/x-adobe-dng", "image/x-canon-cr2", "image/x-canon-cr3", "image/x-fuji-raf", "image/x-nikon-nef",
+		"image/x-olympus-orf", "image/x-panasonic-rw2", "image/x-pentax-pef", "image/x-sony-arw",
+	} {
+		if !worker.Supports(mediaType) {
+			t.Errorf("worker does not support packaged RAW media type %q", mediaType)
+		}
+	}
+	dng := encodeTestDNG(t, 128, 96)
+	generated, err := worker.Generate(context.Background(), preview.GenerationRequest{
+		Source: bytes.NewReader(dng), SourceSize: int64(len(dng)), MediaType: "image/x-adobe-dng", Variant: 64,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	features, err := webp.GetFeatures(bytes.NewReader(generated.Bytes))
+	if err != nil || features.Width < 1 || features.Height < 1 || features.Width > 128 || features.Height > 96 || features.HasAnimation {
+		t.Fatalf("RAW WebP features = %+v, %v", features, err)
+	}
+	pngInput := encodePNG(t, image.NewNRGBA(image.Rect(0, 0, 4, 3)))
+	if _, err := worker.Generate(context.Background(), preview.GenerationRequest{
+		Source: bytes.NewReader(pngInput), SourceSize: int64(len(pngInput)), MediaType: "image/x-sony-arw", Variant: 64,
+	}); err == nil {
+		t.Fatal("RAW worker accepted PNG bytes under an ARW media type")
 	}
 }
 
@@ -326,6 +374,115 @@ func encodeGIF(t *testing.T, value *image.Paletted) []byte {
 		t.Fatal(err)
 	}
 	return output.Bytes()
+}
+
+func encodeTestDNG(t *testing.T, width, height int) []byte {
+	t.Helper()
+	if width < 4 || height < 4 {
+		t.Fatal("DNG fixture dimensions are too small")
+	}
+	type entry struct {
+		tag, dataType uint16
+		count         uint32
+		value         []byte
+		offset        uint32
+	}
+	shorts := func(values ...uint16) []byte {
+		data := make([]byte, len(values)*2)
+		for index, value := range values {
+			binary.LittleEndian.PutUint16(data[index*2:], value)
+		}
+		return data
+	}
+	longs := func(values ...uint32) []byte {
+		data := make([]byte, len(values)*4)
+		for index, value := range values {
+			binary.LittleEndian.PutUint32(data[index*4:], value)
+		}
+		return data
+	}
+	rationals := func(values ...uint32) []byte { return longs(values...) }
+	srationals := func(values ...int32) []byte {
+		data := make([]byte, len(values)*4)
+		for index, value := range values {
+			binary.LittleEndian.PutUint32(data[index*4:], uint32(value))
+		}
+		return data
+	}
+	pixels := make([]byte, width*height*2)
+	for y := range height {
+		for x := range width {
+			value := uint16(256 + (x*137+y*193)%3500)
+			binary.LittleEndian.PutUint16(pixels[(y*width+x)*2:], value)
+		}
+	}
+	entries := []entry{
+		{tag: 254, dataType: 4, count: 1, value: longs(0)},
+		{tag: 256, dataType: 4, count: 1, value: longs(uint32(width))},
+		{tag: 257, dataType: 4, count: 1, value: longs(uint32(height))},
+		{tag: 258, dataType: 3, count: 1, value: shorts(16)},
+		{tag: 259, dataType: 3, count: 1, value: shorts(1)},
+		{tag: 262, dataType: 3, count: 1, value: shorts(32803)},
+		{tag: 271, dataType: 2, count: 10, value: []byte("EndlessFS\x00")},
+		{tag: 272, dataType: 2, count: 18, value: []byte("Deterministic RAW\x00")},
+		{tag: 273, dataType: 4, count: 1, value: longs(0)},
+		{tag: 274, dataType: 3, count: 1, value: shorts(1)},
+		{tag: 277, dataType: 3, count: 1, value: shorts(1)},
+		{tag: 278, dataType: 4, count: 1, value: longs(uint32(height))},
+		{tag: 279, dataType: 4, count: 1, value: longs(uint32(len(pixels)))},
+		{tag: 284, dataType: 3, count: 1, value: shorts(1)},
+		{tag: 33421, dataType: 3, count: 2, value: shorts(2, 2)},
+		{tag: 33422, dataType: 1, count: 4, value: []byte{0, 1, 1, 2}},
+		{tag: 50706, dataType: 1, count: 4, value: []byte{1, 4, 0, 0}},
+		{tag: 50707, dataType: 1, count: 4, value: []byte{1, 1, 0, 0}},
+		{tag: 50708, dataType: 2, count: 28, value: []byte("EndlessFS Deterministic RAW\x00")},
+		{tag: 50710, dataType: 1, count: 3, value: []byte{0, 1, 2}},
+		{tag: 50711, dataType: 3, count: 1, value: shorts(1)},
+		{tag: 50713, dataType: 3, count: 2, value: shorts(1, 1)},
+		{tag: 50714, dataType: 5, count: 1, value: rationals(0, 1)},
+		{tag: 50717, dataType: 4, count: 1, value: longs(4095)},
+		{tag: 50718, dataType: 5, count: 2, value: rationals(1, 1, 1, 1)},
+		{tag: 50719, dataType: 4, count: 2, value: longs(0, 0)},
+		{tag: 50720, dataType: 4, count: 2, value: longs(uint32(width), uint32(height))},
+		{tag: 50721, dataType: 10, count: 9, value: srationals(1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1)},
+		{tag: 50728, dataType: 5, count: 3, value: rationals(1, 1, 1, 1, 1, 1)},
+		{tag: 50778, dataType: 3, count: 1, value: shorts(21)},
+		{tag: 50829, dataType: 4, count: 4, value: longs(0, 0, uint32(height), uint32(width))},
+	}
+	ifdSize := 2 + len(entries)*12 + 4
+	nextOffset := uint32(8 + ifdSize)
+	align := func(value uint32) uint32 { return (value + 3) &^ 3 }
+	for index := range entries {
+		if len(entries[index].value) > 4 {
+			entries[index].offset = nextOffset
+			nextOffset = align(nextOffset + uint32(len(entries[index].value)))
+		}
+	}
+	pixelOffset := nextOffset
+	for index := range entries {
+		if entries[index].tag == 273 {
+			entries[index].value = longs(pixelOffset)
+		}
+	}
+	output := make([]byte, int(pixelOffset)+len(pixels))
+	copy(output[:2], "II")
+	binary.LittleEndian.PutUint16(output[2:4], 42)
+	binary.LittleEndian.PutUint32(output[4:8], 8)
+	binary.LittleEndian.PutUint16(output[8:10], uint16(len(entries)))
+	for index, item := range entries {
+		offset := 10 + index*12
+		binary.LittleEndian.PutUint16(output[offset:offset+2], item.tag)
+		binary.LittleEndian.PutUint16(output[offset+2:offset+4], item.dataType)
+		binary.LittleEndian.PutUint32(output[offset+4:offset+8], item.count)
+		if len(item.value) <= 4 {
+			copy(output[offset+8:offset+12], item.value)
+		} else {
+			binary.LittleEndian.PutUint32(output[offset+8:offset+12], item.offset)
+			copy(output[item.offset:], item.value)
+		}
+	}
+	copy(output[pixelOffset:], pixels)
+	return output
 }
 
 func addJPEGOrientation(t *testing.T, source []byte, orientation uint16) []byte {

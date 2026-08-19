@@ -213,9 +213,9 @@ these pipelines neither target nor configure the GKE cluster that hosts
 - `endlessfs-release-` re-verifies `v*.*.*` tags, publishes version and `latest`
   images, and creates a GitHub release containing every Nix-built artifact.
 - The short-lived PaC GitHub App installation token used for cloning is reused
-  for release creation and asset upload. It is the configured GHCR candidate,
-  but the registry path must pass the disposable xlab push proof documented in
-  `.tekton/README.md`; App `packages: write` is not claimed as proof by itself.
+  for release creation and asset upload. GHCR rejected that general App token,
+  so container publishing uses a separate SOPS-encrypted classic PAT with only
+  `write:packages`; it is mounted only into trusted publishing Tasks.
   Repository administration remains outside ordinary CI.
 
 The former Darwin smoke job is deprecated. Its triggerless PaC definition

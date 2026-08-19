@@ -86,6 +86,7 @@ spec:
       - name: git-cache
       - name: nix-store
       - name: basic-auth
+      - name: github-packages-auth
     tasks:
       - name: clone
         taskRef:
@@ -153,6 +154,8 @@ spec:
             workspace: source
           - name: nix-store
             workspace: nix-store
+          - name: github-packages-auth
+            workspace: github-packages-auth
         params:
           - name: GITHUB_TOKEN_SECRET_NAME
             value: $(params.git_auth_secret)
@@ -195,3 +198,6 @@ spec:
     - name: basic-auth
       secret:
         secretName: "{{ git_auth_secret }}"
+    - name: github-packages-auth
+      secret:
+        secretName: github-packages-credentials

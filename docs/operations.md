@@ -126,9 +126,10 @@ Tekton publishing on the xlab bare-metal Talos Linux cluster is tag-driven.
 Protected `vMAJOR.MINOR.PATCH` tags cause the PaC release workflow to repeat the
 full gate, push version and `latest` tags to GHCR, and attach the Nix-built
 evidence. The same short-lived xlab.now GitHub App installation token used to
-clone the tag performs release creation and asset upload. It is attempted for
-GHCR only after an isolated push proves registry support; the App permission
-alone is not release evidence. The workflow never targets the production GKE
+clone the tag performs release creation and asset upload. GHCR publishing uses
+a separate SOPS-encrypted classic PAT limited to `write:packages`, mounted only
+into the trusted publishing step after the general App installation token was
+rejected by the registry. The workflow never targets the production GKE
 cluster. Applying branch/tag rules is a separate explicit administrator operation through
 `nix run .#repository-policy -- apply`; the ordinary CI token cannot administer
 repository policy.

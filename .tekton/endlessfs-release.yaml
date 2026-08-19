@@ -1,0 +1,197 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: endlessfs-release-
+  annotations:
+    pipelinesascode.tekton.dev/on-event: "[push]"
+    pipelinesascode.tekton.dev/on-target-branch: "[refs/tags/v*.*.*]"
+    pipelinesascode.tekton.dev/max-keep-runs: "20"
+    pipelinesascode.tekton.dev/cancel-in-progress: "false"
+    pipelinesascode.tekton.dev/target-namespace: "tekton-buildkit"
+    ci/trigger: release
+  labels:
+    app.kubernetes.io/part-of: endlessfs-ci
+    tekton.dev/pipeline: endlessfs-release
+    ci/repo: "{{ repo_name }}"
+spec:
+  taskRunTemplate:
+    serviceAccountName: tekton-build-sa
+    podTemplate:
+      nodeSelector:
+        storage.xlab.now/fast-local: "true"
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+  taskRunSpecs:
+    - pipelineTaskName: clone
+      stepSpecs:
+        - name: clone
+          computeResources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+    - pipelineTaskName: verify
+      podTemplate:
+        hostUsers: false
+      stepSpecs:
+        - name: run
+          computeResources:
+            requests:
+              cpu: "6"
+              memory: 12Gi
+            limits:
+              cpu: "12"
+              memory: 24Gi
+    - pipelineTaskName: release
+      podTemplate:
+        hostUsers: false
+      stepSpecs:
+        - name: run
+          computeResources:
+            requests:
+              cpu: "6"
+              memory: 12Gi
+            limits:
+              cpu: "12"
+              memory: 24Gi
+  # PaC installation tokens expire after one hour. Keep the complete sequential
+  # release path below that boundary so the clone token remains valid for the
+  # final release and asset API calls.
+  timeouts:
+    pipeline: 55m0s
+  params:
+    - name: repo_url
+      value: "{{ repo_url }}"
+    - name: revision
+      value: "{{ revision }}"
+    - name: release_tag
+      value: "{{ git_tag }}"
+    - name: git_auth_secret
+      value: "{{ git_auth_secret }}"
+  pipelineSpec:
+    params:
+      - name: repo_url
+        type: string
+      - name: revision
+        type: string
+      - name: release_tag
+        type: string
+      - name: git_auth_secret
+        type: string
+    workspaces:
+      - name: source
+      - name: git-cache
+      - name: nix-store
+      - name: basic-auth
+    tasks:
+      - name: clone
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: git-clone-cached
+            - name: namespace
+              value: tekton-pipelines
+        timeout: 5m
+        workspaces:
+          - name: output
+            workspace: source
+          - name: git-cache
+            workspace: git-cache
+          - name: basic-auth
+            workspace: basic-auth
+        params:
+          - name: url
+            value: $(params.repo_url)
+          - name: revision
+            value: $(params.revision)
+          - name: depth
+            value: "0"
+          - name: cache-key
+            value: applyinnovations-endlessfs
+
+      - name: verify
+        runAfter: [clone]
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: nix-run-v2
+            - name: namespace
+              value: tekton-buildkit
+        timeout: 35m
+        workspaces:
+          - name: source
+            workspace: source
+          - name: nix-store
+            workspace: nix-store
+        params:
+          - name: SCRIPT
+            value: nix flake check --print-build-logs --max-jobs 6 --cores 2
+
+      - name: release
+        runAfter: [verify]
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: nix-run-github-v2
+            - name: namespace
+              value: tekton-buildkit
+        timeout: 15m
+        workspaces:
+          - name: source
+            workspace: source
+          - name: nix-store
+            workspace: nix-store
+        params:
+          - name: GITHUB_TOKEN_SECRET_NAME
+            value: $(params.git_auth_secret)
+          - name: SCRIPT
+            value: |
+              release_tag="$(params.release_tag)"
+              printf '%s\n' "$release_tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
+                echo "release checkout is not a vMAJOR.MINOR.PATCH tag" >&2
+                exit 2
+              }
+              nix build .#release --out-link result-release --print-build-logs
+              nix run .#publish-container -- \
+                "ghcr.io/applyinnovations/endlessfs:$release_tag" \
+                "ghcr.io/applyinnovations/endlessfs:latest"
+              if nix develop --command gh release view "$release_tag" >/dev/null 2>&1; then
+                nix develop --command gh release upload "$release_tag" \
+                  result-release/* --clobber
+              else
+                nix develop --command gh release create "$release_tag" \
+                  result-release/* \
+                  --verify-tag \
+                  --generate-notes \
+                  --title "$release_tag"
+              fi
+  workspaces:
+    - name: source
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          storageClassName: fast-local
+          resources:
+            requests:
+              storage: 20Gi
+    - name: git-cache
+      persistentVolumeClaim:
+        claimName: git-repo-cache
+    - name: nix-store
+      persistentVolumeClaim:
+        claimName: nix-store
+    - name: basic-auth
+      secret:
+        secretName: "{{ git_auth_secret }}"

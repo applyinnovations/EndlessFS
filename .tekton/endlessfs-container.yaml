@@ -1,0 +1,141 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: endlessfs-container-
+  annotations:
+    pipelinesascode.tekton.dev/on-event: "[push]"
+    pipelinesascode.tekton.dev/on-target-branch: "[main]"
+    pipelinesascode.tekton.dev/max-keep-runs: "10"
+    pipelinesascode.tekton.dev/cancel-in-progress: "true"
+    pipelinesascode.tekton.dev/target-namespace: "tekton-buildkit"
+    ci/trigger: main
+  labels:
+    app.kubernetes.io/part-of: endlessfs-ci
+    tekton.dev/pipeline: endlessfs-container
+    ci/repo: "{{ repo_name }}"
+spec:
+  taskRunTemplate:
+    serviceAccountName: tekton-build-sa
+    podTemplate:
+      nodeSelector:
+        storage.xlab.now/fast-local: "true"
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+  taskRunSpecs:
+    - pipelineTaskName: clone
+      stepSpecs:
+        - name: clone
+          computeResources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+    - pipelineTaskName: publish
+      podTemplate:
+        hostUsers: false
+      stepSpecs:
+        - name: run
+          computeResources:
+            requests:
+              cpu: "6"
+              memory: 12Gi
+            limits:
+              cpu: "12"
+              memory: 24Gi
+  timeouts:
+    pipeline: 45m0s
+  params:
+    - name: repo_url
+      value: "{{ repo_url }}"
+    - name: revision
+      value: "{{ revision }}"
+    - name: git_auth_secret
+      value: "{{ git_auth_secret }}"
+  pipelineSpec:
+    params:
+      - name: repo_url
+        type: string
+      - name: revision
+        type: string
+      - name: git_auth_secret
+        type: string
+    workspaces:
+      - name: source
+      - name: git-cache
+      - name: nix-store
+      - name: basic-auth
+    tasks:
+      - name: clone
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: git-clone-cached
+            - name: namespace
+              value: tekton-pipelines
+        timeout: 10m
+        workspaces:
+          - name: output
+            workspace: source
+          - name: git-cache
+            workspace: git-cache
+          - name: basic-auth
+            workspace: basic-auth
+        params:
+          - name: url
+            value: $(params.repo_url)
+          - name: revision
+            value: $(params.revision)
+          - name: depth
+            value: "1"
+          - name: cache-key
+            value: applyinnovations-endlessfs
+
+      - name: publish
+        runAfter: [clone]
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: nix-run-github-v2
+            - name: namespace
+              value: tekton-buildkit
+        timeout: 35m
+        workspaces:
+          - name: source
+            workspace: source
+          - name: nix-store
+            workspace: nix-store
+        params:
+          - name: GITHUB_TOKEN_SECRET_NAME
+            value: $(params.git_auth_secret)
+          - name: SCRIPT
+            value: >-
+              nix run .#publish-container --
+              "ghcr.io/applyinnovations/endlessfs:sha-$(tasks.clone.results.COMMIT_SHA)"
+              "ghcr.io/applyinnovations/endlessfs:edge"
+  workspaces:
+    - name: source
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          storageClassName: fast-local
+          resources:
+            requests:
+              storage: 20Gi
+    - name: git-cache
+      persistentVolumeClaim:
+        claimName: git-repo-cache
+    - name: nix-store
+      persistentVolumeClaim:
+        claimName: nix-store
+    - name: basic-auth
+      secret:
+        secretName: "{{ git_auth_secret }}"

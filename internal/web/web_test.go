@@ -67,6 +67,9 @@ func TestUploadMediaTypeHasDeterministicRequiredImageFallbacks(t *testing.T) {
 			t.Errorf("upload media-type fallback is missing %q", required)
 		}
 	}
+	if strings.Index(script, `png: "image/png"`) > strings.Index(script, "const declared") {
+		t.Error("required image extension fallback must take precedence over host MIME classification")
+	}
 }
 
 func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *testing.T) {

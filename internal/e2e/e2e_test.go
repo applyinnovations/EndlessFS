@@ -582,6 +582,9 @@ func claimConcurrentBrowserPreview(t *testing.T, harness harness, path domain.Us
 		Owner: accounts[0].UserID, ContentID: entry.ContentID, ContentVersion: entry.ContentVersion,
 		MediaType: entry.MediaType, SourceSize: entry.Size, RecipeID: "image-webp-q80-v1", Variant: variant,
 	}
+	if !binding.Valid() {
+		t.Fatalf("browser preview binding invalid: contentID=%q contentVersion=%q mediaType=%q sourceSize=%d variant=%d", binding.ContentID, binding.ContentVersion, binding.MediaType, binding.SourceSize, binding.Variant)
+	}
 	const generationID = "browser-contending-generation"
 	claim, err := harness.previewStore.Claim(context.Background(), binding, generationID, harness.clock.Now().Add(time.Minute))
 	if err != nil {

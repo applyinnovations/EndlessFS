@@ -31,12 +31,16 @@ type Options struct {
 	MaxPixels      int
 	MaxDimension   int
 	MaxSourceBytes int64
+	// RawDecoderPath is an internal, Nix-supplied path to the closed camera
+	// RAW decoder. It is never accepted from an HTTP or provider boundary.
+	RawDecoderPath string `json:"-"`
 }
 
 type Generator struct {
 	maxPixels      int
 	maxDimension   int
 	maxSourceBytes int64
+	rawDecoderPath string
 }
 
 func New(options Options) *Generator {
@@ -49,7 +53,10 @@ func New(options Options) *Generator {
 	if options.MaxSourceBytes == 0 {
 		options.MaxSourceBytes = defaultMaxSourceSize
 	}
-	return &Generator{maxPixels: options.MaxPixels, maxDimension: options.MaxDimension, maxSourceBytes: options.MaxSourceBytes}
+	return &Generator{
+		maxPixels: options.MaxPixels, maxDimension: options.MaxDimension, maxSourceBytes: options.MaxSourceBytes,
+		rawDecoderPath: options.RawDecoderPath,
+	}
 }
 
 func (*Generator) Capability() string { return "image" }
@@ -62,6 +69,10 @@ func (*Generator) Supports(mediaType string) bool {
 	default:
 		return false
 	}
+}
+
+func (g *Generator) supports(mediaType string) bool {
+	return g.Supports(mediaType) || g.rawDecoderPath != "" && isRawMediaType(mediaType)
 }
 
 func (g *Generator) SelfTest(ctx context.Context) error {
@@ -92,13 +103,16 @@ func (g *Generator) Generate(ctx context.Context, request preview.GenerationRequ
 	if err := ctx.Err(); err != nil {
 		return preview.GeneratedArtifact{}, err
 	}
-	if request.Source == nil || !g.Supports(request.MediaType) || request.SourceSize < 1 || request.SourceSize > g.maxSourceBytes ||
+	if request.Source == nil || !g.supports(request.MediaType) || request.SourceSize < 1 || request.SourceSize > g.maxSourceBytes ||
 		request.Variant < 64 || request.Variant > 4096 || g.maxPixels < 1 || g.maxDimension < 1 || g.maxSourceBytes < 1 {
 		return preview.GeneratedArtifact{}, fmt.Errorf("image generator request is invalid")
 	}
 	data, err := io.ReadAll(io.LimitReader(request.Source, g.maxSourceBytes+1))
 	if err != nil || int64(len(data)) != request.SourceSize || int64(len(data)) > g.maxSourceBytes {
 		return preview.GeneratedArtifact{}, fmt.Errorf("image source byte limit exceeded")
+	}
+	if isRawMediaType(request.MediaType) {
+		return g.generateRAW(ctx, request, data)
 	}
 	configuration, format, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil || format != expectedFormat(request.MediaType) {
@@ -117,6 +131,18 @@ func (g *Generator) Generate(ctx context.Context, request preview.GenerationRequ
 	}
 	oriented := applyOrientation(decoded, sourceOrientation(request.MediaType, data))
 	resized := resizeToMaximumEdge(oriented, request.Variant)
+	encoded, err := encodeWebP(resized)
+	if err != nil {
+		return preview.GeneratedArtifact{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return preview.GeneratedArtifact{}, err
+	}
+	bounds := resized.Bounds()
+	return preview.GeneratedArtifact{Bytes: encoded, Width: bounds.Dx(), Height: bounds.Dy()}, nil
+}
+
+func encodeWebP(source image.Image) ([]byte, error) {
 	options := webp.DefaultOptions()
 	options.Lossless = false
 	options.Quality = 80
@@ -127,14 +153,10 @@ func (g *Generator) Generate(ctx context.Context, request preview.GenerationRequ
 	options.EXIF = nil
 	options.XMP = nil
 	var output bytes.Buffer
-	if err := webp.Encode(&output, resized, options); err != nil {
-		return preview.GeneratedArtifact{}, fmt.Errorf("WebP encode failed")
+	if err := webp.Encode(&output, source, options); err != nil {
+		return nil, fmt.Errorf("WebP encode failed")
 	}
-	if err := ctx.Err(); err != nil {
-		return preview.GeneratedArtifact{}, err
-	}
-	bounds := resized.Bounds()
-	return preview.GeneratedArtifact{Bytes: output.Bytes(), Width: bounds.Dx(), Height: bounds.Dy()}, nil
+	return output.Bytes(), nil
 }
 
 func expectedFormat(mediaType string) string {

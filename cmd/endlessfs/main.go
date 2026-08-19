@@ -240,7 +240,11 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	}
 	var previewService *preview.Service
 	if previewEnabled {
-		imageGenerator, workerErr := imagegen.NewWorker(imagegen.Options{})
+		rawDecoderPath, decoderErr := imagegen.PackagedRawDecoderPath()
+		if decoderErr != nil {
+			return domain.NewError(domain.ErrorUnavailable, "preview RAW decoder is unavailable")
+		}
+		imageGenerator, workerErr := imagegen.NewWorker(imagegen.Options{RawDecoderPath: rawDecoderPath})
 		if workerErr != nil {
 			return domain.NewError(domain.ErrorUnavailable, "preview generator worker is unavailable")
 		}

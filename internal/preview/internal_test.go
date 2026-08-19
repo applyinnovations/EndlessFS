@@ -255,7 +255,9 @@ func TestServiceRejectsInvalidRegistryAndGenerationRequests(t *testing.T) {
 		t.Fatalf("missing application state error = %v", err)
 	}
 	manifest := BuildCapabilityManifest("coverage-version")
-	if manifest.ApplicationVersion != "coverage-version" || len(manifest.PackagedCapabilities) != 1 {
+	if manifest.ApplicationVersion != "coverage-version" || len(manifest.PackagedCapabilities) != 1 ||
+		len(manifest.AcceptedImageMediaTypes) != 13 || manifest.AcceptedImageMediaTypes[12] != "image/x-sony-arw" ||
+		len(manifest.PackagedImageDecoders) != 3 || manifest.PackagedImageDecoders[2] != "libraw-0.22.1" {
 		t.Fatalf("capability manifest = %+v", manifest)
 	}
 	service := &Service{

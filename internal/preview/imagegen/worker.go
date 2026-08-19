@@ -14,10 +14,11 @@ import (
 )
 
 const (
-	workerEnvironment = "ENDLESSFS_INTERNAL_PREVIEW_WORKER"
-	workerVersion     = 1
-	maxWorkerHeader   = 4096
-	maxWorkerOutput   = int64(128 << 20)
+	workerEnvironment     = "ENDLESSFS_INTERNAL_PREVIEW_WORKER"
+	rawDecoderEnvironment = "ENDLESSFS_INTERNAL_RAW_DECODER"
+	workerVersion         = 1
+	maxWorkerHeader       = 4096
+	maxWorkerOutput       = int64(128 << 20)
 )
 
 type workerRequest struct {
@@ -49,13 +50,21 @@ func NewWorker(options Options) (*WorkerGenerator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("preview worker executable is unavailable: %w", err)
 	}
-	return &WorkerGenerator{options: normalizedOptions(options), executable: executable, environment: []string{workerEnvironment + "=1"}}, nil
+	normalized := normalizedOptions(options)
+	environment := []string{workerEnvironment + "=1"}
+	if normalized.RawDecoderPath != "" {
+		if err := validateRawDecoder(normalized.RawDecoderPath); err != nil {
+			return nil, fmt.Errorf("preview RAW decoder is unavailable")
+		}
+		environment = append(environment, rawDecoderEnvironment+"="+normalized.RawDecoderPath)
+	}
+	return &WorkerGenerator{options: normalized, executable: executable, environment: environment}, nil
 }
 
 func (*WorkerGenerator) Capability() string { return "image" }
 func (*WorkerGenerator) RecipeID() string   { return recipeID }
-func (*WorkerGenerator) Supports(mediaType string) bool {
-	return New(Options{}).Supports(mediaType)
+func (g *WorkerGenerator) Supports(mediaType string) bool {
+	return New(g.options).supports(mediaType)
 }
 
 func (g *WorkerGenerator) SelfTest(ctx context.Context) error {
@@ -63,6 +72,15 @@ func (g *WorkerGenerator) SelfTest(ctx context.Context) error {
 	generated, err := g.Generate(ctx, preview.GenerationRequest{Source: bytes.NewReader(fixture), SourceSize: int64(len(fixture)), MediaType: "image/webp", Variant: 64})
 	if err != nil || len(generated.Bytes) < 12 || generated.Width != 1 || generated.Height != 1 {
 		return fmt.Errorf("preview worker integrity check failed")
+	}
+	if g.options.RawDecoderPath != "" {
+		fixture := rawSelfTestDNG()
+		generated, err = g.Generate(ctx, preview.GenerationRequest{
+			Source: bytes.NewReader(fixture), SourceSize: int64(len(fixture)), MediaType: "image/x-adobe-dng", Variant: 64,
+		})
+		if err != nil || len(generated.Bytes) < 12 || generated.Width < 1 || generated.Height < 1 || generated.Width > 64 || generated.Height > 64 {
+			return fmt.Errorf("preview worker RAW integrity check failed")
+		}
 	}
 	return nil
 }
@@ -115,6 +133,7 @@ func RunWorker(input io.Reader, output io.Writer) error {
 	if err != nil || int64(len(data)) != header.SourceSize {
 		return fmt.Errorf("invalid preview worker source")
 	}
+	header.Options.RawDecoderPath = os.Getenv(rawDecoderEnvironment)
 	generated, generateErr := New(header.Options).Generate(context.Background(), preview.GenerationRequest{
 		Source: bytes.NewReader(data), SourceSize: header.SourceSize, MediaType: header.MediaType, Variant: header.Variant,
 	})
@@ -129,7 +148,10 @@ func RunWorker(input io.Reader, output io.Writer) error {
 
 func normalizedOptions(options Options) Options {
 	generator := New(options)
-	return Options{MaxPixels: generator.maxPixels, MaxDimension: generator.maxDimension, MaxSourceBytes: generator.maxSourceBytes}
+	return Options{
+		MaxPixels: generator.maxPixels, MaxDimension: generator.maxDimension, MaxSourceBytes: generator.maxSourceBytes,
+		RawDecoderPath: generator.rawDecoderPath,
+	}
 }
 
 func readWorkerHeader(input io.Reader) (workerRequest, error) {

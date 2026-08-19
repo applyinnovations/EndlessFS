@@ -3,9 +3,10 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.vulndb = {
-    # Use the immutable bulk object at the Go database's backing bucket so the
-    # gate never depends on the mutable online vulnerability API.
-    url = "https://storage.googleapis.com/go-vulndb/vulndb.zip";
+    # The canonical vuln.go.dev hostname rejects GitHub-hosted runner IPs;
+    # pin the official bulk object by its immutable GCS generation as well as
+    # the Nix content hash recorded in flake.lock.
+    url = "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1787088262759230";
     flake = false;
   };
 
@@ -50,6 +51,25 @@
             makeWrapper "$browser" "$out/bin/chrome-headless-shell"
           '';
       dependencyPolicyCommand = moduleClosure: ''
+        vulndb_locked_url="$(jq -er '.nodes.vulndb.locked.url' flake.lock)"
+        vulndb_original_url="$(jq -er '.nodes.vulndb.original.url' flake.lock)"
+        if [ "$vulndb_locked_url" != "$vulndb_original_url" ]; then
+          echo "vulnerability database lock URL differs from the declared input" >&2
+          exit 1
+        fi
+        vulndb_prefix='https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation='
+        case "$vulndb_locked_url" in
+          "$vulndb_prefix"*) vulndb_generation="''${vulndb_locked_url#"$vulndb_prefix"}" ;;
+          *)
+            echo "vulnerability database must use a generation-pinned official GCS media URL" >&2
+            exit 1
+            ;;
+        esac
+        if ! printf '%s\n' "$vulndb_generation" | grep -Eq '^[0-9]+$'; then
+          echo "vulnerability database generation must be numeric" >&2
+          exit 1
+        fi
+
         dependency_inventory="$(mktemp -t endlessfs-dependencies.XXXXXX)"
         trap 'rm -f "$dependency_inventory"' EXIT
         module_closure=${nixpkgs.lib.escapeShellArg (toString moduleClosure)}
@@ -190,6 +210,8 @@
               dependency_inventory="$TMPDIR/endlessfs-dependencies.txt"
               awk '/^# / && $2 != "=>" { print $2, $3 }' vendor/modules.txt \
                 | LC_ALL=C sort -u > "$dependency_inventory"
+              printf '%s\n' 'libraw 0.22.1' >> "$dependency_inventory"
+              LC_ALL=C sort -u -o "$dependency_inventory" "$dependency_inventory"
               dependency_digest="$(sha256sum "$dependency_inventory" | cut -d ' ' -f 1)"
               ldflags+=("-X=github.com/applyinnovations/endlessfs/internal/preview.DependencyInventoryDigest=$dependency_digest")
             fi
@@ -220,11 +242,34 @@
                 "-X=main.version=${version}"
               ];
               passthru = { inherit themeBundles; };
+              postInstall = ''
+                install -D -m 0555 ${pkgs.libraw}/bin/dcraw_emu "$out/bin/endlessfs-raw-decoder"
+              '';
             };
 
           endlessfs = lib.makeOverridable mkEndlessFS { };
 
           linuxArchitecture = if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "amd64";
+          linuxSystem = if pkgs.stdenv.hostPlatform.isAarch64 then "aarch64-linux" else "x86_64-linux";
+          linuxPkgs = nixpkgs.legacyPackages.${linuxSystem};
+          releaseRawDecoder =
+            if pkgs.stdenv.hostPlatform.isLinux then
+              pkgs.pkgsStatic.libraw.overrideAttrs (_: {
+                pname = "endlessfs-raw-decoder";
+                outputs = [ "out" ];
+                buildPhase = ''
+                  runHook preBuild
+                  make -j"$NIX_BUILD_CORES" bin/dcraw_emu
+                  runHook postBuild
+                '';
+                installPhase = ''
+                  runHook preInstall
+                  install -D -m 0555 bin/dcraw_emu "$out/bin/dcraw_emu"
+                  runHook postInstall
+                '';
+              })
+            else
+              pkgs.libraw;
           mkLinuxBinary =
             {
               themeBundles ? [ ],
@@ -245,6 +290,8 @@
                 dependency_inventory="$TMPDIR/endlessfs-dependencies.txt"
                 awk '/^# / && $2 != "=>" { print $2, $3 }' vendor/modules.txt \
                   | LC_ALL=C sort -u > "$dependency_inventory"
+                printf '%s\n' 'libraw 0.22.1' >> "$dependency_inventory"
+                LC_ALL=C sort -u -o "$dependency_inventory" "$dependency_inventory"
                 dependency_digest="$(sha256sum "$dependency_inventory" | cut -d ' ' -f 1)"
                 export GOOS=linux
                 export GOARCH=${linuxArchitecture}
@@ -257,6 +304,7 @@
               installPhase = ''
                 runHook preInstall
                 install -D -m 0555 endlessfs "$out/bin/endlessfs"
+                install -D -m 0555 ${linuxPkgs.libraw}/bin/dcraw_emu "$out/bin/endlessfs-raw-decoder"
                 runHook postInstall
               '';
               passthru = { inherit themeBundles; };
@@ -267,9 +315,10 @@
           containerRoot = pkgs.runCommandLocal "endlessfs-container-root" { } ''
             mkdir -p "$out/bin" "$out/etc/ssl/certs" "$out/share"
             cp ${linuxBinary}/bin/endlessfs "$out/bin/endlessfs"
+            cp ${linuxBinary}/bin/endlessfs-raw-decoder "$out/bin/endlessfs-raw-decoder"
             cp ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt "$out/etc/ssl/certs/ca-bundle.crt"
             cp -R ${pkgs.tzdata}/share/zoneinfo "$out/share/zoneinfo"
-            chmod 0555 "$out/bin/endlessfs"
+            chmod 0555 "$out/bin/endlessfs" "$out/bin/endlessfs-raw-decoder"
           '';
 
           container = pkgs.dockerTools.buildLayeredImage {
@@ -291,7 +340,7 @@
                 "org.opencontainers.image.description" = "EndlessFS control plane";
                 "org.opencontainers.image.revision" = version;
                 "org.opencontainers.image.source" = "https://github.com/applyinnovations/EndlessFS";
-                "org.opencontainers.image.licenses" = "Apache-2.0";
+                "org.opencontainers.image.licenses" = "Apache-2.0 AND (CDDL-1.0 OR LGPL-2.1-or-later)";
               };
             };
           };
@@ -314,6 +363,8 @@
               ''
                 awk '/^# / && $2 != "=>" { print $2, $3 }' \
                   ${endlessfs.goModules}/modules.txt | LC_ALL=C sort -u > "$out"
+                printf '%s\n' 'libraw 0.22.1' >> "$out"
+                LC_ALL=C sort -u -o "$out" "$out"
               '';
 
           capabilityInventory =
@@ -328,9 +379,10 @@
                     previewSpecification: "v1.1",
                     profile: "images",
                     packagedCapabilities: ["image"],
-                    acceptedImageMediaTypes: ["image/gif", "image/jpeg", "image/png", "image/webp"],
+                    acceptedImageMediaTypes: ["image/gif", "image/jpeg", "image/png", "image/webp", "image/x-adobe-dng", "image/x-canon-cr2", "image/x-canon-cr3", "image/x-fuji-raf", "image/x-nikon-nef", "image/x-olympus-orf", "image/x-panasonic-rw2", "image/x-pentax-pef", "image/x-sony-arw"],
                     artifactMediaTypes: ["image/webp"],
                     imageRecipeID: "image-webp-q80-v1",
+                    packagedImageDecoders: ["go-standard-library", "deepteams-webp-1.2.6", "libraw-0.22.1"],
                     dependencyInventorySHA256: $dependencyInventorySHA256
                   }' > "$out"
               '';
@@ -350,6 +402,7 @@
               ''
                 mkdir -p "$out" staging
                 cp ${endlessfs}/bin/endlessfs staging/endlessfs
+                cp ${releaseRawDecoder}/bin/dcraw_emu staging/endlessfs-raw-decoder
                 cp ${container} "staging/endlessfs-container-${version}.tar.gz"
                 cp ${projectSource}/LICENSE staging/LICENSE
                 cp ${projectSource}/README.md staging/README.md
@@ -364,7 +417,12 @@
                     | LC_ALL=C sort -z \
                     | xargs -0 sha256sum
                 ) > staging/DEPENDENCY-LICENSES.sha256
+                for license in LICENSE.CDDL LICENSE.LGPL; do
+                  digest="$(sha256sum ${pkgs.libraw.src}/$license | cut -d ' ' -f 1)"
+                  printf '%s  libraw/%s\n' "$digest" "$license" >> staging/DEPENDENCY-LICENSES.sha256
+                done
                 binary_hash="$(sha256sum staging/endlessfs | cut -d ' ' -f 1)"
+                raw_decoder_hash="$(sha256sum staging/endlessfs-raw-decoder | cut -d ' ' -f 1)"
                 container_hash="$(sha256sum "staging/endlessfs-container-${version}.tar.gz" | cut -d ' ' -f 1)"
                 theme_hash="$(sha256sum staging/THEMES.json | cut -d ' ' -f 1)"
                 capability_hash="$(sha256sum staging/CAPABILITIES.json | cut -d ' ' -f 1)"
@@ -387,7 +445,9 @@
                   printf 'go-toolchain=%s\n' '1.26.6'
                   printf 'capability-profile=%s\n' 'images'
                   printf 'packaged-preview-capabilities=%s\n' 'image'
+                  printf 'packaged-image-decoders=%s\n' 'go-standard-library,deepteams-webp-1.2.6,libraw-0.22.1'
                   printf 'binary-sha256=%s\n' "$binary_hash"
+                  printf 'raw-decoder-sha256=%s\n' "$raw_decoder_hash"
                   printf 'oci-sha256=%s\n' "$container_hash"
                   printf 'oci-archive-bytes=%s\n' "$container_archive_bytes"
                   printf 'oci-unpacked-root-bytes=%s\n' "$container_unpacked_bytes"
@@ -413,6 +473,7 @@
                   -C staging -czf "$out/endlessfs-${version}-${system}.tar.gz" .
                 cp "staging/endlessfs-container-${version}.tar.gz" "$out/"
                 cp staging/RELEASE-INVENTORY.txt "$out/"
+                cp staging/endlessfs-raw-decoder "$out/"
                 cp staging/DEPENDENCIES.txt "$out/"
                 cp staging/DEPENDENCY-LICENSES.sha256 "$out/"
                 cp staging/THEMES.json "$out/"
@@ -422,6 +483,7 @@
                   sha256sum \
                     "endlessfs-${version}-${system}.tar.gz" \
                     "endlessfs-container-${version}.tar.gz" \
+                    endlessfs-raw-decoder \
                     CAPABILITIES.json DEPENDENCIES.txt DEPENDENCY-LICENSES.sha256 RELEASE-INVENTORY.txt THEMES.json \
                     > SHA256SUMS
                 )
@@ -460,7 +522,10 @@
               || relative == "tools"
               || lib.hasPrefix "tools/" relative;
           };
-          goTools = [ go ];
+          goTools = [
+            go
+            pkgs.libraw
+          ];
           qualityTools = goTools ++ [
             pkgs.actionlint
             pkgs.go-tools
@@ -482,6 +547,8 @@
             name: text:
             mkTask name goTools ''
               export CGO_ENABLED=0
+              export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
+              export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
               ${text}
             '';
           unavailable =
@@ -586,6 +653,8 @@
             mkTask "endlessfs-test-coverage"
               (goTools ++ [ pkgs.gawk ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
               ''
+                export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
+                export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
                 export ENDLESSFS_RUN_E2E=1
                 ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
@@ -609,6 +678,8 @@
 
           test-race = mkTask "endlessfs-test-race" (goTools ++ [ pkgs.stdenv.cc ]) ''
             export CGO_ENABLED=1
+            export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
+            export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
             go test -race ./...
           '';
 
@@ -640,6 +711,7 @@
                   pkgs.gawk
                   pkgs.gnugrep
                   pkgs.govulncheck
+                  pkgs.jq
                   pkgs.nix
                 ]
               )
@@ -660,6 +732,7 @@
             pkgs.findutils
             pkgs.gawk
             pkgs.gnugrep
+            pkgs.jq
           ] (dependencyPolicyCommand packages.default.goModules);
 
           pr-check = mkTask "endlessfs-pr-check" qualityTools ''
@@ -823,6 +896,7 @@
                   exit 1
                 fi
                 rg --quiet '(^|/)bin/endlessfs$' image-paths.txt
+                rg --quiet '(^|/)bin/endlessfs-raw-decoder$' image-paths.txt
                 touch "$out"
               '';
           goCheckWithSource =
@@ -844,6 +918,8 @@
                 mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_RUNTIME_DIR"
                 chmod 700 "$XDG_RUNTIME_DIR"
                 export CGO_ENABLED=0
+                export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
+                export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
                 cp -R ${checkSource} source
                 chmod -R u+w source
                 cp -R ${self.packages.${system}.default.goModules} source/vendor
@@ -919,6 +995,7 @@
                 pkgs.gnugrep
                 pkgs.gosec
                 pkgs.govulncheck
+                pkgs.jq
               ];
           repositoryPolicyCheck =
             goCheckWithSource "repository-policy" policySource "go run ./tools/repository-policy check"
@@ -977,9 +1054,12 @@
               pkgs.ripgrep
               pkgs.skopeo
               pkgs.yq-go
+              pkgs.libraw
             ];
             shellHook = ''
               export GOFLAGS=-mod=readonly
+              export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
+              export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
               echo "EndlessFS development shell — run: nix flake check"
             '';
           };

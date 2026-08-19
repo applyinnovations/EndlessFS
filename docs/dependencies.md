@@ -38,9 +38,17 @@ The WebAuthn dependency closure includes audited format/parsing support for CBOR
 
 ## Pinned security inputs
 
-The flake pins the Go toolchain source and the [official Go vulnerability database](https://go.dev/doc/security/vuln/database) as immutable Nix inputs. The required `govulncheck` gate reads that local database with `-db=file://...`; it never depends on mutable network results. `flake.lock` is therefore both the dependency-resolution record and the vulnerability-data freshness record for a release. Updating either input is an explicit, reviewed change followed by the complete Nix gate.
+The flake pins the Go toolchain source and the [official Go vulnerability database](https://go.dev/doc/security/vuln/database) as immutable Nix inputs. The database URL selects an exact Google Cloud Storage object generation, which uniquely identifies immutable object bytes, and `flake.lock` independently records the Nix content hash. The dependency policy rejects a moving latest-object URL or a nonnumeric generation. The required `govulncheck` gate reads that local database with `-db=file://...`; it never depends on mutable network results. `flake.lock` is therefore both the dependency-resolution record and the vulnerability-data freshness record for a release. Updating either input is an explicit, reviewed change followed by the complete Nix gate.
 
 Every module is pinned by `go.mod`, `go.sum`, and the fixed Nix module hash. Nix materializes that closure in its sandbox for offline builds without tracking `vendor/` in Git. `nix run .#dependency-check` inventories the locked module versions and fails when a module root does not retain a license or copying notice. The release derivation emits the module inventory and a deterministic hash inventory of all retained dependency license files.
+
+## `golang.org/x/sys`
+
+- **Purpose:** Create and seal the Linux anonymous memory file used to pass camera-RAW bytes to the isolated decoder without a persistent filesystem name.
+- **Why the standard library is insufficient:** Go exposes inherited file descriptors but does not expose Linux `memfd_create` or file-seal operations through `os` or `syscall`. Re-declaring architecture-specific syscall numbers locally would be less portable and less auditable.
+- **Maintenance:** This is an official Go subrepository maintained through the Go project and pinned at `v0.46.0`; it was already present in the locked transitive module closure and is now a direct dependency because EndlessFS imports its Linux API.
+- **License:** BSD-3-Clause; its license and patent notice are retained in the locked module closure.
+- **Security posture:** The dependency is used only for `memfd_create` and write/grow/shrink/seal controls. The descriptor is bounded by the preview source limit, inherited only by the one decoder child, and closed after the one-shot operation. It performs no networking, authentication, parsing, or dynamic loading.
 
 ## `github.com/deepteams/webp`
 
@@ -49,6 +57,14 @@ Every module is pinned by `go.mod`, `go.sum`, and the fixed Nix module hash. Nix
 - **Maintenance:** The project publishes signed, verified release tags and maintains a pure-Go codec with active tests and fuzzing. EndlessFS pins `v1.2.6`, materializes it only in Nix's fixed-output module closure, and runs its own malformed-input, resource-bound, static-frame, metadata-removal, and startup-integrity tests before accepting an upgrade.
 - **License:** MIT; the license is retained and inventoried in the Nix-generated module closure.
 - **Security posture:** The codec is statically linked with `CGO_ENABLED=0`; it starts no process, performs no network or filesystem access, and loads no runtime plugin. EndlessFS bounds compressed bytes, decoded dimensions, decoded pixels, execution time, and output variants before or around codec use. Artifacts are decoded and structurally revalidated before immutable commit. Source metadata is not copied into generated output.
+
+## LibRaw `0.22.1`
+
+- **Purpose:** Decode the closed DNG, CR2, CR3, RAF, NEF, ORF, RW2, PEF, and ARW camera-RAW input set into a bounded raster that EndlessFS re-encodes as metadata-free WebP.
+- **Why the standard library is insufficient:** Go's standard library has no camera-RAW decoder, and the formats contain camera-specific sensor layouts, compression, color calibration, and model quirks that would be unsafe and impractical to reimplement.
+- **Maintenance:** LibRaw publishes maintained releases and a current supported-camera matrix. EndlessFS pins Nixpkgs' LibRaw `0.22.1`; upgrades require the deterministic DNG test, malformed/mismatched-input denial tests, worker-isolation checks, full Nix gate, and live representative-camera validation.
+- **License:** LibRaw and `dcraw_emu` are dual-licensed under CDDL-1.0 or LGPL-2.1-or-later. Both license texts are hashed in the release license inventory and the OCI label records the combined application/runtime expression.
+- **Security posture:** Nix installs only the fixed `dcraw_emu` helper as `endlessfs-raw-decoder` plus its immutable runtime closure. It is invoked only inside the existing one-shot preview worker with fixed options, an empty environment, discarded diagnostics, bounded stdout, and a hard operation deadline. Linux source bytes use a sealed anonymous memory file and the decoder receives parent-death termination. No provider path, filename, capability, credential, configurable executable, or configurable argument reaches the helper. The Go worker strictly parses 8-bit PPM, enforces dimensions/pixels/output size, and emits the same static metadata-free WebP contract.
 
 ## `github.com/chromedp/chromedp` and `github.com/chromedp/cdproto`
 

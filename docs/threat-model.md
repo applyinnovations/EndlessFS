@@ -25,6 +25,8 @@ This review applies the normative threat model in [v1 specification section 17](
 
 The production binary contains no telemetry, analytics, updater, license check, external identity client, remote theme registry, CDN asset, service worker, SQL client, cache, or queue integration. Required tests construct only explicit loopback control/data listeners. The GCS fake is protocol-level and cannot reach GCP metadata, token, IAM, or storage endpoints. Nix derivation tests use the fixed-output module closure and pinned inputs and have no cloud credential, database, container-daemon, or Internet dependency.
 
+Camera RAW decoding uses the pinned LibRaw helper only inside a one-shot, hard-cancelable preview worker. Arguments and executable identity are closed build inputs; Linux input is a sealed anonymous memory file; the helper environment is empty; output is bounded and strictly parsed; and errors are sanitized. Decoder compromise is therefore confined to the unprivileged worker's lifetime and receives no source/provider name, capability, application credential, or network configuration. A kernel-level sandbox is not claimed.
+
 ## Claims deliberately excluded
 
 EndlessFS v1 does not claim end-to-end encryption, cryptographic user isolation, defense against a malicious operator/host/provider, complete denial-of-service resistance, production durability, live GCS interoperability, or production readiness. The deterministic memory and local GCS protocol backends prove the provider-neutral contracts and browser/control/data-plane boundaries.

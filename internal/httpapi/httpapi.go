@@ -126,7 +126,7 @@ func textStatus(status int, body string) http.HandlerFunc {
 
 func securityHeaders(next http.Handler, secure bool, dataOrigin, previewOrigin string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		imageSources := []string{"'self'"}
+		imageSources := []string{"'self'", "blob:"}
 		frameSources := []string{"'self'"}
 		connectSources := []string{"'self'"}
 		if dataOrigin != "" {
@@ -138,7 +138,7 @@ func securityHeaders(next http.Handler, secure bool, dataOrigin, previewOrigin s
 			imageSources = append(imageSources, previewOrigin)
 			connectSources = append(connectSources, previewOrigin)
 		}
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; img-src "+strings.Join(imageSources, " ")+"; frame-src "+strings.Join(frameSources, " ")+"; font-src 'self'; style-src 'self'; script-src 'self'; connect-src "+strings.Join(connectSources, " "))
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; img-src "+strings.Join(imageSources, " ")+"; frame-src "+strings.Join(frameSources, " ")+"; font-src 'self'; style-src 'self'; style-src-attr 'none'; script-src 'self'; connect-src "+strings.Join(connectSources, " "))
 		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 		w.Header().Set("Referrer-Policy", "no-referrer")

@@ -9,6 +9,8 @@
     nextCursor: "",
     selected: new Map(),
     transfers: [],
+    transferGroups: new Map(),
+    directoryPromises: new Map(),
     activeTransfers: 0,
     themes: [],
     publicToken: "",
@@ -34,6 +36,8 @@
     viewerEntries: [],
     viewerIndex: -1,
     viewerObjectURL: "",
+    viewerPreviewCache: new Map(),
+    viewerPreviewCacheBytes: 0,
     viewerEntry: null,
     viewerController: null,
     viewerOpener: null,
@@ -42,6 +46,8 @@
   const gridOverscanRows = 3;
   const previewRetryDelays = [250, 500, 1000, 2000, 4000, 5000];
   const maximumPreviewPolls = 14;
+  const maximumViewerPreviewCacheEntries = 8;
+  const maximumViewerPreviewCacheBytes = 64 << 20;
 
   class APIError extends Error {
     constructor(response, problem) {
@@ -265,6 +271,9 @@
     try { await api("/api/v1/logout", { method: "POST", body: {} }); } catch { /* local transition still clears the UI */ }
     state.user = null;
     state.selected.clear();
+    releaseViewerObjectURL();
+    clearViewerPreviewCache();
+    cleanupGridMedia(new Set());
     history.replaceState({}, "", "/");
     showOnly("auth-view");
     byID("account-actions").hidden = true;
@@ -450,10 +459,11 @@
     const scroller = byID("media-grid");
     const content = byID("media-grid-content");
     if (state.gridObserver) state.gridObserver.disconnect();
-    const style = getComputedStyle(document.documentElement);
-    const thumbnailSize = Number.parseFloat(style.getPropertyValue("--efs-metric-thumbnailSize")) || 96;
+    const rootMetrics = getComputedStyle(document.documentElement);
+    const thumbnailSize = Number.parseFloat(rootMetrics.getPropertyValue("--efs-metric-thumbnailSize")) || 96;
+    const componentGap = Number.parseFloat(rootMetrics.getPropertyValue("--efs-spacing-componentGap")) || 8;
     const tileMinimum = Math.max(140, thumbnailSize + 32);
-    const columns = Math.max(1, Math.floor(Math.max(scroller.clientWidth, 280) / tileMinimum));
+    const columns = Math.max(1, Math.floor((Math.max(scroller.clientWidth, 280) - componentGap) / (tileMinimum + componentGap)));
     const rowHeight = Math.max(184, thumbnailSize + 92);
     const totalRows = Math.ceil(entries.length / columns);
     const viewportHeight = Math.max(scroller.clientHeight, 420);
@@ -466,15 +476,11 @@
     const activePaths = new Set(entries.slice(firstIndex, lastIndex).map((entry) => entry.path));
     cleanupGridMedia(activePaths);
     content.replaceChildren();
-    content.style.setProperty("--media-grid-columns", String(columns));
-    content.style.height = `${totalRows * rowHeight}px`;
     content.dataset.itemCount = String(entries.length);
     const layer = document.createElement("div");
     layer.className = "media-grid-layer";
-    layer.style.transform = `translateY(${firstRow * rowHeight}px)`;
-    layer.style.gridTemplateColumns = `repeat(${columns}, minmax(0, 1fr))`;
     for (let index = firstIndex; index < lastIndex; index += 1) layer.append(mediaTile(entries[index], index, columns));
-    content.append(layer);
+    content.append(mediaGridSpacer(firstRow * rowHeight), layer, mediaGridSpacer((totalRows - lastRow) * rowHeight));
     scroller.setAttribute("aria-rowcount", String(totalRows));
     scroller.setAttribute("aria-colcount", String(columns));
     const observe = (frame) => queueGridPreview(frame.entry, frame);
@@ -486,6 +492,16 @@
     } else {
       layer.querySelectorAll(".media-frame[data-preview-candidate='true']").forEach(observe);
     }
+  }
+
+  function mediaGridSpacer(height) {
+    const spacer = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    spacer.classList.add("media-grid-spacer");
+    spacer.setAttribute("width", "1");
+    spacer.setAttribute("height", String(Math.max(0, Math.round(height))));
+    spacer.setAttribute("aria-hidden", "true");
+    spacer.setAttribute("focusable", "false");
+    return spacer;
   }
 
   function mediaTile(entry, index, columns) {
@@ -644,13 +660,25 @@
 
   function setPreviewImage(frame, entry, objectURL, result) {
     const image = document.createElement("img");
+    image.addEventListener("load", () => {
+      if (image.isConnected) frame.dataset.previewLoaded = "true";
+    }, { once: true });
+    image.addEventListener("error", () => {
+      if (!image.isConnected) return;
+      if (state.previewObjectURLs.get(entry.path) === objectURL) {
+        URL.revokeObjectURL(objectURL);
+        state.previewObjectURLs.delete(entry.path);
+      }
+      state.previewStates.set(entry.path, { state: "unavailable" });
+      frame.dataset.previewState = "unavailable";
+      frame.removeAttribute("data-preview-loaded");
+      frame.replaceChildren(fileTypeIcon(entry, "media-fallback-icon"));
+    }, { once: true });
     image.src = objectURL;
     image.alt = `Preview of ${entry.name}`;
     image.width = result && result.artifact ? result.artifact.width : 1;
     image.height = result && result.artifact ? result.artifact.height : 1;
     image.decoding = "async";
-    image.loading = "lazy";
-    image.fetchPriority = "low";
     frame.replaceChildren(image);
   }
 
@@ -726,37 +754,202 @@
     } catch (error) { announce(friendlyError(error), true); }
   }
 
-  function queueFiles(files) {
-    const items = Array.from(files).filter((file) => file instanceof File);
-    if (!items.length) return;
-    for (const file of items) {
-      const relative = file.webkitRelativePath || file.name;
-      const components = relative.split("/").filter(Boolean);
-      if (!components.length || components.some((part) => part === "." || part === ".." || part.includes("\\") || part.includes("\u0000"))) {
-        announce(`Skipped an invalid upload path for ${file.name}.`, true);
+  function validUploadComponents(relative) {
+    if (typeof relative !== "string" || !relative) return null;
+    const components = relative.split("/");
+    if (!components.length || components.some((part) => !part || part === "." || part === ".." || part.includes("\\") || part.includes("\u0000"))) return null;
+    return components;
+  }
+
+  function queueFiles(files, options = {}) {
+    const baseDirectory = state.currentDirectory;
+    const inputs = Array.from(files).map((value) => value instanceof File ? { file: value, relativePath: value.webkitRelativePath || value.name } : value)
+      .filter((value) => value && value.file instanceof File && typeof value.relativePath === "string");
+    const groupID = options.groupName ? idempotencyKey() : "";
+    const queued = [];
+    for (const input of inputs) {
+      const components = validUploadComponents(input.relativePath);
+      if (!components) {
+        announce(`Skipped an invalid upload path for ${input.file.name}.`, true);
         continue;
       }
       const name = components.pop();
       const relativeDirectory = components.join("/");
-      const directory = relativeDirectory ? joinPath(state.currentDirectory, relativeDirectory) : state.currentDirectory;
-      state.transfers.push({ id: idempotencyKey(), file, name, directory, relativeDirectory, state: "queued", confirmed: 0, error: "", controller: null, uploadID: "" });
+      const directory = relativeDirectory ? joinPath(baseDirectory, relativeDirectory) : baseDirectory;
+      queued.push({
+        id: idempotencyKey(), file: input.file, name, directory, baseDirectory, relativeDirectory,
+        relativePath: input.relativePath, groupID, state: "queued", confirmed: 0, error: "", controller: null, uploadID: "",
+      });
+    }
+    const directories = Array.from(new Set(options.directories || [])).filter((relative) => validUploadComponents(relative));
+    if (!queued.length && !directories.length) return;
+    state.transfers.push(...queued);
+    if (groupID) {
+      const group = {
+        id: groupID, name: options.groupName, baseDirectory, directories, transferIDs: queued.map((transfer) => transfer.id),
+        totalSize: queued.reduce((total, transfer) => total + transfer.file.size, 0), state: "preparing", error: "", refreshed: false, cancelled: false,
+      };
+      state.transferGroups.set(groupID, group);
+      prepareTransferGroup(group);
     }
     byID("transfer-panel").hidden = false;
     renderTransfers();
-    pumpTransfers();
+    if (!groupID) pumpTransfers();
   }
 
-  async function ensureDirectories(relativeDirectory) {
+  function queueFolderFiles(files) {
+    const groups = new Map();
+    const looseFiles = [];
+    for (const file of Array.from(files).filter((value) => value instanceof File)) {
+      const relativePath = file.webkitRelativePath || file.name;
+      const components = validUploadComponents(relativePath);
+      if (!components || components.length < 2) {
+        looseFiles.push({ file, relativePath });
+        continue;
+      }
+      const root = components[0];
+      let group = groups.get(root);
+      if (!group) {
+        group = { files: [], directories: new Set() };
+        groups.set(root, group);
+      }
+      group.files.push({ file, relativePath });
+      for (let length = 1; length < components.length; length += 1) group.directories.add(components.slice(0, length).join("/"));
+    }
+    for (const [groupName, group] of groups) queueFiles(group.files, { groupName, directories: [...group.directories] });
+    if (looseFiles.length) queueFiles(looseFiles);
+  }
+
+  function readLegacyFile(entry) {
+    return new Promise((resolve, reject) => entry.file(resolve, reject));
+  }
+
+  function readLegacyDirectory(reader) {
+    return new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+  }
+
+  async function collectLegacyEntry(entry, parent, files, directories) {
+    const relativePath = parent ? `${parent}/${entry.name}` : entry.name;
+    if (entry.isFile) {
+      files.push({ file: await readLegacyFile(entry), relativePath });
+      return;
+    }
+    if (!entry.isDirectory) return;
+    directories.push(relativePath);
+    const reader = entry.createReader();
+    while (true) {
+      const entries = await readLegacyDirectory(reader);
+      if (!entries.length) break;
+      for (const child of entries) await collectLegacyEntry(child, relativePath, files, directories);
+    }
+  }
+
+  async function collectFileSystemHandle(handle, parent, files, directories) {
+    const relativePath = parent ? `${parent}/${handle.name}` : handle.name;
+    if (handle.kind === "file") {
+      files.push({ file: await handle.getFile(), relativePath });
+      return;
+    }
+    if (handle.kind !== "directory") return;
+    directories.push(relativePath);
+    for await (const child of handle.values()) await collectFileSystemHandle(child, relativePath, files, directories);
+  }
+
+  async function queueDroppedItems(dataTransfer) {
+    const items = Array.from(dataTransfer.items || []).filter((item) => item.kind === "file");
+    if (!items.length) {
+      queueFiles(dataTransfer.files || []);
+      return;
+    }
+    const looseFiles = [];
+    let usedEntryAPI = false;
+    for (const item of items) {
+      const getEntry = typeof item.getAsEntry === "function" ? item.getAsEntry.bind(item) : typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry.bind(item) : null;
+      const legacyEntry = getEntry ? getEntry() : null;
+      if (legacyEntry) {
+        usedEntryAPI = true;
+        const files = [];
+        const directories = [];
+        await collectLegacyEntry(legacyEntry, "", files, directories);
+        if (legacyEntry.isDirectory) queueFiles(files, { groupName: legacyEntry.name, directories });
+        else looseFiles.push(...files);
+        continue;
+      }
+      const handle = typeof item.getAsFileSystemHandle === "function" ? await item.getAsFileSystemHandle() : null;
+      if (handle) {
+        usedEntryAPI = true;
+        const files = [];
+        const directories = [];
+        await collectFileSystemHandle(handle, "", files, directories);
+        if (handle.kind === "directory") queueFiles(files, { groupName: handle.name, directories });
+        else looseFiles.push(...files);
+        continue;
+      }
+      const file = typeof item.getAsFile === "function" ? item.getAsFile() : null;
+      if (file) looseFiles.push({ file, relativePath: file.name });
+    }
+    if (looseFiles.length) queueFiles(looseFiles);
+    if (!usedEntryAPI && !looseFiles.length) queueFiles(dataTransfer.files || []);
+  }
+
+  async function ensureDirectory(path) {
+    let pending = state.directoryPromises.get(path);
+    if (pending) return pending;
+    pending = (async () => {
+      try {
+        const existing = await api(`/api/v1/files/stat?path=${encodeURIComponent(path)}`);
+        if (existing.kind !== "directory") throw new Error("An upload folder path is already a file.");
+        return;
+      } catch (error) {
+        if (!(error instanceof APIError) || error.status !== 404) throw error;
+      }
+      try {
+        await api("/api/v1/directories", { method: "POST", body: { path, conflict: "fail" } });
+      } catch (error) {
+        if (!(error instanceof APIError) || error.status !== 409) throw error;
+        const existing = await api(`/api/v1/files/stat?path=${encodeURIComponent(path)}`);
+        if (existing.kind !== "directory") throw error;
+      }
+    })();
+    state.directoryPromises.set(path, pending);
+    try { await pending; }
+    finally { if (state.directoryPromises.get(path) === pending) state.directoryPromises.delete(path); }
+  }
+
+  async function ensureDirectories(baseDirectory, relativeDirectory) {
     if (!relativeDirectory) return;
-    let current = state.currentDirectory;
+    let current = baseDirectory;
     for (const component of relativeDirectory.split("/")) {
       current = joinPath(current, component);
-      try { await api(`/api/v1/files/stat?path=${encodeURIComponent(current)}`); }
-      catch (error) {
-        if (!(error instanceof APIError) || error.status !== 404) throw error;
-        await api("/api/v1/directories", { method: "POST", body: { path: current, conflict: "fail" } });
-      }
+      await ensureDirectory(current);
     }
+  }
+
+  async function prepareTransferGroup(group) {
+    group.cancelled = false;
+    group.state = "preparing";
+    group.error = "";
+    renderTransfers();
+    try {
+      const directories = [...group.directories].sort((left, right) => left.split("/").length - right.split("/").length || left.localeCompare(right));
+      for (const relativeDirectory of directories) {
+        await ensureDirectories(group.baseDirectory, relativeDirectory);
+        if (group.cancelled) return;
+      }
+      if (group.cancelled) return;
+      group.state = group.transferIDs.length ? "queued" : "complete";
+      if (!group.transferIDs.length && state.currentDirectory === group.baseDirectory) loadDirectory(group.baseDirectory);
+      pumpTransfers();
+    } catch (error) {
+      group.state = "failed";
+      group.error = friendlyError(error, "Folder preparation failed.");
+      for (const transfer of state.transfers.filter((item) => item.groupID === group.id)) {
+        transfer.state = "failed";
+        transfer.error = group.error;
+      }
+      announce(`${group.name} failed to upload.`, true);
+    }
+    renderTransfers();
   }
 
   function pumpTransfers() {
@@ -765,28 +958,41 @@
     const concurrency = Math.min(maximum, Math.max(1, Number.isFinite(configured) ? configured : 4));
     byID("transfer-concurrency").value = String(concurrency);
     while (state.activeTransfers < concurrency) {
-      const transfer = state.transfers.find((item) => item.state === "queued");
+      const transfer = state.transfers.find((item) => item.state === "queued" && (!item.groupID || state.transferGroups.get(item.groupID)?.state !== "preparing"));
       if (!transfer) break;
       state.activeTransfers += 1;
       uploadTransfer(transfer).finally(() => {
         state.activeTransfers -= 1;
+        updateTransferGroup(transfer.groupID);
         renderTransfers();
         pumpTransfers();
       });
     }
   }
 
+  function uploadMediaType(file, name) {
+    const declared = String(file.type || "").trim().toLocaleLowerCase();
+    if (declared && declared !== "application/octet-stream") return declared;
+    const extension = name.includes(".") ? name.split(".").pop().toLocaleLowerCase() : "";
+    return ({
+      arw: "image/x-sony-arw", cr2: "image/x-canon-cr2", cr3: "image/x-canon-cr3", dng: "image/x-adobe-dng",
+      nef: "image/x-nikon-nef", orf: "image/x-olympus-orf", pef: "image/x-pentax-pef", raf: "image/x-fuji-raf", rw2: "image/x-panasonic-rw2",
+    })[extension] || "application/octet-stream";
+  }
+
   async function uploadTransfer(transfer) {
     transfer.state = "preparing";
     transfer.error = "";
     transfer.controller = new AbortController();
+    updateTransferGroup(transfer.groupID);
     renderTransfers();
     try {
-      await ensureDirectories(transfer.relativeDirectory);
-      const mediaType = transfer.file.type || "application/octet-stream";
+      if (!transfer.groupID) await ensureDirectories(transfer.baseDirectory, transfer.relativeDirectory);
+      const mediaType = uploadMediaType(transfer.file, transfer.name);
       const capability = await api("/api/v1/uploads", { method: "POST", headers: { "Idempotency-Key": transfer.id }, body: { path: transfer.directory, name: transfer.name, size: transfer.file.size, mediaType, conflict: "rename", resumable: true }, signal: transfer.controller.signal });
       transfer.uploadID = capability.uploadID;
       transfer.state = "uploading";
+      updateTransferGroup(transfer.groupID);
       renderTransfers();
       await sendFileData(transfer, capability);
       await api(`/api/v1/uploads/${encodeURIComponent(capability.uploadID)}/complete`, { method: "POST", body: { path: joinPath(transfer.directory, transfer.name), size: transfer.file.size, mediaType }, signal: transfer.controller.signal });
@@ -869,23 +1075,102 @@
     announce(`${transfer.name} cancelled.`);
   }
 
+  function updateTransferGroup(groupID) {
+    if (!groupID) return;
+    const group = state.transferGroups.get(groupID);
+    if (!group || group.state === "preparing") return;
+    const transfers = state.transfers.filter((item) => item.groupID === groupID);
+    if (group.cancelled) group.state = "cancelled";
+    else if (transfers.every((transfer) => transfer.state === "complete")) group.state = "complete";
+    else if (transfers.some((transfer) => ["preparing", "uploading"].includes(transfer.state))) group.state = "uploading";
+    else if (transfers.some((transfer) => transfer.state === "queued")) group.state = "queued";
+    else if (transfers.some((transfer) => transfer.state === "failed")) group.state = "failed";
+    else group.state = "cancelled";
+    if (group.state === "complete" && !group.refreshed) {
+      group.refreshed = true;
+      if (state.currentDirectory === group.baseDirectory) loadDirectory(group.baseDirectory);
+      announce(`${group.name} uploaded with ${transfers.length} files.`);
+    }
+  }
+
+  async function cancelTransferGroup(group) {
+    group.cancelled = true;
+    group.state = "cancelled";
+    renderTransfers();
+    await Promise.all(state.transfers.filter((item) => item.groupID === group.id && ["queued", "preparing", "uploading"].includes(item.state)).map(cancelTransfer));
+    renderTransfers();
+  }
+
+  function retryTransferGroup(group) {
+    group.cancelled = false;
+    group.refreshed = false;
+    for (const transfer of state.transfers.filter((item) => item.groupID === group.id && ["failed", "cancelled"].includes(item.state))) {
+      if (transfer.state === "cancelled") {
+        transfer.id = idempotencyKey();
+        transfer.confirmed = 0;
+        transfer.uploadID = "";
+      }
+      transfer.state = "queued";
+      transfer.error = "";
+    }
+    prepareTransferGroup(group);
+  }
+
+  function transferRow(transfer) {
+    const row = document.createElement("div");
+    row.className = `transfer-row ${transfer.state}`;
+    const label = transfer.groupID ? transfer.relativePath : transfer.name;
+    row.append(text("strong", label), text("span", transfer.state === "uploading" ? `${formatBytes(transfer.confirmed)} of ${formatBytes(transfer.file.size)}` : transfer.state));
+    const progress = document.createElement("progress");
+    progress.max = Math.max(1, transfer.file.size);
+    progress.value = transfer.file.size === 0 && transfer.state === "complete" ? 1 : transfer.confirmed;
+    progress.setAttribute("aria-label", `Upload progress for ${label}`);
+    row.append(progress);
+    if (transfer.error) row.append(text("span", transfer.error, "field-help"));
+    if (["queued", "preparing", "uploading"].includes(transfer.state)) row.append(button("Cancel", () => cancelTransfer(transfer), "quiet"));
+    if (!transfer.groupID && ["failed", "cancelled"].includes(transfer.state)) row.append(button("Retry", () => { transfer.state = "queued"; transfer.error = ""; pumpTransfers(); renderTransfers(); }, "secondary"));
+    return row;
+  }
+
+  function transferGroupRow(group, transfers) {
+    const row = document.createElement("div");
+    row.className = `transfer-group-row ${group.state}`;
+    const confirmed = transfers.reduce((total, transfer) => total + Math.min(transfer.confirmed, transfer.file.size), 0);
+    const complete = transfers.filter((transfer) => transfer.state === "complete").length;
+    const failed = transfers.filter((transfer) => transfer.state === "failed").length;
+    const status = `${formatBytes(confirmed)} of ${formatBytes(group.totalSize)} • ${complete} of ${transfers.length} files${failed ? ` • ${failed} failed` : ""}`;
+    row.append(text("strong", group.name), text("span", group.state === "preparing" ? "Preparing folders…" : status));
+    const progress = document.createElement("progress");
+    progress.max = group.totalSize > 0 ? group.totalSize : Math.max(1, transfers.length);
+    progress.value = group.totalSize > 0 ? confirmed : transfers.length ? complete : group.state === "complete" ? 1 : 0;
+    progress.setAttribute("aria-label", `Upload progress for folder ${group.name}`);
+    row.append(progress);
+    if (group.error) row.append(text("span", group.error, "field-help"));
+    if (["preparing", "queued", "uploading"].includes(group.state)) row.append(button("Cancel folder", () => cancelTransferGroup(group), "quiet"));
+    if (["failed", "cancelled"].includes(group.state)) row.append(button("Retry folder", () => retryTransferGroup(group), "secondary"));
+    return row;
+  }
+
   function renderTransfers() {
     const list = byID("transfer-list");
     list.replaceChildren();
-    for (const transfer of state.transfers) {
+    for (const transfer of state.transfers.filter((item) => !item.groupID)) {
       const item = document.createElement("li");
-      const row = document.createElement("div");
-      row.className = `transfer-row ${transfer.state}`;
-      row.append(text("strong", transfer.name), text("span", transfer.state === "uploading" ? `${formatBytes(transfer.confirmed)} of ${formatBytes(transfer.file.size)}` : transfer.state));
-      const progress = document.createElement("progress");
-      progress.max = Math.max(1, transfer.file.size);
-      progress.value = transfer.confirmed;
-      progress.setAttribute("aria-label", `Upload progress for ${transfer.name}`);
-      row.append(progress);
-      if (transfer.error) row.append(text("span", transfer.error, "field-help"));
-      if (["queued", "preparing", "uploading"].includes(transfer.state)) row.append(button("Cancel", () => cancelTransfer(transfer), "quiet"));
-      if (["failed", "cancelled"].includes(transfer.state)) row.append(button("Retry", () => { transfer.state = "queued"; transfer.error = ""; pumpTransfers(); renderTransfers(); }, "secondary"));
-      item.append(row);
+      item.append(transferRow(transfer));
+      list.append(item);
+    }
+    for (const group of state.transferGroups.values()) {
+      const transfers = state.transfers.filter((item) => item.groupID === group.id);
+      const item = document.createElement("li");
+      item.append(transferGroupRow(group, transfers));
+      const files = document.createElement("ul");
+      files.className = "transfer-file-list";
+      for (const transfer of transfers) {
+        const fileItem = document.createElement("li");
+        fileItem.append(transferRow(transfer));
+        files.append(fileItem);
+      }
+      item.append(files);
       list.append(item);
     }
   }
@@ -975,6 +1260,47 @@
     showViewerEntry(state.viewerEntries[state.viewerIndex]);
   }
 
+  function viewerPreviewKey(entry, variant) {
+    return `${entry.path}\u0000${entry.version}\u0000${variant}`;
+  }
+
+  function deleteCachedViewerPreview(key) {
+    const cached = state.viewerPreviewCache.get(key);
+    if (!cached) return;
+    state.viewerPreviewCache.delete(key);
+    state.viewerPreviewCacheBytes = Math.max(0, state.viewerPreviewCacheBytes - cached.blob.size);
+  }
+
+  function cachedViewerPreview(entry, variant) {
+    const key = viewerPreviewKey(entry, variant);
+    const cached = state.viewerPreviewCache.get(key);
+    if (!cached) return null;
+    if (!Number.isFinite(cached.expiresAt) || Date.now() >= cached.expiresAt) {
+      deleteCachedViewerPreview(key);
+      return null;
+    }
+    state.viewerPreviewCache.delete(key);
+    state.viewerPreviewCache.set(key, cached);
+    return cached;
+  }
+
+  function cacheViewerPreview(entry, variant, result, blob) {
+    const expiresAt = Date.parse(result.capability && result.capability.expiresAt || "");
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() || blob.size > maximumViewerPreviewCacheBytes) return;
+    const key = viewerPreviewKey(entry, variant);
+    deleteCachedViewerPreview(key);
+    state.viewerPreviewCache.set(key, { blob, artifact: result.artifact, expiresAt });
+    state.viewerPreviewCacheBytes += blob.size;
+    while (state.viewerPreviewCache.size > maximumViewerPreviewCacheEntries || state.viewerPreviewCacheBytes > maximumViewerPreviewCacheBytes) {
+      deleteCachedViewerPreview(state.viewerPreviewCache.keys().next().value);
+    }
+  }
+
+  function clearViewerPreviewCache() {
+    state.viewerPreviewCache.clear();
+    state.viewerPreviewCacheBytes = 0;
+  }
+
   async function showViewerEntry(entry) {
     state.viewerEntry = entry;
     if (state.viewerController) state.viewerController.abort();
@@ -991,16 +1317,28 @@
     byID("preview-original").hidden = false;
     byID("preview-download").hidden = false;
     byID("preview-download").onclick = () => download(entry);
-    byID("preview-status").textContent = "Resolving generated preview…";
+    const variant = previewVariant(Math.max(window.innerWidth, window.innerHeight));
+    const cached = cachedViewerPreview(entry, variant);
+    if (cached) {
+      byID("preview-status").textContent = "Opening verified preview…";
+      try {
+        await displayViewerBlob(entry, cached.artifact, cached.blob, state.viewerController.signal);
+        return;
+      } catch (error) {
+        if (error.name === "AbortError") return;
+        deleteCachedViewerPreview(viewerPreviewKey(entry, variant));
+        releaseViewerObjectURL();
+      }
+    }
+    byID("preview-status").textContent = "Loading generated preview…";
     showViewerFallback(entry);
     if (!state.config || !state.config.previewConfigured) {
       byID("preview-status").textContent = "Generated thumbnails are not configured. The file-type icon is shown; the original remains available on request.";
       return;
     }
     try {
-      const variant = previewVariant(Math.max(window.innerWidth, window.innerHeight));
       const response = await api("/api/v1/previews/resolve", { method: "POST", body: { items: [{ path: entry.path, version: entry.version, variant }] }, signal: state.viewerController.signal });
-      await displayViewerResult(entry, response.items[0], state.viewerController.signal);
+      await displayViewerResult(entry, response.items[0], state.viewerController.signal, variant);
     } catch (error) {
       if (error.name !== "AbortError") {
         byID("preview-status").textContent = friendlyError(error, "Generated preview is unavailable.");
@@ -1017,7 +1355,7 @@
     byID("preview-content").replaceChildren(fallback);
   }
 
-  async function displayViewerResult(entry, result, signal) {
+  async function displayViewerResult(entry, result, signal, variant) {
     state.previewStates.set(entry.path, result);
     if (result.state !== "ready" || !result.capability) {
       const messages = {
@@ -1034,16 +1372,28 @@
     }
     const response = await fetch(result.capability.url, { method: result.capability.method || "GET", headers: result.capability.headers || {}, signal, credentials: "omit" });
     const blob = await validatedPreviewBlob(response, result.artifact);
+    await displayViewerBlob(entry, result.artifact, blob, signal);
+    cacheViewerPreview(entry, variant, result, blob);
+  }
+
+  async function displayViewerBlob(entry, artifact, blob, signal) {
     releaseViewerObjectURL();
     state.viewerObjectURL = URL.createObjectURL(blob);
     const image = document.createElement("img");
     image.src = state.viewerObjectURL;
     image.alt = `Preview of ${entry.name}`;
-    image.width = result.artifact.width;
-    image.height = result.artifact.height;
+    image.width = artifact.width;
+    image.height = artifact.height;
     image.decoding = "async";
+    try {
+      await image.decode();
+    } catch (error) {
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+      throw error;
+    }
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     byID("preview-content").replaceChildren(image);
-    byID("preview-status").textContent = "Generated WebP preview ready.";
+    byID("preview-status").textContent = "Preview ready.";
   }
 
   async function generateViewerPreview(regenerate) {
@@ -1068,7 +1418,7 @@
       operation = await waitForPreviewOperation(operation, postGeneration, state.viewerController.signal);
       if (operation.state === "succeeded" && operation.result) {
         state.previewGenerationRequests.delete(requestIdentity);
-        await displayViewerResult(entry, operation.result, state.viewerController.signal);
+        await displayViewerResult(entry, operation.result, state.viewerController.signal, variant);
       } else if (operation.state === "failed") {
         state.previewGenerationRequests.delete(requestIdentity);
         byID("preview-status").textContent = "Preview generation failed. You can try again.";
@@ -1434,14 +1784,29 @@
     });
     byID("new-folder-button").addEventListener("click", createFolder);
     byID("upload-input").addEventListener("change", (event) => { queueFiles(event.target.files); event.target.value = ""; });
-    byID("folder-input").addEventListener("change", (event) => { queueFiles(event.target.files); event.target.value = ""; });
+    byID("folder-input").addEventListener("change", (event) => { queueFolderFiles(event.target.files); event.target.value = ""; });
     const drop = byID("drop-target");
     drop.addEventListener("dragover", (event) => { event.preventDefault(); drop.classList.add("dragging"); });
     drop.addEventListener("dragleave", () => drop.classList.remove("dragging"));
-    drop.addEventListener("drop", (event) => { event.preventDefault(); drop.classList.remove("dragging"); queueFiles(event.dataTransfer.files); });
+    drop.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      drop.classList.remove("dragging");
+      try { await queueDroppedItems(event.dataTransfer); }
+      catch (error) { announce(friendlyError(error, "Dropped files could not be read."), true); }
+    });
     drop.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); byID("upload-input").click(); } });
     byID("transfer-concurrency").addEventListener("change", pumpTransfers);
-    byID("clear-transfers").addEventListener("click", () => { state.transfers = state.transfers.filter((item) => !["complete", "cancelled"].includes(item.state)); renderTransfers(); byID("transfer-panel").hidden = !state.transfers.length; });
+    byID("clear-transfers").addEventListener("click", () => {
+      for (const [groupID, group] of state.transferGroups) {
+        if (["complete", "cancelled"].includes(group.state)) {
+          state.transferGroups.delete(groupID);
+          state.transfers = state.transfers.filter((item) => item.groupID !== groupID);
+        }
+      }
+      state.transfers = state.transfers.filter((item) => item.groupID || !["complete", "cancelled"].includes(item.state));
+      renderTransfers();
+      byID("transfer-panel").hidden = !state.transfers.length && !state.transferGroups.size;
+    });
     byID("file-filter").addEventListener("input", renderFiles); byID("file-sort").addEventListener("change", () => loadDirectory(state.currentDirectory));
     for (const id of ["filter-kind", "filter-media", "filter-min-size", "filter-max-size", "filter-modified-after", "filter-modified-before", "filter-preview"]) byID(id).addEventListener("input", renderFiles);
     for (const id of ["file-view-list", "file-view-grid"]) byID(id).addEventListener("change", (event) => { if (event.target.checked) { state.viewMode = event.target.value; renderFiles(); } });

@@ -699,3 +699,69 @@ func TestProviderRemainingTreeAndTransferBranches(t *testing.T) {
 		t.Fatalf("short writeZeros = %d", written)
 	}
 }
+
+func TestProviderTransferEntropyAndDispatchFailuresFailClosed(t *testing.T) {
+	_, scope, clock := boundaryProvider(t)
+	ctx := context.Background()
+	path := domain.MustParseUserPath("/entropy.txt")
+	request := domain.CreateUploadRequest{Path: path, Size: 1, MediaType: "text/plain"}
+
+	for name, entropyBytes := range map[string]int{"upload ID": 0, "upload token": 16} {
+		t.Run(name, func(t *testing.T) {
+			provider := New(Options{Clock: clock, IDs: domain.NewIDGenerator(bytes.NewReader(make([]byte, entropyBytes)))})
+			if err := provider.SetDataPlaneBaseURL("http://127.0.0.1:43213"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := provider.CreateUpload(ctx, scope, request); !errors.Is(err, domain.ErrInternal) {
+				t.Fatalf("CreateUpload with unavailable %s entropy = %v", name, err)
+			}
+		})
+	}
+
+	provider, scope, _ := boundaryProvider(t)
+	if _, err := provider.UploadStatus(ctx, scope, ""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty UploadStatus = %v", err)
+	}
+	if _, err := provider.CreateUpload(ctx, scope, domain.CreateUploadRequest{Path: path, Size: provider.maxMaterializedBytes + 1, MediaType: "application/octet-stream"}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("oversized single CreateUpload = %v", err)
+	}
+
+	capability, err := provider.CreateUpload(ctx, scope, domain.CreateUploadRequest{Path: path, Size: 4, MediaType: "text/plain"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upload := httptest.NewRequest(http.MethodPut, capability.URL, strings.NewReader("data"))
+	upload.Header.Set("Content-Type", "text/plain")
+	uploadResponse := httptest.NewRecorder()
+	provider.ServeHTTP(uploadResponse, upload)
+	if uploadResponse.Code != http.StatusNoContent {
+		t.Fatalf("upload response = %d", uploadResponse.Code)
+	}
+	provider.ids = domain.NewIDGenerator(bytes.NewReader(nil))
+	if _, err := provider.CompleteUpload(ctx, scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: 4, MediaType: "text/plain"}); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("CompleteUpload with unavailable entry entropy = %v", err)
+	}
+
+	downloadPath := domain.MustParseUserPath("/download-entropy.txt")
+	downloadEntry := provider.newEntryLocked(downloadPath, domain.EntryFile, 1, "text/plain")
+	provider.scopeObjectsLocked(scope)[downloadPath.String()] = object{entry: downloadEntry, data: []byte("x"), materialized: true}
+	if _, err := provider.CreateDownload(ctx, scope, domain.CreateDownloadRequest{Path: downloadPath, Version: downloadEntry.Version}); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("CreateDownload with unavailable token entropy = %v", err)
+	}
+
+	unknown := httptest.NewRecorder()
+	provider.ServeHTTP(unknown, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:43210/cap/unknown/token", nil))
+	if unknown.Code != http.StatusNotFound {
+		t.Fatalf("unknown capability route = %d", unknown.Code)
+	}
+	const missingSessionToken = "missing-session"
+	provider.uploadTokens[tokenHash(missingSessionToken)] = domain.UploadID("missing")
+	missingSession := httptest.NewRecorder()
+	provider.ServeHTTP(missingSession, httptest.NewRequest(http.MethodPut, "http://127.0.0.1:43210/cap/upload/"+missingSessionToken, nil))
+	if missingSession.Code != http.StatusNotFound {
+		t.Fatalf("missing upload session = %d", missingSession.Code)
+	}
+	if _, _, _, err := parseRange("bytes=1-2-3", 4); err == nil {
+		t.Fatal("multi-dash byte range succeeded")
+	}
+}

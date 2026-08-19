@@ -39,9 +39,15 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 			t.Errorf("browser source contains forbidden API %q", forbidden)
 		}
 	}
+	for _, forbidden := range []string{".style.", ".style =", ".style=", `setAttribute("style"`, `setAttribute('style'`} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("browser source creates a CSP-blocked inline style through %q", forbidden)
+		}
+	}
 	for _, required := range []string{
 		"navigator.credentials.create", "navigator.credentials.get", "textContent",
 		"Upload-Offset", "Content-Range", "webkitRelativePath", "history.replaceState",
+		"webkitGetAsEntry", "getAsFileSystemHandle", "readEntries", "transferGroups",
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("browser source is missing workflow primitive %q", required)
@@ -71,8 +77,10 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 	for _, required := range []string{
 		"renderVirtualGrid", "IntersectionObserver", "gridOverscanRows = 3", "URL.revokeObjectURL",
 		"/api/v1/previews/resolve", "/api/v1/previews/generations", "/api/v1/previews/operations/", "image/webp", "validatedPreviewBlob", "Invalid preview artifact body", "filterLoadedEntries",
-		`crypto.subtle.digest("SHA-256"`, "Invalid preview artifact checksum",
+		`crypto.subtle.digest("SHA-256"`, "Invalid preview artifact checksum", "await image.decode()", "previewLoaded",
+		"viewerPreviewCache", "cachedViewerPreview", "cacheViewerPreview",
 		"waitForPreviewOperation", "previewRetryTimers", "Idempotency-Key",
+		"uploadMediaType", "image/x-sony-arw", "image/x-adobe-dng",
 		"ArrowLeft", "ArrowRight",
 	} {
 		if !strings.Contains(script, required) {
@@ -83,7 +91,7 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 		t.Error("media browsing is incorrectly gated by optional preview configuration")
 	}
 	stylesheet := string(mustRead("static/app.css"))
-	for _, required := range []string{".media-grid", ".media-tile", "aspect-ratio: 1", "object-fit: contain"} {
+	for _, required := range []string{".media-grid", ".media-grid-spacer", "repeat(auto-fill", ".media-tile", "aspect-ratio: 1", "object-fit: contain"} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("media browser stylesheet is missing %q", required)
 		}

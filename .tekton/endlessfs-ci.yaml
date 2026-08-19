@@ -73,6 +73,7 @@ spec:
               memory: 24Gi
     - pipelineTaskName: coverage
       podTemplate:
+        automountServiceAccountToken: false
         hostUsers: false
       stepSpecs:
         - name: run
@@ -198,7 +199,7 @@ spec:
             value: nix flake check --print-build-logs --max-jobs 6 --cores 2
 
       - name: coverage
-        runAfter: [prepare-cache]
+        runAfter: [fast-checks, nix-checks]
         taskRef:
           resolver: cluster
           params:
@@ -225,7 +226,7 @@ spec:
           storageClassName: fast-local
           resources:
             requests:
-              storage: 20Gi
+              storage: 10Gi
     - name: git-cache
       persistentVolumeClaim:
         claimName: git-repo-cache

@@ -35,20 +35,20 @@
       headlessBrowserFor =
         pkgs:
         let
-          component = pkgs.playwright-driver.components."chromium-headless-shell";
+          fontConfig = pkgs.makeFontsConf {
+            fontDirectories = [ pkgs.dejavu_fonts ];
+          };
         in
         pkgs.runCommand "endlessfs-headless-browser"
           {
             nativeBuildInputs = [
-              pkgs.findutils
               pkgs.makeWrapper
             ];
           }
           ''
-            browser="$(find ${component} -type f -name chrome-headless-shell -perm -0100 -print -quit)"
-            test -n "$browser"
             mkdir -p "$out/bin"
-            makeWrapper "$browser" "$out/bin/chrome-headless-shell"
+            makeWrapper ${pkgs.chromium}/bin/chromium "$out/bin/chrome-headless-shell" \
+              --set FONTCONFIG_FILE ${fontConfig}
           '';
       dependencyPolicyCommand = moduleClosure: ''
         vulndb_locked_url="$(jq -er '.nodes.vulndb.locked.url' flake.lock)"
@@ -102,6 +102,7 @@
           yq -e '.spec.taskRunTemplate.podTemplate.securityContext.fsGroup == 1000' "$pipeline" >/dev/null
           yq -e '.spec.workspaces[] | select(.name == "nix-store") | .persistentVolumeClaim.claimName == "nix-store"' "$pipeline" >/dev/null
           yq -e '.spec.workspaces[] | select(.name == "git-cache") | .persistentVolumeClaim.claimName == "git-repo-cache"' "$pipeline" >/dev/null
+          yq -e '.spec.workspaces[] | select(.name == "source") | .volumeClaimTemplate.spec.resources.requests.storage == "10Gi"' "$pipeline" >/dev/null
           if rg -ni 'gke|drive\.endlessfs\.com|namespace-macos-fastlane|runs-on:[[:space:]]*macos' "$pipeline"; then
             echo "active CI must stay on xlab Linux compute: $pipeline" >&2
             exit 1
@@ -133,6 +134,10 @@
         for task in prepare-cache fast-checks nix-checks coverage; do
           yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-ci.yaml >/dev/null
         done
+        yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "coverage" and .podTemplate.automountServiceAccountToken == false)' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .taskRef.params[] | select(.name == "name" and .value == "nix-run-v2")' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .runAfter[] | select(. == "fast-checks")' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .runAfter[] | select(. == "nix-checks")' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "publish") | .podTemplate.hostUsers == false' .tekton/endlessfs-container.yaml >/dev/null
         for task in verify release; do
           yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-release.yaml >/dev/null
@@ -659,6 +664,7 @@
             mkTask "endlessfs-test-coverage"
               (goTools ++ [ pkgs.gawk ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
               ''
+                export CGO_ENABLED=0
                 export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
                 export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
                 export ENDLESSFS_RUN_E2E=1
@@ -742,6 +748,7 @@
           ] (dependencyPolicyCommand packages.default.goModules);
 
           pr-check = mkTask "endlessfs-pr-check" qualityTools ''
+            export CGO_ENABLED=0
             unformatted="$(gofmt -l .)"
             if [ -n "$unformatted" ]; then
               echo "Go files need formatting:" >&2
@@ -940,6 +947,20 @@
           testSuite = goCheck "tests" "go test ./..." [ ];
           e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
           coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
+          linuxCiAppPolicy =
+            pkgs.runCommand "endlessfs-linux-ci-app-policy"
+              {
+                nativeBuildInputs = [ pkgs.ripgrep ];
+              }
+              ''
+                for program in \
+                  ${self.apps.${system}.pr-check.program} \
+                  ${self.apps.${system}.test-coverage.program}; do
+                  rg --quiet '^export CGO_ENABLED=0$' "$program"
+                done
+                rg --fixed-strings --quiet 'FONTCONFIG_FILE' ${headlessBrowser}/bin/chrome-headless-shell
+                touch "$out"
+              '';
           formatCheck =
             goCheckWithSource "format" formatSource
               ''
@@ -1032,6 +1053,7 @@
           theme = testSuite;
           race = raceCheck;
           coverage = coverageCompile;
+          linux-ci-app-policy = linuxCiAppPolicy;
           fuzz = fuzzCheck;
           offline = testSuite;
           security = securityCheck;

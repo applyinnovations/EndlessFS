@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-//go:embed static/*
+//go:embed ui/index.html ui/app.css ui/app.js ui/brand/endlessfs-mark.svg ui/fonts/*.woff2
 var assets embed.FS
 
 const themeLink = `<link id="theme-stylesheet" rel="stylesheet" disabled>`
@@ -16,9 +16,20 @@ const themeLink = `<link id="theme-stylesheet" rel="stylesheet" disabled>`
 // Handler serves only the explicitly embedded application assets. An optional
 // resolver may select a validated same-origin theme stylesheet before paint.
 func Handler(themeCSSResolvers ...func(*http.Request) string) http.Handler {
-	index := mustRead("static/index.html")
-	stylesheet := mustRead("static/app.css")
-	script := mustRead("static/app.js")
+	index := mustRead("ui/index.html")
+	assetManifest := map[string]struct {
+		data        []byte
+		contentType string
+		cache       string
+		isolated    bool
+	}{
+		"/assets/ui.css":                     {data: mustRead("ui/app.css"), contentType: "text/css; charset=utf-8", cache: "public, max-age=3600"},
+		"/assets/ui.js":                      {data: mustRead("ui/app.js"), contentType: "text/javascript; charset=utf-8", cache: "public, max-age=3600"},
+		"/assets/brand/endlessfs-mark.svg":   {data: mustRead("ui/brand/endlessfs-mark.svg"), contentType: "image/svg+xml", cache: "public, max-age=31536000, immutable", isolated: true},
+		"/assets/fonts/inter-regular.woff2":  {data: mustRead("ui/fonts/inter-regular.woff2"), contentType: "font/woff2", cache: "public, max-age=31536000, immutable"},
+		"/assets/fonts/inter-medium.woff2":   {data: mustRead("ui/fonts/inter-medium.woff2"), contentType: "font/woff2", cache: "public, max-age=31536000, immutable"},
+		"/assets/fonts/inter-semibold.woff2": {data: mustRead("ui/fonts/inter-semibold.woff2"), contentType: "font/woff2", cache: "public, max-age=31536000, immutable"},
+	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body []byte
@@ -32,14 +43,15 @@ func Handler(themeCSSResolvers ...func(*http.Request) string) http.Handler {
 					body = bytes.Replace(index, []byte(themeLink), []byte(`<link id="theme-stylesheet" rel="stylesheet" href="`+href+`">`), 1)
 				}
 			}
-		case r.URL.Path == "/assets/app.css":
-			w.Header().Set("Cache-Control", "public, max-age=3600")
-			w.Header().Set("Content-Type", "text/css; charset=utf-8")
-			body = stylesheet
-		case r.URL.Path == "/assets/app.js":
-			w.Header().Set("Cache-Control", "public, max-age=3600")
-			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-			body = script
+		case assetManifest[r.URL.Path].data != nil:
+			asset := assetManifest[r.URL.Path]
+			w.Header().Set("Cache-Control", asset.cache)
+			w.Header().Set("Content-Type", asset.contentType)
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			if asset.isolated {
+				w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'none'; sandbox")
+			}
+			body = asset.data
 		default:
 			http.NotFound(w, r)
 			return

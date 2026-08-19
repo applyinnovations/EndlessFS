@@ -10,12 +10,48 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
 
 func customManifest() Manifest {
-	return Manifest{SchemaVersion: 1, ThemeAPI: APIVersion{Major: 1, Minor: 0}, ID: "com.example.theme", Name: "Example", Version: "1.0.0", Extends: "endlessfs-light", Appearance: AppearanceLight, Author: "Example", License: "CC-BY-4.0", Tokens: map[string]json.RawMessage{}, Fonts: map[string]FontDeclaration{}, Assets: map[string]AssetReference{}}
+	return Manifest{SchemaVersion: 2, ThemeAPI: APIVersion{Major: 2, Minor: 0}, ID: "com.example.theme", Name: "Example", Version: "2.0.0", Extends: "endlessfs-light", Appearance: AppearanceLight, Author: "Example", License: "CC-BY-4.0", Tokens: map[string]json.RawMessage{}, Assets: map[string]AssetReference{}}
+}
+
+func TestThemeAPITwoIsANewPurposeOnlyContract(t *testing.T) {
+	if APIMajor != 2 || APIMinor != 0 {
+		t.Fatalf("Theme API = %d.%d, want 2.0", APIMajor, APIMinor)
+	}
+	want := []string{
+		"color.background", "color.border", "color.error", "color.foreground", "color.primary",
+		"color.primary.tint", "color.success", "color.surface", "color.text.muted", "color.warning",
+	}
+	got := make([]string, 0, len(TokenRegistry()))
+	for _, spec := range TokenRegistry() {
+		got = append(got, spec.ID)
+		for _, appearanceName := range []string{"blue", "red", "green", "yellow", "accent", "danger", "canvas"} {
+			if strings.Contains(strings.ToLower(spec.ID), appearanceName) {
+				t.Errorf("new Theme API contains appearance or legacy token %q", spec.ID)
+			}
+		}
+	}
+	sort.Strings(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("Theme API tokens = %v, want %v", got, want)
+	}
+	fontBearingManifest := `{"schemaVersion":2,"themeAPI":{"major":2,"minor":0},"id":"com.example.fonts","name":"Fonts","version":"2.0.0","extends":"endlessfs-light","appearance":"light","license":"CC-BY-4.0","tokens":{},"fonts":{},"assets":{}}`
+	if _, err := DecodeManifest([]byte(fontBearingManifest)); err == nil {
+		t.Fatal("new Theme API accepted a font override surface")
+	}
+
+	legacy := customManifest()
+	legacy.SchemaVersion = 1
+	legacy.ThemeAPI = APIVersion{Major: 1, Minor: 1}
+	if _, err := NewCompiler(map[string]*ResolvedTheme{}).Compile(Bundle{Manifest: legacy, Files: map[string][]byte{}}); err == nil {
+		t.Fatal("Theme API 1.x bundle was accepted")
+	}
 }
 
 func TestBuiltinsAndMinimalCustomUseOrdinaryCompletePipeline(t *testing.T) {
@@ -33,12 +69,12 @@ func TestBuiltinsAndMinimalCustomUseOrdinaryCompletePipeline(t *testing.T) {
 		}
 	}
 	manifest := customManifest()
-	manifest.Tokens["radius.control"] = json.RawMessage(`12`)
+	manifest.Tokens["color.primary"] = json.RawMessage(`"#315bd6"`)
 	resolved, err := NewCompiler(builtins).Compile(Bundle{Manifest: manifest, Files: map[string][]byte{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resolved.Tokens) != len(builtins["endlessfs-light"].Tokens) || resolved.Tokens["radius.control"].Number != 12 || resolved.Tokens["radius.panel"] != builtins["endlessfs-light"].Tokens["radius.panel"] || len(resolved.Assets) != len(MediaRegistry()) {
+	if len(resolved.Tokens) != len(builtins["endlessfs-light"].Tokens) || resolved.Tokens["color.primary"].Color != "#315bd6" || resolved.Tokens["color.surface"] != builtins["endlessfs-light"].Tokens["color.surface"] || len(resolved.Assets) != len(MediaRegistry()) {
 		t.Fatalf("custom inheritance is incomplete")
 	}
 	registry, err := NewRegistry(Bundle{Manifest: manifest, Files: map[string][]byte{}})
@@ -53,7 +89,7 @@ func TestBuiltinsAndMinimalCustomUseOrdinaryCompletePipeline(t *testing.T) {
 	}
 }
 
-func TestOlderCompatibleCustomInheritsSimulatedNewMediaSlot(t *testing.T) {
+func TestCurrentCustomThemeInheritsItsCompleteParentMedia(t *testing.T) {
 	builtins, err := Builtins()
 	if err != nil {
 		t.Fatal(err)
@@ -63,20 +99,20 @@ func TestOlderCompatibleCustomInheritsSimulatedNewMediaSlot(t *testing.T) {
 	for id, asset := range builtins["endlessfs-light"].Assets {
 		parentCopy.Assets[id] = asset
 	}
-	parentCopy.Assets["illustration.futureFeature"] = parentCopy.Assets["illustration.emptyDrive"]
+	parentCopy.Assets["icon.futureFeature"] = parentCopy.Assets["icon.file"]
 	parents := map[string]*ResolvedTheme{"endlessfs-light": &parentCopy, "endlessfs-dark": builtins["endlessfs-dark"]}
 	resolved, err := NewCompiler(parents).Compile(Bundle{Manifest: customManifest(), Files: map[string][]byte{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := resolved.Assets["illustration.futureFeature"]; !ok {
-		t.Fatal("older custom did not inherit a newly added parent slot")
+	if _, ok := resolved.Assets["icon.futureFeature"]; !ok {
+		t.Fatal("current custom theme did not inherit its complete parent media")
 	}
 }
 
 func TestMediaPreviewFallbackSlotsAreCompleteAndVersioned(t *testing.T) {
-	if APIMajor != 1 || APIMinor != 1 {
-		t.Fatalf("Theme API = %d.%d, want 1.1", APIMajor, APIMinor)
+	if APIMajor != 2 || APIMinor != 0 {
+		t.Fatalf("Theme API = %d.%d, want 2.0", APIMajor, APIMinor)
 	}
 	wanted := map[string]bool{
 		"icon.file.image": false, "icon.file.video": false, "icon.file.pdf": false, "icon.file.audio": false,
@@ -120,11 +156,11 @@ func TestThemeTokensAreClosedTypedBoundedAndContrastChecked(t *testing.T) {
 	compiler := NewCompiler(builtins)
 	tests := map[string]func(*Manifest){
 		"unknown token":    func(m *Manifest) { m.Tokens["position.dialog"] = json.RawMessage(`"fixed"`) },
-		"raw CSS color":    func(m *Manifest) { m.Tokens["color.accent"] = json.RawMessage(`"red;display:none"`) },
+		"raw CSS color":    func(m *Manifest) { m.Tokens["color.primary"] = json.RawMessage(`"red;display:none"`) },
 		"dimension string": func(m *Manifest) { m.Tokens["radius.control"] = json.RawMessage(`"12px"`) },
 		"out of range":     func(m *Manifest) { m.Tokens["metric.sidebarWidth"] = json.RawMessage(`9999`) },
 		"unknown easing":   func(m *Manifest) { m.Tokens["motion.easing"] = json.RawMessage(`"steps(1)"`) },
-		"contrast":         func(m *Manifest) { m.Tokens["color.text.primary"] = json.RawMessage(`"#f7f8fa"`) },
+		"contrast":         func(m *Manifest) { m.Tokens["color.foreground"] = json.RawMessage(`"#ffffff"`) },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -136,13 +172,12 @@ func TestThemeTokensAreClosedTypedBoundedAndContrastChecked(t *testing.T) {
 		})
 	}
 	manifest := customManifest()
-	manifest.Tokens["spacing.density"] = json.RawMessage(`"compact"`)
-	manifest.Tokens["elevation.low"] = json.RawMessage(`{"x":0,"y":2,"blur":4,"spread":0,"color":"#000000"}`)
+	manifest.Tokens["color.primary"] = json.RawMessage(`"#315bd6"`)
 	resolved, err := compiler.Compile(Bundle{Manifest: manifest, Files: map[string][]byte{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(resolved.CSS, "compact") == false || strings.Contains(resolved.CSS, "2px 4px") == false {
+	if !strings.Contains(resolved.CSS, "--efs-color-primary:#315bd6") {
 		t.Fatalf("typed CSS = %q", resolved.CSS)
 	}
 }
@@ -168,7 +203,7 @@ func TestThemeManifestStrictMetadataAndCompatibility(t *testing.T) {
 	builtins, _ := Builtins()
 	compiler := NewCompiler(builtins)
 	for name, mutate := range map[string]func(*Manifest){
-		"API major": func(m *Manifest) { m.ThemeAPI.Major = 2 }, "API minor": func(m *Manifest) { m.ThemeAPI.Minor = 2 }, "reserved ID": func(m *Manifest) { m.ID = "endlessfs-shadow" }, "bad ID": func(m *Manifest) { m.ID = "Example" }, "bad version": func(m *Manifest) { m.Version = "latest" }, "remote license": func(m *Manifest) { m.License = "https://license.example" }, "indirect parent": func(m *Manifest) { m.Extends = "com.example.parent" }, "appearance mismatch": func(m *Manifest) { m.Appearance = AppearanceDark },
+		"schema": func(m *Manifest) { m.SchemaVersion = 1 }, "API major": func(m *Manifest) { m.ThemeAPI.Major = 3 }, "API minor": func(m *Manifest) { m.ThemeAPI.Minor = 1 }, "reserved ID": func(m *Manifest) { m.ID = "endlessfs-shadow" }, "bad ID": func(m *Manifest) { m.ID = "Example" }, "bad version": func(m *Manifest) { m.Version = "latest" }, "remote license": func(m *Manifest) { m.License = "https://license.example" }, "indirect parent": func(m *Manifest) { m.Extends = "com.example.parent" }, "appearance mismatch": func(m *Manifest) { m.Appearance = AppearanceDark },
 	} {
 		t.Run(name, func(t *testing.T) {
 			manifest := customManifest()
@@ -204,7 +239,7 @@ func TestSVGSanitizerRejectsActiveContentAndExternalReferences(t *testing.T) {
 	}
 }
 
-func TestMediaSignaturesDimensionsSpritesAndFontDeclarations(t *testing.T) {
+func TestMediaSignaturesDimensionsAndSprites(t *testing.T) {
 	imageValue := image.NewRGBA(image.Rect(0, 0, 16, 12))
 	for y := 0; y < 12; y++ {
 		for x := 0; x < 16; x++ {
@@ -242,17 +277,6 @@ func TestMediaSignaturesDimensionsSpritesAndFontDeclarations(t *testing.T) {
 	}
 	if err := validateSprite(AssetReference{Path: "assets/image.png", Sprite: true, X: 10, Y: 0, Width: 7, Height: 5, PixelRatio: 1}, asset); err == nil {
 		t.Fatal("out-of-range sprite was accepted")
-	}
-	font := make([]byte, 48)
-	copy(font, "wOF2")
-	binary.BigEndian.PutUint32(font[8:12], uint32(len(font)))
-	binary.BigEndian.PutUint16(font[12:14], 1)
-	if err := validateWOFF2("assets/font.woff2", font); err != nil {
-		t.Fatal(err)
-	}
-	font[0] = 'x'
-	if err := validateWOFF2("assets/font.woff2", font); err == nil {
-		t.Fatal("invalid font was accepted")
 	}
 }
 

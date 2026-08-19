@@ -20,14 +20,6 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/state"
 )
 
-func validTestFont() []byte {
-	font := make([]byte, 48)
-	copy(font, "wOF2")
-	binary.BigEndian.PutUint32(font[8:12], uint32(len(font)))
-	binary.BigEndian.PutUint16(font[12:14], 1)
-	return font
-}
-
 func validTestPNG(t *testing.T) []byte {
 	t.Helper()
 	value := image.NewRGBA(image.Rect(0, 0, 8, 8))
@@ -46,67 +38,31 @@ func validTestPNG(t *testing.T) []byte {
 func richCustomBundle(t *testing.T) Bundle {
 	t.Helper()
 	manifest := customManifest()
-	manifest.Fonts["interface"] = FontDeclaration{Regular: "assets/interface-regular.woff2", Bold: "assets/interface-bold.woff2"}
-	manifest.Fonts["monospace"] = FontDeclaration{Regular: "assets/mono.woff2"}
 	manifest.Assets["icon.file"] = AssetReference{Path: "assets/icons.png", X: 0, Y: 0, Width: 4, Height: 4, PixelRatio: 2, Sprite: true}
 	return Bundle{Manifest: manifest, Files: map[string][]byte{
-		"assets/interface-regular.woff2": validTestFont(),
-		"assets/interface-bold.woff2":    validTestFont(),
-		"assets/mono.woff2":              validTestFont(),
-		"assets/icons.png":               validTestPNG(t),
+		"assets/icons.png": validTestPNG(t),
 	}}
 }
 
 func TestThemeAPIRegistriesSerializersAndTokenKinds(t *testing.T) {
-	if len(ContrastRegistry()) == 0 || len(TokenRegistry()) == 0 || len(MediaRegistry()) == 0 || len(FontRegistry()) != 2 {
+	if len(ContrastRegistry()) == 0 || len(TokenRegistry()) == 0 || len(MediaRegistry()) == 0 {
 		t.Fatal("Theme API registries are incomplete")
 	}
-	values := []struct {
-		value TokenValue
-		spec  TokenSpec
-		want  string
-	}{
-		{TokenValue{Kind: TokenColor, Color: "#abcdef"}, TokenSpec{}, "#abcdef"},
-		{TokenValue{Kind: TokenDimension, Number: 1.5}, TokenSpec{Unit: "px"}, "1.5px"},
-		{TokenValue{Kind: TokenNumber, Number: 2}, TokenSpec{}, "2"},
-		{TokenValue{Kind: TokenInteger, Integer: 17}, TokenSpec{Unit: "ms"}, "17ms"},
-		{TokenValue{Kind: TokenShadow, Shadow: &Shadow{X: 1, Y: 2, Blur: 3, Spread: 4, Color: "#000000"}}, TokenSpec{}, "1px 2px 3px 4px #000000"},
-	}
-	for _, test := range values {
-		if got := test.value.CSS(test.spec); got != test.want {
-			t.Fatalf("CSS(%+v) = %q, want %q", test.value, got, test.want)
-		}
-	}
-	for input, expected := range map[string]string{
-		"system": "system-ui, sans-serif", "system-monospace": "ui-monospace, monospace",
-		"interface": "EFSInterface, system-ui, sans-serif", "monospace": "EFSMonospace, ui-monospace, monospace",
-		"standard": "cubic-bezier(0.2, 0, 0, 1)", "emphasized": "cubic-bezier(0.2, 0, 0, 1.2)", "compact": "compact",
-	} {
-		if got := (TokenValue{Kind: TokenEnum, Enum: input}).CSS(TokenSpec{}); got != expected {
-			t.Fatalf("enum CSS %q = %q", input, got)
-		}
-	}
-	if got := (TokenValue{Kind: "unknown"}).CSS(TokenSpec{}); got != "" {
-		t.Fatalf("unknown token CSS = %q", got)
+	if got := (TokenValue{Kind: TokenColor, Color: "#abcdef"}).CSS(TokenSpec{}); got != "#abcdef" {
+		t.Fatalf("color CSS = %q", got)
 	}
 	if _, err := parseTokenValue(TokenSpec{Kind: "unknown"}, json.RawMessage(`1`)); !errors.Is(err, domain.ErrInternal) {
 		t.Fatalf("unknown token kind = %v", err)
 	}
-	if _, err := parseTokenValue(TokenSpec{Kind: TokenInteger, Minimum: 0, Maximum: 1}, json.RawMessage(`2`)); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid integer = %v", err)
-	}
-	for _, raw := range []json.RawMessage{json.RawMessage(`NaN`), json.RawMessage(`"not-number"`), json.RawMessage(`1e999`)} {
-		var value float64
-		if err := decodeNumber(raw, &value); !errors.Is(err, domain.ErrInvalid) {
-			t.Fatalf("decodeNumber(%s) = %v", raw, err)
-		}
+	if _, err := parseTokenValue(TokenSpec{Kind: TokenColor}, json.RawMessage(`"red"`)); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid purpose color = %v", err)
 	}
 	if _, err := relativeLuminance("red"); err == nil {
 		t.Fatal("relativeLuminance accepted a raw CSS color")
 	}
 }
 
-func TestThemeRichCompileRegistryAssetsAndFonts(t *testing.T) {
+func TestThemeRichCompileRegistryAssets(t *testing.T) {
 	builtins, err := Builtins()
 	if err != nil {
 		t.Fatal(err)
@@ -116,8 +72,8 @@ func TestThemeRichCompileRegistryAssetsAndFonts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(resolved.CSS, "@font-face") || !strings.Contains(resolved.CSS, "EFSInterface") || !strings.Contains(resolved.CSS, "EFSMonospace") || resolved.Fonts["interface"].Bold == nil {
-		t.Fatalf("font CSS or resolved fonts incomplete: %s", resolved.CSS)
+	if strings.Contains(resolved.CSS, "@font-face") {
+		t.Fatalf("new Theme API unexpectedly controls application fonts: %s", resolved.CSS)
 	}
 	registry, err := NewRegistry(bundle)
 	if err != nil {
@@ -144,12 +100,6 @@ func TestThemeRichCompileRegistryAssetsAndFonts(t *testing.T) {
 	}
 	if _, ok := registry.Asset("missing-digest", "theme.css"); ok {
 		t.Fatal("missing digest resolved")
-	}
-	for _, font := range []*ValidatedAsset{resolved.Fonts["interface"].Regular, resolved.Fonts["interface"].Bold, resolved.Fonts["monospace"].Regular} {
-		response, ok := registry.Asset(resolved.Digest, assetFilename(*font))
-		if !ok || response.ContentType != "font/woff2" || len(response.Data) == 0 {
-			t.Fatalf("font asset = %+v %v", response, ok)
-		}
 	}
 	primary, fallback, ok := registry.AssetURL(resolved, "icon.file")
 	if !ok || primary == "" || fallback == "" {
@@ -483,23 +433,11 @@ func TestThemeCompilerRejectionBranches(t *testing.T) {
 		t.Fatal("missing parent accepted")
 	}
 	for name, mutate := range map[string]func(*Manifest, map[string][]byte){
-		"nil tokens":  func(m *Manifest, _ map[string][]byte) { m.Tokens = nil },
-		"nil fonts":   func(m *Manifest, _ map[string][]byte) { m.Fonts = nil },
-		"nil assets":  func(m *Manifest, _ map[string][]byte) { m.Assets = nil },
-		"bad color":   func(m *Manifest, _ map[string][]byte) { m.Tokens["color.accent"] = json.RawMessage(`7`) },
-		"bad integer": func(m *Manifest, _ map[string][]byte) { m.Tokens["motion.fast"] = json.RawMessage(`"fast"`) },
-		"bad shadow":  func(m *Manifest, _ map[string][]byte) { m.Tokens["elevation.low"] = json.RawMessage(`{"x":100}`) },
-		"unknown font": func(m *Manifest, _ map[string][]byte) {
-			m.Fonts["unknown"] = FontDeclaration{Regular: "assets/a.woff2"}
-		},
-		"unsafe font path": func(m *Manifest, _ map[string][]byte) { m.Fonts["interface"] = FontDeclaration{Regular: "../a.woff2"} },
-		"missing font": func(m *Manifest, _ map[string][]byte) {
-			m.Fonts["interface"] = FontDeclaration{Regular: "assets/a.woff2"}
-		},
-		"invalid font": func(m *Manifest, files map[string][]byte) {
-			m.Fonts["interface"] = FontDeclaration{Regular: "assets/a.woff2"}
-			files["assets/a.woff2"] = []byte("bad")
-		},
+		"nil tokens":    func(m *Manifest, _ map[string][]byte) { m.Tokens = nil },
+		"nil assets":    func(m *Manifest, _ map[string][]byte) { m.Assets = nil },
+		"bad color":     func(m *Manifest, _ map[string][]byte) { m.Tokens["color.primary"] = json.RawMessage(`7`) },
+		"bad integer":   func(m *Manifest, _ map[string][]byte) { m.Tokens["motion.fast"] = json.RawMessage(`"fast"`) },
+		"bad shadow":    func(m *Manifest, _ map[string][]byte) { m.Tokens["elevation.low"] = json.RawMessage(`{"x":100}`) },
 		"unknown media": func(m *Manifest, _ map[string][]byte) { m.Assets["unknown"] = AssetReference{Path: "assets/a.png"} },
 		"unsafe media path": func(m *Manifest, _ map[string][]byte) {
 			m.Assets["icon.file"] = AssetReference{Path: "../a.png"}
@@ -523,16 +461,16 @@ func TestThemeCompilerRejectionBranches(t *testing.T) {
 			}
 		})
 	}
-	missingTokens := &ResolvedTheme{ID: "parent", Appearance: AppearanceLight, Tokens: map[string]TokenValue{}, Fonts: map[string]ResolvedFont{}, Assets: map[string]ResolvedAsset{}}
+	missingTokens := &ResolvedTheme{ID: "parent", Appearance: AppearanceLight, Tokens: map[string]TokenValue{}, Assets: map[string]ResolvedAsset{}}
 	if _, err := compileBundle(Bundle{Manifest: customManifest(), Files: map[string][]byte{}}, missingTokens, false); err == nil {
 		t.Fatal("incomplete parent tokens accepted")
 	}
-	parentWithFonts, err := NewCompiler(builtins).Compile(richCustomBundle(t))
+	completeParent, err := NewCompiler(builtins).Compile(richCustomBundle(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := compileBundle(Bundle{Manifest: customManifest(), Files: map[string][]byte{}}, parentWithFonts, false); err != nil {
-		t.Fatalf("complete parent font inheritance = %v", err)
+	if _, err := compileBundle(Bundle{Manifest: customManifest(), Files: map[string][]byte{}}, completeParent, false); err != nil {
+		t.Fatalf("complete parent inheritance = %v", err)
 	}
 	incompleteAssets := *builtins["endlessfs-light"]
 	incompleteAssets.Assets = make(map[string]ResolvedAsset, len(builtins["endlessfs-light"].Assets)-1)

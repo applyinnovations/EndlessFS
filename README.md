@@ -77,7 +77,7 @@ endlessfs.packages.${system}.default.override {
 }
 ```
 
-Every supplied archive/directory is validated before generated data is compiled into the binary. See [Theme API 1.1](./docs/theme-api.md).
+Every supplied archive/directory is validated before generated data is compiled into the binary. See [Theme API 2.0](./docs/theme-api.md). Theme API 1.x bundles are intentionally unsupported.
 
 All required builds and checks are Nix sandbox derivations, so project code cannot quietly depend on tools installed on the host. The required test gates are designed to run without cloud credentials, GCP, databases, persistent services, a container daemon, or non-loopback network access.
 
@@ -103,6 +103,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#provider-verify -- check CONFIG` | Strictly read and verify a closed checkpoint on configured single- or split-backend memory fixtures/GCS buckets. |
 | `nix run .#test-preview` | Run focused preview policy, generator, store-contract, and HTTP tests. |
 | `nix run .#test-e2e` | Run Go-controlled Chromium passkey and core Drive workflows. Nix supplies Chromium on Linux. |
+| `nix run .#test-ui-benchmark` | Run the versioned Chromium UI scale benchmark and write JSON-line evidence to `ui-benchmark-v1.json` (override with `ENDLESSFS_UI_BENCHMARK_OUTPUT`). |
 | `nix run .#test-coverage` | Run the complete suite and enforce 85% repository plus 95% security-boundary statement coverage. |
 | `nix run .#test-race` | Run the suite with Go's race detector. |
 | `nix run .#test-fuzz` | Run fixed-iteration path, encoding, JSON, cursor, share, capability, WebAuthn, logging, theme, and image-preview decoder fuzz smoke targets. |

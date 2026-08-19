@@ -6,15 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"sort"
 	"strconv"
 	"strings"
 )
-
-type ResolvedFont struct {
-	Regular *ValidatedAsset `json:"regular,omitempty"`
-	Bold    *ValidatedAsset `json:"bold,omitempty"`
-}
 
 type ResolvedAsset struct {
 	Reference AssetReference  `json:"reference"`
@@ -33,7 +27,6 @@ type ResolvedTheme struct {
 	License    string                   `json:"license"`
 	Digest     string                   `json:"digest"`
 	Tokens     map[string]TokenValue    `json:"tokens"`
-	Fonts      map[string]ResolvedFont  `json:"fonts"`
 	Assets     map[string]ResolvedAsset `json:"assets"`
 	CSS        string                   `json:"-"`
 }
@@ -79,10 +72,10 @@ func compileBundle(bundle Bundle, parent *ResolvedTheme, builtIn bool) (*Resolve
 	if err := validateManifestMetadata(manifest, builtIn); err != nil {
 		return nil, err
 	}
-	if manifest.Tokens == nil || manifest.Fonts == nil || manifest.Assets == nil {
-		return nil, fmt.Errorf("theme tokens, fonts, and assets objects are required")
+	if manifest.Tokens == nil || manifest.Assets == nil {
+		return nil, fmt.Errorf("theme tokens and assets objects are required")
 	}
-	result := &ResolvedTheme{ID: manifest.ID, Name: manifest.Name, Version: manifest.Version, ThemeAPI: manifest.ThemeAPI, Extends: manifest.Extends, Appearance: manifest.Appearance, Author: manifest.Author, License: manifest.License, Tokens: make(map[string]TokenValue), Fonts: make(map[string]ResolvedFont), Assets: make(map[string]ResolvedAsset)}
+	result := &ResolvedTheme{ID: manifest.ID, Name: manifest.Name, Version: manifest.Version, ThemeAPI: manifest.ThemeAPI, Extends: manifest.Extends, Appearance: manifest.Appearance, Author: manifest.Author, License: manifest.License, Tokens: make(map[string]TokenValue), Assets: make(map[string]ResolvedAsset)}
 	specs := tokenSpecMap()
 	if parent == nil {
 		for _, spec := range tokenSpecs {
@@ -95,9 +88,6 @@ func compileBundle(bundle Bundle, parent *ResolvedTheme, builtIn bool) (*Resolve
 	} else {
 		for id, value := range parent.Tokens {
 			result.Tokens[id] = value
-		}
-		for id, value := range parent.Fonts {
-			result.Fonts[id] = value
 		}
 		for id, value := range parent.Assets {
 			inherited := value
@@ -117,38 +107,6 @@ func compileBundle(bundle Bundle, parent *ResolvedTheme, builtIn bool) (*Resolve
 		result.Tokens[id] = value
 	}
 	referenced := make(map[string]bool)
-	fontSlots := make(map[string]bool)
-	for _, slot := range FontRegistry() {
-		fontSlots[slot.ID] = true
-	}
-	for slot, declaration := range manifest.Fonts {
-		if !fontSlots[slot] {
-			return nil, fmt.Errorf("unknown font slot %q", slot)
-		}
-		resolved := result.Fonts[slot]
-		for weight, name := range map[string]string{"regular": declaration.Regular, "bold": declaration.Bold} {
-			if name == "" {
-				continue
-			}
-			normalized, err := normalizeBundlePath(name)
-			if err != nil || !strings.HasPrefix(normalized, "assets/") {
-				return nil, fmt.Errorf("font slot %q has an invalid path", slot)
-			}
-			data, found := bundle.Files[normalized]
-			if !found || validateWOFF2(normalized, data) != nil {
-				return nil, fmt.Errorf("font slot %q references an invalid WOFF2 file", slot)
-			}
-			digest := sha256.Sum256(data)
-			media := &ValidatedAsset{Path: normalized, Digest: base64.RawURLEncoding.EncodeToString(digest[:]), ContentType: "font/woff2", Data: append([]byte(nil), data...)}
-			if weight == "regular" {
-				resolved.Regular = media
-			} else {
-				resolved.Bold = media
-			}
-			referenced[normalized] = true
-		}
-		result.Fonts[slot] = resolved
-	}
 	mediaSlots := make(map[string]MediaSlot)
 	for _, slot := range MediaRegistry() {
 		mediaSlots[slot.ID] = slot
@@ -204,9 +162,8 @@ func compileBundle(bundle Bundle, parent *ResolvedTheme, builtIn bool) (*Resolve
 	digestInput := struct {
 		Metadata Metadata                 `json:"metadata"`
 		Tokens   map[string]TokenValue    `json:"tokens"`
-		Fonts    map[string]ResolvedFont  `json:"fonts"`
 		Assets   map[string]ResolvedAsset `json:"assets"`
-	}{Metadata: result.Metadata(), Tokens: result.Tokens, Fonts: result.Fonts, Assets: result.Assets}
+	}{Metadata: result.Metadata(), Tokens: result.Tokens, Assets: result.Assets}
 	digestInput.Metadata.Digest = ""
 	canonical, err := json.Marshal(digestInput)
 	if err != nil {
@@ -214,46 +171,12 @@ func compileBundle(bundle Bundle, parent *ResolvedTheme, builtIn bool) (*Resolve
 	}
 	digest := sha256.Sum256(canonical)
 	result.Digest = base64.RawURLEncoding.EncodeToString(digest[:])
-	result.CSS = CSSVariables(result.Tokens) + fontCSS(result)
+	result.CSS = CSSVariables(result.Tokens)
 	return result, nil
 }
 
 func (t *ResolvedTheme) Metadata() Metadata {
 	return Metadata{ID: t.ID, Name: t.Name, Version: t.Version, ThemeAPI: t.ThemeAPI, Extends: t.Extends, Appearance: t.Appearance, Author: t.Author, License: t.License, Digest: t.Digest}
-}
-
-func fontCSS(theme *ResolvedTheme) string {
-	ids := make([]string, 0, len(theme.Fonts))
-	for id := range theme.Fonts {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	var result strings.Builder
-	for _, id := range ids {
-		family := "EFSInterface"
-		if id == "monospace" {
-			family = "EFSMonospace"
-		}
-		font := theme.Fonts[id]
-		for _, item := range []struct {
-			asset  *ValidatedAsset
-			weight int
-		}{{font.Regular, 400}, {font.Bold, 700}} {
-			if item.asset == nil {
-				continue
-			}
-			result.WriteString("@font-face{font-family:")
-			result.WriteString(family)
-			result.WriteString(";src:url('/assets/themes/")
-			result.WriteString(theme.Digest)
-			result.WriteByte('/')
-			result.WriteString(item.asset.Digest)
-			result.WriteString(".woff2') format('woff2');font-style:normal;font-weight:")
-			result.WriteString(fmt.Sprint(item.weight))
-			result.WriteString(";font-display:swap;}")
-		}
-	}
-	return result.String()
 }
 
 func validateContrast(tokens map[string]TokenValue) error {

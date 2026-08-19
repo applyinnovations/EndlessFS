@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/theme"
@@ -93,8 +92,5 @@ func (api *identityAPI) themeAsset(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
-	if strings.HasPrefix(asset.ContentType, "font/") {
-		w.Header().Set("Access-Control-Allow-Origin", api.config.AllowedOrigin)
-	}
 	_, _ = w.Write(asset.Data)
 }

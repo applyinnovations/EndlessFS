@@ -12,7 +12,7 @@ import (
 )
 
 func TestConformanceFixtureOwnsAccessibilityResponsiveAndReducedMotionRules(t *testing.T) {
-	for _, required := range []string{"focus-visible", "min-height:var(--efs-metric-targetMinimum)", "@media(max-width:320px)", "@media(prefers-reduced-motion:reduce)", "animation-duration:.01ms!important", "Dialogs", "File browser", "Delete permanently?"} {
+	for _, required := range []string{"focus-visible", "min-height:44px", "@media(max-width:320px)", "@media(prefers-reduced-motion:reduce)", "animation-duration:.01ms!important", "Dialogs", "File browser", "Delete permanently?"} {
 		if !strings.Contains(fixtureCSS+fixtureTemplate.Tree.Root.String(), required) {
 			t.Fatalf("fixture lacks %q", required)
 		}

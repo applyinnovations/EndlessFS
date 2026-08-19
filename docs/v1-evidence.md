@@ -113,12 +113,12 @@ The Milestone 4 checkpoint implements specification section 14, acceptance crite
 
 | Requirement | Automated evidence |
 |---|---|
-| Closed versioned registry with typed serializers, bounds, defaults, CSS mapping, contrast pairs, fonts, and complete semantic media slots | `TestThemeTokensAreClosedTypedBoundedAndContrastChecked`; generated `tools/theme api`; [Theme API 1.1](./theme-api.md) |
+| Closed purpose-based color registry with strict values, defaults, CSS mapping, contrast pairs, and complete semantic media slots | `TestThemeAPITwoIsANewPurposeOnlyContract`; `TestThemeTokensAreClosedTypedBoundedAndContrastChecked`; generated `tools/theme api`; [Theme API 2.0](./theme-api.md) |
 | Immutable complete light/dark bundles through the ordinary compiler | `TestBuiltinsAndMinimalCustomUseOrdinaryCompletePipeline`; `nix run .#test-theme` |
-| Direct built-in inheritance, old-bundle compatible additions, unavailable selection, media fallback, and emergency safe theme | `TestBuiltinsAndMinimalCustomUseOrdinaryCompletePipeline`, `TestOlderCompatibleCustomInheritsSimulatedNewMediaSlot`, `TestThemeReferenceClosureAndAssetFallback`, `TestThemePreferenceIsSeparatePersistentAndSafelyResolved` |
+| Direct built-in inheritance, explicit rejection of Theme API 1.x, unavailable selection, media fallback, and emergency safe theme | `TestBuiltinsAndMinimalCustomUseOrdinaryCompletePipeline`, `TestThemeAPITwoIsANewPurposeOnlyContract`, `TestThemeReferenceClosureAndAssetFallback`, `TestThemePreferenceIsSeparatePersistentAndSafelyResolved` |
 | Strict manifest metadata/API/license/ID validation and collision prevention | `TestThemeManifestStrictMetadataAndCompatibility`, `TestThemeDigestIsCanonicalAndIDsCannotCollide` |
 | ZIP/directory traversal, normalized duplicate, symlink, hard-link, raw-code, compression-ratio, count/size, and reference-closure defenses | `TestThemeZIPAndDirectoryDefenses`, `TestThemeReferenceClosureAndAssetFallback`, `FuzzThemeBoundaries` |
-| Signature/dimension/pixel validation for PNG/WebP/AVIF, WOFF2 declarations, and bounded raster sprites | `TestMediaSignaturesDimensionsSpritesAndFontDeclarations` |
+| Signature/dimension/pixel validation for PNG/WebP/AVIF and bounded raster sprites | `TestMediaSignaturesDimensionsAndSprites` |
 | Static SVG subset rejects declarations, scripts, handlers, external/data references, embedded content, raw style, and text | `TestSVGSanitizerRejectsActiveContentAndExternalReferences`, `FuzzThemeBoundaries` |
 | Separate per-user `system`/installed preference, light/dark resolution, safe override, and allowlisted non-identity device cookie | `TestThemePreferenceIsSeparatePersistentAndSafelyResolved`, `TestIntegrationThemeHTTPMetadataPreferenceAssetsAndSafeFallback` |
 | Exact content types, immutable digest URLs, `nosniff`, restrictive asset CSP, and no arbitrary filesystem lookup | `TestIntegrationThemeHTTPMetadataPreferenceAssetsAndSafeFallback` |
@@ -139,6 +139,7 @@ The Milestone 5 checkpoint implements specification section 13’s core Drive wo
 | Direct resumable upload with bounded 1–8 concurrency, provider-confirmed offsets, retry, cancellation, multi-file, folder fallback, and conflict policy | `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; `TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML`; provider contract fault suite |
 | Download initiation, safe preview modes, public share creation, trash and restore | `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; file/share integration suite |
 | Responsive 320 CSS-pixel layout and reduced-motion handling | Chromium viewport assertion in `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; `TestApplicationShellExposesCompleteAccessibleWorkspaces` |
+| Bounded large-directory list/grid DOM, bounded preview requests, and deterministic filter work | `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; `nix run .#test-ui-benchmark` (`ui-benchmark-v1` JSON-line evidence) |
 | No external runtime origin and no browser persistence of tokens or capabilities | Chromium request-origin assertion; `TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML` |
 | Selected validated theme stylesheet in the initial HTML response, with safe fallback | `TestIntegrationThemeHTTPMetadataPreferenceAssetsAndSafeFallback`, `TestThemeResolverCanOnlyInjectValidatedSameOriginStylesheet` |
 | Linux CI uses Nix-pinned Chromium; macOS contributors use the same Go driver with installed Chrome | `nix run .#test-e2e`; CI's host-side Nix browser/coverage gate |
@@ -250,7 +251,7 @@ The release coverage command is `nix run .#test-coverage`. CI first runs the cac
 | AC-054 | Signature-validated preview allowlist tests for raster/text/PDF and active/unknown attachments. |
 | AC-055 | Text-node-only browser source assertions, hostile-value tests, CSP, and Chromium execution diagnostics. |
 | AC-056 | Both built-ins use the ordinary compiler/conformance pipeline and run complete Chromium workflows. |
-| AC-057 | Minimal/older inheritance, selection, media, emergency, and reset fallback tests. |
+| AC-057 | Theme API 2.0 same-parent inheritance, Theme API 1.x rejection, selection, media, emergency, and reset fallback tests. |
 | AC-058 | Archive/manifest/media/SVG hostile matrices, fuzz target, build-input rejection, and browser origin capture. |
 | AC-059 | Preference persistence/resolution HTTP tests and both appearance-path E2E workflows. |
 | AC-060 | `TestE2EBrowserBootstrapLoginDriveShareAndTrash` and `TestE2EInviteSettingsAdminRecoveryAndShareRevocation`. |

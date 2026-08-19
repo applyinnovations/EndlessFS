@@ -223,22 +223,45 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 
 	if err := chromedp.Run(ctx, chromedp.Focus("#trash-selected", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
-		t.Fatalf("open trash confirmation: %v", err)
+		t.Fatalf("move selected file to trash: %v", err)
 	}
-	if err := waitVisible(ctx, "#action-dialog", 5*time.Second); err != nil {
-		t.Fatalf("wait for trash confirmation: %v (%s)", err, browserStatus(ctx))
+	if err := waitVisible(ctx, "#toast-region .toast", 5*time.Second); err != nil {
+		t.Fatalf("wait for trash recovery action: %v (%s)", err, browserStatus(ctx))
 	}
-	if err := chromedp.Run(ctx, chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
-		t.Fatalf("confirm trash: %v", err)
-	}
-	if err := runStage(ctx, 10*time.Second, chromedp.WaitNotPresent("#file-rows tr", chromedp.ByQuery)); err != nil {
+	if err := runStage(ctx, 10*time.Second, chromedp.WaitNotPresent("#file-rows tr:not(.list-spacer)", chromedp.ByQuery)); err != nil {
 		t.Fatalf("wait for trashed file to leave drive: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Click("#toast-region button", chromedp.ByQuery)); err != nil {
+		t.Fatalf("undo trash: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#file-rows")?.textContent.includes("browser-proof.txt")`, 10*time.Second); err != nil {
+		t.Fatalf("wait for undo to restore file: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Click("#file-rows input[type='checkbox']", chromedp.ByQuery)); err != nil {
+		t.Fatalf("select restored file: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#selection-count")?.textContent === "1 selected"`, 5*time.Second); err != nil {
+		t.Fatalf("wait for restored file selection: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Focus("#trash-selected", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+		t.Fatalf("move restored file to trash: %v", err)
+	}
+	if err := waitVisible(ctx, "#toast-region .toast", 5*time.Second); err != nil {
+		t.Fatalf("wait for second trash recovery action: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := runStage(ctx, 10*time.Second, chromedp.WaitNotPresent("#file-rows tr:not(.list-spacer)", chromedp.ByQuery)); err != nil {
+		t.Fatalf("wait for restored file to return to trash: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := chromedp.Run(ctx, chromedp.Click("a[data-route='trash']", chromedp.ByQuery)); err != nil {
 		t.Fatalf("open trash: %v", err)
 	}
-	if err := waitVisible(ctx, "#trash-rows tr", 10*time.Second); err != nil {
-		t.Fatalf("wait for trash listing: %v (%s)", err, browserStatus(ctx))
+	if err := waitVisible(ctx, "#trash-rows .row-actions button:first-child", 10*time.Second); err != nil {
+		var trashState string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => { const rect=(selector)=>document.querySelector(selector)?.getBoundingClientRect().toJSON(); const button=document.querySelector("#trash-rows .row-actions button:first-child"); const view=document.querySelector("#trash-view"); return JSON.stringify({state:document.querySelector("#trash-state")?.textContent,rows:document.querySelector("#trash-rows")?.textContent,urgent:document.querySelector("#urgent-status")?.textContent,toast:document.querySelector("#toast-region")?.textContent,authenticatedHidden:document.querySelector("#authenticated-view")?.hidden,authenticatedRect:rect("#authenticated-view"),viewHidden:view?.hidden,viewDisplay:getComputedStyle(view).display,viewRect:rect("#trash-view"),tableRect:rect("#trash-view table"),rowRect:rect("#trash-rows tr"),cellRect:rect("#trash-rows td:last-child"),actionsRect:rect("#trash-rows .row-actions"),buttonRect:button?.getBoundingClientRect().toJSON(),buttonDisplay:button ? getComputedStyle(button).display : null,buttonVisibility:button ? getComputedStyle(button).visibility : null,buttonDisabled:button?.disabled}); })()`, &trashState))
+		mu.Lock()
+		requests := append([]string(nil), requestedURLs...)
+		mu.Unlock()
+		t.Fatalf("wait for trash listing: %v (%s) trash=%s requests=%v", err, browserStatus(ctx), trashState, requests)
 	}
 	if err := chromedp.Run(ctx, chromedp.Focus("#trash-rows .row-actions button:first-child", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatalf("open restore confirmation: %v", err)
@@ -458,6 +481,44 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	mu.Unlock()
 	if loaded != 10_003 || renderedTiles > 64 || resolveRequestsAfterScale-resolveRequestsBeforeScale > 32 {
 		t.Fatalf("virtual grid bounds: logical=%d rendered=%d previewRequests=%d", loaded, renderedTiles, resolveRequestsAfterScale-resolveRequestsBeforeScale)
+	}
+	var listBenchmark struct {
+		Logical       int     `json:"logical"`
+		Rendered      int     `json:"rendered"`
+		FilterMillis  float64 `json:"filterMillis"`
+		FilteredItems int     `json:"filteredItems"`
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`document.querySelector("#file-view-list").click()`, nil),
+		chromedp.Evaluate(`(() => {
+			const input = document.querySelector("#file-filter");
+			const started = performance.now();
+			input.value = "virtual-09999";
+			input.dispatchEvent(new Event("input", {bubbles: true}));
+			const elapsed = performance.now() - started;
+			const rows = document.querySelector("#file-rows");
+			const result = {
+				logical: Number(rows.dataset.itemCount || 0),
+				rendered: Number(rows.dataset.renderedCount || 0),
+				filterMillis: elapsed,
+				filteredItems: Number(rows.dataset.itemCount || 0),
+			};
+			input.value = "";
+			input.dispatchEvent(new Event("input", {bubbles: true}));
+			result.logical = Number(rows.dataset.itemCount || 0);
+			result.rendered = Number(rows.dataset.renderedCount || 0);
+			return result;
+		})()`, &listBenchmark),
+	); err != nil {
+		t.Fatalf("measure virtual list: %v", err)
+	}
+	if listBenchmark.Logical != loaded || listBenchmark.Rendered > 64 || listBenchmark.FilteredItems != 1 || listBenchmark.FilterMillis > 250 {
+		t.Fatalf("virtual list benchmark: logical=%d rendered=%d filtered=%d filterMillis=%.2f", listBenchmark.Logical, listBenchmark.Rendered, listBenchmark.FilteredItems, listBenchmark.FilterMillis)
+	}
+	t.Logf(`ui-benchmark-v1 {"directory":{"logical":%d,"listRendered":%d,"gridRendered":%d,"filterMillis":%.2f},"previewRequests":%d}`,
+		loaded, listBenchmark.Rendered, renderedTiles, listBenchmark.FilterMillis, resolveRequestsAfterScale-resolveRequestsBeforeScale)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("#file-view-grid").click()`, nil)); err != nil {
+		t.Fatalf("restore grid after list benchmark: %v", err)
 	}
 	if err := waitFor(ctx, `document.querySelector(".media-frame img[alt='Preview of media-proof.png']") !== null`, 15*time.Second); err != nil {
 		t.Fatalf("wait for preview before virtual eviction: %v (%s)", err, browserStatus(ctx))

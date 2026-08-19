@@ -48,6 +48,7 @@ nix run .#test-preview
 nix run .#test-replica
 nix run .#test-portability
 nix run .#test-e2e
+nix run .#test-ui-benchmark
 nix run .#test-coverage
 nix run .#test-race
 nix run .#test-fuzz

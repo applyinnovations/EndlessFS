@@ -7,6 +7,8 @@
     currentDirectory: "/",
     entries: [],
     nextCursor: "",
+    directoryLoading: false,
+    directoryRequest: 0,
     selected: new Map(),
     transfers: [],
     transferGroups: new Map(),
@@ -33,6 +35,7 @@
     previewGenerationRequests: new Map(),
     gridObserver: null,
     gridRenderFrame: 0,
+    listRenderFrame: 0,
     viewerEntries: [],
     viewerIndex: -1,
     viewerObjectURL: "",
@@ -44,10 +47,16 @@
   };
 
   const gridOverscanRows = 3;
+  const listOverscanRows = 8;
+  const listRowHeight = 36;
   const previewRetryDelays = [250, 500, 1000, 2000, 4000, 5000];
   const maximumPreviewPolls = 14;
   const maximumViewerPreviewCacheEntries = 8;
   const maximumViewerPreviewCacheBytes = 64 << 20;
+  const maximumRenderedStandaloneTransfers = 32;
+  const maximumRenderedTransferGroups = 24;
+  const maximumRenderedGroupFiles = 20;
+  let toastTimer = 0;
 
   class APIError extends Error {
     constructor(response, problem) {
@@ -126,6 +135,42 @@
     target.textContent = message;
     target.className = `state-panel${kind ? ` ${kind}` : ""}`;
     target.hidden = !message;
+  }
+
+  function clearToast() {
+    window.clearTimeout(toastTimer);
+    byID("toast-region").replaceChildren();
+  }
+
+  function showTrashUndo(items) {
+    const recoverable = items.filter((item) => item && item.trashID);
+    if (!recoverable.length) return;
+    clearToast();
+    const toast = document.createElement("div");
+    toast.className = "toast";
+    toast.append(text("span", `${recoverable.length} item${recoverable.length === 1 ? "" : "s"} moved to Trash`));
+    const undo = button("Undo", async () => {
+      undo.disabled = true;
+      try {
+        for (const item of recoverable) {
+          const operation = await api(`/api/v1/trash/${encodeURIComponent(item.trashID)}/restore`, {
+            method: "POST",
+            headers: { "Idempotency-Key": idempotencyKey() },
+            body: { conflict: "rename" },
+          });
+          await watchOperation(operation.operationID || operation.id);
+        }
+        clearToast();
+        announce(`${recoverable.length} item${recoverable.length === 1 ? "" : "s"} restored.`);
+        await loadDirectory(state.currentDirectory);
+      } catch (error) {
+        clearToast();
+        announce(friendlyError(error, "Undo could not be completed."), true);
+      }
+    }, "quiet");
+    toast.append(undo);
+    byID("toast-region").append(toast);
+    toastTimer = window.setTimeout(clearToast, 10000);
   }
 
   function friendlyError(error, fallback = "That action could not be completed.") {
@@ -354,6 +399,10 @@
   }
 
   async function loadDirectory(directory, append = false) {
+    if (append && state.directoryLoading) return;
+    const request = state.directoryRequest + 1;
+    state.directoryRequest = request;
+    state.directoryLoading = true;
     state.currentDirectory = directory;
     if (!append) {
       cleanupGridMedia(new Set());
@@ -361,6 +410,8 @@
       state.entries = [];
       state.nextCursor = "";
       state.selected.clear();
+      byID("list-presentation").scrollTop = 0;
+      byID("media-grid").scrollTop = 0;
       updateSelection();
       showState("drive-state", "Loading files…");
     }
@@ -369,20 +420,25 @@
     const cursor = append && state.nextCursor ? `&cursor=${encodeURIComponent(state.nextCursor)}` : "";
     try {
       const page = await api(`/api/v1/files?path=${encodeURIComponent(directory)}&limit=100&sort=${sort}&order=${order}${cursor}`);
+      if (request !== state.directoryRequest) return;
       state.entries = append ? state.entries.concat(page.entries || []) : (page.entries || []);
       state.nextCursor = page.nextCursor || "";
       renderFiles();
       announce(`${page.entries.length} item${page.entries.length === 1 ? "" : "s"} loaded from ${pathName(directory)}.`);
     } catch (error) {
-      showState("drive-state", friendlyError(error, "Files could not be loaded."), "error");
-      byID("file-rows").replaceChildren();
-      announce(friendlyError(error), true);
+      if (request !== state.directoryRequest) return;
+      if (append) announce(friendlyError(error, "More files could not be loaded."), true);
+      else {
+        showState("drive-state", friendlyError(error, "Files could not be loaded."), "error");
+        byID("file-rows").replaceChildren();
+        announce(friendlyError(error), true);
+      }
+    } finally {
+      if (request === state.directoryRequest) state.directoryLoading = false;
     }
   }
 
   function renderFiles() {
-    const rows = byID("file-rows");
-    rows.replaceChildren();
     const visible = filterLoadedEntries(state.entries);
     state.filteredEntries = visible;
     const gridEnabled = state.viewMode === "grid";
@@ -391,13 +447,44 @@
     if (gridEnabled) renderVirtualGrid(visible);
     else {
       cleanupGridMedia(new Set());
-      for (const entry of visible) rows.append(fileRow(entry));
+      renderVirtualList(visible);
     }
     showState("drive-state", visible.length ? "" : (state.entries.length ? "No loaded items match this filter." : "This folder is empty. Upload a file or create a folder."));
     byID("next-page").hidden = !state.nextCursor;
     const selectedVisible = visible.filter((entry) => state.selected.has(entry.path)).length;
     byID("select-all").checked = visible.length > 0 && selectedVisible === visible.length;
     byID("select-all").indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
+  }
+
+  function listSpacerRow(height) {
+    const row = document.createElement("tr");
+    row.className = "list-spacer";
+    row.setAttribute("aria-hidden", "true");
+    const cell = document.createElement("td");
+    cell.colSpan = 5;
+    const spacer = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    spacer.setAttribute("width", "1");
+    spacer.setAttribute("height", String(Math.max(0, Math.round(height))));
+    spacer.setAttribute("aria-hidden", "true");
+    cell.append(spacer);
+    row.append(cell);
+    return row;
+  }
+
+  function renderVirtualList(entries) {
+    const rows = byID("file-rows");
+    const scroller = byID("list-presentation");
+    const viewportHeight = Math.max(listRowHeight, scroller.clientHeight - listRowHeight);
+    const firstVisible = Math.max(0, Math.floor(Math.max(0, scroller.scrollTop - listRowHeight) / listRowHeight));
+    const start = Math.max(0, firstVisible - listOverscanRows);
+    const end = Math.min(entries.length, firstVisible + Math.ceil(viewportHeight / listRowHeight) + listOverscanRows);
+    const fragment = document.createDocumentFragment();
+    if (start > 0) fragment.append(listSpacerRow(start * listRowHeight));
+    for (let index = start; index < end; index += 1) fragment.append(fileRow(entries[index]));
+    if (end < entries.length) fragment.append(listSpacerRow((entries.length - end) * listRowHeight));
+    rows.replaceChildren(fragment);
+    rows.dataset.itemCount = String(entries.length);
+    rows.dataset.renderedCount = String(end - start);
   }
 
   function filterLoadedEntries(entries) {
@@ -435,6 +522,11 @@
     return "unknown";
   }
 
+  function previewEligible(entry) {
+    return Boolean(state.config && state.config.previewConfigured && entry.kind === "file" &&
+      Array.isArray(state.config.previewFormats) && state.config.previewFormats.includes(mediaCategory(entry)));
+  }
+
   function fileTypeIcon(entry, className = "file-icon") {
     const category = mediaCategory(entry);
     const slot = category === "folder" ? "icon.folder" : `icon.file.${category}`;
@@ -461,10 +553,9 @@
     if (state.gridObserver) state.gridObserver.disconnect();
     const rootMetrics = getComputedStyle(document.documentElement);
     const thumbnailSize = Number.parseFloat(rootMetrics.getPropertyValue("--efs-metric-thumbnailSize")) || 96;
-    const componentGap = Number.parseFloat(rootMetrics.getPropertyValue("--efs-spacing-componentGap")) || 8;
-    const tileMinimum = Math.max(140, thumbnailSize + 32);
-    const columns = Math.max(1, Math.floor((Math.max(scroller.clientWidth, 280) - componentGap) / (tileMinimum + componentGap)));
-    const rowHeight = Math.max(184, thumbnailSize + 92);
+    const tileMinimum = Math.max(80, thumbnailSize);
+    const columns = Math.max(1, Math.floor(Math.max(scroller.clientWidth, 280) / tileMinimum));
+    const rowHeight = Math.max(tileMinimum, scroller.clientWidth / columns);
     const totalRows = Math.ceil(entries.length / columns);
     const viewportHeight = Math.max(scroller.clientHeight, 420);
     const firstVisible = Math.floor(scroller.scrollTop / rowHeight);
@@ -526,7 +617,7 @@
     frame.className = "media-frame";
     frame.entry = entry;
     frame.dataset.path = entry.path;
-    if (entry.kind === "file") frame.dataset.previewCandidate = "true";
+    if (previewEligible(entry)) frame.dataset.previewCandidate = "true";
     const objectURL = state.previewObjectURLs.get(entry.path);
     if (objectURL) setPreviewImage(frame, entry, objectURL, state.previewStates.get(entry.path));
     else frame.append(fileTypeIcon(entry, "media-fallback-icon"));
@@ -544,7 +635,7 @@
 
   function queueGridPreview(entry, frame) {
     const known = state.previewStates.get(entry.path);
-    if (!state.config || !state.config.previewConfigured || entry.kind !== "file" || (known && known.state !== "ready" && known.state !== "generating") || state.previewQueued.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
+    if (!previewEligible(entry) || (known && known.state !== "ready" && known.state !== "generating") || state.previewQueued.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
     state.previewQueued.add(entry.path);
     state.previewQueue.push({ entry, frame });
     pumpPreviewQueue();
@@ -792,7 +883,12 @@
       state.transferGroups.set(groupID, group);
       prepareTransferGroup(group);
     }
-    byID("transfer-panel").hidden = false;
+    const panel = byID("transfer-panel");
+    panel.hidden = false;
+    panel.classList.remove("collapsed");
+    byID("transfer-toggle").setAttribute("aria-expanded", "true");
+    byID("transfer-toggle").setAttribute("aria-label", "Collapse transfers");
+    byID("transfer-toggle").textContent = "⌄";
     renderTransfers();
     if (!groupID) pumpTransfers();
   }
@@ -1151,27 +1247,59 @@
     return row;
   }
 
+  function prioritizedTransferRows(items, limit) {
+    const actionable = items.filter((item) => !["complete", "cancelled"].includes(item.state));
+    const recent = items.filter((item) => ["complete", "cancelled"].includes(item.state)).slice().reverse();
+    const visible = actionable.slice(0, limit);
+    if (visible.length < limit) visible.push(...recent.slice(0, limit - visible.length));
+    return { visible, hidden: Math.max(0, items.length - visible.length) };
+  }
+
+  function summarizeTransferRows(parent, hidden, noun) {
+    if (!hidden) return;
+    const item = document.createElement("li");
+    item.className = "transfer-summary";
+    item.textContent = `${hidden} more ${noun}`;
+    parent.append(item);
+  }
+
   function renderTransfers() {
     const list = byID("transfer-list");
     list.replaceChildren();
-    for (const transfer of state.transfers.filter((item) => !item.groupID)) {
+    const standalone = prioritizedTransferRows(state.transfers.filter((item) => !item.groupID), maximumRenderedStandaloneTransfers);
+    for (const transfer of standalone.visible) {
       const item = document.createElement("li");
       item.append(transferRow(transfer));
       list.append(item);
     }
-    for (const group of state.transferGroups.values()) {
+    summarizeTransferRows(list, standalone.hidden, "transfers");
+    const groups = prioritizedTransferRows([...state.transferGroups.values()], maximumRenderedTransferGroups);
+    for (const group of groups.visible) {
       const transfers = state.transfers.filter((item) => item.groupID === group.id);
       const item = document.createElement("li");
       item.append(transferGroupRow(group, transfers));
       const files = document.createElement("ul");
       files.className = "transfer-file-list";
-      for (const transfer of transfers) {
+      const groupFiles = prioritizedTransferRows(transfers, maximumRenderedGroupFiles);
+      for (const transfer of groupFiles.visible) {
         const fileItem = document.createElement("li");
         fileItem.append(transferRow(transfer));
         files.append(fileItem);
       }
+      summarizeTransferRows(files, groupFiles.hidden, "files");
       item.append(files);
       list.append(item);
+    }
+    summarizeTransferRows(list, groups.hidden, "upload groups");
+
+    const allTransfers = state.transfers.length > 0 && state.transfers.every((item) => ["complete", "cancelled"].includes(item.state));
+    const allGroups = [...state.transferGroups.values()].every((group) => ["complete", "cancelled"].includes(group.state));
+    if (allTransfers && allGroups) {
+      const panel = byID("transfer-panel");
+      panel.classList.add("collapsed");
+      byID("transfer-toggle").setAttribute("aria-expanded", "false");
+      byID("transfer-toggle").setAttribute("aria-label", "Expand transfers");
+      byID("transfer-toggle").textContent = "⌃";
     }
   }
 
@@ -1487,14 +1615,12 @@
   async function trashSelected() {
     const paths = [...state.selected.keys()];
     if (!paths.length) return;
-    const confirmed = await ask({ title: `Move ${paths.length} item${paths.length === 1 ? "" : "s"} to trash?`, description: "The items leave the current folder but can be restored from Trash.", confirm: "Move to trash", danger: true });
-    if (!confirmed) return;
     try {
       const result = await api("/api/v1/files/trash", { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: { paths } });
-      announce(`${paths.length} item${paths.length === 1 ? "" : "s"} moved to trash.`);
       state.selected.clear(); updateSelection();
       if (result.operationID) await watchOperation(result.operationID);
       await loadDirectory(state.currentDirectory);
+      showTrashUndo(result.items || []);
     } catch (error) { announce(friendlyError(error), true); }
   }
 
@@ -1595,11 +1721,31 @@
 
   function applyTheme(selection) {
     const link = byID("theme-stylesheet");
-    if (!selection || !selection.cssURL) { link.disabled = true; link.removeAttribute("href"); state.themeAssets = {}; return; }
+    if (!selection || !selection.cssURL) {
+      link.disabled = true;
+      link.removeAttribute("href");
+      state.themeAssets = {};
+      delete document.documentElement.dataset.theme;
+      delete document.documentElement.dataset.appearance;
+      document.querySelectorAll(".brand-mark, .entry-mark").forEach((image) => { image.src = "/assets/brand/endlessfs-mark.svg"; delete image.dataset.themeMedia; });
+      document.querySelector("link[rel='icon']").href = "/assets/brand/endlessfs-mark.svg";
+      return;
+    }
     link.href = selection.cssURL;
     link.disabled = false;
     state.themeAssets = selection.assets || {};
     document.documentElement.dataset.theme = selection.resolved.id;
+    document.documentElement.dataset.appearance = selection.resolved.appearance;
+    const mark = state.themeAssets["brand.mark"];
+    const favicon = state.themeAssets["brand.favicon"];
+    if (mark && mark.url) {
+      document.querySelectorAll(".brand-mark, .entry-mark").forEach((image) => {
+        image.src = mark.url;
+        image.dataset.themeMedia = "true";
+        if (mark.fallbackURL && mark.fallbackURL !== mark.url) image.addEventListener("error", () => { image.src = mark.fallbackURL; }, { once: true });
+      });
+    }
+    if (favicon && favicon.url) document.querySelector("link[rel='icon']").href = favicon.url;
     if (state.user && !byID("drive-view").hidden) renderFiles();
   }
 
@@ -1794,7 +1940,7 @@
       try { await queueDroppedItems(event.dataTransfer); }
       catch (error) { announce(friendlyError(error, "Dropped files could not be read."), true); }
     });
-    drop.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); byID("upload-input").click(); } });
+    drop.addEventListener("keydown", (event) => { if (event.target === drop && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); byID("upload-input").click(); } });
     byID("transfer-concurrency").addEventListener("change", pumpTransfers);
     byID("clear-transfers").addEventListener("click", () => {
       for (const [groupID, group] of state.transferGroups) {
@@ -1807,10 +1953,22 @@
       renderTransfers();
       byID("transfer-panel").hidden = !state.transfers.length && !state.transferGroups.size;
     });
+    byID("transfer-toggle").addEventListener("click", () => {
+      const panel = byID("transfer-panel");
+      const collapsed = panel.classList.toggle("collapsed");
+      byID("transfer-toggle").setAttribute("aria-expanded", String(!collapsed));
+      byID("transfer-toggle").setAttribute("aria-label", collapsed ? "Expand transfers" : "Collapse transfers");
+      byID("transfer-toggle").textContent = collapsed ? "⌃" : "⌄";
+    });
     byID("file-filter").addEventListener("input", renderFiles); byID("file-sort").addEventListener("change", () => loadDirectory(state.currentDirectory));
     for (const id of ["filter-kind", "filter-media", "filter-min-size", "filter-max-size", "filter-modified-after", "filter-modified-before", "filter-preview"]) byID(id).addEventListener("input", renderFiles);
     for (const id of ["file-view-list", "file-view-grid"]) byID(id).addEventListener("change", (event) => { if (event.target.checked) { state.viewMode = event.target.value; renderFiles(); } });
     byID("media-grid").addEventListener("scroll", () => { if (state.gridRenderFrame) return; state.gridRenderFrame = requestAnimationFrame(() => { state.gridRenderFrame = 0; if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries); }); });
+    byID("list-presentation").addEventListener("scroll", () => {
+      if (!state.listRenderFrame) state.listRenderFrame = requestAnimationFrame(() => { state.listRenderFrame = 0; if (state.viewMode === "list") renderVirtualList(state.filteredEntries); });
+      const scroller = byID("list-presentation");
+      if (state.nextCursor && !state.directoryLoading && scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - (listRowHeight * 6)) loadDirectory(state.currentDirectory, true);
+    });
     window.addEventListener("resize", () => { if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries); });
     byID("select-all").addEventListener("change", (event) => { for (const entry of filterLoadedEntries(state.entries)) { if (event.target.checked) state.selected.set(entry.path, entry); else state.selected.delete(entry.path); } renderFiles(); updateSelection(); });
     byID("clear-selection").addEventListener("click", () => { state.selected.clear(); renderFiles(); updateSelection(); });

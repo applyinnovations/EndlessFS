@@ -123,18 +123,11 @@ func (r *Registry) Asset(digest, name string) (AssetResponse, bool) {
 			return AssetResponse{ContentType: asset.Media.ContentType, Data: append([]byte(nil), asset.Media.Data...)}, true
 		}
 	}
-	for _, font := range theme.Fonts {
-		for _, asset := range []*ValidatedAsset{font.Regular, font.Bold} {
-			if asset != nil && assetFilename(*asset) == name {
-				return AssetResponse{ContentType: "font/woff2", Data: append([]byte(nil), asset.Data...)}, true
-			}
-		}
-	}
 	return AssetResponse{}, false
 }
 
 func assetFilename(asset ValidatedAsset) string {
-	extension := map[string]string{"image/svg+xml": ".svg", "image/png": ".png", "image/webp": ".webp", "image/avif": ".avif", "font/woff2": ".woff2"}[asset.ContentType]
+	extension := map[string]string{"image/svg+xml": ".svg", "image/png": ".png", "image/webp": ".webp", "image/avif": ".avif"}[asset.ContentType]
 	return asset.Digest + extension
 }
 

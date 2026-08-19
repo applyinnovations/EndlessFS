@@ -1,6 +1,6 @@
 # EndlessFS new browser UI project plan
 
-Status: project plan; implementation has not started.
+Status: active clean-slate implementation plan.
 
 ## Project mandate
 
@@ -8,7 +8,7 @@ Delete the existing browser UI and build a new EndlessFS interface from an empty
 
 This is not a reskin, refactor, component conversion, or progressive modernization of the old interface. Do not carry forward its HTML, CSS, JavaScript structure, selectors, layout assumptions, UI copy, visual hierarchy, components, or interaction patterns. The new application is designed from the brand system and the normative product specifications as if no previous frontend existed.
 
-The clean slate applies to the browser application. EndlessFS remains one product, so the provider-portable storage engine, application use cases, HTTP API, passkey identity, direct-transfer boundary, preview service, theme compiler, and security controls remain the platform on which the new UI is built. Changing those boundaries requires a separate specification and tests; copying the old browser implementation does not.
+The clean slate applies to the browser application and its theme system. EndlessFS remains one product, so the provider-portable storage engine, application use cases, HTTP API, passkey identity, direct-transfer boundary, preview service, and security controls remain the platform on which the new UI is built. The legacy Theme API is not a platform constraint: it is deleted only after the finished UI has established the complete replacement contract.
 
 The project launches only as a complete replacement. There is no mixed old/new production shell, compatibility mode, hidden legacy route, or long-lived feature flag.
 
@@ -21,7 +21,8 @@ The implementation branch begins by removing:
 - `internal/web/static/app.js`;
 - the asset handler assumptions that only those three files exist;
 - browser tests coupled to old selectors, copy, DOM structure, and visual behavior; and
-- every obsolete screenshot, fixture, style rule, renderer, event handler, and UI-specific helper.
+- every obsolete screenshot, fixture, style rule, renderer, event handler, and UI-specific helper;
+- Theme API 1.x, its aliases, manifests, generated CSS contract, compatibility behavior, authoring documentation, and implementation-coupled tests, after the new UI contract is complete.
 
 Nothing from those files is copied into the new project. If a behavior matters, it must be justified by a specification or a product acceptance test and implemented anew.
 
@@ -31,9 +32,9 @@ The following are platform contracts, not frontend code, and remain in force:
 - virtual-path, authorization, CSRF, origin, capability, and secret-lifetime rules;
 - passkey ceremonies and the two-field identity profile;
 - provider-direct upload/download behavior;
-- portable file, operation, Trash, share, theme, and preview semantics;
+- portable file, operation, Trash, share, and preview semantics;
 - CSP, security headers, same-origin assets, and text-only rendering of untrusted values;
-- data-only theme compilation and safe fallback; and
+- the security boundary that any replacement theme input remains closed, data-only, and safely recoverable; and
 - Nix as the only public build and test interface.
 
 The dedicated project branch may be temporarily non-releaseable after demolition. It must not merge, publish, or claim completion until the entire new UI and every required gate pass.
@@ -52,7 +53,7 @@ The old UI is not a source of truth, a reference implementation, or a design con
 
 The written brand guide, not pixels sampled from either board, is authoritative for token values. A board swatch that differs from the guide is illustrative and must not enter CSS, theme data, tests, or generated assets.
 
-The supplied PNG boards are visual references rather than production assets. Production marks, icons, and fonts must be authored or sourced as discrete files, licensed, validated through the theme pipeline, and embedded in the Go binary.
+The supplied PNG boards are visual references rather than production assets. Production marks, icons, and fonts must be authored or sourced as discrete files, licensed, validated through their application-asset or theme-media boundary, and embedded in the Go binary.
 
 ## Product definition
 
@@ -116,7 +117,7 @@ The new browser application is a precision filesystem instrument. Files are the 
 - The supplied full UI board defines light mode only. The project derives a complete dark parent from the same semantic roles and layout, but final dark-mode visual-fidelity approval remains pending until a dark reference board is supplied or the derived dark fixture is explicitly approved.
 - The browser-facing color contract is `color.background`, `color.foreground`, `color.text.muted`, `color.border`, `color.surface`, `color.primary`, `color.primary.tint`, `color.success`, `color.warning`, and `color.error`.
 - The exact values in the brand-guide table are canonical. Board pixels and board annotations do not override them.
-- Older installed theme inputs are handled, if supported, by an explicit versioned adapter in the Go theme compiler. The new frontend sees only the semantic contract and never knows an old alias such as `color.accent`.
+- Theme API 1.x and every installed theme authored for it are unsupported by the replacement. There is no alias adapter, compatibility compiler, migration mode, dual contract, or legacy fallback. After the rebuilt UI freezes its complete semantic surface, the old API is deleted and the new API is authored directly from that surface.
 - Continuous browsing consumes bounded API pages progressively. Filtering remains explicitly limited to loaded metadata and never presents itself as full-drive search.
 
 ## New project architecture
@@ -197,16 +198,16 @@ Exit: the repository contains no old browser implementation; the new project has
 6. Define dense table anatomy, responsive column priorities, numeric alignment, truncation/full-value behavior, selection treatment, and row-height invariants.
 7. Define zero-shift loading geometry, compact spinner limits, floating-surface safe regions, collision behavior, closure, and focus restoration.
 8. Define short, state-driven motion using reserved geometry and equivalent reduced-motion outcomes.
-9. Implement the versioned Go theme-compiler boundary that emits only the new semantic contract.
-10. Build a complete component/state fixture for light and dark themes at desktop and 320px.
-11. Prove contrast, media safety, inheritance, fallback, token completeness, source-value authority, visual restraint, text sparsity, and checksum inventories.
+9. Build the application-owned light and dark foundations directly from the canonical semantic contract, without importing or conforming to Theme API 1.x.
+10. Build a complete component/state fixture for light and dark at desktop and 320px.
+11. Prove contrast, token completeness, source-value authority, visual restraint, text sparsity, and checksum inventories for the application-owned foundation.
 
 Exit: the visual language exists as tested primitives and production assets before any product screen is assembled.
 
 ### Stage 2 — Build the application runtime and shell
 
 1. Implement the explicit Go embedded-asset handler and content-security tests.
-2. Build the semantic document shell, pre-paint theme selection, skip navigation, live regions, and application landmarks.
+2. Build the semantic document shell, pre-paint system appearance selection, skip navigation, live regions, and application landmarks.
 3. Build the state container, API client, session boundary, router, focus manager, status system, and feature cleanup lifecycle.
 4. Build the compact rail, toolbar, workspace, menu, toast, sheet, and irreversible-dialog primitives with their complete control states and floating-surface collision rules.
 5. Build a layout-stability observer in the Chromium harness and fail tests on unexpected post-render layout shift.
@@ -219,7 +220,7 @@ Exit: a secure, responsive application frame exists with no product workflow pla
 1. Build loading, sign-in, bootstrap, public registration, invite registration, and recovery screens.
 2. Implement passkey creation and authentication from the documented WebAuthn contracts.
 3. Keep raw bootstrap, invite, recovery, ceremony, and session values ephemeral.
-4. Test keyboard-only entry, error recovery, expiry, denial, focus behavior, safe-theme fallback, dark mode, and 320px layouts.
+4. Test keyboard-only entry, error recovery, expiry, denial, focus behavior, dark mode, and 320px layouts.
 
 Exit: every supported entry path reaches the authenticated application securely and accessibly.
 
@@ -248,15 +249,26 @@ Exit: transfers and previews feel continuous, compact, recoverable, and independ
 ### Stage 6 — Build the remaining product surfaces
 
 1. Build dense Trash management with restore, conflict handling, permanent deletion, and empty Trash. UI text describes application Trash only and never presents a provider-native retention window as an application guarantee.
-2. Build profile, theme, passkey, share, and session settings.
+2. Build profile, passkey, share, and session settings.
 3. Build administration for users, roles, account state, invites, pagination, and recovery links.
 4. Build the read-only public file/folder share browser.
 5. Benchmark representative and stress-scale batch operations through selection, immediate reversible Trash actions, aggregate progress, partial failure, retry, Undo, and irreversible confirmation where required. Assert bounded command concurrency, compact summary-plus-exception rendering, usable cancellation/remediation, and zero unexpected layout shift.
-6. Test one-time secret handling, final-admin protections, theme selection/fallback, invite/recovery expiry, share revocation, denied states, keyboard operation, and 320px layouts.
+6. Test one-time secret handling, final-admin protections, invite/recovery expiry, share revocation, denied states, keyboard operation, and 320px layouts.
 
 Exit: every required v1 browser surface exists in the new project and uses the same design and interaction model.
 
-### Stage 7 — Prove, package, and launch
+### Stage 7 — Replace the theme system from the finished UI
+
+1. Inventory the completed UI's semantic color, typography, spacing, shape, metric, motion, elevation, interaction, file-state, brand, and media requirements; classify deterministic geometry and pinned typography as application-owned rather than theme input.
+2. Delete Theme API 1.x in full: registry, manifests, aliases, compiler assumptions, generated properties, compatibility logic, authoring documentation, fixtures, and tests tied to the old contract.
+3. Specify a new major Theme API whose closed purpose-named tokens and semantic assets map exactly to the completed UI inventory.
+4. Build new immutable light and dark parents and a new data-only Go compiler with strict parsing, media validation, contrast validation, reference closure, canonical digests, and safe reset. Pinned application fonts stay outside theme input.
+5. Build theme selection and theme settings against only the new API; old bundles fail closed as unsupported and are never adapted.
+6. Prove that components consume only the new contract, no old token or generated property exists, custom input cannot add behavior or prose, and unavailable or invalid selections recover to the immutable new light parent.
+
+Exit: the finished application can be themed only through the new purpose-based contract, with no code or data path back to Theme API 1.x.
+
+### Stage 8 — Prove, package, and launch
 
 1. Audit every source file for dead code, duplicate primitives, raw values, leaked listeners, observers, timers, abort controllers, object URLs, and caches.
 2. Verify focus, complete control states, contrast, target geometry, non-color cues, equivalent reduced-motion outcomes, 320px overflow, orientation context preservation, layout stability, and both built-in themes.

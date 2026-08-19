@@ -204,13 +204,6 @@ func svgDimension(value string) (int, error) {
 	return int(parsed), nil
 }
 
-func validateWOFF2(name string, data []byte) error {
-	if strings.ToLower(path.Ext(name)) != ".woff2" || len(data) < 48 || len(data) > int(MaximumAssetBytes) || string(data[:4]) != "wOF2" || int(binary.BigEndian.Uint32(data[8:12])) != len(data) || binary.BigEndian.Uint16(data[12:14]) == 0 {
-		return fmt.Errorf("font %q is not a bounded valid WOFF2 declaration", name)
-	}
-	return nil
-}
-
 func validateSprite(reference AssetReference, asset ValidatedAsset) error {
 	if !reference.Sprite {
 		return nil

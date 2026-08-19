@@ -67,6 +67,26 @@ func TestBrowserNonRootUIDRejectsRootAndInvalidValues(t *testing.T) {
 	}
 }
 
+func TestBrowserRuntimeExistsBeforeDirectoryHandoff(t *testing.T) {
+	profile := t.TempDir()
+	downloads := t.TempDir()
+	var handedOff []string
+	runtimeDirectory, err := prepareBrowserRuntime(profile, []string{downloads}, 1000, func(path string, _, _ int) error {
+		if _, statErr := os.Stat(filepath.Join(profile, "runtime")); statErr != nil {
+			return fmt.Errorf("runtime missing before handoff: %w", statErr)
+		}
+		handedOff = append(handedOff, path)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{downloads, runtimeDirectory, profile}
+	if strings.Join(handedOff, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("handed-off directories = %v, want %v", handedOff, want)
+	}
+}
+
 func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
@@ -1032,18 +1052,9 @@ func browserRuntimeOptions(t *testing.T, profile string, writableDirectories ...
 	if err != nil {
 		t.Fatal(err)
 	}
-	directories := append([]string{profile}, writableDirectories...)
-	for _, directory := range directories {
-		if err := os.Chown(directory, int(uid), int(uid)); err != nil {
-			t.Fatalf("assign browser directory %q to uid %d: %v", directory, uid, err)
-		}
-	}
-	runtimeDirectory := filepath.Join(profile, "runtime")
-	if err := os.Mkdir(runtimeDirectory, 0o700); err != nil {
-		t.Fatalf("create browser runtime directory: %v", err)
-	}
-	if err := os.Chown(runtimeDirectory, int(uid), int(uid)); err != nil {
-		t.Fatalf("assign browser runtime directory to uid %d: %v", uid, err)
+	runtimeDirectory, err := prepareBrowserRuntime(profile, writableDirectories, uid, os.Chown)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return []chromedp.ExecAllocatorOption{
 		chromedp.Env(
@@ -1056,6 +1067,20 @@ func browserRuntimeOptions(t *testing.T, profile string, writableDirectories ...
 			configureBrowserCommand(command, uid)
 		}),
 	}
+}
+
+func prepareBrowserRuntime(profile string, writableDirectories []string, uid uint32, chown func(string, int, int) error) (string, error) {
+	runtimeDirectory := filepath.Join(profile, "runtime")
+	if err := os.Mkdir(runtimeDirectory, 0o700); err != nil {
+		return "", fmt.Errorf("create browser runtime directory: %w", err)
+	}
+	directories := append(append([]string(nil), writableDirectories...), runtimeDirectory, profile)
+	for _, directory := range directories {
+		if err := chown(directory, int(uid), int(uid)); err != nil {
+			return "", fmt.Errorf("assign browser directory %q to uid %d: %w", directory, uid, err)
+		}
+	}
+	return runtimeDirectory, nil
 }
 
 func parseBrowserNonRootUID(rawUID string) (uint32, error) {

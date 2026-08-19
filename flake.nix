@@ -167,7 +167,23 @@
           linuxSystem = if pkgs.stdenv.hostPlatform.isAarch64 then "aarch64-linux" else "x86_64-linux";
           linuxPkgs = nixpkgs.legacyPackages.${linuxSystem};
           releaseRawDecoder =
-            if pkgs.stdenv.hostPlatform.isLinux then pkgs.pkgsStatic.libraw else pkgs.libraw;
+            if pkgs.stdenv.hostPlatform.isLinux then
+              pkgs.pkgsStatic.libraw.overrideAttrs (_: {
+                pname = "endlessfs-raw-decoder";
+                outputs = [ "out" ];
+                buildPhase = ''
+                  runHook preBuild
+                  make -j"$NIX_BUILD_CORES" bin/dcraw_emu
+                  runHook postBuild
+                '';
+                installPhase = ''
+                  runHook preInstall
+                  install -D -m 0555 bin/dcraw_emu "$out/bin/dcraw_emu"
+                  runHook postInstall
+                '';
+              })
+            else
+              pkgs.libraw;
           mkLinuxBinary =
             {
               themeBundles ? [ ],

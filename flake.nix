@@ -111,6 +111,15 @@
           .tekton/endlessfs-release.yaml
         "
 
+        if [ -d .github/workflows ] && [ -n "$(rg --files .github/workflows)" ]; then
+          echo "GitHub Actions workflows must remain retired after the Tekton cutover" >&2
+          exit 1
+        fi
+        if [ -e .github/dependabot.yml ]; then
+          echo "the GitHub-Actions-only Dependabot configuration must remain retired" >&2
+          exit 1
+        fi
+
         for pipeline in $active_pipelines; do
           test -f "$pipeline" || {
             echo "missing active Tekton PipelineRun: $pipeline" >&2
@@ -187,7 +196,7 @@
           echo "retired Darwin workflow must not have a Pipelines-as-Code trigger" >&2
           exit 1
         fi
-        if rg -ni 'namespace-macos-fastlane|nsc[[:space:]]|macos/[a-z0-9]|runs-on:[[:space:]]*macos' "$darwin_pipeline" .github/workflows; then
+        if rg -ni 'namespace-macos-fastlane|nsc[[:space:]]|macos/[a-z0-9]|runs-on:[[:space:]]*macos' "$darwin_pipeline"; then
           echo "retired Darwin workflow must not run or allocate macOS compute" >&2
           exit 1
         fi
@@ -572,7 +581,6 @@
             pkgs.libraw
           ];
           qualityTools = goTools ++ [
-            pkgs.actionlint
             pkgs.go-tools
             pkgs.gosec
             pkgs.nixfmt
@@ -647,7 +655,6 @@
               '';
 
           lint = mkTask "endlessfs-lint" qualityTools ''
-            actionlint .github/workflows/*.yml
             ${pipelinePolicyCommand}
             go vet ./...
             staticcheck ./...
@@ -762,7 +769,6 @@
                 ]
               )
               ''
-                actionlint .github/workflows/*.yml
                 ${pipelinePolicyCommand}
                 go vet ./...
                 staticcheck ./...
@@ -790,7 +796,6 @@
               exit 1
             fi
             nixfmt --check flake.nix
-            actionlint .github/workflows/*.yml
             ${pipelinePolicyCommand}
             go vet ./...
             staticcheck ./...
@@ -855,11 +860,6 @@
             || lib.hasPrefix "internal/" relative
             || relative == "tools"
             || lib.hasPrefix "tools/" relative;
-          isWorkflowSource =
-            relative:
-            relative == ".github"
-            || relative == ".github/workflows"
-            || lib.hasPrefix ".github/workflows/" relative;
           testSource = lib.cleanSourceWith {
             src = ./.;
             filter = path: _type: isGoTestSource (relativePath path);
@@ -873,15 +873,6 @@
               in
               isGoTestSource relative || relative == "flake.nix";
           };
-          lintSource = lib.cleanSourceWith {
-            src = ./.;
-            filter =
-              path: _type:
-              let
-                relative = relativePath path;
-              in
-              isGoTestSource relative || isWorkflowSource relative;
-          };
           pipelineSource = lib.cleanSourceWith {
             src = ./.;
             filter =
@@ -889,7 +880,12 @@
               let
                 relative = relativePath path;
               in
-              relative == ".tekton" || lib.hasPrefix ".tekton/" relative || isWorkflowSource relative;
+              relative == ".tekton"
+              || lib.hasPrefix ".tekton/" relative
+              || relative == ".github"
+              || relative == ".github/workflows"
+              || lib.hasPrefix ".github/workflows/" relative
+              || relative == ".github/dependabot.yml";
           };
           policySource = lib.cleanSourceWith {
             src = ./.;
@@ -1026,14 +1022,12 @@
                 pkgs.nixfmt
               ];
           lintCheck =
-            goCheckWithSource "lint" lintSource
+            goCheckWithSource "lint" testSource
               ''
-                actionlint .github/workflows/*.yml
                 go vet ./...
                 ${sandboxedStaticcheck}
               ''
               [
-                pkgs.actionlint
                 pkgs.go-tools
               ];
           pipelinePolicyCheck =
@@ -1059,14 +1053,12 @@
           securityCheck =
             goCheckWithSource "security" fullSource
               ''
-                actionlint .github/workflows/*.yml
                 gosec -quiet -nosec-require-justification -nosec-require-rules ./...
                 govulncheck -db=file://${vulndb} ./...
                 ${dependencyPolicyCommand self.packages.${system}.default.goModules}
                 go run ./tools/check-source .
               ''
               [
-                pkgs.actionlint
                 pkgs.findutils
                 pkgs.gawk
                 pkgs.gnugrep
@@ -1130,7 +1122,6 @@
               go
               pkgs.go-tools
               pkgs.gosec
-              pkgs.actionlint
               pkgs.nixfmt
               pkgs.ripgrep
               pkgs.skopeo

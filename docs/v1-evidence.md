@@ -23,9 +23,11 @@ The focused gate is `nix run .#test-preview`. The final acceptance run used `nix
 ## Reproducible foundation — implemented baseline
 
 - The one-binary Go module, embedded browser shell, pinned Nix environment,
-  minimal OCI image, release artifacts, original GitHub workflows, and repository
-  rulesets were introduced in commit `8c04cbb`. The active workflow contract is
-  now expressed as xlab Tekton PaC definitions validated by
+  minimal OCI image, release artifacts, bootstrap workflows, and repository
+  rulesets were introduced in commit `8c04cbb`. The bootstrap workflows were
+  retired after the xlab pull-request, merge-queue, Chromium, cache-placement,
+  and GHCR proof recorded in `.tekton/README.md`. The active workflow contract is
+  expressed as xlab Tekton PaC definitions validated by
   `nix run .#pipeline-policy`; the Darwin smoke path is explicitly retired.
 - `tools/check-source` rejects forbidden languages, dependency managers, task runners, and external browser resources.
 - `internal/config` validates the implemented environment contract and provides `FuzzParse`.

@@ -13,9 +13,12 @@ import (
 )
 
 const (
-	uploadRecordSchema  = "upload-record-v1"
-	transferLeaseSchema = "transfer-lease-v1"
+	uploadRecordSchema                  = "upload-record-v1"
+	transferLeaseSchema                 = "transfer-lease-v1"
+	maxInternalUploadCompletionAttempts = 8
 )
+
+var errUploadCompletionNeedsRetry = errors.New("upload completion lost a directory-root race")
 
 func (s *FileStore) CreateUpload(ctx context.Context, scope domain.Scope, request domain.CreateUploadRequest) (domain.UploadCapability, error) {
 	if err := validateFileRequest(ctx, scope); err != nil {
@@ -323,6 +326,10 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 	if err != nil {
 		return domain.Entry{}, err
 	}
+	return s.completeUpload(ctx, scope, request, mediaType, transfers, maxInternalUploadCompletionAttempts)
+}
+
+func (s *FileStore) completeUpload(ctx context.Context, scope domain.Scope, request domain.CompleteUploadRequest, mediaType string, transfers objectstore.DirectTransferBackend, attemptsRemaining int) (domain.Entry, error) {
 	operationObject, operationEnvelope, record, err := s.readUploadRecord(ctx, scope.UserID(), string(request.UploadID))
 	if err != nil {
 		return domain.Entry{}, err
@@ -340,6 +347,9 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 	if record.State == storageformat.UploadActive {
 		if resumed, found, resumeErr := s.resumeUploadCompletion(ctx, scope, record); found || resumeErr != nil {
 			if resumeErr != nil {
+				if errors.Is(resumeErr, errUploadCompletionNeedsRetry) {
+					return s.retryUploadCompletion(ctx, scope, request, mediaType, transfers, operationObject, operationEnvelope, record, attemptsRemaining)
+				}
 				return domain.Entry{}, resumeErr
 			}
 			if err := s.finishUpload(ctx, operationObject, operationEnvelope, record); err != nil {
@@ -427,9 +437,12 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 		return domain.Entry{}, err
 	}
 	result, err := s.startFileOperation(ctx, operation, operationBody, "", "")
-	if errors.Is(err, domain.ErrConflict) {
+	if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrPreconditionFailed) {
 		if resumed, found, resumeErr := s.resumeUploadCompletion(ctx, scope, record); found || resumeErr != nil {
 			if resumeErr != nil {
+				if errors.Is(resumeErr, errUploadCompletionNeedsRetry) {
+					return s.retryUploadCompletion(ctx, scope, request, mediaType, transfers, operationObject, operationEnvelope, record, attemptsRemaining)
+				}
 				return domain.Entry{}, resumeErr
 			}
 			if err := s.finishUpload(ctx, operationObject, operationEnvelope, record); err != nil {
@@ -442,12 +455,55 @@ func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, requ
 		if err != nil {
 			return domain.Entry{}, err
 		}
+		if result.State == domain.OperationFailed && result.ErrorKind == domain.ErrorPreconditionFailed {
+			return s.retryUploadCompletion(ctx, scope, request, mediaType, transfers, operationObject, operationEnvelope, record, attemptsRemaining)
+		}
 		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload completion operation failed")
 	}
 	if err := s.finishUpload(ctx, operationObject, operationEnvelope, record); err != nil {
 		return domain.Entry{}, err
 	}
 	return domainEntry(resolvedPath, entry), nil
+}
+
+func (s *FileStore) retryUploadCompletion(
+	ctx context.Context,
+	scope domain.Scope,
+	request domain.CompleteUploadRequest,
+	mediaType string,
+	transfers objectstore.DirectTransferBackend,
+	recordObject objectstore.Object,
+	recordEnvelope storageformat.Envelope,
+	record storageformat.UploadRecord,
+	attemptsRemaining int,
+) (domain.Entry, error) {
+	if attemptsRemaining <= 1 {
+		return domain.Entry{}, domain.NewError(domain.ErrorUnavailable, "upload completion remained contended")
+	}
+	if err := s.rotateUploadCompletionOperation(ctx, recordObject, recordEnvelope, record); err != nil && !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
+		return domain.Entry{}, err
+	}
+	return s.completeUpload(ctx, scope, request, mediaType, transfers, attemptsRemaining-1)
+}
+
+func (s *FileStore) rotateUploadCompletionOperation(ctx context.Context, object objectstore.Object, envelope storageformat.Envelope, record storageformat.UploadRecord) error {
+	operationID, err := s.engine.ids.OpaqueID()
+	if err != nil {
+		return err
+	}
+	record.CompletionOperationID = operationID
+	body, err := storageformat.EncodeEnvelope(uploadRecordSchema, object.Key, envelope.Revision+1, record)
+	if err != nil {
+		return err
+	}
+	intent := storageformat.MutationIntent{
+		Action: storageformat.MutationCAS, TargetKey: object.Key.String(),
+		ExpectedLogicalVersion: envelope.LogicalVersion, TargetBody: body,
+	}
+	return s.engine.withAdmission(ctx, intent, func() error {
+		_, putErr := s.engine.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
+		return putErr
+	})
 }
 
 func matchesUploadEntry(record storageformat.UploadRecord, entry storageformat.DirectoryEntry) bool {
@@ -461,15 +517,25 @@ func (s *FileStore) resumeUploadCompletion(ctx context.Context, scope domain.Sco
 	} else if err != nil {
 		return domain.Entry{}, true, err
 	}
-	if err := s.executeFileOperation(ctx, key); err != nil {
-		return domain.Entry{}, true, err
+	var executionErr error
+	for range maxInternalUploadCompletionAttempts {
+		executionErr = s.executeFileOperation(ctx, key)
+		if executionErr == nil || !errors.Is(executionErr, domain.ErrPreconditionFailed) && !errors.Is(executionErr, domain.ErrConflict) {
+			break
+		}
+	}
+	if executionErr != nil {
+		if errors.Is(executionErr, domain.ErrPreconditionFailed) || errors.Is(executionErr, domain.ErrConflict) {
+			return domain.Entry{}, true, domain.NewError(domain.ErrorUnavailable, "upload completion changed concurrently")
+		}
+		return domain.Entry{}, true, executionErr
 	}
 	operation, err := s.readFileOperation(ctx, scope.UserID(), record.CompletionOperationID)
 	if err != nil {
 		return domain.Entry{}, true, err
 	}
 	if operation.State == storageformat.FileOperationFailed {
-		return domain.Entry{}, true, domain.NewError(domain.ErrorPreconditionFailed, "upload completion operation failed")
+		return domain.Entry{}, true, errUploadCompletionNeedsRetry
 	}
 	path, err := domain.ParseUserPath(record.ResolvedPath)
 	if err != nil {
@@ -486,22 +552,45 @@ func (s *FileStore) resumeUploadCompletion(ctx context.Context, scope domain.Sco
 }
 
 func (s *FileStore) finishUpload(ctx context.Context, object objectstore.Object, envelope storageformat.Envelope, record storageformat.UploadRecord) error {
-	record.State = storageformat.UploadCompleted
-	body, err := storageformat.EncodeEnvelope(uploadRecordSchema, object.Key, envelope.Revision+1, record)
+	userID, err := domain.ParseUserID(record.UserID)
 	if err != nil {
-		return err
+		return domain.NewError(domain.ErrorInvalid, "stored upload user is invalid")
 	}
-	intent := storageformat.MutationIntent{
-		Action: storageformat.MutationCAS, TargetKey: object.Key.String(), ExpectedLogicalVersion: envelope.LogicalVersion,
-		TargetBody: body, AbortUploads: []string{record.UploadID},
-	}
-	return s.engine.withAdmission(ctx, intent, func() error {
-		if err := s.engine.ensureUploadAborts(ctx, intent.AbortUploads); err != nil {
+	for range maxInternalUploadCompletionAttempts {
+		record.State = storageformat.UploadCompleted
+		body, encodeErr := storageformat.EncodeEnvelope(uploadRecordSchema, object.Key, envelope.Revision+1, record)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		intent := storageformat.MutationIntent{
+			Action: storageformat.MutationCAS, TargetKey: object.Key.String(), ExpectedLogicalVersion: envelope.LogicalVersion,
+			TargetBody: body, AbortUploads: []string{record.UploadID},
+		}
+		err = s.engine.withAdmission(ctx, intent, func() error {
+			if abortErr := s.engine.ensureUploadAborts(ctx, intent.AbortUploads); abortErr != nil {
+				return abortErr
+			}
+			_, putErr := s.engine.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
+			return putErr
+		})
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
 			return err
 		}
-		_, err := s.engine.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
-		return err
-	})
+		object, envelope, record, err = s.readUploadRecord(ctx, userID, record.UploadID)
+		if err != nil {
+			return err
+		}
+		if record.State == storageformat.UploadCompleted {
+			return nil
+		}
+		if record.State != storageformat.UploadActive {
+			return domain.NewError(domain.ErrorPreconditionFailed, "upload state changed during completion")
+		}
+	}
+	return domain.NewError(domain.ErrorUnavailable, "upload finalization remained contended")
 }
 
 func (s *FileStore) AbortUpload(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) error {

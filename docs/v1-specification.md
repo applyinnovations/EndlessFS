@@ -1040,6 +1040,7 @@ Requirements:
 - A failed or expired upload does not create a visible complete file.
 - Durable upload intent, scope, destination, size, integrity expectations, and logical progress use canonical records. Provider-native resumable session URLs, multipart IDs, block IDs, and confirmed-native offsets are encrypted transient leases and cannot be required after a portability checkpoint.
 - Completed bytes are committed as an immutable canonical blob before the portable file-entry record becomes visible. A completion race or failed descriptor commit leaves an unreferenced blob for bounded idempotent cleanup, never a visible corrupt entry.
+- A completion that loses an ancestor directory-root CAS to an unrelated file mutation advances its canonical upload record to a fresh durable completion-operation attempt and retries from authoritative directory state. A true same-target create or replacement race still has exactly one version-precondition winner.
 - Upload publication and replacement update the destination directory and every changed ancestor recursive-byte aggregate at the same durable operation commit point.
 - Upload status survives page navigation only if the provider/session supports it; cross-browser persistence is not required in v1.
 - Large-object tests simulate offsets above 1 TiB without allocating equivalent storage.

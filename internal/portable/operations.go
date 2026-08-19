@@ -591,6 +591,9 @@ func (s *FileStore) prepareOperationRoot(ctx context.Context, root storageformat
 			return domain.NewError(domain.ErrorPreconditionFailed, "directory root changed")
 		}
 		_, err = s.engine.backend.Put(ctx, key, root.PendingBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
+		if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+			return s.acceptConcurrentOperationRoot(ctx, key, root, err)
+		}
 		return err
 	}
 	if !errors.Is(err, domain.ErrNotFound) {
@@ -600,7 +603,21 @@ func (s *FileStore) prepareOperationRoot(ctx context.Context, root storageformat
 		return domain.NewError(domain.ErrorPreconditionFailed, "directory root disappeared")
 	}
 	_, err = s.engine.backend.Put(ctx, key, root.PendingBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
+	if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+		return s.acceptConcurrentOperationRoot(ctx, key, root, err)
+	}
 	return err
+}
+
+func (s *FileStore) acceptConcurrentOperationRoot(ctx context.Context, key objectstore.Key, root storageformat.FileOperationRoot, original error) error {
+	current, err := s.engine.backend.Get(ctx, key)
+	if err == nil && (string(current.Body) == string(root.PendingBody) || string(current.Body) == string(root.FinalBody)) {
+		return nil
+	}
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	return original
 }
 
 func (s *FileStore) finalizeOperationRoot(ctx context.Context, root storageformat.FileOperationRoot) error {
@@ -616,10 +633,41 @@ func (s *FileStore) finalizeOperationRoot(ctx context.Context, root storageforma
 		return domain.NewError(domain.ErrorPreconditionFailed, "directory pending transition changed")
 	}
 	_, err = s.engine.backend.Put(ctx, key, root.FinalBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
+	if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+		current, getErr := s.engine.backend.Get(ctx, key)
+		if getErr == nil && string(current.Body) == string(root.FinalBody) {
+			return nil
+		}
+		if getErr != nil && !errors.Is(getErr, domain.ErrNotFound) {
+			return getErr
+		}
+	}
 	return err
 }
 
 func (s *FileStore) failFileOperation(ctx context.Context, object objectstore.Object, envelope storageformat.Envelope, operation storageformat.FileOperation, kind domain.ErrorKind, message string) error {
+	for _, root := range operation.Roots {
+		key := objectstore.MustKey(root.Key)
+		current, getErr := s.engine.backend.Get(ctx, key)
+		if errors.Is(getErr, domain.ErrNotFound) {
+			continue
+		}
+		if getErr != nil {
+			return getErr
+		}
+		if string(current.Body) != string(root.PendingBody) {
+			continue
+		}
+		var rollbackErr error
+		if root.PreExisted {
+			_, rollbackErr = s.engine.backend.Put(ctx, key, root.RollbackBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: current.Version})
+		} else {
+			rollbackErr = s.engine.backend.Delete(ctx, key, objectstore.DeleteCondition{Version: current.Version})
+		}
+		if rollbackErr != nil {
+			return domain.WrapError(domain.ErrorUnavailable, "file operation rollback was interrupted", rollbackErr)
+		}
+	}
 	operation.State = storageformat.FileOperationFailed
 	operation.ErrorKind = kind
 	operation.Error = message
@@ -628,22 +676,11 @@ func (s *FileStore) failFileOperation(ctx context.Context, object objectstore.Ob
 	if err != nil {
 		return err
 	}
-	if _, err = s.engine.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
-		return err
+	_, err = s.engine.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
+	if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrNotFound) {
+		return domain.NewError(domain.ErrorUnavailable, "file operation failure state changed concurrently")
 	}
-	for _, root := range operation.Roots {
-		key := objectstore.MustKey(root.Key)
-		current, getErr := s.engine.backend.Get(ctx, key)
-		if getErr != nil || string(current.Body) != string(root.PendingBody) {
-			continue
-		}
-		if root.PreExisted {
-			_, _ = s.engine.backend.Put(ctx, key, root.RollbackBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: current.Version})
-		} else {
-			_ = s.engine.backend.Delete(ctx, key, objectstore.DeleteCondition{Version: current.Version})
-		}
-	}
-	return nil
+	return err
 }
 
 func (s *FileStore) readFileOperation(ctx context.Context, userID domain.UserID, operationID string) (storageformat.FileOperation, error) {

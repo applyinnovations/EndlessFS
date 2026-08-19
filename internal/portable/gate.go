@@ -478,6 +478,13 @@ func (e *Engine) ensureMutationCopies(ctx context.Context, copies []storageforma
 		}
 		sourceInfo, err := e.fileBackend.Head(ctx, source)
 		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				winner, headErr := e.fileBackend.Head(ctx, destination)
+				if headErr == nil && winner.Size == copyIntent.Size {
+					previous = copyIntent.DestinationKey
+					continue
+				}
+			}
 			return err
 		}
 		if sourceInfo.Size != copyIntent.Size {
@@ -485,7 +492,7 @@ func (e *Engine) ensureMutationCopies(ctx context.Context, copies []storageforma
 		}
 		_, err = e.fileBackend.Copy(ctx, source, destination, objectstore.CopyCondition{SourceVersion: sourceInfo.Version, Destination: objectstore.PutCondition{Mode: objectstore.PutCreateOnly}})
 		if err != nil {
-			if !errors.Is(err, domain.ErrConflict) {
+			if !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
 				return err
 			}
 			winner, headErr := e.fileBackend.Head(ctx, destination)

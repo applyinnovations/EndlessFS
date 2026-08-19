@@ -34,15 +34,17 @@ type FileStore struct{ engine *Engine }
 func (e *Engine) Files() *FileStore { return &FileStore{engine: e} }
 
 type directorySnapshot struct {
-	object         objectstore.Object
-	exists         bool
-	envelope       storageformat.Envelope
-	root           storageformat.DirectoryRoot
-	manifestID     string
-	manifest       storageformat.DirectoryManifest
-	entries        []storageformat.DirectoryEntry
-	recursiveBytes int64
-	pending        bool
+	object          objectstore.Object
+	exists          bool
+	envelope        storageformat.Envelope
+	root            storageformat.DirectoryRoot
+	manifestID      string
+	manifest        storageformat.DirectoryManifest
+	entries         []storageformat.DirectoryEntry
+	recursiveBytes  int64
+	pending         bool
+	transitionState storageformat.FileOperationState
+	transitionFence uint64
 }
 
 type preparedDirectory struct {
@@ -319,11 +321,42 @@ func (s *FileStore) resolveDirectoryTrail(ctx context.Context, scope domain.Scop
 			return nil, err
 		}
 		if current.recursiveBytes != entry.Size {
-			return nil, domain.NewError(domain.ErrorInvalid, "directory recursive byte aggregate mismatch")
+			return nil, s.classifyDirectoryTrailMismatch(ctx, trail[len(trail)-1], entry, current)
 		}
 		trail = append(trail, directoryTrailNode{scope: scope, path: currentPath, directoryID: entry.DirectoryID, snapshot: current})
 	}
 	return trail, nil
+}
+
+func (s *FileStore) classifyDirectoryTrailMismatch(ctx context.Context, parent directoryTrailNode, childEntry storageformat.DirectoryEntry, child directorySnapshot) error {
+	parentAgain, parentErr := s.readDirectory(ctx, parent.scope, parent.directoryID, parent.path.IsRoot())
+	if parentErr != nil {
+		return parentErr
+	}
+	if !sameDirectoryVisibility(parent.snapshot, parentAgain) {
+		return domain.NewError(domain.ErrorUnavailable, "directory changed while resolving recursive byte aggregates")
+	}
+	childAgain, childErr := s.readDirectory(ctx, parent.scope, childEntry.DirectoryID, false)
+	if childErr != nil {
+		if errors.Is(childErr, domain.ErrNotFound) {
+			return domain.NewError(domain.ErrorInvalid, "directory aggregate references a missing child root")
+		}
+		return childErr
+	}
+	if !sameDirectoryVisibility(child, childAgain) {
+		return domain.NewError(domain.ErrorUnavailable, "directory changed while resolving recursive byte aggregates")
+	}
+	return domain.NewError(domain.ErrorInvalid, "directory trail recursive byte aggregate mismatch")
+}
+
+func sameDirectoryVisibility(first, second directorySnapshot) bool {
+	return first.exists == second.exists &&
+		first.envelope.LogicalVersion == second.envelope.LogicalVersion &&
+		first.manifestID == second.manifestID &&
+		first.recursiveBytes == second.recursiveBytes &&
+		first.pending == second.pending &&
+		first.transitionState == second.transitionState &&
+		first.transitionFence == second.transitionFence
 }
 
 func (s *FileStore) readDirectory(ctx context.Context, scope domain.Scope, directoryID string, allowVirtualRoot bool) (directorySnapshot, error) {
@@ -337,7 +370,7 @@ func (s *FileStore) readDirectory(ctx context.Context, scope domain.Scope, direc
 	}
 	computed, err := recursiveByteSize(entries)
 	if err != nil || computed != snapshot.recursiveBytes {
-		return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "directory recursive byte aggregate mismatch")
+		return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "directory manifest entries recursive byte aggregate mismatch")
 	}
 	snapshot.entries = entries
 	return snapshot, nil
@@ -366,6 +399,8 @@ func (s *FileStore) readDirectoryMetadata(ctx context.Context, scope domain.Scop
 	manifestID := root.ManifestID
 	recursiveBytes := root.RecursiveBytes
 	pending := root.Pending != nil
+	transitionState := storageformat.FileOperationState("")
+	var transitionFence uint64
 	if pending {
 		if root.Pending.OperationID == "" || root.Pending.Fence == 0 || root.Pending.PostManifestID == "" || root.Pending.PreManifestID != root.ManifestID || root.Pending.PostRecursiveBytes < 0 {
 			return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "invalid pending directory transition")
@@ -377,6 +412,8 @@ func (s *FileStore) readDirectoryMetadata(ctx context.Context, scope domain.Scop
 		if operation.Fence < root.Pending.Fence {
 			return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "directory transition fence is invalid")
 		}
+		transitionState = operation.State
+		transitionFence = operation.Fence
 		if operation.State == storageformat.FileOperationCommitted || operation.State == storageformat.FileOperationSucceeded {
 			manifestID = root.Pending.PostManifestID
 			recursiveBytes = root.Pending.PostRecursiveBytes
@@ -384,18 +421,18 @@ func (s *FileStore) readDirectoryMetadata(ctx context.Context, scope domain.Scop
 	}
 	if manifestID == "" {
 		if recursiveBytes != 0 {
-			return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "directory recursive byte aggregate mismatch")
+			return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "empty directory root recursive byte aggregate mismatch")
 		}
-		return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, recursiveBytes: recursiveBytes, pending: pending}, nil
+		return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, recursiveBytes: recursiveBytes, pending: pending, transitionState: transitionState, transitionFence: transitionFence}, nil
 	}
 	manifest, err := s.readDirectoryManifest(ctx, scope, directoryID, manifestID)
 	if err != nil {
 		return directorySnapshot{}, err
 	}
 	if manifest.RecursiveBytes != recursiveBytes {
-		return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "directory recursive byte aggregate mismatch")
+		return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "directory root and manifest recursive byte aggregate mismatch")
 	}
-	return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, manifestID: manifestID, manifest: manifest, recursiveBytes: recursiveBytes, pending: pending}, nil
+	return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, manifestID: manifestID, manifest: manifest, recursiveBytes: recursiveBytes, pending: pending, transitionState: transitionState, transitionFence: transitionFence}, nil
 }
 
 func (s *FileStore) readManifestEntries(ctx context.Context, scope domain.Scope, directoryID, manifestID string) ([]storageformat.DirectoryEntry, error) {

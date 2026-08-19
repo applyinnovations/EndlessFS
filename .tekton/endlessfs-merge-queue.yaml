@@ -140,7 +140,7 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-run-sandboxed
+              value: nix-run-v2
             - name: namespace
               value: tekton-buildkit
         timeout: 15m
@@ -161,7 +161,7 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-run-sandboxed
+              value: nix-run-v2
             - name: namespace
               value: tekton-buildkit
         timeout: 15m
@@ -182,7 +182,7 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-run-sandboxed
+              value: nix-run-v2
             - name: namespace
               value: tekton-buildkit
         timeout: 45m
@@ -203,7 +203,7 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-run-sandboxed
+              value: nix-run-v2
             - name: namespace
               value: tekton-buildkit
         timeout: 45m

@@ -36,7 +36,7 @@ task itself verifies that container UID 0 is not host UID 0 before executing.
 
 Pipelines-as-Code creates a per-run Secret containing a short-lived xlab.now
 GitHub App installation token. The clone task mounts its generated Git
-configuration. `nix-run-github` reads the same Secret's `git-provider-token`
+configuration. `nix-run-github-v2` reads the same Secret's `git-provider-token`
 key and exposes it only for the publishing step as `GH_TOKEN` and `GHCR_TOKEN`.
 The installation token is supported for cloning, release creation, and release
 asset uploads. It is also the first GHCR credential attempted now that the App

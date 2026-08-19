@@ -199,7 +199,7 @@ spec:
             value: nix flake check --print-build-logs --max-jobs 6 --cores 2
 
       - name: coverage
-        runAfter: [prepare-cache]
+        runAfter: [fast-checks, nix-checks]
         taskRef:
           resolver: cluster
           params:

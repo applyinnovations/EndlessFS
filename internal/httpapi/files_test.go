@@ -237,8 +237,8 @@ func TestIntegrationFileHTTPDirectDataPathTrashAndShare(t *testing.T) {
 	}
 	var listed domain.ListPage
 	decodeResponse(t, listing, &listed)
-	if listed.Current.Path != domain.MustParseUserPath("/docs") || listed.Current.Size != 5 {
-		t.Fatalf("listing current directory = %+v; want /docs size 5", listed.Current)
+	if listed.Current.Path != domain.MustParseUserPath("/docs") || listed.Current.Size != 5 || listed.Current.FileCount != 1 {
+		t.Fatalf("listing current directory = %+v; want /docs size/count 5/1", listed.Current)
 	}
 	otherListing := performRequest(t, env.handler, http.MethodGet, "/api/v1/files?path=/docs", "", "", []*http.Cookie{env.otherSession}, nil)
 	if otherListing.Code != http.StatusNotFound {
@@ -284,7 +284,7 @@ func TestIntegrationFileHTTPDirectDataPathTrashAndShare(t *testing.T) {
 	}
 	var publicPage drive.PublicPage
 	decodeResponse(t, public, &publicPage)
-	if publicPage.Root.Path != "/" || publicPage.Current.Path != "/" || publicPage.Current.Size != 5 {
+	if publicPage.Root.Path != "/" || publicPage.Current.Path != "/" || publicPage.Current.Size != 5 || publicPage.Current.FileCount != 1 {
 		t.Fatalf("public current target = %+v; root=%+v", publicPage.Current, publicPage.Root)
 	}
 	trashed := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"paths":["/docs"]}`, cookies, driveMutationHeaders(env.csrf.Value, "http-trash-request-00001"))
@@ -294,7 +294,7 @@ func TestIntegrationFileHTTPDirectDataPathTrashAndShare(t *testing.T) {
 	trashListing := performRequest(t, env.handler, http.MethodGet, "/api/v1/trash", "", "", []*http.Cookie{env.session}, nil)
 	var trashPage drive.TrashPage
 	decodeResponse(t, trashListing, &trashPage)
-	if trashListing.Code != http.StatusOK || len(trashPage.Items) != 1 || trashPage.Items[0].Size != 5 || trashPage.Items[0].MediaType != "" {
+	if trashListing.Code != http.StatusOK || len(trashPage.Items) != 1 || trashPage.Items[0].Size != 5 || trashPage.Items[0].FileCount != 1 || trashPage.Items[0].MediaType != "" {
 		t.Fatalf("trash metadata response = %d %+v %s", trashListing.Code, trashPage, trashListing.Body.String())
 	}
 	unavailable := performRequest(t, env.handler, http.MethodGet, "/api/v1/public/shares/"+token+"?path=/", "", "", nil, nil)

@@ -363,8 +363,9 @@ func (p *Provider) statLocked(scope domain.Scope, path domain.UserPath) (domain.
 		if err != nil {
 			return domain.Entry{}, err
 		}
+		fileCount := p.rootRecursiveFileCountLocked(scope)
 		return domain.Entry{
-			Path: path, Kind: domain.EntryDirectory, Size: recursiveBytes, ModifiedAt: time.Unix(0, 0).UTC(), Version: "root",
+			Path: path, Kind: domain.EntryDirectory, Size: recursiveBytes, FileCount: fileCount, ModifiedAt: time.Unix(0, 0).UTC(), Version: "root",
 		}, nil
 	}
 	item, found := p.scopeObjectsLocked(scope)[path.String()]
@@ -481,8 +482,12 @@ func (p *Provider) availableRenamedPathLocked(scope domain.Scope, path domain.Us
 
 func (p *Provider) newEntryLocked(path domain.UserPath, kind domain.EntryKind, size int64, mediaType string) domain.Entry {
 	p.versions++
+	fileCount := int64(0)
+	if kind == domain.EntryFile {
+		fileCount = 1
+	}
 	return domain.Entry{
-		Path: path, Name: path.Name(), Kind: kind, Size: size, MediaType: mediaType,
+		Path: path, Name: path.Name(), Kind: kind, Size: size, FileCount: fileCount, MediaType: mediaType,
 		ModifiedAt: p.clock.Now().UTC(), Version: domain.Version(fmt.Sprintf("p%016x", p.versions)),
 	}
 }
@@ -528,12 +533,23 @@ func (p *Provider) rootRecursiveBytesLocked(scope domain.Scope) (int64, error) {
 	return total, nil
 }
 
+func (p *Provider) rootRecursiveFileCountLocked(scope domain.Scope) int64 {
+	var total int64
+	for _, item := range p.scopeObjectsLocked(scope) {
+		if item.entry.Kind == domain.EntryFile {
+			total++
+		}
+	}
+	return total
+}
+
 func (p *Provider) recomputeRecursiveBytesLocked(scope domain.Scope) error {
 	if _, err := p.rootRecursiveBytesLocked(scope); err != nil {
 		return err
 	}
 	objects := p.scopeObjectsLocked(scope)
 	totals := make(map[string]int64)
+	counts := make(map[string]int64)
 	for _, item := range objects {
 		if item.entry.Kind != domain.EntryFile {
 			continue
@@ -545,14 +561,16 @@ func (p *Provider) recomputeRecursiveBytesLocked(scope domain.Scope) error {
 				return domain.NewError(domain.ErrorInvalid, "directory recursive byte aggregate overflows")
 			}
 			totals[parent.String()] = current + item.entry.Size
+			counts[parent.String()]++
 			parent = parent.Parent()
 		}
 	}
 	for path, item := range objects {
-		if item.entry.Kind != domain.EntryDirectory || item.entry.Size == totals[path] {
+		if item.entry.Kind != domain.EntryDirectory || item.entry.Size == totals[path] && item.entry.FileCount == counts[path] {
 			continue
 		}
 		item.entry.Size = totals[path]
+		item.entry.FileCount = counts[path]
 		p.versions++
 		item.entry.Version = domain.Version(fmt.Sprintf("p%016x", p.versions))
 		objects[path] = item

@@ -104,8 +104,8 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 		if sourceDirectory.pending {
 			return domain.Operation{}, domain.NewError(domain.ErrorUnavailable, "source tree has a pending operation")
 		}
-		if sourceDirectory.recursiveBytes != sourceEntry.Size {
-			return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "source directory recursive byte aggregate mismatch")
+		if sourceDirectory.recursiveBytes != sourceEntry.Size || sourceDirectory.recursiveFileCount != sourceEntry.FileCount {
+			return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "source directory recursive aggregate mismatch")
 		}
 	}
 	destinationTrail, err := s.resolveDirectoryTrail(ctx, to, request.Destination.Parent())
@@ -223,8 +223,8 @@ func (s *FileStore) Delete(ctx context.Context, scope domain.Scope, request doma
 		if directory.pending {
 			return domain.Operation{}, domain.NewError(domain.ErrorUnavailable, "directory has a pending operation")
 		}
-		if directory.recursiveBytes != entry.Size {
-			return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "directory recursive byte aggregate mismatch")
+		if directory.recursiveBytes != entry.Size || directory.recursiveFileCount != entry.FileCount {
+			return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "directory recursive aggregate mismatch")
 		}
 	}
 	operationID, err := s.engine.ids.OpaqueID()
@@ -310,8 +310,8 @@ func (s *FileStore) cloneTree(ctx context.Context, from, to domain.Scope, source
 	result.prerequisites = append(result.prerequisites, prepared.prerequisites...)
 	result.prerequisites = append(result.prerequisites, storageformat.MutationObject{Key: rootKey.String(), Body: prepared.rootBody})
 	result.entry.DirectoryID = directoryID
-	if prepared.recursiveBytes != source.Size {
-		return treePreparation{}, domain.NewError(domain.ErrorInvalid, "source directory recursive byte aggregate mismatch")
+	if prepared.recursiveBytes != source.Size || prepared.recursiveFileCount != source.FileCount {
+		return treePreparation{}, domain.NewError(domain.ErrorInvalid, "source directory recursive aggregate mismatch")
 	}
 	result.entry.ModifiedAt = now
 	return result, nil
@@ -349,20 +349,20 @@ func (s *FileStore) buildFileOperation(
 		}
 		prerequisites = append(prerequisites, prepared.prerequisites...)
 		key := objectstore.MustKey(keyValue)
-		pendingRoot := storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: preManifest, RecursiveBytes: update.snapshot.recursiveBytes, Pending: &storageformat.DirectoryTransition{
-			OperationID: operationID, Fence: 1, PreManifestID: preManifest, PostManifestID: prepared.manifestID, PostRecursiveBytes: prepared.recursiveBytes,
+		pendingRoot := storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: preManifest, RecursiveBytes: update.snapshot.recursiveBytes, RecursiveFileCount: update.snapshot.recursiveFileCount, Pending: &storageformat.DirectoryTransition{
+			OperationID: operationID, Fence: 1, PreManifestID: preManifest, PostManifestID: prepared.manifestID, PostRecursiveBytes: prepared.recursiveBytes, PostRecursiveFileCount: prepared.recursiveFileCount,
 		}}
 		pendingBody, err := storageformat.EncodeEnvelope(directoryRootSchema, key, currentRevision+1, pendingRoot)
 		if err != nil {
 			return storageformat.FileOperation{}, nil, err
 		}
-		finalBody, err := storageformat.EncodeEnvelope(directoryRootSchema, key, currentRevision+2, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: prepared.manifestID, RecursiveBytes: prepared.recursiveBytes})
+		finalBody, err := storageformat.EncodeEnvelope(directoryRootSchema, key, currentRevision+2, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: prepared.manifestID, RecursiveBytes: prepared.recursiveBytes, RecursiveFileCount: prepared.recursiveFileCount})
 		if err != nil {
 			return storageformat.FileOperation{}, nil, err
 		}
 		var rollbackBody []byte
 		if update.snapshot.exists {
-			rollbackBody, err = storageformat.EncodeEnvelope(directoryRootSchema, key, currentRevision+2, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: preManifest, RecursiveBytes: update.snapshot.recursiveBytes})
+			rollbackBody, err = storageformat.EncodeEnvelope(directoryRootSchema, key, currentRevision+2, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: preManifest, RecursiveBytes: update.snapshot.recursiveBytes, RecursiveFileCount: update.snapshot.recursiveFileCount})
 			if err != nil {
 				return storageformat.FileOperation{}, nil, err
 			}

@@ -238,6 +238,7 @@ type TrashEntry struct {
 	TrashedPath     domain.UserPath  `json:"trashedPath"`
 	Kind            domain.EntryKind `json:"kind"`
 	Size            int64            `json:"size"`
+	FileCount       int64            `json:"fileCount"`
 	MediaType       string           `json:"mediaType,omitempty"`
 	TrashedAt       time.Time        `json:"trashedAt"`
 	OriginalVersion domain.Version   `json:"originalVersion"`
@@ -372,19 +373,19 @@ func (s *Service) TrashPage(ctx context.Context, userID domain.UserID, limit int
 		}
 		return TrashPage{}, err
 	}
-	if lookup.Current.Path != domain.MustParseUserPath("/") || lookup.Current.Kind != domain.EntryDirectory || lookup.Current.Size < 0 || lookup.Current.MediaType != "" || len(lookup.Entries) != len(records) {
+	if lookup.Current.Path != domain.MustParseUserPath("/") || lookup.Current.Kind != domain.EntryDirectory || lookup.Current.Size < 0 || lookup.Current.FileCount < 0 || lookup.Current.MediaType != "" || len(lookup.Entries) != len(records) {
 		return TrashPage{}, domain.NewError(domain.ErrorInvalid, "trash tree metadata is inconsistent")
 	}
 	items := make([]TrashEntry, 0, len(records))
 	for index, record := range records {
 		entry := lookup.Entries[index]
-		if entry.Path != record.TrashedPath || entry.Name != record.TrashID || entry.Kind != record.Kind || entry.Size < 0 || (entry.Kind == domain.EntryDirectory && entry.MediaType != "") || (entry.Kind == domain.EntryFile && entry.MediaType == "") {
+		if entry.Path != record.TrashedPath || entry.Name != record.TrashID || entry.Kind != record.Kind || entry.Size < 0 || entry.FileCount < 0 || (entry.Kind == domain.EntryDirectory && entry.MediaType != "") || (entry.Kind == domain.EntryFile && (entry.MediaType == "" || entry.FileCount != 1)) {
 			return TrashPage{}, domain.NewError(domain.ErrorInvalid, "trash entry metadata is inconsistent")
 		}
 		items = append(items, TrashEntry{
 			SchemaVersion: record.SchemaVersion, TrashID: record.TrashID, OwnerUserID: record.OwnerUserID,
 			OriginalPath: record.OriginalPath, TrashedPath: record.TrashedPath, Kind: record.Kind,
-			Size: entry.Size, MediaType: entry.MediaType, TrashedAt: record.TrashedAt, OriginalVersion: record.OriginalVersion,
+			Size: entry.Size, FileCount: entry.FileCount, MediaType: entry.MediaType, TrashedAt: record.TrashedAt, OriginalVersion: record.OriginalVersion,
 		})
 	}
 	return TrashPage{Items: items, NextCursor: next}, nil
@@ -584,6 +585,7 @@ type PublicEntry struct {
 	Name       string           `json:"name"`
 	Kind       domain.EntryKind `json:"kind"`
 	Size       int64            `json:"size"`
+	FileCount  int64            `json:"fileCount"`
 	MediaType  string           `json:"mediaType,omitempty"`
 	ModifiedAt time.Time        `json:"modifiedAt"`
 	Version    domain.Version   `json:"version"`
@@ -616,7 +618,7 @@ func (s *Service) PublicShare(ctx context.Context, token, relative string, limit
 	if err != nil {
 		return PublicPage{}, publicShareError()
 	}
-	if page.Current.Kind != domain.EntryDirectory || page.Current.Size < 0 || page.Current.MediaType != "" {
+	if page.Current.Kind != domain.EntryDirectory || page.Current.Size < 0 || page.Current.FileCount < 0 || page.Current.MediaType != "" {
 		return PublicPage{}, publicShareError()
 	}
 	rootAgain, err := s.storage.Stat(ctx, scope, record.RootPath)
@@ -724,7 +726,7 @@ func publicEntry(rootPath domain.UserPath, entry, root domain.Entry) PublicEntry
 	if entry.Path == rootPath {
 		name = root.Name
 	}
-	return PublicEntry{Path: path, Name: name, Kind: entry.Kind, Size: entry.Size, MediaType: entry.MediaType, ModifiedAt: entry.ModifiedAt, Version: entry.Version}
+	return PublicEntry{Path: path, Name: name, Kind: entry.Kind, Size: entry.Size, FileCount: entry.FileCount, MediaType: entry.MediaType, ModifiedAt: entry.ModifiedAt, Version: entry.Version}
 }
 
 func publicShareError() error {

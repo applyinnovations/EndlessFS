@@ -104,6 +104,7 @@ func (s *lookupOnlyStorage) LookupChildren(_ context.Context, _ domain.Scope, re
 			return domain.ChildLookup{}, domain.NewError(domain.ErrorNotFound, "entry not found")
 		}
 		result.Current.Size += entry.Size
+		result.Current.FileCount += entry.FileCount
 		result.Entries = append(result.Entries, entry)
 	}
 	if s.currentOverride != nil {
@@ -293,7 +294,7 @@ func TestIntegrationSharesPreviewAndRevocation(t *testing.T) {
 	}
 	token := created.Link.Reveal()[len("http://127.0.0.1:8080/s/"):]
 	page, err := env.service.PublicShare(ctx, token, "/", 10, "")
-	if err != nil || page.Current.Path != "/" || page.Current.Size != int64(len("safe text")+len("<script>x</script>")+len("child")) || len(page.Entries) != 3 || page.Entries[0].Path == "/public/readme.txt" {
+	if err != nil || page.Current.Path != "/" || page.Current.Size != int64(len("safe text")+len("<script>x</script>")+len("child")) || page.Current.FileCount != 3 || len(page.Entries) != 3 || page.Entries[0].Path == "/public/readme.txt" {
 		t.Fatalf("PublicShare = %+v, %v", page, err)
 	}
 	var nestedRow drive.PublicEntry
@@ -302,11 +303,11 @@ func TestIntegrationSharesPreviewAndRevocation(t *testing.T) {
 			nestedRow = entry
 		}
 	}
-	if nestedRow.Kind != domain.EntryDirectory || nestedRow.Size != 5 {
-		t.Fatalf("public nested child row = %+v; want recursive size 5", nestedRow)
+	if nestedRow.Kind != domain.EntryDirectory || nestedRow.Size != 5 || nestedRow.FileCount != 1 {
+		t.Fatalf("public nested child row = %+v; want recursive size/count 5/1", nestedRow)
 	}
 	nested, err := env.service.PublicShare(ctx, token, "/nested", 10, "")
-	if err != nil || nested.Root.Path != "/" || nested.Current.Path != "/nested" || nested.Current.Kind != domain.EntryDirectory || nested.Current.Size != 5 || len(nested.Entries) != 1 || nested.Entries[0].Path != "/nested/deeper" || nested.Entries[0].Size != 5 {
+	if err != nil || nested.Root.Path != "/" || nested.Current.Path != "/nested" || nested.Current.Kind != domain.EntryDirectory || nested.Current.Size != 5 || nested.Current.FileCount != 1 || len(nested.Entries) != 1 || nested.Entries[0].Path != "/nested/deeper" || nested.Entries[0].Size != 5 || nested.Entries[0].FileCount != 1 {
 		t.Fatalf("nested PublicShare = %+v, %v", nested, err)
 	}
 	if _, err := env.service.PublicShare(ctx, token, "/../outside", 10, ""); !errors.Is(err, domain.ErrNotFound) {
@@ -423,7 +424,11 @@ func TestTrashPageReturnsExactPersistedMetadataWithoutPerRowStats(t *testing.T) 
 		{path: "/standalone.jpg", kind: domain.EntryFile, size: int64(len(standaloneBody)), mediaType: "image/jpeg"},
 	} {
 		item, ok := items[test.path]
-		if !ok || item.Kind != test.kind || item.Size != test.size || item.MediaType != test.mediaType {
+		wantCount := int64(1)
+		if test.path == "/empty" {
+			wantCount = 0
+		}
+		if !ok || item.Kind != test.kind || item.Size != test.size || item.FileCount != wantCount || item.MediaType != test.mediaType {
 			t.Errorf("trash metadata %s = %+v, present=%t", test.path, item, ok)
 		}
 	}
@@ -452,7 +457,7 @@ func TestTrashPageScalesToOneThousandLegacyRecordsWithOneBatchLookup(t *testing.
 		if _, err := env.store.Create(context.Background(), statememory.MustKey(statememory.NamespaceTrash, env.owner.String(), trashID), data); err != nil {
 			t.Fatal(err)
 		}
-		storage.entries[trashID] = domain.Entry{Path: trashedPath, Name: trashID, Kind: domain.EntryFile, Size: int64(index), MediaType: "application/octet-stream", ModifiedAt: env.clock.Now(), Version: "legacy-v1"}
+		storage.entries[trashID] = domain.Entry{Path: trashedPath, Name: trashID, Kind: domain.EntryFile, Size: int64(index), FileCount: 1, MediaType: "application/octet-stream", ModifiedAt: env.clock.Now(), Version: "legacy-v1"}
 	}
 	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, 32)))
 	service, err := drive.NewService(storage, env.store, env.repo, domain.NewIDGenerator(&hashReader{}), env.clock, key, "http://127.0.0.1:8080", "http://127.0.0.1:8081", 1<<20)
@@ -476,6 +481,18 @@ func TestTrashPageScalesToOneThousandLegacyRecordsWithOneBatchLookup(t *testing.
 	}
 	for name, entry := range storage.entries {
 		entry.Size = 1
+		storage.entries[name] = entry
+	}
+	for name, entry := range storage.entries {
+		entry.FileCount = -1
+		storage.entries[name] = entry
+		break
+	}
+	if _, err := service.TrashPage(context.Background(), env.owner, 1000, ""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("negative legacy file count error = %v", err)
+	}
+	for name, entry := range storage.entries {
+		entry.FileCount = 1
 		storage.entries[name] = entry
 	}
 	storage.lookupErr = domain.NewError(domain.ErrorNotFound, "missing tree entry")
@@ -698,7 +715,7 @@ func TestShareIdempotencyFileRootAndPublicFailureMatrix(t *testing.T) {
 	}
 	token := strings.TrimPrefix(created.Link.Reveal(), "http://127.0.0.1:8080/s/")
 	page, err := env.service.PublicShare(ctx, token, "", 10, "")
-	if err != nil || page.Root.Path != "/" || page.Root.Kind != domain.EntryFile || page.Current != page.Root || page.Current.Size != int64(len("public")) {
+	if err != nil || page.Root.Path != "/" || page.Root.Kind != domain.EntryFile || page.Current != page.Root || page.Current.Size != int64(len("public")) || page.Current.FileCount != 1 {
 		t.Fatalf("public file root = %+v, %v", page, err)
 	}
 	if _, err := env.service.PublicShare(ctx, token, "/child", 10, ""); !errors.Is(err, domain.ErrNotFound) {

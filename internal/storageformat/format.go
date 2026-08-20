@@ -17,12 +17,13 @@ import (
 )
 
 const (
-	FormatID              = "endlessfs-portable-bucket-v1"
-	CanonicalEncoder      = "canonical-json-v1"
-	KeyFormatVersion      = 1
-	WriterProtocolVersion = 1
-	MaxCanonicalBytes     = 1 << 20
-	FeatureRecursiveBytes = "recursive-byte-aggregates-v1"
+	FormatID                   = "endlessfs-portable-bucket-v1"
+	CanonicalEncoder           = "canonical-json-v1"
+	KeyFormatVersion           = 1
+	WriterProtocolVersion      = 1
+	MaxCanonicalBytes          = 1 << 20
+	FeatureRecursiveBytes      = "recursive-byte-aggregates-v1"
+	FeatureRecursiveFileCounts = "recursive-file-count-aggregates-v1"
 )
 
 type Envelope struct {
@@ -222,29 +223,32 @@ type StateVersionRecord struct {
 }
 
 type DirectoryRoot struct {
-	SchemaVersion  int                  `json:"schemaVersion"`
-	DirectoryID    string               `json:"directoryID"`
-	ManifestID     string               `json:"manifestID"`
-	RecursiveBytes int64                `json:"recursiveBytes"`
-	Pending        *DirectoryTransition `json:"pending,omitempty"`
+	SchemaVersion      int                  `json:"schemaVersion"`
+	DirectoryID        string               `json:"directoryID"`
+	ManifestID         string               `json:"manifestID"`
+	RecursiveBytes     int64                `json:"recursiveBytes"`
+	RecursiveFileCount int64                `json:"recursiveFileCount"`
+	Pending            *DirectoryTransition `json:"pending,omitempty"`
 }
 
 type DirectoryTransition struct {
-	OperationID        string `json:"operationID"`
-	Fence              uint64 `json:"fence"`
-	PreManifestID      string `json:"preManifestID,omitempty"`
-	PostManifestID     string `json:"postManifestID"`
-	PostRecursiveBytes int64  `json:"postRecursiveBytes"`
+	OperationID            string `json:"operationID"`
+	Fence                  uint64 `json:"fence"`
+	PreManifestID          string `json:"preManifestID,omitempty"`
+	PostManifestID         string `json:"postManifestID"`
+	PostRecursiveBytes     int64  `json:"postRecursiveBytes"`
+	PostRecursiveFileCount int64  `json:"postRecursiveFileCount"`
 }
 
 type DirectoryManifest struct {
-	SchemaVersion  int       `json:"schemaVersion"`
-	DirectoryID    string    `json:"directoryID"`
-	ManifestID     string    `json:"manifestID"`
-	PageIDs        []string  `json:"pageIDs"`
-	EntryCount     int       `json:"entryCount"`
-	RecursiveBytes int64     `json:"recursiveBytes"`
-	CreatedAt      time.Time `json:"createdAt"`
+	SchemaVersion      int       `json:"schemaVersion"`
+	DirectoryID        string    `json:"directoryID"`
+	ManifestID         string    `json:"manifestID"`
+	PageIDs            []string  `json:"pageIDs"`
+	EntryCount         int       `json:"entryCount"`
+	RecursiveBytes     int64     `json:"recursiveBytes"`
+	RecursiveFileCount int64     `json:"recursiveFileCount"`
+	CreatedAt          time.Time `json:"createdAt"`
 }
 
 type DirectoryPage struct {
@@ -261,6 +265,7 @@ type DirectoryEntry struct {
 	DirectoryID    string           `json:"directoryID,omitempty"`
 	BlobID         string           `json:"blobID,omitempty"`
 	Size           int64            `json:"size"`
+	FileCount      int64            `json:"fileCount,omitempty"`
 	MediaType      string           `json:"mediaType,omitempty"`
 	SHA256         string           `json:"sha256,omitempty"`
 	ModifiedAt     time.Time        `json:"modifiedAt"`

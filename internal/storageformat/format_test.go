@@ -70,33 +70,36 @@ func TestCanonicalEnvelopeAndLogicalVersion(t *testing.T) {
 	}
 }
 
-func TestCanonicalDirectoryRootCarriesRecursiveByteTransition(t *testing.T) {
+func TestCanonicalDirectoryRootCarriesRecursiveAggregatesTransition(t *testing.T) {
 	root := DirectoryRoot{
-		SchemaVersion: 1, DirectoryID: RootDirectoryID, ManifestID: "manifest", RecursiveBytes: 42,
+		SchemaVersion: 1, DirectoryID: RootDirectoryID, ManifestID: "manifest", RecursiveBytes: 42, RecursiveFileCount: 7,
 		Pending: &DirectoryTransition{
-			OperationID: "operation", Fence: 3, PreManifestID: "manifest", PostManifestID: "next", PostRecursiveBytes: 84,
+			OperationID: "operation", Fence: 3, PreManifestID: "manifest", PostManifestID: "next", PostRecursiveBytes: 84, PostRecursiveFileCount: 14,
 		},
 	}
 	body, err := EncodeCanonical(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"schemaVersion":1,"directoryID":"root","manifestID":"manifest","recursiveBytes":42,"pending":{"operationID":"operation","fence":3,"preManifestID":"manifest","postManifestID":"next","postRecursiveBytes":84}}`
+	want := `{"schemaVersion":1,"directoryID":"root","manifestID":"manifest","recursiveBytes":42,"recursiveFileCount":7,"pending":{"operationID":"operation","fence":3,"preManifestID":"manifest","postManifestID":"next","postRecursiveBytes":84,"postRecursiveFileCount":14}}`
 	if string(body) != want {
 		t.Fatalf("directory root = %s; want %s", body, want)
 	}
 	if FeatureRecursiveBytes != "recursive-byte-aggregates-v1" {
 		t.Fatalf("recursive-byte feature = %q", FeatureRecursiveBytes)
 	}
+	if FeatureRecursiveFileCounts != "recursive-file-count-aggregates-v1" {
+		t.Fatalf("recursive-file-count feature = %q", FeatureRecursiveFileCounts)
+	}
 	manifest := DirectoryManifest{
 		SchemaVersion: 1, DirectoryID: RootDirectoryID, ManifestID: "manifest", PageIDs: []string{"page"},
-		EntryCount: 2, RecursiveBytes: 42, CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		EntryCount: 2, RecursiveBytes: 42, RecursiveFileCount: 7, CreatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
 	}
 	body, err = EncodeCanonical(manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want = `{"schemaVersion":1,"directoryID":"root","manifestID":"manifest","pageIDs":["page"],"entryCount":2,"recursiveBytes":42,"createdAt":"2026-01-02T03:04:05Z"}`
+	want = `{"schemaVersion":1,"directoryID":"root","manifestID":"manifest","pageIDs":["page"],"entryCount":2,"recursiveBytes":42,"recursiveFileCount":7,"createdAt":"2026-01-02T03:04:05Z"}`
 	if string(body) != want {
 		t.Fatalf("directory manifest = %s; want %s", body, want)
 	}
@@ -118,6 +121,7 @@ func TestCanonicalDirectoryRootKeyParsing(t *testing.T) {
 	invalid := []string{
 		strings.Replace(valid, encodedPart(userID), "0", 1),
 		strings.Replace(valid, "/live/", "/other/", 1),
+		strings.Replace(valid, encodedPart(RootDirectoryID), "0", 1),
 		strings.Replace(valid, encodedPart(RootDirectoryID), encodedPart("short"), 1),
 		strings.Replace(valid, encodedPart(userID), encodedPart("short"), 1),
 	}

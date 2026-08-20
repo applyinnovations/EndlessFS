@@ -33,6 +33,7 @@ type Entry struct {
 	Name       string    `json:"name"`
 	Kind       EntryKind `json:"kind"`
 	Size       int64     `json:"size"`
+	FileCount  int64     `json:"fileCount"`
 	MediaType  string    `json:"mediaType,omitempty"`
 	ModifiedAt time.Time `json:"modifiedAt"`
 	Version    Version   `json:"version"`

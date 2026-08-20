@@ -54,17 +54,51 @@ type legacyDirectoryManifest struct {
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
+type recursiveByteDirectoryRoot struct {
+	SchemaVersion  int                               `json:"schemaVersion"`
+	DirectoryID    string                            `json:"directoryID"`
+	ManifestID     string                            `json:"manifestID"`
+	RecursiveBytes int64                             `json:"recursiveBytes"`
+	Pending        *recursiveByteDirectoryTransition `json:"pending,omitempty"`
+}
+
+type recursiveByteDirectoryTransition struct {
+	OperationID        string `json:"operationID"`
+	Fence              uint64 `json:"fence"`
+	PreManifestID      string `json:"preManifestID,omitempty"`
+	PostManifestID     string `json:"postManifestID"`
+	PostRecursiveBytes int64  `json:"postRecursiveBytes"`
+}
+
+type recursiveByteDirectoryManifest struct {
+	SchemaVersion  int       `json:"schemaVersion"`
+	DirectoryID    string    `json:"directoryID"`
+	ManifestID     string    `json:"manifestID"`
+	PageIDs        []string  `json:"pageIDs"`
+	EntryCount     int       `json:"entryCount"`
+	RecursiveBytes int64     `json:"recursiveBytes"`
+	CreatedAt      time.Time `json:"createdAt"`
+}
+
+type migrationAggregate struct {
+	bytes int64
+	files int64
+}
+
 type migrationDirectoryRoot struct {
-	object         objectstore.Object
-	envelope       storageformat.Envelope
-	manifestID     string
-	recursiveBytes int64
-	current        bool
+	object             objectstore.Object
+	envelope           storageformat.Envelope
+	manifestID         string
+	recursiveBytes     int64
+	recursiveFileCount int64
+	hasRecursiveBytes  bool
+	current            bool
 }
 
 type migrationDirectoryManifest struct {
-	manifest storageformat.DirectoryManifest
-	current  bool
+	manifest          storageformat.DirectoryManifest
+	hasRecursiveBytes bool
+	current           bool
 }
 
 type migrationScope struct {
@@ -76,18 +110,36 @@ type migrationWalk struct {
 	engine  *Engine
 	group   migrationScope
 	state   map[string]uint8
-	totals  map[string]int64
+	totals  map[string]migrationAggregate
 	parents map[string]string
 }
 
-func legacyRecursiveByteFeatures(features []string) []string {
-	legacy := make([]string, 0, len(features))
+func predecessorAggregateFeatureSets(features []string) [][]string {
+	byteOnly := make([]string, 0, len(features))
+	preAggregate := make([]string, 0, len(features))
 	for _, feature := range features {
-		if feature != storageformat.FeatureRecursiveBytes {
-			legacy = append(legacy, feature)
+		if feature != storageformat.FeatureRecursiveFileCounts {
+			byteOnly = append(byteOnly, feature)
+		}
+		if feature != storageformat.FeatureRecursiveBytes && feature != storageformat.FeatureRecursiveFileCounts {
+			preAggregate = append(preAggregate, feature)
 		}
 	}
-	return legacy
+	return [][]string{byteOnly, preAggregate}
+}
+
+func isAggregatePredecessor(features, current []string) bool {
+	for _, predecessor := range predecessorAggregateFeatureSets(current) {
+		if reflect.DeepEqual(features, predecessor) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameWriterExceptFeatures(stored, current storageformat.WriterSet) bool {
+	stored.RequiredFeatures = append([]string(nil), current.RequiredFeatures...)
+	return reflect.DeepEqual(stored, current)
 }
 
 func (e *Engine) migrateRecursiveByteAggregates(ctx context.Context, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
@@ -167,9 +219,10 @@ func (e *Engine) verifyMigrationWriterSet(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	legacy := e.writer
-	legacy.RequiredFeatures = legacyRecursiveByteFeatures(legacy.RequiredFeatures)
-	if !reflect.DeepEqual(writer, legacy) && !reflect.DeepEqual(writer, e.writer) {
+	if !isAggregatePredecessor(writer.RequiredFeatures, e.writer.RequiredFeatures) && !reflect.DeepEqual(writer, e.writer) {
+		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable writer set")
+	}
+	if !sameWriterExceptFeatures(writer, e.writer) {
 		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable writer set")
 	}
 	return nil
@@ -207,7 +260,7 @@ func (e *Engine) closeRecursiveByteMigrationGate(ctx context.Context) (bool, err
 		if gate.Mode != storageformat.GateOpen && gate.CheckpointID != recursiveByteMigrationCheckpointID {
 			return false, domain.NewError(domain.ErrorConflict, "write gate is reserved by another maintenance operation")
 		}
-		if len(gate.WriterFeatures) > 0 && !reflect.DeepEqual(gate.WriterFeatures, legacyRecursiveByteFeatures(e.writer.RequiredFeatures)) && !reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
+		if len(gate.WriterFeatures) > 0 && !isAggregatePredecessor(gate.WriterFeatures, e.writer.RequiredFeatures) && !reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
 			return false, domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
 		}
 		switch gate.Mode {
@@ -285,7 +338,7 @@ func (e *Engine) migrateAllDirectoryAggregates(ctx context.Context) error {
 		}
 		walk := migrationWalk{
 			engine: e, group: group, state: make(map[string]uint8, len(group.roots)),
-			totals: make(map[string]int64, len(group.roots)), parents: make(map[string]string, len(group.roots)),
+			totals: make(map[string]migrationAggregate, len(group.roots)), parents: make(map[string]string, len(group.roots)),
 		}
 		if _, err := walk.directory(ctx, storageformat.RootDirectoryID, ""); err != nil {
 			return err
@@ -297,40 +350,40 @@ func (e *Engine) migrateAllDirectoryAggregates(ctx context.Context) error {
 	return nil
 }
 
-func (walk *migrationWalk) directory(ctx context.Context, directoryID, parentID string) (int64, error) {
+func (walk *migrationWalk) directory(ctx context.Context, directoryID, parentID string) (migrationAggregate, error) {
 	if _, found := walk.group.roots[directoryID]; !found {
-		return 0, domain.NewError(domain.ErrorInvalid, "directory entry references a missing child root")
+		return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "directory entry references a missing child root")
 	}
 	if directoryID == storageformat.RootDirectoryID && parentID != "" {
-		return 0, domain.NewError(domain.ErrorInvalid, "directory graph references its area root")
+		return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "directory graph references its area root")
 	}
 	if parentID != "" {
 		if _, found := walk.parents[directoryID]; found {
-			return 0, domain.NewError(domain.ErrorInvalid, "directory graph references a child more than once")
+			return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "directory graph references a child more than once")
 		}
 		walk.parents[directoryID] = parentID
 	}
 	switch walk.state[directoryID] {
 	case 1:
-		return 0, domain.NewError(domain.ErrorInvalid, "directory graph contains a cycle")
+		return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "directory graph contains a cycle")
 	case 2:
 		return walk.totals[directoryID], nil
 	}
 	walk.state[directoryID] = 1
 	root, err := walk.engine.readMigrationDirectoryRoot(ctx, walk.group.scope, directoryID)
 	if err != nil {
-		return 0, err
+		return migrationAggregate{}, err
 	}
 	manifest, err := walk.engine.readMigrationDirectoryManifest(ctx, walk.group.scope, directoryID, root.manifestID)
 	if err != nil {
-		return 0, err
+		return migrationAggregate{}, err
 	}
-	if root.current != manifest.current {
-		return 0, domain.NewError(domain.ErrorInvalid, "directory root and manifest migration states differ")
+	if root.current != manifest.current || root.hasRecursiveBytes != manifest.hasRecursiveBytes {
+		return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "directory root and manifest migration states differ")
 	}
 	entries, err := walk.engine.Files().readManifestPageEntries(ctx, walk.group.scope, directoryID, manifest.manifest)
 	if err != nil {
-		return 0, err
+		return migrationAggregate{}, err
 	}
 	for index := range entries {
 		if entries[index].Kind != domain.EntryDirectory {
@@ -338,40 +391,52 @@ func (walk *migrationWalk) directory(ctx context.Context, directoryID, parentID 
 		}
 		childTotal, childErr := walk.directory(ctx, entries[index].DirectoryID, directoryID)
 		if childErr != nil {
-			return 0, childErr
+			return migrationAggregate{}, childErr
 		}
-		if root.current && entries[index].Size != childTotal {
-			return 0, domain.NewError(domain.ErrorInvalid, "migrated directory entry aggregate mismatch")
+		if root.hasRecursiveBytes && entries[index].Size != childTotal.bytes {
+			return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "migrated directory byte aggregate mismatch")
+		}
+		if root.current && entries[index].FileCount != childTotal.files {
+			return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "migrated directory file count mismatch")
 		}
 		if !root.current {
-			entries[index].Size = childTotal
+			entries[index].Size = childTotal.bytes
+			entries[index].FileCount = childTotal.files
 			entries[index].LogicalVersion, err = directoryEntryVersion(entries[index])
 			if err != nil {
-				return 0, err
+				return migrationAggregate{}, err
 			}
 		}
 	}
-	total, err := recursiveByteSize(entries)
+	totalBytes, err := recursiveByteSize(entries)
 	if err != nil {
-		return 0, err
+		return migrationAggregate{}, err
 	}
+	totalFiles, err := recursiveFileCount(entries)
+	if err != nil {
+		return migrationAggregate{}, err
+	}
+	total := migrationAggregate{bytes: totalBytes, files: totalFiles}
 	if root.current {
-		if root.recursiveBytes != total || manifest.manifest.RecursiveBytes != total {
-			return 0, domain.NewError(domain.ErrorInvalid, "migrated directory aggregate mismatch")
+		if root.recursiveBytes != total.bytes || manifest.manifest.RecursiveBytes != total.bytes || root.recursiveFileCount != total.files || manifest.manifest.RecursiveFileCount != total.files {
+			return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "migrated directory aggregate mismatch")
 		}
 		walk.state[directoryID] = 2
 		walk.totals[directoryID] = total
 		return total, nil
 	}
+	if root.hasRecursiveBytes && (root.recursiveBytes != total.bytes || manifest.manifest.RecursiveBytes != total.bytes) {
+		return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "recursive-byte predecessor aggregate mismatch")
+	}
 	prepared, err := walk.engine.prepareMigratedDirectory(walk.group.scope, directoryID, entries, root, manifest.manifest.CreatedAt)
 	if err != nil {
-		return 0, err
+		return migrationAggregate{}, err
 	}
 	if err := walk.engine.ensureMutationPrerequisites(ctx, prepared.prerequisites); err != nil {
-		return 0, err
+		return migrationAggregate{}, err
 	}
 	if err := walk.engine.step(ctx, StepMigrationAfterDirectoryPrerequisites); err != nil {
-		return 0, err
+		return migrationAggregate{}, err
 	}
 	_, err = walk.engine.backend.Put(ctx, root.object.Key, prepared.rootBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: root.object.Version})
 	if err != nil {
@@ -383,14 +448,14 @@ func (walk *migrationWalk) directory(ctx context.Context, directoryID, parentID 
 				return total, nil
 			}
 			if getErr != nil {
-				return 0, getErr
+				return migrationAggregate{}, getErr
 			}
-			return 0, domain.NewError(domain.ErrorInvalid, "directory root changed unexpectedly during migration")
+			return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "directory root changed unexpectedly during migration")
 		}
-		return 0, err
+		return migrationAggregate{}, err
 	}
 	if err := walk.engine.step(ctx, StepMigrationAfterDirectoryRoot); err != nil {
-		return 0, err
+		return migrationAggregate{}, err
 	}
 	walk.state[directoryID] = 2
 	walk.totals[directoryID] = total
@@ -406,10 +471,18 @@ func (e *Engine) readMigrationDirectoryRoot(ctx context.Context, scope domain.Sc
 	var envelope storageformat.Envelope
 	var current storageformat.DirectoryRoot
 	if err := storageformat.DecodeEnvelope(object.Body, key, directoryRootSchema, &envelope, &current); err == nil {
-		if current.SchemaVersion != 1 || current.DirectoryID != directoryID || current.ManifestID == "" || current.RecursiveBytes < 0 || current.Pending != nil {
+		if current.SchemaVersion != 1 || current.DirectoryID != directoryID || current.ManifestID == "" || current.RecursiveBytes < 0 || current.RecursiveFileCount < 0 || current.Pending != nil {
 			return migrationDirectoryRoot{}, domain.NewError(domain.ErrorInvalid, "invalid migrated directory root")
 		}
-		return migrationDirectoryRoot{object: object, envelope: envelope, manifestID: current.ManifestID, recursiveBytes: current.RecursiveBytes, current: true}, nil
+		return migrationDirectoryRoot{object: object, envelope: envelope, manifestID: current.ManifestID, recursiveBytes: current.RecursiveBytes, recursiveFileCount: current.RecursiveFileCount, hasRecursiveBytes: true, current: true}, nil
+	}
+	var byteEnvelope storageformat.Envelope
+	var byteRoot recursiveByteDirectoryRoot
+	if err := storageformat.DecodeEnvelope(object.Body, key, directoryRootSchema, &byteEnvelope, &byteRoot); err == nil {
+		if byteRoot.SchemaVersion != 1 || byteRoot.DirectoryID != directoryID || byteRoot.ManifestID == "" || byteRoot.RecursiveBytes < 0 || byteRoot.Pending != nil {
+			return migrationDirectoryRoot{}, domain.NewError(domain.ErrorInvalid, "invalid recursive-byte directory root")
+		}
+		return migrationDirectoryRoot{object: object, envelope: byteEnvelope, manifestID: byteRoot.ManifestID, recursiveBytes: byteRoot.RecursiveBytes, hasRecursiveBytes: true}, nil
 	}
 	var legacyEnvelope storageformat.Envelope
 	var legacy legacyDirectoryRoot
@@ -434,7 +507,20 @@ func (e *Engine) readMigrationDirectoryManifest(ctx context.Context, scope domai
 		if err := validateMigrationManifest(current, directoryID, manifestID); err != nil {
 			return migrationDirectoryManifest{}, err
 		}
-		return migrationDirectoryManifest{manifest: current, current: true}, nil
+		return migrationDirectoryManifest{manifest: current, hasRecursiveBytes: true, current: true}, nil
+	}
+	var byteEnvelope storageformat.Envelope
+	var byteManifest recursiveByteDirectoryManifest
+	if err := storageformat.DecodeEnvelope(object.Body, key, directoryManifestSchema, &byteEnvelope, &byteManifest); err == nil {
+		current = storageformat.DirectoryManifest{
+			SchemaVersion: byteManifest.SchemaVersion, DirectoryID: byteManifest.DirectoryID, ManifestID: byteManifest.ManifestID,
+			PageIDs: append([]string(nil), byteManifest.PageIDs...), EntryCount: byteManifest.EntryCount,
+			RecursiveBytes: byteManifest.RecursiveBytes, CreatedAt: byteManifest.CreatedAt,
+		}
+		if err := validateMigrationManifest(current, directoryID, manifestID); err != nil {
+			return migrationDirectoryManifest{}, err
+		}
+		return migrationDirectoryManifest{manifest: current, hasRecursiveBytes: true}, nil
 	}
 	var legacyEnvelope storageformat.Envelope
 	var legacy legacyDirectoryManifest
@@ -452,7 +538,7 @@ func (e *Engine) readMigrationDirectoryManifest(ctx context.Context, scope domai
 }
 
 func validateMigrationManifest(manifest storageformat.DirectoryManifest, directoryID, manifestID string) error {
-	if manifest.SchemaVersion != 1 || manifest.DirectoryID != directoryID || manifest.ManifestID != manifestID || manifest.EntryCount < 0 || manifest.RecursiveBytes < 0 || len(manifest.PageIDs) == 0 || manifest.CreatedAt.IsZero() {
+	if manifest.SchemaVersion != 1 || manifest.DirectoryID != directoryID || manifest.ManifestID != manifestID || manifest.EntryCount < 0 || manifest.RecursiveBytes < 0 || manifest.RecursiveFileCount < 0 || len(manifest.PageIDs) == 0 || manifest.CreatedAt.IsZero() {
 		return domain.NewError(domain.ErrorInvalid, "invalid directory manifest during migration")
 	}
 	return nil
@@ -463,6 +549,10 @@ func (e *Engine) prepareMigratedDirectory(scope domain.Scope, directoryID string
 		return preparedDirectory{}, err
 	}
 	recursiveBytes, err := recursiveByteSize(entries)
+	if err != nil {
+		return preparedDirectory{}, err
+	}
+	fileCount, err := recursiveFileCount(entries)
 	if err != nil {
 		return preparedDirectory{}, err
 	}
@@ -490,7 +580,7 @@ func (e *Engine) prepareMigratedDirectory(scope domain.Scope, directoryID string
 	manifestKey := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifestID)
 	manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, storageformat.DirectoryManifest{
 		SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID, PageIDs: pageIDs,
-		EntryCount: len(entries), RecursiveBytes: recursiveBytes, CreatedAt: createdAt,
+		EntryCount: len(entries), RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount, CreatedAt: createdAt,
 	})
 	if err != nil {
 		return preparedDirectory{}, err
@@ -498,12 +588,12 @@ func (e *Engine) prepareMigratedDirectory(scope domain.Scope, directoryID string
 	prerequisites := append(pages, storageformat.MutationObject{Key: manifestKey.String(), Body: manifestBody})
 	sort.Slice(prerequisites, func(i, j int) bool { return prerequisites[i].Key < prerequisites[j].Key })
 	rootBody, err := storageformat.EncodeEnvelope(directoryRootSchema, rootKey, root.envelope.Revision+1, storageformat.DirectoryRoot{
-		SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID, RecursiveBytes: recursiveBytes,
+		SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID, RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount,
 	})
 	if err != nil {
 		return preparedDirectory{}, err
 	}
-	return preparedDirectory{manifestID: manifestID, recursiveBytes: recursiveBytes, rootBody: rootBody, prerequisites: prerequisites}, nil
+	return preparedDirectory{manifestID: manifestID, recursiveBytes: recursiveBytes, recursiveFileCount: fileCount, rootBody: rootBody, prerequisites: prerequisites}, nil
 }
 
 func deterministicMigrationID(value string) string {
@@ -520,9 +610,10 @@ func (e *Engine) activateRecursiveByteWriterSet(ctx context.Context) error {
 		if reflect.DeepEqual(writer, e.writer) {
 			return nil
 		}
-		legacy := e.writer
-		legacy.RequiredFeatures = legacyRecursiveByteFeatures(legacy.RequiredFeatures)
-		if !reflect.DeepEqual(writer, legacy) {
+		if !isAggregatePredecessor(writer.RequiredFeatures, e.writer.RequiredFeatures) {
+			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable writer set during migration")
+		}
+		if !sameWriterExceptFeatures(writer, e.writer) {
 			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable writer set during migration")
 		}
 		body, err := storageformat.EncodeEnvelope(writerSetSchema, object.Key, envelope.Revision+1, e.writer)
@@ -547,7 +638,7 @@ func (e *Engine) activateRecursiveByteSuperblock(ctx context.Context, initial ob
 		if reflect.DeepEqual(superblock.RequiredFeatures, e.writer.RequiredFeatures) {
 			return nil
 		}
-		if !reflect.DeepEqual(superblock.RequiredFeatures, legacyRecursiveByteFeatures(e.writer.RequiredFeatures)) {
+		if !isAggregatePredecessor(superblock.RequiredFeatures, e.writer.RequiredFeatures) {
 			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable superblock during migration")
 		}
 		superblock.RequiredFeatures = append([]string(nil), e.writer.RequiredFeatures...)
@@ -594,7 +685,7 @@ func (e *Engine) bindMigrationGateToWriterFeatures(ctx context.Context) error {
 		if gate.Mode != storageformat.GateClosed || gate.CheckpointID != recursiveByteMigrationCheckpointID {
 			return domain.NewError(domain.ErrorPreconditionFailed, "migration write gate is not closed")
 		}
-		if len(gate.WriterFeatures) > 0 && !reflect.DeepEqual(gate.WriterFeatures, legacyRecursiveByteFeatures(e.writer.RequiredFeatures)) && !reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
+		if len(gate.WriterFeatures) > 0 && !isAggregatePredecessor(gate.WriterFeatures, e.writer.RequiredFeatures) && !reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
 			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
 		}
 		if reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {

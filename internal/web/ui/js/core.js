@@ -56,6 +56,8 @@
     recoveryToken: "",
     dialogOpener: null,
     viewMode: "list",
+    fileSortBeforeStorage: "",
+    storageMapRenderVersion: 0,
     filteredEntries: [],
     themeAssets: {},
     previewStates: new Map(),
@@ -133,6 +135,7 @@
     "arrow-left": ["M5 12l14 0", "M5 12l6 6", "M5 12l6 -6"],
     "arrow-right": ["M5 12l14 0", "M13 18l6 -6", "M13 6l6 6"],
     check: ["M5 12l5 5l10 -10"],
+    "chart-treemap": ["M4 4h8v16h-8z", "M16 4h4v6h-4z", "M16 14h4v6h-4z"],
     "chevron-down": ["M6 9l6 6l6 -6"],
     "chevron-up": ["M6 15l6 -6l6 6"],
     copy: ["M7 9.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667l0 -8.666", "M4.012 16.737a2.005 2.005 0 0 1 -1.012 -1.737v-10c0 -1.1 .9 -2 2 -2h10c.75 0 1.158 .385 1.5 1"],
@@ -318,15 +321,22 @@
 
   function syncFilePresentation() {
     const gridEnabled = state.viewMode === "grid";
-    byID("drop-target").dataset.presentation = gridEnabled ? "grid" : "list";
-    byID("list-presentation").hidden = gridEnabled;
+    const storageEnabled = state.viewMode === "storage" && state.browserAccess === "owner";
+    const presentation = storageEnabled ? "storage" : gridEnabled ? "grid" : "list";
+    byID("drop-target").dataset.presentation = presentation;
+    byID("list-presentation").hidden = gridEnabled || storageEnabled;
     byID("media-grid").hidden = !gridEnabled;
+    byID("storage-map").hidden = !storageEnabled;
     return gridEnabled;
   }
 
   function renderFileLoadingItems() {
     syncBrowserPagingSentinels();
     const gridEnabled = syncFilePresentation();
+    if (state.viewMode === "storage" && state.browserAccess === "owner") {
+      renderStorageMapLoading();
+      return;
+    }
     if (!gridEnabled) {
       renderTableLoadingRows("file-rows", "file", 6, 6);
       return;
@@ -447,12 +457,14 @@
     const accessChanged = state.browserAccess !== access;
     if (surface.parentElement !== host) host.append(surface);
     state.browserAccess = access;
+    if (access !== "owner" && state.viewMode === "storage") setFileViewMode("list", false);
     if (accessChanged) { state.selected.clear(); updateSelection(); }
     surface.dataset.access = access;
     byID("breadcrumbs").setAttribute("aria-label", access === "public" ? "Shared folder path" : "Current folder");
     const collectionLabel = access === "trash" ? "Items in trash" : access === "public" ? "Files in shared folder" : "Files in the current folder";
     byID("file-table-caption").textContent = collectionLabel;
     byID("media-grid").setAttribute("aria-label", collectionLabel);
+    byID("storage-map").setAttribute("aria-label", access === "owner" ? "Storage used by items in the current folder" : collectionLabel);
     byID("select-all").setAttribute("aria-label", access === "trash" ? "Select all trashed items on this page" : "Select all files on this page");
     byID("selection-bar").setAttribute("aria-label", access === "trash" ? "Trash selection actions" : "Selection actions");
     if (access !== "trash") state.trashRequest += 1;

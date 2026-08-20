@@ -78,6 +78,7 @@ The new browser application is a precision filesystem instrument. Files are the 
 - List rows are dense, stable, aligned, and unboxed.
 - Dense tables use compact stable headers, predictable column widths, aligned numeric metadata, restrained dividers, and responsive column reorganization without changing row identity or height during updates.
 - The media grid is an edge-to-edge contact sheet with square reserved geometry, effectively zero gap, no captions, no card chrome, and overlay selection. A file without a preview receives a deterministic file-type icon and short type/extension cue, never a broken image or indefinite placeholder.
+- The storage view is a deterministic, accessible treemap of the current path. Area encodes recursive consumed bytes from the aggregate tree; the largest useful entries remain direct and the remaining positive byte total is represented by one exact Other tile. It uses no recursive client lookup, unbounded DOM, decorative color field, or zero-area item tile.
 - Collections scroll continuously while server requests remain bounded and paginated.
 - “Design for 1,000” is a scale mindset, not a universal fixture size, literal rendering requirement, or acceptance threshold. Each container anticipates disproportionate growth and chooses virtualization, aggregation, grouping, filtering, progressive detail, or summary-plus-exception presentation appropriate to its content.
 - Large directories remain comfortable to browse and select without unbounded DOM or request counts; they do not render every row or tile simultaneously merely to prove scale.
@@ -227,11 +228,11 @@ Exit: every supported entry path reaches the authenticated application securely 
 ### Stage 4 — Build the file workspace
 
 1. Build breadcrumbs, directory state, progressive page loading, filtering, sorting, and stable loading/error geometry.
-2. Build the virtualized dense list, compact stable table headers, and edge-to-edge virtualized media grid with deterministic file-type fallbacks.
+2. Build the virtualized dense list, compact stable table headers, edge-to-edge virtualized media grid with deterministic file-type fallbacks, and bounded accessible storage treemap from the supplied aggregate tree.
 3. Build pointer and keyboard selection for one item through thousands.
 4. Build direct toolbar/menu commands for folder creation, upload, download, share, copy, move, Trash, and Undo.
 5. Make the workspace the transient upload drop target with file, folder, recursive-drop, and multi-file fallbacks.
-6. Benchmark representative and stress-scale directories through list and grid navigation, scrolling, filtering, sorting, range selection, command invocation, preview loading, pagination recovery, and responsive reflow. Assert bounded live DOM, bounded requests, preserved context, and zero unexpected layout shift; do not render all items at once merely to satisfy a fixture.
+6. Benchmark representative and stress-scale directories through list, grid, and storage-map navigation, scrolling, filtering, sorting, range selection, command invocation, preview loading, pagination recovery, and responsive reflow. Assert bounded live DOM, bounded requests, non-overlapping deterministic treemap geometry, preserved context, and zero unexpected layout shift; do not render all items at once merely to satisfy a fixture.
 
 Exit: the filesystem workspace is complete and files remain the dominant interface at every supported size.
 

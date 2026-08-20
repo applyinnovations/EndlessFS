@@ -152,6 +152,8 @@ input[type="radio"] { accent-color: var(--efs-color-primary); }
   background: var(--efs-color-background);
 }
 #drop-target[data-presentation="grid"] #drive-state { inset-block-start: 0; }
+#drop-target[data-presentation="storage"] #drive-state { inset-block-start: 0; }
+#drop-target[data-presentation="storage"] { padding-block-end: var(--efs-spacing-pageGutter); }
 
 .table-scroll { width: 100%; overflow: auto; }
 .page-sentinel { display: block; width: 100%; height: 1px; pointer-events: none; }
@@ -212,3 +214,27 @@ tbody tr.selected { background: var(--efs-color-primary-tint); }
 .media-tile-name,
 .media-tile-meta { display: none; }
 .trash-media-actions { position: absolute; z-index: 4; inset: auto 4px 4px auto; display: flex; gap: 2px; }
+
+.storage-map { position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; background: var(--efs-color-background); contain: strict; }
+.storage-map-canvas { display: block; width: 100%; height: 100%; overflow: hidden; }
+.storage-map-tile { cursor: pointer; outline: 0; }
+.storage-map-tile.aggregate { cursor: default; }
+.storage-map-shape { fill: var(--efs-color-surface); stroke: var(--efs-color-border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.storage-map-tile.file .storage-map-shape { fill: var(--efs-color-background); }
+.storage-map-tile.aggregate .storage-map-shape { fill: var(--efs-color-background); stroke-dasharray: 3 3; }
+.storage-map-tile:hover .storage-map-shape { stroke: var(--efs-color-text-muted); }
+.storage-map-tile:focus .storage-map-shape,
+.storage-map-tile:focus-visible .storage-map-shape { stroke: var(--efs-color-primary); stroke-width: 2; }
+.storage-map-tile.selected .storage-map-shape { fill: var(--efs-color-primary-tint); stroke: var(--efs-color-primary); stroke-width: 2; }
+.storage-map-labels { pointer-events: none; }
+.storage-map-name { fill: var(--efs-color-foreground); font-size: var(--efs-type-size-sm); font-weight: var(--efs-type-weight-semibold); }
+.storage-map-size,
+.storage-map-count { fill: var(--efs-color-text-muted); font-size: var(--efs-type-size-xs); font-variant-numeric: tabular-nums; }
+.storage-map-message { fill: var(--efs-color-text-muted); font-size: var(--efs-type-size-sm); }
+.storage-map-select-control { overflow: visible; }
+.storage-map-checkbox { width: 18px; height: 18px; margin: 5px; opacity: 0; cursor: pointer; }
+.storage-map-tile:hover .storage-map-checkbox,
+.storage-map-tile:focus-within .storage-map-checkbox,
+.storage-map-tile.selected .storage-map-checkbox { opacity: 1; }
+@media (hover: none) { .storage-map-checkbox { opacity: 1; } }
+.storage-map-loading-shape { fill: var(--efs-color-surface); stroke: var(--efs-color-border); stroke-width: 1; }

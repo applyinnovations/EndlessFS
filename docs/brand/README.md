@@ -185,6 +185,17 @@ Responsive layouts may rearrange metadata, but behavior remains consistent.
 
 The reference behavior is closer to a dense photo library/contact sheet than a conventional card grid.
 
+### Storage maps
+
+- A storage map is a third file presentation for identifying disproportionately large files and directories in the current path.
+- Rectangle area represents recursive consumed bytes only. Folder file count is secondary metadata and never changes area.
+- Use the aggregate tree already returned with directory entries; never discover descendants through client-side recursive requests.
+- Render a deterministic bounded set of the largest useful items and combine the remaining positive byte total into one exact **Other** tile. Zero-byte entries remain represented by the current-path count and do not receive dishonest visible area.
+- Keep navigation, selection, filtering, and actions consistent with the list and grid. The map is not a dashboard or a separate storage-management workflow.
+- Tiles use plain neutral surfaces and restrained dividers. Size creates visual emphasis; decorative color, gradients, shadows, and nested cards do not.
+- Every actionable tile is keyboard reachable, exposes its complete accessible name and values, and supports spatial arrow-key navigation. Small tiles may omit visible labels but not accessible identity.
+- Loading reserves the final map geometry. Rendering and requests remain bounded independently of directory size.
+
 ## Selection, focus, and active states
 
 Use Primary for strong active, focus, and selected states and Primary Tint for quiet selected and active surfaces. Focus must remain accessible, selection must not create layout shift, and Primary must not be diluted through unrelated decoration. Selection patterns must scale from one item to thousands. The theme assigns their concrete values.

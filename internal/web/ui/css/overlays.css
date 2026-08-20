@@ -111,6 +111,7 @@ dialog::backdrop { background: color-mix(in srgb, var(--efs-color-foreground) 38
 .preview-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   justify-content: start;
 }

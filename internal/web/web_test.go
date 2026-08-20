@@ -313,6 +313,10 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 		`id="preview-generation-action" class="preview-generation-action"`,
 		`id="preview-original" class="icon-button" type="button" aria-label="Show original" data-icon="file"`,
 		`id="preview-download" class="icon-button" type="button" aria-label="Download" data-icon="download"`,
+		`id="preview-share" class="icon-button" type="button" aria-label="Share" data-icon="share-3"`,
+		`id="preview-copy" class="icon-button" type="button" aria-label="Copy" data-icon="copy"`,
+		`id="preview-move" class="icon-button" type="button" aria-label="Move" data-icon="folder-symlink"`,
+		`id="preview-trash" class="icon-button danger" type="button" aria-label="Move to trash" data-icon="trash"`,
 	} {
 		if !strings.Contains(shell, required) {
 			t.Errorf("media browser shell is missing %q", required)
@@ -339,6 +343,11 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 		`unavailable: ["Preview unavailable. Original file unaffected.", "warning"]`,
 		`failed: ["Preview generation failed.", "error"]`,
 		"ArrowLeft", "ArrowRight",
+		"syncPreviewOwnerActions", "runPreviewOwnerAction",
+		`byID("preview-share").addEventListener("click", () => runPreviewOwnerAction(createShare));`,
+		`byID("preview-copy").addEventListener("click", () => runPreviewOwnerAction((entry) => copyMove(false, [entry], false)));`,
+		`byID("preview-move").addEventListener("click", () => runPreviewOwnerAction((entry) => copyMove(true, [entry], false)));`,
+		`byID("preview-trash").addEventListener("click", () => runPreviewOwnerAction((entry) => trashEntries([entry], false)));`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("media browser script is missing %q", required)
@@ -425,6 +434,77 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 	}
 	if strings.Contains(stylesheet, ".metadata-list { display: none; }") {
 		t.Error("preview metadata is hidden instead of using the compact mobile dock")
+	}
+}
+
+func TestStorageMapUsesBoundedSnapshotAggregatesAndAccessibleDeterministicGeometry(t *testing.T) {
+	t.Parallel()
+
+	shell := string(mustRead("ui/index.html"))
+	for _, required := range []string{
+		`id="file-view-storage"`,
+		`aria-label="Storage view" data-icon="chart-treemap"`,
+		`id="storage-map" class="storage-map owner-only" role="tree"`,
+		`id="storage-map-canvas"`,
+	} {
+		if !strings.Contains(shell, required) {
+			t.Errorf("storage map shell is missing %q", required)
+		}
+	}
+
+	script := string(applicationScript)
+	for _, required := range []string{
+		`const storageMapPageSize = 240;`,
+		`const storageMapMaximumTiles = 180;`,
+		`const storageMapMinimumTileArea = 420;`,
+		`function layoutStorageMap(items, width, height)`,
+		`function storageMapRemainder(entries, renderedEntries, current)`,
+		`function renderStorageMap(entries)`,
+		`function renderStorageMapLoading()`,
+		`state.viewMode === "storage"`,
+		`limit=${state.viewMode === "storage" ? storageMapPageSize : 100}`,
+		`sort=${sort}&order=${order}`,
+		`tile.setAttribute("role", "treeitem")`,
+		`tile.setAttribute("aria-selected", String(selected))`,
+		`event.key === "Enter"`,
+		`event.key === " ") { event.preventDefault(); toggleStorageMapSelection(entry, true);`,
+		`candidate.dataset.storageEntry === entry.path`,
+		`knownEntrySize(entry)`,
+		`knownEntryFileCount(entry)`,
+		`if (remainder.size > 0) items.push`,
+		`return ` + "`Remaining items, ${formatBytes(item.size)}, ${files}`" + `;`,
+		`const name = item.aggregate ? "Remaining items" : entry.name;`,
+		`sort.value = "size:desc";`,
+		`sort.disabled = true;`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("storage map behavior is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`document.createElement("canvas")`,
+		`entry.size || 0`,
+		`entry.fileCount || 0`,
+		`Other content, ${formatBytes(item.size)}, ${files}`,
+		`item.aggregate ? "Other" : entry.name`,
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("storage map retains inaccessible or lossy behavior %q", forbidden)
+		}
+	}
+
+	stylesheet := string(applicationStylesheet)
+	for _, required := range []string{
+		`.storage-map { position: relative; width: 100%; height: 100%;`,
+		`#drop-target[data-presentation="storage"] { padding-block-end: var(--efs-spacing-pageGutter); }`,
+		`.storage-map-tile:focus .storage-map-shape`,
+		`.storage-map-tile.selected .storage-map-shape`,
+		`@media (hover: none) { .storage-map-checkbox { opacity: 1; } }`,
+		`#drop-target[data-presentation="storage"] #drive-state`,
+	} {
+		if !strings.Contains(stylesheet, required) {
+			t.Errorf("storage map presentation is missing %q", required)
+		}
 	}
 }
 
@@ -664,6 +744,7 @@ func TestBrowserSourcesAreSplitIntoOrderedDomains(t *testing.T) {
 	scriptMarkers := map[string]string{
 		"ui/js/core.js":          "const state = {",
 		"ui/js/files.js":         "async function loadDirectory",
+		"ui/js/storage-map.js":   "const storageMapPageSize",
 		"ui/js/transfers.js":     "function transferFileSize",
 		"ui/js/previews.js":      "async function download",
 		"ui/js/operations.js":    "async function copyMove",
@@ -1689,7 +1770,8 @@ func TestFileStateOccupiesContentWithoutMovingTableHeader(t *testing.T) {
 	script := string(applicationScript)
 	for _, required := range []string{
 		`function syncFilePresentation()`,
-		`byID("drop-target").dataset.presentation = gridEnabled ? "grid" : "list";`,
+		`const presentation = storageEnabled ? "storage" : gridEnabled ? "grid" : "list";`,
+		`byID("drop-target").dataset.presentation = presentation;`,
 		`const gridEnabled = syncFilePresentation();`,
 	} {
 		if !strings.Contains(script, required) {

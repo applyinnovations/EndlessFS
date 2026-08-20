@@ -12,7 +12,7 @@
     "text/plain": "Plain text",
   });
 
-  async function loadDirectory(directory, append = false) {
+  async function loadDirectory(directory, append = false, preserveSelection = false) {
     if (append && state.directoryLoading) return;
     const request = state.directoryRequest + 1;
     state.directoryRequest = request;
@@ -25,7 +25,7 @@
       renderPathAggregate(null);
       state.entries = [];
       state.nextCursor = "";
-      state.selected.clear();
+      if (!preserveSelection) state.selected.clear();
       byID("list-presentation").scrollTop = 0;
       byID("media-grid").scrollTop = 0;
       updateSelection();
@@ -33,10 +33,11 @@
       renderFileLoadingItems();
     }
     renderBreadcrumbs("breadcrumbs", directory, (path) => loadDirectory(path));
-    const [sort, order] = byID("file-sort").value.split(":");
+    const [sort, order] = (state.viewMode === "storage" ? "size:desc" : byID("file-sort").value).split(":");
+    const limit = `limit=${state.viewMode === "storage" ? storageMapPageSize : 100}`;
     const cursor = append && state.nextCursor ? `&cursor=${encodeURIComponent(state.nextCursor)}` : "";
     try {
-      const page = await api(`/api/v1/files?path=${encodeURIComponent(directory)}&limit=100&sort=${sort}&order=${order}${cursor}`);
+      const page = await api(`/api/v1/files?path=${encodeURIComponent(directory)}&${limit}&sort=${sort}&order=${order}${cursor}`);
       if (request !== state.directoryRequest) return;
       state.currentEntry = page.current;
       renderPathAggregate(page.current);
@@ -138,7 +139,10 @@
     finishListLoading("file-rows");
     finishListLoading("media-grid-content");
     const gridEnabled = syncFilePresentation();
-    if (gridEnabled) renderVirtualGrid(visible);
+    if (state.viewMode === "storage" && state.browserAccess === "owner") {
+      cleanupGridMedia(new Set());
+      renderStorageMap(visible);
+    } else if (gridEnabled) renderVirtualGrid(visible);
     else {
       cleanupGridMedia(new Set());
       renderVirtualList(visible);

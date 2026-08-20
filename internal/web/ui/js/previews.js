@@ -39,6 +39,27 @@
     byID("preview-next").disabled = standalone || state.viewerIndex < 0 || state.viewerIndex >= state.viewerEntries.length - 1;
   }
 
+  function syncPreviewOwnerActions(ownerAccess) {
+    for (const id of ["preview-share", "preview-copy", "preview-move", "preview-trash"]) byID(id).hidden = !ownerAccess;
+  }
+
+  function closePreviewViewer() {
+    if (state.viewerController) state.viewerController.abort();
+    state.viewerController = null;
+    releaseViewerObjectURL();
+    byID("preview-content").replaceChildren();
+    closeTopLayerDialog(byID("preview-dialog"));
+    if (state.viewerOpener && state.viewerOpener.focus) state.viewerOpener.focus();
+    state.viewerEntry = null;
+  }
+
+  function runPreviewOwnerAction(action) {
+    if (state.browserAccess !== "owner" || !state.viewerEntry) return;
+    const entry = state.viewerEntry;
+    closePreviewViewer();
+    action(entry);
+  }
+
   async function openSafeOriginalPreview(entry, publicToken = "") {
     if (entry.kind !== "file") return;
     clearToast();
@@ -55,6 +76,7 @@
     byID("preview-original").disabled = true;
     byID("preview-download").hidden = false;
     byID("preview-download").onclick = () => download(entry, publicToken);
+    syncPreviewOwnerActions(!publicToken && state.browserAccess === "owner");
     const content = byID("preview-content");
     showViewerFallback(entry);
     if (!dialog.open) { state.viewerOpener = document.activeElement; showTopLayerDialog(dialog); }
@@ -162,6 +184,7 @@
     byID("preview-original").disabled = false;
     byID("preview-download").hidden = false;
     byID("preview-download").onclick = () => download(entry);
+    syncPreviewOwnerActions(true);
     const variant = previewVariant(Math.max(window.innerWidth, window.innerHeight));
     const cached = cachedViewerPreview(entry, variant);
     if (cached) {

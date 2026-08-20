@@ -68,7 +68,7 @@
                 <div class="drive-controls">
                   <label class="search-field"><span aria-hidden="true">⌕</span><input type="search" placeholder="Filter loaded files" disabled></label>
                   <label class="compact-field"><span>Sort</span><select disabled><option>Name A–Z</option></select></label>
-                  <fieldset class="presentation-choice" aria-label="File presentation" disabled><input type="radio" checked><label aria-label="List view" data-icon="list"></label><input type="radio"><label aria-label="Grid view" data-icon="layout-grid"></label></fieldset>
+                  <fieldset class="presentation-choice" aria-label="File presentation" disabled><input type="radio" checked><label aria-label="List view" data-icon="list"></label><input type="radio"><label aria-label="Grid view" data-icon="layout-grid"></label><input type="radio"><label aria-label="Storage view" data-icon="chart-treemap"></label></fieldset>
                   <button class="secondary" type="button" disabled>Filter</button>
                 </div>
               </div>
@@ -146,7 +146,7 @@
                 <div class="drive-controls">
                   <label class="search-field" for="file-filter"><span class="visually-hidden">Filter loaded files</span><span aria-hidden="true">⌕</span><input id="file-filter" type="search" placeholder="Filter loaded files"></label>
                   <label class="compact-field" for="file-sort"><span>Sort</span><select id="file-sort"><option value="name:asc">Name A–Z</option><option value="name:desc">Name Z–A</option><option value="modified:desc">Newest</option><option value="modified:asc">Oldest</option><option value="size:desc">Largest</option><option value="size:asc">Smallest</option><option value="kind:asc">Type</option></select></label>
-                  <fieldset id="file-presentation" class="presentation-choice" aria-label="File presentation"><legend class="visually-hidden">File presentation</legend><input id="file-view-list" name="file-view" type="radio" value="list" checked><label for="file-view-list" aria-label="List view" data-icon="list"></label><input id="file-view-grid" name="file-view" type="radio" value="grid"><label for="file-view-grid" aria-label="Grid view" data-icon="layout-grid"></label></fieldset>
+                  <fieldset id="file-presentation" class="presentation-choice" aria-label="File presentation"><legend class="visually-hidden">File presentation</legend><input id="file-view-list" name="file-view" type="radio" value="list" checked><label for="file-view-list" aria-label="List view" data-icon="list"></label><input id="file-view-grid" name="file-view" type="radio" value="grid"><label for="file-view-grid" aria-label="Grid view" data-icon="layout-grid"></label><input id="file-view-storage" class="owner-only" name="file-view" type="radio" value="storage"><label class="owner-only" for="file-view-storage" aria-label="Storage view" data-icon="chart-treemap"></label></fieldset>
                   <details class="filter-disclosure"><summary>Filter</summary><div id="metadata-filters" class="metadata-filters"><label for="filter-kind">Kind<select id="filter-kind"><option value="">All</option><option value="directory">Folders</option><option value="file">Files</option></select></label><label for="filter-media">Media<select id="filter-media"><option value="">All</option><option value="image">Images</option><option value="video">Videos</option><option value="pdf">PDFs</option><option value="audio">Audio</option><option value="document">Documents</option><option value="archive">Archives</option><option value="unknown">Other</option></select></label><label for="filter-min-size">Min bytes<input id="filter-min-size" type="number" min="0" inputmode="numeric"></label><label for="filter-max-size">Max bytes<input id="filter-max-size" type="number" min="0" inputmode="numeric"></label><label for="filter-modified-after">After<input id="filter-modified-after" type="date"></label><label for="filter-modified-before">Before<input id="filter-modified-before" type="date"></label><label class="owner-only" for="filter-preview">Preview<select id="filter-preview"><option value="">Any</option><option value="ready">Ready</option><option value="missing">Missing</option><option value="ineligible">Excluded</option><option value="unsupported">Unsupported</option><option value="unavailable">Unavailable</option></select></label></div></details>
                 </div>
 
@@ -162,6 +162,7 @@
                 <span id="drop-help" class="drop-hint owner-only">Drop to upload</span>
                 <div id="list-presentation" class="table-scroll"><table id="file-table"><caption id="file-table-caption" class="visually-hidden">Files in the current folder</caption><thead><tr><th class="select-column selectable-only" scope="col"><input id="select-all" type="checkbox" aria-label="Select all files on this page"></th><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Details</th><th scope="col">Changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead><tbody id="file-rows"></tbody></table><span id="list-page-sentinel" class="page-sentinel" hidden aria-hidden="true"></span></div>
                 <div id="media-grid" class="media-grid" role="grid" aria-label="Files in the current folder" tabindex="0" hidden><div id="media-grid-content" class="media-grid-content"></div><span id="grid-page-sentinel" class="page-sentinel" hidden aria-hidden="true"></span></div>
+                <div id="storage-map" class="storage-map owner-only" role="tree" aria-label="Storage used by items in the current folder" hidden><svg id="storage-map-canvas" class="storage-map-canvas"></svg></div>
                 <div id="drive-state" class="state-panel" hidden></div>
               </section>
 
@@ -291,6 +292,10 @@
               </span>
               <button id="preview-original" class="icon-button" type="button" aria-label="Show original" data-icon="file"></button>
               <button id="preview-download" class="icon-button" type="button" aria-label="Download" data-icon="download"></button>
+              <button id="preview-share" class="icon-button" type="button" aria-label="Share" data-icon="share-3"></button>
+              <button id="preview-copy" class="icon-button" type="button" aria-label="Copy" data-icon="copy"></button>
+              <button id="preview-move" class="icon-button" type="button" aria-label="Move" data-icon="folder-symlink"></button>
+              <button id="preview-trash" class="icon-button danger" type="button" aria-label="Move to trash" data-icon="trash"></button>
             </div>
             <dl id="preview-metadata" class="metadata-list"></dl>
           </aside>

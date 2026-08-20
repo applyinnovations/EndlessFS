@@ -19,6 +19,7 @@ const themeLink = `<link id="theme-stylesheet" rel="stylesheet" disabled>`
 var applicationScriptSources = []string{
 	"ui/js/core.js",
 	"ui/js/files.js",
+	"ui/js/storage-map.js",
 	"ui/js/transfers.js",
 	"ui/js/previews.js",
 	"ui/js/operations.js",

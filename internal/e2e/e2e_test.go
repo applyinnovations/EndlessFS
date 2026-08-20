@@ -706,6 +706,9 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 			t.Fatalf("scroll virtual grid after %d items: %v", loaded, err)
 		}
 	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => { const grid = document.querySelector("#media-grid"); grid.scrollTop = 0; grid.dispatchEvent(new Event("scroll")); })()`, nil)); err != nil {
+		t.Fatalf("return large virtual grid to its first item: %v", err)
+	}
 	if err := waitFor(ctx, `(() => {
 		const aggregate = document.querySelector("#path-aggregate")?.textContent || "";
 		return document.querySelector('.media-tile-open[aria-label="View file virtual-00000.bin"] .media-tile-meta')?.textContent === "0 B" && !aggregate.startsWith("—") && aggregate.endsWith("· 10,004 files");
@@ -755,8 +758,74 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if listBenchmark.Logical != loaded || listBenchmark.Rendered > 64 || listBenchmark.FilteredItems != 1 || listBenchmark.FilterMillis > 250 {
 		t.Fatalf("virtual list benchmark: logical=%d rendered=%d filtered=%d filterMillis=%.2f", listBenchmark.Logical, listBenchmark.Rendered, listBenchmark.FilteredItems, listBenchmark.FilterMillis)
 	}
-	t.Logf(`ui-benchmark-v1 {"directory":{"logical":%d,"listRendered":%d,"gridRendered":%d,"filterMillis":%.2f},"previewRequests":%d}`,
-		loaded, listBenchmark.Rendered, renderedTiles, listBenchmark.FilterMillis, resolveRequestsAfterScale-resolveRequestsBeforeScale)
+	mu.Lock()
+	fileRequestsBeforeStorage := countRequestPath(requestedURLs, "/api/v1/files")
+	mu.Unlock()
+	var storageBenchmark struct {
+		Rendered     int  `json:"rendered"`
+		NoOverlaps   bool `json:"noOverlaps"`
+		PositiveArea bool `json:"positiveArea"`
+		SortDisabled bool `json:"sortDisabled"`
+		ExactCount   bool `json:"exactCount"`
+		TreeItems    int  `json:"treeItems"`
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("#file-view-storage").click()`, nil)); err != nil {
+		t.Fatalf("open storage map benchmark: %v", err)
+	}
+	if err := waitFor(ctx, `!document.querySelector("#storage-map").hidden && document.querySelector("#storage-map").getAttribute("aria-busy") !== "true" && document.querySelectorAll(".storage-map-shape").length > 0`, 10*time.Second); err != nil {
+		t.Fatalf("wait for storage map benchmark: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const rectangles = Array.from(document.querySelectorAll(".storage-map-shape"), (shape) => ({
+			x: Number(shape.getAttribute("x")),
+			y: Number(shape.getAttribute("y")),
+			width: Number(shape.getAttribute("width")),
+			height: Number(shape.getAttribute("height")),
+		}));
+		let noOverlaps = true;
+		for (let left = 0; left < rectangles.length; left += 1) {
+			for (let right = left + 1; right < rectangles.length; right += 1) {
+				const a = rectangles[left];
+				const b = rectangles[right];
+				const overlapX = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
+				const overlapY = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
+				if (overlapX > 0.02 && overlapY > 0.02) noOverlaps = false;
+			}
+		}
+		return {
+			rendered: rectangles.length,
+			noOverlaps,
+			positiveArea: rectangles.every((rectangle) => rectangle.width > 0 && rectangle.height > 0),
+			sortDisabled: document.querySelector("#file-sort").disabled,
+			exactCount: document.querySelector("#path-aggregate").textContent.endsWith("· 10,004 files"),
+			treeItems: document.querySelectorAll('#storage-map [role="treeitem"]').length,
+		};
+	})()`, &storageBenchmark)); err != nil {
+		t.Fatalf("measure storage map benchmark: %v", err)
+	}
+	mu.Lock()
+	storageRequests := countRequestPath(requestedURLs, "/api/v1/files") - fileRequestsBeforeStorage
+	mu.Unlock()
+	if storageBenchmark.Rendered == 0 || storageBenchmark.Rendered > 181 || storageBenchmark.TreeItems != storageBenchmark.Rendered || !storageBenchmark.NoOverlaps || !storageBenchmark.PositiveArea || !storageBenchmark.SortDisabled || !storageBenchmark.ExactCount || storageRequests > 2 {
+		t.Fatalf("storage map benchmark: rendered=%d treeItems=%d noOverlaps=%v positiveArea=%v sortDisabled=%v exactCount=%v requests=%d", storageBenchmark.Rendered, storageBenchmark.TreeItems, storageBenchmark.NoOverlaps, storageBenchmark.PositiveArea, storageBenchmark.SortDisabled, storageBenchmark.ExactCount, storageRequests)
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.Focus(`#storage-map .storage-map-tile[tabindex="0"]`, chromedp.ByQuery),
+		chromedp.KeyEvent(" "),
+	); err != nil {
+		t.Fatalf("select storage map tile from keyboard: %v", err)
+	}
+	if err := waitFor(ctx, `!document.querySelector("#selection-bar").hidden && document.activeElement?.matches('#storage-map .storage-map-tile[tabindex="0"]')`, time.Second); err != nil {
+		t.Fatalf("storage map selection did not reuse the canonical selection surface: %v", err)
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.Click("#clear-selection", chromedp.ByQuery),
+		chromedp.Evaluate(`document.querySelector("#file-view-list").click()`, nil),
+	); err != nil {
+		t.Fatalf("leave storage map benchmark: %v", err)
+	}
+	t.Logf(`ui-benchmark-v1 {"directory":{"logical":%d,"listRendered":%d,"gridRendered":%d,"filterMillis":%.2f,"storageRendered":%d,"storageRequests":%d},"previewRequests":%d}`,
+		loaded, listBenchmark.Rendered, renderedTiles, listBenchmark.FilterMillis, storageBenchmark.Rendered, storageRequests, resolveRequestsAfterScale-resolveRequestsBeforeScale)
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("#file-view-grid").click()`, nil)); err != nil {
 		t.Fatalf("restore grid after list benchmark: %v", err)
 	}
@@ -804,6 +873,22 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 	if !fitsMobile || !namedControls || focusOutline == "none" {
 		t.Fatalf("accessibility result: fitsMobile=%v namedControls=%v focus=%q focusOutline=%q", fitsMobile, namedControls, focusID, focusOutline)
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("#file-view-storage").click()`, nil)); err != nil {
+		t.Fatalf("open mobile storage map: %v", err)
+	}
+	if err := waitFor(ctx, `!document.querySelector("#storage-map").hidden && document.querySelector("#storage-map").getAttribute("aria-busy") !== "true"`, 10*time.Second); err != nil {
+		t.Fatalf("wait for mobile storage map: %v (%s)", err, browserStatus(ctx))
+	}
+	var mobileStorageFits bool
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`document.documentElement.scrollWidth <= 320 && document.querySelector("#storage-map").getBoundingClientRect().width <= 320 && document.querySelectorAll(".storage-map-shape").length <= 181`, &mobileStorageFits),
+		chromedp.Evaluate(`document.querySelector("#file-view-list").click()`, nil),
+	); err != nil {
+		t.Fatalf("inspect mobile storage map: %v", err)
+	}
+	if !mobileStorageFits {
+		t.Fatal("storage map overflows or exceeds its rendering bound at 320 CSS pixels")
 	}
 	if err := chromedp.Run(ctx,
 		chromedp.Focus("#new-folder-button", chromedp.ByQuery),
@@ -1518,15 +1603,32 @@ func TestE2EMediaBrowserIsAvailableWithoutGeneratedPreviews(t *testing.T) {
 	}
 	var correctBoundary bool
 	if err := chromedp.Run(client.ctx,
-		chromedp.Evaluate(`!document.querySelector("#file-presentation").hidden && !document.querySelector("#metadata-filters").hidden && document.querySelector("#preview-generate").hidden && document.querySelector("#preview-regenerate").hidden && !document.querySelector("#preview-status") && document.querySelector("#toast-region .toast.info")?.textContent.includes("not configured")`, &correctBoundary),
+		chromedp.Evaluate(`(() => {
+			const ownerActions = ["preview-share", "preview-copy", "preview-move", "preview-trash"].map((id) => document.getElementById(id));
+			return !document.querySelector("#file-presentation").hidden &&
+				!document.querySelector("#metadata-filters").hidden &&
+				document.querySelector("#preview-generate").hidden &&
+				document.querySelector("#preview-regenerate").hidden &&
+				!document.querySelector("#preview-status") &&
+				document.querySelector("#toast-region .toast.info")?.textContent.includes("not configured") &&
+				ownerActions.every((button) => button && !button.hidden && button.textContent.trim() === "" && getComputedStyle(button).backgroundColor === "rgba(0, 0, 0, 0)");
+		})()`, &correctBoundary),
 		chromedp.KeyEvent(kb.ArrowLeft),
 		chromedp.KeyEvent(kb.ArrowRight),
-		chromedp.KeyEvent(kb.Escape),
 	); err != nil {
 		t.Fatalf("verify icon-only media browser: %v", err)
 	}
 	if !correctBoundary {
-		t.Fatal("grid, metadata filters, or full-screen icon viewer depended on generated-preview configuration")
+		t.Fatal("grid, metadata filters, full-screen icon viewer, or canonical owner actions depended on generated-preview configuration")
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Click("#preview-copy", chromedp.ByQuery)); err != nil {
+		t.Fatalf("open copy action from preview: %v", err)
+	}
+	if err := waitFor(client.ctx, `!document.querySelector("#preview-dialog").open && document.querySelector("#action-dialog").open && document.querySelector("#dialog-title").textContent === "Copy 1 item"`, 5*time.Second); err != nil {
+		t.Fatalf("preview copy action did not transition to its action sheet: %v (%s)", err, browserStatus(client.ctx))
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Click("#dialog-cancel", chromedp.ByQuery)); err != nil {
+		t.Fatalf("close preview copy action: %v", err)
 	}
 	for _, request := range client.requestSnapshot() {
 		if strings.Contains(request, "/api/v1/previews/") {

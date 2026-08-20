@@ -178,7 +178,7 @@
     });
     byID("file-filter").addEventListener("input", renderFiles); byID("file-sort").addEventListener("change", () => state.browserAccess === "owner" ? loadDirectory(state.currentDirectory) : renderFiles());
     for (const id of ["filter-kind", "filter-media", "filter-min-size", "filter-max-size", "filter-modified-after", "filter-modified-before", "filter-preview"]) byID(id).addEventListener("input", renderFiles);
-    for (const id of ["file-view-list", "file-view-grid"]) byID(id).addEventListener("change", (event) => { if (event.target.checked) { state.viewMode = event.target.value; renderFiles(); } });
+    for (const id of ["file-view-list", "file-view-grid", "file-view-storage"]) byID(id).addEventListener("change", (event) => { if (event.target.checked) setFileViewMode(event.target.value); });
     byID("media-grid").addEventListener("scroll", () => { if (!state.gridRenderFrame) state.gridRenderFrame = requestAnimationFrame(() => { state.gridRenderFrame = 0; if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries); }); maybeLoadNextBrowserPage(byID("media-grid")); });
     byID("list-presentation").addEventListener("scroll", () => {
       if (!state.listRenderFrame) state.listRenderFrame = requestAnimationFrame(() => { state.listRenderFrame = 0; if (state.viewMode === "list") renderVirtualList(state.filteredEntries); });
@@ -186,6 +186,7 @@
     });
     window.addEventListener("resize", () => {
       if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries);
+      if (state.viewMode === "storage") renderStorageMap(state.filteredEntries);
       if (!byID("settings-view").hidden) { renderPasskeys(); renderShares(); }
       if (!byID("admin-view").hidden) renderUsers();
       if (!byID("transfer-panel").hidden) setTransferSheetOpen(true);
@@ -224,14 +225,17 @@
       const scroller = byID("users-table-scroll");
       if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - (settingsRowHeight * 6)) loadMoreUsers();
     });
-    const closePreview = () => { if (state.viewerController) state.viewerController.abort(); state.viewerController = null; releaseViewerObjectURL(); byID("preview-content").replaceChildren(); closeTopLayerDialog(byID("preview-dialog")); if (state.viewerOpener && state.viewerOpener.focus) state.viewerOpener.focus(); state.viewerEntry = null; };
     byID("preview-previous").addEventListener("click", () => navigateViewer(-1));
     byID("preview-next").addEventListener("click", () => navigateViewer(1));
     byID("preview-generate").addEventListener("click", () => generateViewerPreview(false));
     byID("preview-regenerate").addEventListener("click", () => generateViewerPreview(true));
     byID("preview-original").addEventListener("click", () => { if (state.viewerEntry) openSafeOriginalPreview(state.viewerEntry); });
-    byID("preview-close").addEventListener("click", closePreview);
-    byID("preview-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closePreview(); });
+    byID("preview-share").addEventListener("click", () => runPreviewOwnerAction(createShare));
+    byID("preview-copy").addEventListener("click", () => runPreviewOwnerAction((entry) => copyMove(false, [entry], false)));
+    byID("preview-move").addEventListener("click", () => runPreviewOwnerAction((entry) => copyMove(true, [entry], false)));
+    byID("preview-trash").addEventListener("click", () => runPreviewOwnerAction((entry) => trashEntries([entry], false)));
+    byID("preview-close").addEventListener("click", closePreviewViewer);
+    byID("preview-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closePreviewViewer(); });
     byID("preview-dialog").addEventListener("keydown", (event) => { if (event.key === "ArrowLeft") { event.preventDefault(); navigateViewer(-1); } if (event.key === "ArrowRight") { event.preventDefault(); navigateViewer(1); } });
     window.addEventListener("popstate", () => { if (state.user) setRoute(routeFromPath(), false); });
     window.addEventListener("online", resumePausedTransfers);

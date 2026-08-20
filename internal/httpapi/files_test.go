@@ -524,9 +524,23 @@ func TestIntegrationBatchCopyMoveAndUploadLifecycleRoutes(t *testing.T) {
 	if status.Code != http.StatusOK {
 		t.Fatalf("upload status = %d %s", status.Code, status.Body.String())
 	}
+	var activeStatus domain.UploadStatus
+	decodeResponse(t, status, &activeStatus)
+	if activeStatus.State != domain.UploadStateActive {
+		t.Fatalf("active upload status = %+v", activeStatus)
+	}
 	aborted := performRequest(t, env.handler, http.MethodDelete, "/api/v1/uploads/"+string(capability.UploadID), origin, `{}`, cookies, driveMutationHeaders(env.csrf.Value, ""))
 	if aborted.Code != http.StatusNoContent {
 		t.Fatalf("upload abort = %d %s", aborted.Code, aborted.Body.String())
+	}
+	abortedStatusResponse := performRequest(t, env.handler, http.MethodGet, "/api/v1/uploads/"+string(capability.UploadID), "", "", []*http.Cookie{env.session}, nil)
+	if abortedStatusResponse.Code != http.StatusOK {
+		t.Fatalf("aborted upload status = %d %s", abortedStatusResponse.Code, abortedStatusResponse.Body.String())
+	}
+	var abortedStatus domain.UploadStatus
+	decodeResponse(t, abortedStatusResponse, &abortedStatus)
+	if abortedStatus.State != domain.UploadStateAborted {
+		t.Fatalf("aborted upload status = %+v", abortedStatus)
 	}
 
 	for _, target := range []string{"/api/v1/files?limit=invalid", "/api/v1/files?order=sideways", "/api/v1/trash?limit=1001", "/api/v1/public/shares/missing?limit=0"} {

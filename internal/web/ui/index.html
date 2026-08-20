@@ -17,19 +17,24 @@
       <header class="app-header">
         <a class="brand" href="/" data-route="drive" aria-label="EndlessFS files">
           <img class="brand-mark" src="/assets/brand/endlessfs-mark.svg" width="36" height="28" alt="">
-          <span class="brand-name">EndlessFS</span>
         </a>
-        <nav id="workspace-tabs" class="app-tabs" aria-label="Workspace">
-          <a href="/" data-route="drive">Files</a>
-          <a href="/trash" data-route="trash">Trash</a>
-          <a href="/settings" data-route="settings">Settings</a>
-          <a id="admin-nav" href="/admin" data-route="admin" hidden>Admin</a>
+        <nav id="workspace-tabs" class="tabs app-tabs" aria-label="Workspace">
+          <a class="tab" href="/" data-route="drive">Files</a>
+          <a class="tab" href="/trash" data-route="trash">Trash</a>
+          <a class="tab" href="/settings" data-route="settings">Settings</a>
+          <a id="admin-nav" class="tab" href="/admin" data-route="admin" hidden>Admin</a>
         </nav>
-        <div class="header-status">
-          <div id="account-actions" class="account-actions" hidden>
-            <span id="account-name"></span>
-            <button id="logout-button" class="icon-button" type="button" aria-label="Sign out" data-icon="logout"></button>
+        <div id="account-actions" class="account-actions" hidden>
+          <div id="header-transfer-status" class="header-transfer-status" hidden>
+            <span id="header-transfer-summary" class="header-transfer-summary" aria-hidden="true">
+              <span id="header-transfer-percent">0%</span>
+              <span id="header-transfer-speed" class="header-transfer-speed">—/s</span>
+              <span id="header-transfer-eta" class="header-transfer-eta">ETA —</span>
+              <span id="header-transfer-count" class="header-transfer-count">0/0</span>
+            </span>
+            <button id="open-transfers" class="icon-button transfer-launcher" type="button" aria-label="View transfers" aria-expanded="false" aria-controls="transfer-panel" data-icon="transfer"></button>
           </div>
+          <button id="logout-button" class="tab header-signout" type="button">Sign out</button>
         </div>
       </header>
 
@@ -144,19 +149,6 @@
               <div class="pagination"><button id="next-page" class="secondary more-button" type="button" hidden>More</button></div>
                 </div>
               </div>
-              <aside id="transfer-panel" class="transfer-panel" hidden aria-labelledby="transfer-title">
-                <div class="panel-heading transfer-heading">
-                  <div class="transfer-heading-copy"><h2 id="transfer-title">Transfers</h2><span id="transfer-compact-metrics" class="transfer-compact-metrics">0% · ETA — · —/s</span></div>
-                  <div class="heading-actions"><button id="clear-transfers" class="icon-button" type="button" aria-label="Clear finished transfers" data-icon="trash"></button><button id="transfer-toggle" class="icon-button" type="button" aria-label="Collapse transfers" aria-expanded="true" data-icon="chevron-down"></button></div>
-                </div>
-                <progress id="transfer-progress" class="transfer-overall-progress" max="1" value="0" aria-label="Overall upload progress"></progress>
-                <div class="transfer-overview" aria-live="polite">
-                  <div class="transfer-overview-primary"><strong id="transfer-percent">0%</strong><span id="transfer-eta">ETA —</span><span id="transfer-speed">—/s</span></div>
-                  <div class="transfer-overview-secondary"><span id="transfer-volume">0 B of 0 B</span><span id="transfer-counts">0 files</span></div>
-                </div>
-                <label class="transfer-filter-field" for="transfer-filter"><span class="visually-hidden">Show transfers</span><select id="transfer-filter"><option value="current">Current</option><option value="failed">Failed</option><option value="complete">Complete</option><option value="all">All</option></select></label>
-                <ul id="transfer-list" class="transfer-list"></ul>
-              </aside>
             </section>
 
             <section id="trash-view" class="view" hidden aria-labelledby="browser-title"><div id="trash-browser-host"></div></section>
@@ -219,6 +211,32 @@
                 </section>
               </div>
             </section>
+
+            <aside id="transfer-panel" class="transfer-panel transfer-sheet" hidden aria-labelledby="transfer-title">
+              <div class="panel-heading transfer-heading">
+                <h2 id="transfer-title">Transfers</h2>
+                <div class="heading-actions"><button id="clear-transfers" class="icon-button" type="button" aria-label="Clear finished transfers" data-icon="trash"></button><button id="transfer-close" class="icon-button" type="button" aria-label="Close transfers" data-icon="x"></button></div>
+              </div>
+              <div class="transfer-sheet-content">
+                <progress id="transfer-progress" class="transfer-overall-progress" max="1" value="0" aria-label="Overall upload progress"></progress>
+                <div class="transfer-overview">
+                  <div class="transfer-overview-primary"><strong id="transfer-percent">0%</strong><span id="transfer-eta">ETA —</span><span id="transfer-speed">—/s</span></div>
+                  <div class="transfer-overview-secondary"><span id="transfer-volume">0 B of 0 B</span><span id="transfer-counts">0 files</span></div>
+                </div>
+                <div id="transfer-filter" class="tabs transfer-tabs" role="tablist" aria-label="Show transfers">
+                  <span class="tab" role="tab" aria-selected="true" aria-controls="transfer-list" data-tab-value="current">Current <span class="tab-count" data-transfer-count="current">(0)</span></span>
+                  <span class="tab" role="tab" aria-selected="false" aria-controls="transfer-list" data-tab-value="failed" tabindex="-1">Failed <span class="tab-count" data-transfer-count="failed">(0)</span></span>
+                  <span class="tab" role="tab" aria-selected="false" aria-controls="transfer-list" data-tab-value="complete" tabindex="-1">Complete <span class="tab-count" data-transfer-count="complete">(0)</span></span>
+                  <span class="tab" role="tab" aria-selected="false" aria-controls="transfer-list" data-tab-value="all" tabindex="-1">All <span class="tab-count" data-transfer-count="all">(0)</span></span>
+                </div>
+                <div class="transfer-tools">
+                  <label class="transfer-search" for="transfer-search"><span class="visually-hidden">Filter transfers</span><input id="transfer-search" type="search" placeholder="Filter transfers" autocomplete="off"></label>
+                  <button id="retry-failed-transfers" class="icon-button" type="button" aria-label="Retry failed transfers" data-icon="refresh" disabled></button>
+                </div>
+                <ul id="transfer-list" class="transfer-list" role="tabpanel" aria-label="Transfer items"></ul>
+                <div id="transfer-live" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+              </div>
+            </aside>
           </div>
         </div>
       </main>

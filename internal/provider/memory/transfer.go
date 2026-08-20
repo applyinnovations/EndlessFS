@@ -104,7 +104,7 @@ func (p *Provider) CreateUpload(ctx context.Context, scope domain.Scope, request
 	p.uploads[uploadID] = &upload{
 		id: uploadID, scope: scope, requestedPath: request.Path, path: path, size: request.Size, mediaType: mediaType,
 		conflict: conflict, expectedVersion: request.ExpectedVersion, targetExisted: targetExisted,
-		protocol: protocol, expiresAt: expiresAt, materialized: true, hasher: sha256.New(), capabilityHash: hash,
+		protocol: protocol, expiresAt: expiresAt, materialized: true, hasher: sha256.New(), state: domain.UploadStateActive, capabilityHash: hash,
 	}
 	p.uploadTokens[hash] = uploadID
 	headers := map[string]string{"Content-Type": mediaType}
@@ -131,11 +131,15 @@ func (p *Provider) UploadStatus(ctx context.Context, scope domain.Scope, uploadI
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	session, found := p.uploads[uploadID]
-	if !found || session.scope != scope || session.aborted {
+	if !found || session.scope != scope {
 		return domain.UploadStatus{}, domain.NewError(domain.ErrorNotFound, "upload not found")
 	}
+	state := session.state
+	if state == domain.UploadStateActive && !p.clock.Now().Before(session.expiresAt) {
+		state = domain.UploadStateExpired
+	}
 	return domain.UploadStatus{
-		UploadID: uploadID, Path: session.requestedPath, Protocol: session.protocol,
+		UploadID: uploadID, State: state, Path: session.requestedPath, Protocol: session.protocol,
 		ConfirmedOffset: session.offset, DeclaredSize: session.size, ExpiresAt: session.expiresAt,
 	}, nil
 }
@@ -157,7 +161,7 @@ func (p *Provider) CompleteUpload(ctx context.Context, scope domain.Scope, reque
 		return domain.Entry{}, err
 	}
 	session, found := p.uploads[request.UploadID]
-	if !found || session.scope != scope || session.aborted {
+	if !found || session.scope != scope || session.state != domain.UploadStateActive {
 		return domain.Entry{}, domain.NewError(domain.ErrorNotFound, "upload not found")
 	}
 	if !p.clock.Now().Before(session.expiresAt) {
@@ -192,7 +196,8 @@ func (p *Provider) CompleteUpload(ctx context.Context, scope domain.Scope, reque
 	}
 	p.scopeObjectsLocked(scope)[session.path.String()] = object{entry: entry, data: data, materialized: session.materialized}
 	delete(p.uploadTokens, session.capabilityHash)
-	delete(p.uploads, request.UploadID)
+	session.state = domain.UploadStateCompleted
+	session.offset = session.size
 	return entry, nil
 }
 
@@ -226,12 +231,11 @@ func (p *Provider) AbortUpload(ctx context.Context, scope domain.Scope, uploadID
 		return err
 	}
 	session, found := p.uploads[uploadID]
-	if !found || session.scope != scope {
+	if !found || session.scope != scope || session.state != domain.UploadStateActive {
 		return domain.NewError(domain.ErrorNotFound, "upload not found")
 	}
-	session.aborted = true
+	session.state = domain.UploadStateAborted
 	delete(p.uploadTokens, session.capabilityHash)
-	delete(p.uploads, uploadID)
 	return nil
 }
 
@@ -364,7 +368,7 @@ func (p *Provider) serveUpload(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	session, found := p.uploads[uploadID]
-	if !found || session.aborted {
+	if !found || session.state != domain.UploadStateActive {
 		http.NotFound(writer, request)
 		return
 	}

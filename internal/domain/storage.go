@@ -131,10 +131,22 @@ type UploadCapability struct {
 	DeclaredSize int64             `json:"declaredSize"`
 }
 
+// UploadState is the safe provider-independent lifecycle exposed by the
+// control plane. It never contains a provider upload identifier or bearer.
+type UploadState string
+
+const (
+	UploadStateActive    UploadState = "active"
+	UploadStateCompleted UploadState = "completed"
+	UploadStateAborted   UploadState = "aborted"
+	UploadStateExpired   UploadState = "expired"
+)
+
 // UploadStatus is the safe control-plane view of provider-confirmed progress.
 // It deliberately contains no capability URL or bearer material.
 type UploadStatus struct {
 	UploadID        UploadID       `json:"uploadID"`
+	State           UploadState    `json:"state"`
 	Path            UserPath       `json:"path"`
 	Protocol        UploadProtocol `json:"protocol"`
 	ConfirmedOffset int64          `json:"confirmedOffset"`

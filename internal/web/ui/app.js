@@ -11,12 +11,31 @@
     directoryRequest: 0,
     selected: new Map(),
     transfers: [],
+    transferByID: new Map(),
     transferGroups: new Map(),
     directoryPromises: new Map(),
     activeTransfers: 0,
     transferFilter: "current",
+    transferSearch: "",
     transferRenderFrame: 0,
-    transferVisibleLimits: new Map(),
+    transferStructureFrame: 0,
+    transferProjection: [],
+    transferQueueCursor: 0,
+    transferSummary: null,
+    transferVirtualStart: 0,
+    transferVirtualFrame: 0,
+    expandedTransferGroups: new Set(),
+    transferRetryTimers: new Map(),
+    transferFailureTimes: [],
+    transferCircuitOpenUntil: 0,
+    transferLedger: null,
+    transferLedgerOwner: "",
+    transferLedgerWarningShown: false,
+    transferPersistQueue: new Map(),
+    transferPersistTimer: 0,
+    transferReconnectGroup: null,
+    transferSheetOpener: null,
+    transferFixtureTimer: 0,
     themes: [],
     passkeys: [],
     shares: [],
@@ -68,9 +87,15 @@
   const maximumPreviewPolls = 14;
   const maximumViewerPreviewCacheEntries = 8;
   const maximumViewerPreviewCacheBytes = 64 << 20;
-  const maximumRenderedStandaloneTransfers = 32;
-  const maximumRenderedTransferGroups = 24;
-  const maximumRenderedGroupFiles = 20;
+  const transferLedgerDatabaseName = "endlessfs-transfer-ledger-v1";
+  const transferLedgerVersion = 1;
+  const transferVirtualWindowSize = 72;
+  const transferVirtualWindowStep = 32;
+  const transferVirtualRowHeight = 72;
+  const transferDiscoveryBatchSize = 64;
+  const transferRetryBaseDelay = 1000;
+  const transferRetryMaximumDelay = 60000;
+  const transferRetryLimit = 7;
   const transferProgressSampleWeight = 0.35;
   let toastTimer = 0;
 
@@ -125,6 +150,7 @@
     "shield-plus": ["M12.462 20.87c-.153 .047 -.307 .09 -.462 .13a12 12 0 0 1 -8.5 -15a12 12 0 0 0 8.5 -3a12 12 0 0 0 8.5 3a12 12 0 0 1 .11 6.37", "M16 19h6", "M19 16v6"],
     trash: ["M4 7l16 0", "M10 11l0 6", "M14 11l0 6", "M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2 -2l1 -12", "M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3"],
     "trash-x": ["M4 7h16", "M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2 -2l1 -12", "M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3", "M10 12l4 4m0 -4l-4 4"],
+    transfer: ["M20 10h-16l5 -5", "M4 14h16l-5 5"],
     upload: ["M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2", "M7 9l5 -5l5 5", "M12 4l0 12"],
     "user-check": ["M8 7a4 4 0 1 0 8 0a4 4 0 0 0 -8 0", "M6 21v-2a4 4 0 0 1 4 -4h4", "M15 19l2 2l4 -4"],
     "user-off": ["M8.18 8.189a4.01 4.01 0 0 0 2.616 2.627m3.507 -.545a4 4 0 1 0 -5.59 -5.552", "M6 21v-2a4 4 0 0 1 4 -4h4c.412 0 .81 .062 1.183 .178m2.633 2.618c.12 .38 .184 .785 .184 1.204v2", "M3 3l18 18"],
@@ -159,6 +185,7 @@
   let actionTooltipTarget = null;
   function hideActionTooltip(target = null) {
     if (target && target !== actionTooltipTarget) return;
+    if (actionTooltipTarget) actionTooltipTarget.classList.remove("tooltip-anchor");
     actionTooltipTarget = null;
     const tooltip = byID("action-tooltip");
     tooltip.hidden = true;
@@ -177,21 +204,9 @@
     if (!label || target.disabled) return;
     const tooltip = activeActionTooltip();
     actionTooltipTarget = target;
+    target.classList.add("tooltip-anchor");
     tooltip.textContent = label;
-    tooltip.style.visibility = "hidden";
     tooltip.hidden = false;
-    const targetRect = target.getBoundingClientRect();
-    const tooltipRect = tooltip.getBoundingClientRect();
-    const inset = 6;
-    const gap = 6;
-    const centered = targetRect.left + ((targetRect.width - tooltipRect.width) / 2);
-    const left = Math.max(inset, Math.min(centered, window.innerWidth - tooltipRect.width - inset));
-    let top = targetRect.top - tooltipRect.height - gap;
-    if (top < inset) top = targetRect.bottom + gap;
-    top = Math.max(inset, Math.min(top, window.innerHeight - tooltipRect.height - inset));
-    tooltip.style.left = `${Math.round(left)}px`;
-    tooltip.style.top = `${Math.round(top)}px`;
-    tooltip.style.visibility = "visible";
   }
   const tooltipTarget = (event) => event.target instanceof Element ? event.target.closest("[data-tooltip]") : null;
   function wireActionTooltips() {
@@ -568,9 +583,32 @@
   }
 
   async function logout() {
+    const suspendedTransfers = state.transfers.filter((transfer) => !["complete", "cancelled"].includes(transfer.state));
+    for (const transfer of suspendedTransfers) {
+      transfer.suspendedByLogout = true;
+      if (transfer.controller) transfer.controller.abort();
+      window.clearTimeout(state.transferRetryTimers.get(transfer.id));
+      state.transferRetryTimers.delete(transfer.id);
+      transitionTransfer(transfer, "paused", "Paused on this device.", "signed_out");
+    }
+    await Promise.all([
+      ...suspendedTransfers.map(persistTransferItem),
+      ...[...state.transferGroups.values()].map(persistTransferGroup),
+    ]);
     try { await api("/api/v1/logout", { method: "POST", body: {} }); } catch { /* local transition still clears the UI */ }
     state.user = null;
     state.selected.clear();
+    state.transfers = [];
+    state.transferByID.clear();
+    state.transferGroups.clear();
+    state.transferProjection = [];
+    state.transferQueueCursor = 0;
+    state.transferLedgerOwner = "";
+    state.transferPersistQueue.clear();
+    window.clearTimeout(state.transferPersistTimer);
+    state.transferPersistTimer = 0;
+    window.clearInterval(state.transferFixtureTimer);
+    state.transferFixtureTimer = 0;
     releaseViewerObjectURL();
     clearViewerPreviewCache();
     cleanupGridMedia(new Set());
@@ -1257,6 +1295,269 @@
     } catch (error) { announce(friendlyError(error), true); }
   }
 
+  function transferFileSize(transfer) {
+    return Number.isSafeInteger(transfer.size) ? transfer.size : transfer.file instanceof File ? transfer.file.size : 0;
+  }
+
+  function transferSourceAvailable(transfer) {
+    return transfer.file instanceof File || transfer.fixture === true;
+  }
+
+  function transferMediaType(transfer) {
+    if (transfer.mediaType) return transfer.mediaType;
+    if (transfer.file instanceof File) return uploadMediaType(transfer.file, transfer.name);
+    return "application/octet-stream";
+  }
+
+  function ledgerRequest(request) {
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("Transfer ledger request failed."));
+    });
+  }
+
+  function ledgerTransactionDone(transaction) {
+    return new Promise((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onabort = () => reject(transaction.error || new Error("Transfer ledger transaction was aborted."));
+      transaction.onerror = () => reject(transaction.error || new Error("Transfer ledger transaction failed."));
+    });
+  }
+
+  async function openTransferLedger() {
+    if (state.transferLedger) return state.transferLedger;
+    if (!("indexedDB" in window)) return null;
+    const request = indexedDB.open(transferLedgerDatabaseName, transferLedgerVersion);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      for (const storeName of ["groups", "items", "sources"]) {
+        const store = database.objectStoreNames.contains(storeName)
+          ? request.transaction.objectStore(storeName)
+          : database.createObjectStore(storeName, { keyPath: "key" });
+        if (!store.indexNames.contains("ownerID")) store.createIndex("ownerID", "ownerID", { unique: false });
+      }
+    };
+    state.transferLedger = await ledgerRequest(request);
+    state.transferLedger.addEventListener("versionchange", () => {
+      state.transferLedger.close();
+      state.transferLedger = null;
+    });
+    return state.transferLedger;
+  }
+
+  function warnTransferLedger(message) {
+    if (state.transferLedgerWarningShown) return;
+    state.transferLedgerWarningShown = true;
+    showToast(message, "warning");
+  }
+
+  function transferLedgerKey(ownerID, id) {
+    return `${ownerID}:${id}`;
+  }
+
+  function transferLedgerItem(transfer) {
+    const ownerID = state.transferLedgerOwner;
+    return {
+      key: transferLedgerKey(ownerID, transfer.id), ownerID, id: transfer.id,
+      groupID: transfer.groupID || "", name: transfer.name, directory: transfer.directory,
+      baseDirectory: transfer.baseDirectory, relativeDirectory: transfer.relativeDirectory || "",
+      relativePath: transfer.relativePath, size: transferFileSize(transfer), mediaType: transferMediaType(transfer),
+      lastModified: Number.isSafeInteger(transfer.lastModified) ? transfer.lastModified : 0,
+      state: transfer.state, confirmed: Math.max(0, transfer.confirmed || 0), uploadID: transfer.uploadID || "",
+      retryCount: Math.max(0, transfer.retryCount || 0), nextRetryAt: Math.max(0, transfer.nextRetryAt || 0),
+      errorCode: String(transfer.errorCode || "").slice(0, 80), error: String(transfer.error || "").slice(0, 240),
+      createdAt: transfer.createdAt || Date.now(), updatedAt: Date.now(),
+    };
+  }
+
+  function transferLedgerGroup(group) {
+    const ownerID = state.transferLedgerOwner;
+    return {
+      key: transferLedgerKey(ownerID, group.id), ownerID, id: group.id, name: group.name,
+      baseDirectory: group.baseDirectory, directories: [...(group.directories || [])], transferIDs: [...group.transferIDs],
+      totalSize: group.totalSize || 0, state: group.state, error: String(group.error || "").slice(0, 240),
+      cancelled: Boolean(group.cancelled), discoveryDone: group.discoveryDone !== false,
+      createdAt: group.createdAt || Date.now(), updatedAt: Date.now(),
+    };
+  }
+
+  async function persistTransferItem(transfer) {
+    if (transfer.fixture || !state.transferLedgerOwner) return;
+    try {
+      const database = await openTransferLedger();
+      if (!database) return;
+      const transaction = database.transaction("items", "readwrite");
+      transaction.objectStore("items").put(transferLedgerItem(transfer));
+      await ledgerTransactionDone(transaction);
+    } catch {
+      warnTransferLedger("Transfer history could not be saved on this device.");
+    }
+  }
+
+  async function persistTransferGroup(group) {
+    if (group.fixture || !state.transferLedgerOwner) return;
+    try {
+      const database = await openTransferLedger();
+      if (!database) return;
+      const transaction = database.transaction("groups", "readwrite");
+      transaction.objectStore("groups").put(transferLedgerGroup(group));
+      await ledgerTransactionDone(transaction);
+    } catch {
+      warnTransferLedger("Transfer history could not be saved on this device.");
+    }
+  }
+
+  function queueTransferPersistence(transfer) {
+    if (transfer.fixture || !state.transferLedgerOwner) return;
+    state.transferPersistQueue.set(transfer.id, transfer);
+    if (state.transferPersistTimer) return;
+    state.transferPersistTimer = window.setTimeout(async () => {
+      state.transferPersistTimer = 0;
+      const pending = [...state.transferPersistQueue.values()];
+      state.transferPersistQueue.clear();
+      await Promise.all(pending.map(persistTransferItem));
+    }, 500);
+  }
+
+  async function persistTransferSource(transfer, handle) {
+    if (!handle || transfer.fixture || !state.transferLedgerOwner) return;
+    try {
+      const database = await openTransferLedger();
+      if (!database) return;
+      const transaction = database.transaction("sources", "readwrite");
+      transaction.objectStore("sources").put({ key: transferLedgerKey(state.transferLedgerOwner, transfer.id), ownerID: state.transferLedgerOwner, handle });
+      await ledgerTransactionDone(transaction);
+    } catch {
+      // Some browsers expose handles without allowing them to be cloned. The
+      // ledger remains useful and the source can be reconnected explicitly.
+    }
+  }
+
+  async function transferLedgerRecords(storeName, ownerID) {
+    const database = await openTransferLedger();
+    if (!database) return [];
+    const transaction = database.transaction(storeName, "readonly");
+    const records = await ledgerRequest(transaction.objectStore(storeName).index("ownerID").getAll(IDBKeyRange.only(ownerID)));
+    await ledgerTransactionDone(transaction);
+    return records;
+  }
+
+  async function restoreTransferSource(transfer, sourceRecords) {
+    const source = sourceRecords.get(transfer.id);
+    if (!source || !source.handle || typeof source.handle.queryPermission !== "function") return false;
+    transfer.sourceHandle = source.handle;
+    try {
+      if (await source.handle.queryPermission({ mode: "read" }) !== "granted") return false;
+      const file = await source.handle.getFile();
+      if (file.size !== transferFileSize(transfer) || (transfer.lastModified && file.lastModified !== transfer.lastModified)) return false;
+      transfer.file = file;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function reconcileRestoredTransfer(transfer) {
+    if (["complete", "cancelled"].includes(transfer.state)) return;
+    if (transfer.uploadID) {
+      try {
+        const status = await api(`/api/v1/uploads/${encodeURIComponent(transfer.uploadID)}`);
+        transfer.confirmed = Math.max(transfer.confirmed, Number(status.confirmedOffset) || 0);
+        if (status.state === "completed") {
+          transfer.state = "complete";
+          transfer.confirmed = transferFileSize(transfer);
+          transfer.error = "";
+          return;
+        }
+        if (status.state === "aborted" || status.state === "expired") {
+          transfer.state = "failed";
+          transfer.errorCode = status.state;
+          transfer.error = status.state === "expired" ? "Upload expired. Reconnect the source to start again." : "Upload was cancelled.";
+          return;
+        }
+      } catch (error) {
+        if (!(error instanceof APIError) || error.status !== 404) {
+          transfer.state = navigator.onLine ? "retry-wait" : "paused";
+          transfer.error = "Waiting to reconcile upload state.";
+          return;
+        }
+      }
+    }
+    if (!(transfer.file instanceof File)) {
+      transfer.state = "needs-source";
+      transfer.errorCode = "source_required";
+      transfer.error = "Reconnect the source to continue.";
+    } else if (transfer.state === "retry-wait" && transfer.nextRetryAt > Date.now()) {
+      state.transferRetryTimers.set(transfer.id, window.setTimeout(() => {
+        state.transferRetryTimers.delete(transfer.id);
+        if (transfer.state !== "retry-wait") return;
+        transitionTransfer(transfer, "queued");
+        renderTransfers();
+        pumpTransfers();
+      }, transfer.nextRetryAt - Date.now()));
+    } else if (transfer.state === "paused" && navigator.onLine) {
+      transfer.state = "queued";
+      transfer.error = "";
+    } else if (!["failed", "retry-wait"].includes(transfer.state)) {
+      transfer.state = "queued";
+      transfer.error = "";
+    }
+  }
+
+  async function restoreTransferLedger() {
+    if (!state.user || !state.user.userID || (state.config && state.config.localFixture && new URLSearchParams(location.search).get("fixture") === "transfers")) return;
+    state.transferLedgerOwner = state.user.userID;
+    try {
+      const [itemRecords, groupRecords, storedSources] = await Promise.all([
+        transferLedgerRecords("items", state.transferLedgerOwner),
+        transferLedgerRecords("groups", state.transferLedgerOwner),
+        transferLedgerRecords("sources", state.transferLedgerOwner),
+      ]);
+      const sourceRecords = new Map(storedSources.map((source) => [source.key.slice(source.key.indexOf(":") + 1), source]));
+      state.transfers = itemRecords.map((record) => ({
+        ...record, file: null, controller: null, speedBps: 0, lastProgressAt: 0,
+        lastProgressBytes: record.confirmed || 0, recoveryFailures: 0,
+      }));
+      state.transferByID = new Map(state.transfers.map((transfer) => [transfer.id, transfer]));
+      state.transferGroups = new Map(groupRecords.map((record) => [record.id, {
+        ...record, refreshed: record.state === "complete", failureAnnounced: record.state === "failed",
+      }]));
+      let nextIndex = 0;
+      const workers = Array.from({ length: Math.min(4, state.transfers.length) }, async () => {
+        while (nextIndex < state.transfers.length) {
+          const transfer = state.transfers[nextIndex];
+          nextIndex += 1;
+          await restoreTransferSource(transfer, sourceRecords);
+          await reconcileRestoredTransfer(transfer);
+          queueTransferPersistence(transfer);
+        }
+      });
+      await Promise.all(workers);
+      for (const group of state.transferGroups.values()) updateTransferGroup(group.id, false);
+      if (state.transfers.length) {
+        renderTransfers();
+        setTransferSheetOpen(false);
+        pumpTransfers();
+      }
+    } catch {
+      warnTransferLedger("Transfer history could not be restored on this device.");
+    }
+  }
+
+  async function deleteTransferLedgerEntries(itemIDs, groupIDs) {
+    if (!state.transferLedgerOwner) return;
+    const database = await openTransferLedger();
+    if (!database) return;
+    const transaction = database.transaction(["items", "groups", "sources"], "readwrite");
+    for (const id of itemIDs) {
+      const key = transferLedgerKey(state.transferLedgerOwner, id);
+      transaction.objectStore("items").delete(key);
+      transaction.objectStore("sources").delete(key);
+    }
+    for (const id of groupIDs) transaction.objectStore("groups").delete(transferLedgerKey(state.transferLedgerOwner, id));
+    await ledgerTransactionDone(transaction);
+  }
+
   function validUploadComponents(relative) {
     if (typeof relative !== "string" || !relative) return null;
     const components = relative.split("/");
@@ -1264,13 +1565,41 @@
     return components;
   }
 
-  function queueFiles(files, options = {}) {
+  function setTransferSheetOpen(open, focus = false) {
+    const panel = byID("transfer-panel");
+    const launcher = byID("open-transfers");
+    const headerStatus = byID("header-transfer-status");
+    const available = state.transfers.length > 0 || state.transferGroups.size > 0;
+    const shouldOpen = available && open;
+    if (shouldOpen && focus) state.transferSheetOpener = document.activeElement;
+    panel.hidden = !shouldOpen;
+    headerStatus.hidden = !available;
+    launcher.setAttribute("aria-expanded", String(shouldOpen));
+    const modal = shouldOpen && matchMedia("(max-width: 760px)").matches;
+    for (const view of byID("authenticated-view").querySelectorAll(".view")) view.inert = modal;
+    document.querySelector(".app-header").inert = modal;
+    if (focus && shouldOpen) byID("transfer-close").focus();
+    if (focus && !shouldOpen && state.transferSheetOpener && state.transferSheetOpener.focus) state.transferSheetOpener.focus();
+  }
+
+  async function queueFiles(files, options = {}) {
     const baseDirectory = state.currentDirectory;
     const inputs = Array.from(files).map((value) => value instanceof File ? { file: value, relativePath: value.webkitRelativePath || value.name } : value)
       .filter((value) => value && value.file instanceof File && typeof value.relativePath === "string");
-    const groupID = options.groupName || inputs.length > 1 ? idempotencyKey() : "";
+    const groupID = options.groupID || (options.groupName || inputs.length > 1 ? idempotencyKey() : "");
     const queued = [];
-    for (const input of inputs) {
+    let group = groupID ? state.transferGroups.get(groupID) : null;
+    if (groupID && !group) {
+      group = {
+        id: groupID, name: options.groupName || `${inputs.length} files`, baseDirectory, directories: [], transferIDs: [],
+        totalSize: 0, state: "queued", error: "", refreshed: false, cancelled: false, failureAnnounced: false,
+        discoveryDone: options.discoveryDone !== false, createdAt: Date.now(),
+      };
+      state.transferGroups.set(groupID, group);
+    }
+    const discoveredDirectories = Array.from(new Set(options.directories || [])).filter((relative) => validUploadComponents(relative));
+    if (group) group.directories = Array.from(new Set([...(group.directories || []), ...discoveredDirectories]));
+    for (const [index, input] of inputs.entries()) {
       const components = validUploadComponents(input.relativePath);
       if (!components) {
         announce(`Skipped an invalid upload path for ${input.file.name}.`, true);
@@ -1282,33 +1611,43 @@
       queued.push({
         id: idempotencyKey(), file: input.file, name, directory, baseDirectory, relativeDirectory,
         relativePath: input.relativePath, groupID, state: "queued", confirmed: 0, error: "", controller: null, uploadID: "",
-        speedBps: 0, lastProgressAt: 0, lastProgressBytes: 0, recoveryFailures: 0,
+        size: input.file.size, mediaType: uploadMediaType(input.file, name), lastModified: input.file.lastModified,
+        sourceHandle: input.sourceHandle || null, speedBps: 0, lastProgressAt: 0, lastProgressBytes: 0,
+        recoveryFailures: 0, retryCount: 0, nextRetryAt: 0, errorCode: "", createdAt: Date.now(),
       });
+      const transfer = queued[queued.length - 1];
+      state.transfers.push(transfer);
+      state.transferByID.set(transfer.id, transfer);
+      if (group) {
+        group.transferIDs.push(transfer.id);
+        group.totalSize += transferFileSize(transfer);
+      }
+      queueTransferPersistence(transfer);
+      if (transfer.sourceHandle) persistTransferSource(transfer, transfer.sourceHandle);
+      if ((index + 1) % transferDiscoveryBatchSize === 0) {
+        if (group) persistTransferGroup(group);
+        rebuildTransferProjection();
+        renderTransfers();
+        pumpTransfers();
+        await wait(0);
+      }
     }
-    const directories = Array.from(new Set(options.directories || [])).filter((relative) => validUploadComponents(relative));
-    if (!queued.length && !directories.length) return;
-    state.transfers.push(...queued);
+    if (!queued.length && !discoveredDirectories.length) return groupID;
     state.transferFilter = "current";
-    byID("transfer-filter").value = "current";
-    state.transferVisibleLimits.clear();
-    if (groupID) {
-      const group = {
-        id: groupID, name: options.groupName || `${queued.length} files`, baseDirectory, directories, transferIDs: queued.map((transfer) => transfer.id),
-        totalSize: queued.reduce((total, transfer) => total + transfer.file.size, 0), state: "preparing", error: "", refreshed: false, cancelled: false, failureAnnounced: false,
-      };
-      state.transferGroups.set(groupID, group);
-      prepareTransferGroup(group);
+    if (group) {
+      group.discoveryDone = options.discoveryDone !== false;
+      group.state = group.transferIDs.length ? "queued" : "preparing";
+      await persistTransferGroup(group);
+      if (!group.transferIDs.length && group.discoveryDone) prepareTransferGroup(group);
     }
-    const panel = byID("transfer-panel");
-    panel.hidden = false;
-    panel.classList.remove("collapsed");
-    byID("transfer-toggle").setAttribute("aria-expanded", "true");
-    setIconControl(byID("transfer-toggle"), "chevron-down", "Collapse transfers");
+    setTransferSheetOpen(true);
+    rebuildTransferProjection();
     renderTransfers();
-    if (!groupID) pumpTransfers();
+    pumpTransfers();
+    return groupID;
   }
 
-  function queueFolderFiles(files) {
+  async function queueFolderFiles(files) {
     const groups = new Map();
     const looseFiles = [];
     for (const file of Array.from(files).filter((value) => value instanceof File)) {
@@ -1327,8 +1666,8 @@
       group.files.push({ file, relativePath });
       for (let length = 1; length < components.length; length += 1) group.directories.add(components.slice(0, length).join("/"));
     }
-    for (const [groupName, group] of groups) queueFiles(group.files, { groupName, directories: [...group.directories] });
-    if (looseFiles.length) queueFiles(looseFiles);
+    for (const [groupName, group] of groups) await queueFiles(group.files, { groupName, directories: [...group.directories] });
+    if (looseFiles.length) await queueFiles(looseFiles);
   }
 
   function readLegacyFile(entry) {
@@ -1339,31 +1678,61 @@
     return new Promise((resolve, reject) => reader.readEntries(resolve, reject));
   }
 
-  async function collectLegacyEntry(entry, parent, files, directories) {
+  async function discoverLegacyEntry(entry, parent, onFile, onDirectory) {
     const relativePath = parent ? `${parent}/${entry.name}` : entry.name;
     if (entry.isFile) {
-      files.push({ file: await readLegacyFile(entry), relativePath });
+      await onFile({ file: await readLegacyFile(entry), relativePath });
       return;
     }
     if (!entry.isDirectory) return;
-    directories.push(relativePath);
+    await onDirectory(relativePath);
     const reader = entry.createReader();
     while (true) {
       const entries = await readLegacyDirectory(reader);
       if (!entries.length) break;
-      for (const child of entries) await collectLegacyEntry(child, relativePath, files, directories);
+      for (const child of entries) await discoverLegacyEntry(child, relativePath, onFile, onDirectory);
     }
   }
 
-  async function collectFileSystemHandle(handle, parent, files, directories) {
+  async function discoverFileSystemHandle(handle, parent, onFile, onDirectory) {
     const relativePath = parent ? `${parent}/${handle.name}` : handle.name;
     if (handle.kind === "file") {
-      files.push({ file: await handle.getFile(), relativePath });
+      await onFile({ file: await handle.getFile(), relativePath, sourceHandle: handle });
       return;
     }
     if (handle.kind !== "directory") return;
-    directories.push(relativePath);
-    for await (const child of handle.values()) await collectFileSystemHandle(child, relativePath, files, directories);
+    await onDirectory(relativePath);
+    for await (const child of handle.values()) await discoverFileSystemHandle(child, relativePath, onFile, onDirectory);
+  }
+
+  async function discoverTransferGroup(name, discover) {
+    const groupID = idempotencyKey();
+    const files = [];
+    const directories = [];
+    const flush = async () => {
+      if (!files.length && !directories.length) return;
+      const pendingFiles = files.splice(0, files.length);
+      const pendingDirectories = directories.splice(0, directories.length);
+      await queueFiles(pendingFiles, { groupID, groupName: name, directories: pendingDirectories, discoveryDone: false });
+    };
+    await discover(async (input) => {
+      files.push(input);
+      if (files.length >= transferDiscoveryBatchSize) await flush();
+    }, async (directory) => {
+      directories.push(directory);
+      if (directories.length >= transferDiscoveryBatchSize) await flush();
+    });
+    await flush();
+    const group = state.transferGroups.get(groupID);
+    if (group) {
+      group.discoveryDone = true;
+      if (!group.transferIDs.length) await prepareTransferGroup(group);
+      else updateTransferGroup(groupID, false);
+      await persistTransferGroup(group);
+      rebuildTransferProjection();
+      renderTransfers();
+      pumpTransfers();
+    }
   }
 
   async function queueDroppedItems(dataTransfer) {
@@ -1374,33 +1743,34 @@
     }
     const looseFiles = [];
     let usedEntryAPI = false;
-    for (const item of items) {
+    const handlePromises = items.map((item) => typeof item.getAsFileSystemHandle === "function" ? item.getAsFileSystemHandle() : Promise.resolve(null));
+    for (const [index, item] of items.entries()) {
+      const handle = await handlePromises[index];
+      if (handle) {
+        usedEntryAPI = true;
+        if (handle.kind === "directory") {
+          await discoverTransferGroup(handle.name, (onFile, onDirectory) => discoverFileSystemHandle(handle, "", onFile, onDirectory));
+        } else {
+          await discoverFileSystemHandle(handle, "", async (input) => { looseFiles.push(input); }, async () => {});
+        }
+        continue;
+      }
       const getEntry = typeof item.getAsEntry === "function" ? item.getAsEntry.bind(item) : typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry.bind(item) : null;
       const legacyEntry = getEntry ? getEntry() : null;
       if (legacyEntry) {
         usedEntryAPI = true;
-        const files = [];
-        const directories = [];
-        await collectLegacyEntry(legacyEntry, "", files, directories);
-        if (legacyEntry.isDirectory) queueFiles(files, { groupName: legacyEntry.name, directories });
-        else looseFiles.push(...files);
-        continue;
-      }
-      const handle = typeof item.getAsFileSystemHandle === "function" ? await item.getAsFileSystemHandle() : null;
-      if (handle) {
-        usedEntryAPI = true;
-        const files = [];
-        const directories = [];
-        await collectFileSystemHandle(handle, "", files, directories);
-        if (handle.kind === "directory") queueFiles(files, { groupName: handle.name, directories });
-        else looseFiles.push(...files);
+        if (legacyEntry.isDirectory) {
+          await discoverTransferGroup(legacyEntry.name, (onFile, onDirectory) => discoverLegacyEntry(legacyEntry, "", onFile, onDirectory));
+        } else {
+          await discoverLegacyEntry(legacyEntry, "", async (input) => { looseFiles.push(input); }, async () => {});
+        }
         continue;
       }
       const file = typeof item.getAsFile === "function" ? item.getAsFile() : null;
       if (file) looseFiles.push({ file, relativePath: file.name });
     }
-    if (looseFiles.length) queueFiles(looseFiles);
-    if (!usedEntryAPI && !looseFiles.length) queueFiles(dataTransfer.files || []);
+    if (looseFiles.length) await queueFiles(looseFiles);
+    if (!usedEntryAPI && !looseFiles.length) await queueFiles(dataTransfer.files || []);
   }
 
   async function ensureDirectory(path) {
@@ -1467,8 +1837,9 @@
   function automaticTransferConcurrency() {
     const configuredMaximum = Number(state.config && state.config.maximumTransferConcurrency);
     const maximum = Math.max(1, Math.min(8, Number.isFinite(configuredMaximum) ? configuredMaximum : 8));
-    const pending = state.transfers.filter((transfer) => ["queued", "preparing", "uploading"].includes(transfer.state));
-    if (pending.length <= 1) return 1;
+    const summary = state.transferSummary || aggregateTransferSummary(state.transfers);
+    const pendingCount = summary.counts.queued + summary.counts.preparing + summary.counts.uploading;
+    if (pendingCount <= 1) return 1;
 
     const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
     let networkCeiling = maximum;
@@ -1486,27 +1857,28 @@
     const fallback = Number(state.config && state.config.defaultTransferConcurrency) || 4;
     const hardwareCeiling = Number.isFinite(hardware) && hardware > 0 ? Math.max(2, Math.ceil(hardware / 2)) : fallback;
     const ceiling = Math.max(1, Math.min(maximum, networkCeiling, hardwareCeiling));
-    const averageSize = pending.reduce((total, transfer) => total + transfer.file.size, 0) / pending.length;
+    const averageSize = summary.remainingBytes / Math.max(1, summary.active + summary.pending);
     let desired = Math.min(ceiling, 4);
-    if (averageSize <= 256 * 1024) desired = Math.min(ceiling, pending.length > 500 ? ceiling : 6);
+    if (averageSize <= 256 * 1024) desired = Math.min(ceiling, pendingCount > 500 ? ceiling : 6);
     else if (averageSize >= 256 * 1024 * 1024) desired = Math.min(ceiling, 2);
     else if (averageSize >= 64 * 1024 * 1024) desired = Math.min(ceiling, 3);
 
-    const active = pending.filter((transfer) => ["preparing", "uploading"].includes(transfer.state));
-    const recovering = active.filter((transfer) => transfer.recoveryFailures > 0).length;
-    if (active.length && recovering >= Math.ceil(active.length / 2)) desired = Math.min(desired, Math.max(1, Math.floor(active.length / 2)));
-    return Math.max(1, Math.min(desired, pending.length));
+    const recentFailures = state.transferFailureTimes.filter((value) => Date.now() - value < 10000).length;
+    if (summary.active && recentFailures >= Math.ceil(summary.active / 2)) desired = Math.min(desired, Math.max(1, Math.floor(summary.active / 2)));
+    return Math.max(1, Math.min(desired, pendingCount));
   }
 
   function beginTransferMeasurement(transfer) {
     transfer.speedBps = 0;
-    transfer.lastProgressBytes = Math.min(transfer.confirmed, transfer.file.size);
+    transfer.lastProgressBytes = Math.min(transfer.confirmed, transferFileSize(transfer));
     transfer.lastProgressAt = performance.now();
     transfer.recoveryFailures = 0;
   }
 
   function recordTransferProgress(transfer, confirmed) {
-    const next = Math.max(transfer.confirmed, Math.min(confirmed, transfer.file.size));
+    const priorConfirmed = transfer.confirmed;
+    const priorSpeed = transfer.speedBps;
+    const next = Math.max(transfer.confirmed, Math.min(confirmed, transferFileSize(transfer)));
     const now = performance.now();
     const elapsed = now - transfer.lastProgressAt;
     const transferred = next - transfer.lastProgressBytes;
@@ -1519,29 +1891,52 @@
     transfer.confirmed = next;
     transfer.lastProgressBytes = next;
     transfer.lastProgressAt = now;
+    updateAggregateProgress(state.transferSummary, transfer, priorConfirmed, priorSpeed);
+    updateAggregateProgress(state.transferGroups.get(transfer.groupID)?.transferSummary, transfer, priorConfirmed, priorSpeed);
+    queueTransferPersistence(transfer);
   }
 
   function scheduleTransferRender() {
     if (state.transferRenderFrame) return;
     state.transferRenderFrame = requestAnimationFrame(() => {
       state.transferRenderFrame = 0;
+      renderTransferProgress();
+    });
+  }
+
+  function scheduleTransferStructureRender() {
+    if (state.transferStructureFrame) return;
+    state.transferStructureFrame = requestAnimationFrame(() => {
+      state.transferStructureFrame = 0;
       renderTransfers();
     });
   }
 
   function pumpTransfers() {
+    if (!navigator.onLine) return;
     const concurrency = automaticTransferConcurrency();
     while (state.activeTransfers < concurrency) {
-      const transfer = state.transfers.find((item) => item.state === "queued" && (!item.groupID || state.transferGroups.get(item.groupID)?.state !== "preparing"));
+      const transfer = nextQueuedTransfer();
       if (!transfer) break;
       state.activeTransfers += 1;
       uploadTransfer(transfer).finally(() => {
         state.activeTransfers -= 1;
         updateTransferGroup(transfer.groupID);
-        renderTransfers();
+        scheduleTransferStructureRender();
         pumpTransfers();
       });
     }
+  }
+
+  function nextQueuedTransfer() {
+    const count = state.transfers.length;
+    for (let checked = 0; checked < count; checked += 1) {
+      const index = state.transferQueueCursor % count;
+      state.transferQueueCursor = (index + 1) % count;
+      const transfer = state.transfers[index];
+      if (transfer.state === "queued" && transfer.file instanceof File && (!transfer.groupID || state.transferGroups.get(transfer.groupID)?.state !== "preparing")) return transfer;
+    }
+    return null;
   }
 
   function uploadMediaType(file, name) {
@@ -1554,36 +1949,121 @@
     })[extension] || "application/octet-stream";
   }
 
-  async function uploadTransfer(transfer) {
-    transfer.state = "preparing";
-    transfer.error = "";
-    transfer.controller = new AbortController();
-    updateTransferGroup(transfer.groupID);
-    renderTransfers();
-    try {
-      if (!transfer.groupID) await ensureDirectories(transfer.baseDirectory, transfer.relativeDirectory);
-      const mediaType = uploadMediaType(transfer.file, transfer.name);
-      const capability = await api("/api/v1/uploads", { method: "POST", headers: { "Idempotency-Key": transfer.id }, body: { path: transfer.directory, name: transfer.name, size: transfer.file.size, mediaType, conflict: "rename", resumable: true }, signal: transfer.controller.signal });
-      transfer.uploadID = capability.uploadID;
-      transfer.state = "uploading";
-      beginTransferMeasurement(transfer);
-      updateTransferGroup(transfer.groupID);
+  function transitionTransfer(transfer, nextState, error = "", errorCode = "") {
+    const priorState = transfer.state;
+    const priorSpeed = transfer.speedBps;
+    transfer.state = nextState;
+    transfer.error = String(error || "").slice(0, 240);
+    transfer.errorCode = String(errorCode || "").slice(0, 80);
+    if (nextState !== "uploading") transfer.speedBps = 0;
+    updateAggregateState(state.transferSummary, transfer, priorState, nextState, priorSpeed);
+    updateAggregateState(state.transferGroups.get(transfer.groupID)?.transferSummary, transfer, priorState, nextState, priorSpeed);
+    queueTransferPersistence(transfer);
+    updateTransferGroup(transfer.groupID, false);
+  }
+
+  function transferFailureIsRetryable(error) {
+    if (!navigator.onLine) return true;
+    if (error instanceof APIError) return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+    return error instanceof TypeError || (error && error.name === "NetworkError");
+  }
+
+  function transferRetryDelay(transfer) {
+    const exponential = Math.min(transferRetryMaximumDelay, transferRetryBaseDelay * (2 ** Math.max(0, transfer.retryCount - 1)));
+    const jitter = Math.floor(Math.random() * exponential);
+    return Math.max(transferRetryBaseDelay, jitter);
+  }
+
+  function noteTransferFailure() {
+    const now = Date.now();
+    state.transferFailureTimes = state.transferFailureTimes.filter((value) => now - value < 10000);
+    state.transferFailureTimes.push(now);
+    if (state.transferFailureTimes.length >= 3) state.transferCircuitOpenUntil = Math.max(state.transferCircuitOpenUntil, now + 5000);
+  }
+
+  function scheduleTransferRetry(transfer, error) {
+    if (!navigator.onLine) {
+      transitionTransfer(transfer, "paused", "Waiting for a network connection.", "offline");
+      return;
+    }
+    transfer.retryCount = (transfer.retryCount || 0) + 1;
+    if (transfer.retryCount > transferRetryLimit) {
+      transitionTransfer(transfer, "failed", friendlyError(error, "Upload could not be resumed automatically."), "retry_exhausted");
+      return;
+    }
+    noteTransferFailure();
+    const delay = Math.max(transferRetryDelay(transfer), state.transferCircuitOpenUntil - Date.now());
+    transfer.nextRetryAt = Date.now() + delay;
+    transitionTransfer(transfer, "retry-wait", "Retrying automatically.", "transient");
+    window.clearTimeout(state.transferRetryTimers.get(transfer.id));
+    state.transferRetryTimers.set(transfer.id, window.setTimeout(() => {
+      state.transferRetryTimers.delete(transfer.id);
+      if (transfer.state !== "retry-wait") return;
+      transfer.nextRetryAt = 0;
+      transitionTransfer(transfer, transfer.file instanceof File ? "queued" : "needs-source", transfer.file instanceof File ? "" : "Reconnect the source to continue.");
+      rebuildTransferProjection();
       renderTransfers();
+      pumpTransfers();
+    }, delay));
+  }
+
+  function resumePausedTransfers() {
+    let resumed = 0;
+    for (const transfer of state.transfers) {
+      if (!['paused', 'retry-wait'].includes(transfer.state) || !(transfer.file instanceof File)) continue;
+      transitionTransfer(transfer, "queued");
+      resumed += 1;
+    }
+    if (resumed) {
+      rebuildTransferProjection();
+      renderTransfers();
+      byID("transfer-live").textContent = `${resumed} transfers resumed.`;
+    }
+    pumpTransfers();
+  }
+
+  async function uploadTransfer(transfer) {
+    if (!(transfer.file instanceof File)) {
+      transitionTransfer(transfer, "needs-source", "Reconnect the source to continue.", "source_required");
+      return;
+    }
+    transitionTransfer(transfer, "preparing");
+    transfer.cancelRequested = false;
+    transfer.controller = new AbortController();
+    updateTransferGroup(transfer.groupID, false);
+    scheduleTransferStructureRender();
+    try {
+      await ensureDirectories(transfer.baseDirectory, transfer.relativeDirectory);
+      const mediaType = transferMediaType(transfer);
+      const size = transferFileSize(transfer);
+      const capability = await api("/api/v1/uploads", { method: "POST", headers: { "Idempotency-Key": transfer.id }, body: { path: transfer.directory, name: transfer.name, size, mediaType, conflict: "rename", resumable: true }, signal: transfer.controller.signal });
+      transfer.uploadID = capability.uploadID;
+      transitionTransfer(transfer, "uploading");
+      beginTransferMeasurement(transfer);
+      updateTransferGroup(transfer.groupID, false);
+      scheduleTransferStructureRender();
       await sendFileData(transfer, capability);
-      await api(`/api/v1/uploads/${encodeURIComponent(capability.uploadID)}/complete`, { method: "POST", body: { path: joinPath(transfer.directory, transfer.name), size: transfer.file.size, mediaType }, signal: transfer.controller.signal });
-      recordTransferProgress(transfer, transfer.file.size);
-      transfer.state = "complete";
+      await api(`/api/v1/uploads/${encodeURIComponent(capability.uploadID)}/complete`, { method: "POST", body: { path: joinPath(transfer.directory, transfer.name), size, mediaType }, signal: transfer.controller.signal });
+      recordTransferProgress(transfer, size);
+      transfer.retryCount = 0;
+      transfer.nextRetryAt = 0;
+      transitionTransfer(transfer, "complete");
       if (!transfer.groupID) announce(`${transfer.name} uploaded.`);
       if (transfer.directory === state.currentDirectory) await loadDirectory(state.currentDirectory);
     } catch (error) {
-      if (error.name === "AbortError") {
-        transfer.state = "cancelled";
-        transfer.error = "Cancelled";
+      if (error.name === "AbortError" && transfer.suspendedByLogout) {
+        return;
+      } else if (error.name === "AbortError" && transfer.cancelRequested) {
+        transitionTransfer(transfer, "cancelled", "Cancelled", "cancelled");
+      } else if (transferFailureIsRetryable(error)) {
+        scheduleTransferRetry(transfer, error);
       } else {
-        transfer.state = "failed";
-        transfer.error = friendlyError(error, "Upload interrupted. Retry to resume from a confirmed offset.");
+        transitionTransfer(transfer, "failed", friendlyError(error, "Upload could not continue."), error instanceof APIError ? error.code : "terminal");
         if (!transfer.groupID) announce(`${transfer.name} failed to upload.`, true);
       }
+    } finally {
+      transfer.controller = null;
+      scheduleTransferStructureRender();
     }
   }
 
@@ -1591,15 +2071,16 @@
     let offset = transfer.confirmed;
     const headersTemplate = capability.headers || {};
     const framing = capability.framing || "offset-header";
-    const declaredSize = Number.isSafeInteger(capability.declaredSize) ? capability.declaredSize : transfer.file.size;
-    const maximum = capability.chunkRules && capability.chunkRules.maximumSize ? capability.chunkRules.maximumSize : transfer.file.size;
+    const size = transferFileSize(transfer);
+    const declaredSize = Number.isSafeInteger(capability.declaredSize) ? capability.declaredSize : size;
+    const maximum = capability.chunkRules && capability.chunkRules.maximumSize ? capability.chunkRules.maximumSize : size;
     let failures = 0;
-    while (offset < transfer.file.size || (transfer.file.size === 0 && offset === 0)) {
-      const end = transfer.file.size === 0 ? 0 : Math.min(transfer.file.size, offset + maximum);
+    while (offset < size || (size === 0 && offset === 0)) {
+      const end = size === 0 ? 0 : Math.min(size, offset + maximum);
       const headers = new Headers(headersTemplate);
       if (framing === "content-range") {
         headers.delete("Upload-Offset");
-        headers.set("Content-Range", transfer.file.size === 0 ? `bytes */${declaredSize}` : `bytes ${offset}-${end - 1}/${declaredSize}`);
+        headers.set("Content-Range", size === 0 ? `bytes */${declaredSize}` : `bytes ${offset}-${end - 1}/${declaredSize}`);
       } else if (framing === "offset-header") {
         headers.set("Upload-Offset", String(offset));
       } else {
@@ -1627,60 +2108,101 @@
         failures = 0;
         transfer.recoveryFailures = 0;
         scheduleTransferRender();
-        if (transfer.file.size === 0) break;
+        if (size === 0) break;
         continue;
       }
       const status = await api(`/api/v1/uploads/${encodeURIComponent(capability.uploadID)}`);
+      if (status.state === "completed") {
+        recordTransferProgress(transfer, size);
+        return;
+      }
+      if (status.state === "aborted" || status.state === "expired") {
+        const terminal = new Error(status.state === "expired" ? "Upload expired." : "Upload was cancelled.");
+        terminal.name = "TerminalUploadError";
+        throw terminal;
+      }
       offset = status.confirmedOffset;
       recordTransferProgress(transfer, offset);
       failures += 1;
       transfer.recoveryFailures = failures;
       scheduleTransferRender();
-      if (failures > 3) throw new Error("Upload interrupted after three recovery attempts.");
+      if (failures > 3) throw new TypeError("Upload interrupted after three recovery attempts.");
       await new Promise((resolve) => window.setTimeout(resolve, 250 * (2 ** (failures - 1)) + Math.floor(Math.random() * 100)));
     }
   }
 
   async function cancelTransfer(transfer) {
+    transfer.cancelRequested = true;
     if (transfer.controller) transfer.controller.abort();
     if (transfer.uploadID) {
       try { await api(`/api/v1/uploads/${encodeURIComponent(transfer.uploadID)}`, { method: "DELETE", body: {} }); } catch { /* already expired or complete */ }
     }
-    transfer.state = "cancelled";
-    transfer.error = "Cancelled";
-    transfer.speedBps = 0;
+    transitionTransfer(transfer, "cancelled", "Cancelled", "cancelled");
+    rebuildTransferProjection();
     renderTransfers();
     announce(`${transfer.name} cancelled.`);
   }
 
-  function updateTransferGroup(groupID) {
+  function updateTransferGroup(groupID, notify = true) {
     if (!groupID) return;
     const group = state.transferGroups.get(groupID);
     if (!group || group.state === "preparing") return;
-    const transfers = state.transfers.filter((item) => item.groupID === groupID);
+    const summary = group.transferSummary || aggregateTransferSummary(group.transferIDs.map((id) => state.transferByID.get(id)).filter(Boolean));
+    group.transferSummary = summary;
     if (group.cancelled) group.state = "cancelled";
-    else if (transfers.every((transfer) => transfer.state === "complete")) group.state = "complete";
-    else if (transfers.some((transfer) => ["preparing", "uploading"].includes(transfer.state))) group.state = "uploading";
-    else if (transfers.some((transfer) => transfer.state === "queued")) group.state = "queued";
-    else if (transfers.some((transfer) => transfer.state === "failed")) group.state = "failed";
+    else if (group.discoveryDone !== false && summary.totalCount > 0 && summary.counts.complete === summary.totalCount) group.state = "complete";
+    else if (summary.counts.preparing + summary.counts.uploading + summary.counts["retry-wait"] + summary.counts.paused > 0) group.state = "uploading";
+    else if (summary.counts.queued + summary.counts["needs-source"] > 0) group.state = "queued";
+    else if (summary.counts.failed > 0) group.state = "failed";
+    else if (group.discoveryDone === false) group.state = "queued";
     else group.state = "cancelled";
+    persistTransferGroup(group);
     if (group.state === "complete" && !group.refreshed) {
       group.refreshed = true;
       if (state.currentDirectory === group.baseDirectory) loadDirectory(group.baseDirectory);
-      announce(`${group.name} uploaded with ${transfers.length} files.`);
+      if (notify) announce(`${group.name} uploaded with ${transfers.length} files.`);
     }
     if (group.state === "failed" && !group.failureAnnounced) {
       group.failureAnnounced = true;
-      announce(`${group.name} has ${transfers.filter((transfer) => transfer.state === "failed").length} failed uploads.`, true);
+      if (notify) announce(`${group.name} has ${transfers.filter((transfer) => transfer.state === "failed").length} failed uploads.`, true);
     }
   }
 
   async function cancelTransferGroup(group) {
     group.cancelled = true;
     group.state = "cancelled";
+    const cancelled = state.transfers.filter((item) => item.groupID === group.id && ["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(item.state));
+    const uploadIDs = [];
+    for (const transfer of cancelled) {
+      transfer.cancelRequested = true;
+      if (transfer.controller) transfer.controller.abort();
+      if (transfer.uploadID) uploadIDs.push(transfer.uploadID);
+      window.clearTimeout(state.transferRetryTimers.get(transfer.id));
+      state.transferRetryTimers.delete(transfer.id);
+      transitionTransfer(transfer, "cancelled", "Cancelled", "cancelled");
+    }
+    await Promise.all(cancelled.map(persistTransferItem));
+    await persistTransferGroup(group);
+    if (!group.fixture) await Promise.all(uploadIDs.map(async (uploadID) => {
+      try { await api(`/api/v1/uploads/${encodeURIComponent(uploadID)}`, { method: "DELETE", body: {} }); } catch { /* already terminal */ }
+    }));
+    rebuildTransferProjection();
     renderTransfers();
-    await Promise.all(state.transfers.filter((item) => item.groupID === group.id && ["queued", "preparing", "uploading"].includes(item.state)).map(cancelTransfer));
-    renderTransfers();
+    byID("transfer-live").textContent = `${cancelled.length} transfers cancelled.`;
+  }
+
+  function renewTransferIdentity(transfer) {
+    const priorID = transfer.id;
+    transfer.id = idempotencyKey();
+    state.transferByID.delete(priorID);
+    state.transferByID.set(transfer.id, transfer);
+    const group = state.transferGroups.get(transfer.groupID);
+    if (group) {
+      group.transferIDs = group.transferIDs.map((id) => id === priorID ? transfer.id : id);
+      persistTransferGroup(group);
+    }
+    deleteTransferLedgerEntries([priorID], []).catch(() => showToast("Old transfer history could not be cleared.", "warning"));
+    if (transfer.sourceHandle) persistTransferSource(transfer, transfer.sourceHandle);
   }
 
   function retryTransferGroup(group) {
@@ -1688,8 +2210,8 @@
     group.refreshed = false;
     group.failureAnnounced = false;
     for (const transfer of state.transfers.filter((item) => item.groupID === group.id && ["failed", "cancelled"].includes(item.state))) {
-      if (transfer.state === "cancelled") {
-        transfer.id = idempotencyKey();
+      if (transfer.state === "cancelled" || ["expired", "aborted"].includes(transfer.errorCode)) {
+        renewTransferIdentity(transfer);
         transfer.confirmed = 0;
         transfer.uploadID = "";
       }
@@ -1699,49 +2221,215 @@
       transfer.lastProgressAt = 0;
       transfer.lastProgressBytes = transfer.confirmed;
       transfer.recoveryFailures = 0;
+      transfer.retryCount = 0;
+      transfer.nextRetryAt = 0;
+      queueTransferPersistence(transfer);
     }
-    prepareTransferGroup(group);
+    if (group.fixture) {
+      group.state = "uploading";
+      group.error = "";
+      const retrying = state.transfers.filter((item) => item.groupID === group.id && item.state === "queued");
+      for (const [index, transfer] of retrying.entries()) {
+        transfer.state = index < 4 ? "uploading" : "queued";
+        transfer.speedBps = index < 4 ? (3 + index) * (1 << 20) : 0;
+      }
+      rebuildTransferProjection();
+      renderTransfers();
+      return;
+    }
+    group.state = "queued";
+    persistTransferGroup(group);
+    rebuildTransferProjection();
+    renderTransfers();
+    pumpTransfers();
+  }
+
+  function retryTransfer(transfer) {
+    if (transfer.state === "cancelled" || ["expired", "aborted"].includes(transfer.errorCode)) {
+      renewTransferIdentity(transfer);
+      transfer.confirmed = 0;
+      transfer.uploadID = "";
+    }
+    transfer.state = transfer.fixture ? "uploading" : "queued";
+    transfer.error = "";
+    transfer.speedBps = transfer.fixture ? 4 * (1 << 20) : 0;
+    transfer.lastProgressAt = 0;
+    transfer.lastProgressBytes = transfer.confirmed;
+    transfer.recoveryFailures = 0;
+    transfer.retryCount = 0;
+    transfer.nextRetryAt = 0;
+    queueTransferPersistence(transfer);
+    if (!transfer.fixture) pumpTransfers();
+    rebuildTransferProjection();
+    renderTransfers();
+  }
+
+  function retryFailedTransfers() {
+    const failed = state.transfers.filter((transfer) => transfer.state === "failed" && transferSourceAvailable(transfer));
+    const failedGroupIDs = new Set(failed.map((transfer) => transfer.groupID).filter(Boolean));
+    for (const transfer of failed) {
+      if (["expired", "aborted"].includes(transfer.errorCode)) {
+        renewTransferIdentity(transfer);
+        transfer.confirmed = 0;
+        transfer.uploadID = "";
+      }
+      transfer.retryCount = 0;
+      transfer.nextRetryAt = 0;
+      transitionTransfer(transfer, transfer.fixture ? "uploading" : "queued");
+      if (transfer.fixture) transfer.speedBps = 4 * (1 << 20);
+    }
+    for (const group of state.transferGroups.values()) {
+      if (failedGroupIDs.has(group.id)) {
+        group.cancelled = false;
+        group.failureAnnounced = false;
+        group.state = "queued";
+        persistTransferGroup(group);
+      }
+    }
+    rebuildTransferProjection();
+    renderTransfers();
+    pumpTransfers();
+    showToast(failed.length ? `${failed.length} failed transfers returned to the queue.` : "No failed transfers can be retried without reconnecting their source.", failed.length ? "success" : "info");
+  }
+
+  async function reconnectTransferSources(files) {
+    const groupID = state.transferReconnectGroup;
+    state.transferReconnectGroup = null;
+    const candidates = state.transfers.filter((transfer) => transfer.groupID === groupID && transfer.state === "needs-source");
+    const supplied = new Map(Array.from(files).filter((file) => file instanceof File).map((file) => [file.webkitRelativePath || file.name, file]));
+    let connected = 0;
+    for (const transfer of candidates) {
+      const file = supplied.get(transfer.relativePath) || supplied.get(transfer.name);
+      if (!file || file.size !== transferFileSize(transfer) || (transfer.lastModified && file.lastModified !== transfer.lastModified)) continue;
+      transfer.file = file;
+      transitionTransfer(transfer, "queued");
+      connected += 1;
+    }
+    rebuildTransferProjection();
+    renderTransfers();
+    pumpTransfers();
+    showToast(`${connected} of ${candidates.length} transfer sources reconnected.`, connected === candidates.length ? "success" : "warning");
+  }
+
+  async function reconnectStoredTransferSources(groupID) {
+    const candidates = state.transfers.filter((transfer) => transfer.groupID === groupID && transfer.state === "needs-source");
+    let connected = 0;
+    for (const transfer of candidates) {
+      const handle = transfer.sourceHandle;
+      if (!handle || typeof handle.requestPermission !== "function" || typeof handle.getFile !== "function") continue;
+      try {
+        if (await handle.requestPermission({ mode: "read" }) !== "granted") continue;
+        const file = await handle.getFile();
+        if (file.size !== transferFileSize(transfer) || (transfer.lastModified && file.lastModified !== transfer.lastModified)) continue;
+        transfer.file = file;
+        transitionTransfer(transfer, "queued");
+        connected += 1;
+      } catch {
+        // Explicit file selection below remains available when a stored handle
+        // cannot be reopened or no longer identifies the original source.
+      }
+    }
+    const remaining = candidates.filter((transfer) => transfer.state === "needs-source");
+    if (connected) {
+      renderTransfers();
+      pumpTransfers();
+    }
+    if (!remaining.length) {
+      showToast(`${connected} transfer sources reconnected.`, "success");
+      return;
+    }
+    state.transferReconnectGroup = groupID;
+    byID(groupID ? "folder-input" : "upload-input").click();
   }
 
   function transferStateLabel(value) {
-    return ({ queued: "Queued", preparing: "Preparing", uploading: "Uploading", complete: "Complete", failed: "Failed", cancelled: "Cancelled" })[value] || "Waiting";
+    return ({ queued: "Queued", preparing: "Preparing", uploading: "Uploading", "retry-wait": "Retrying", paused: "Paused", "needs-source": "Source needed", complete: "Complete", failed: "Failed", cancelled: "Cancelled" })[value] || "Waiting";
   }
 
   function aggregateTransferSummary(transfers) {
-    const counts = { queued: 0, preparing: 0, uploading: 0, complete: 0, failed: 0, cancelled: 0 };
+    const counts = { queued: 0, preparing: 0, uploading: 0, "retry-wait": 0, paused: 0, "needs-source": 0, complete: 0, failed: 0, cancelled: 0 };
     let totalBytes = 0;
     let confirmedBytes = 0;
     let remainingBytes = 0;
     let speedBps = 0;
+    let retryableFailed = 0;
     for (const transfer of transfers) {
       if (Object.hasOwn(counts, transfer.state)) counts[transfer.state] += 1;
-      totalBytes += transfer.file.size;
-      confirmedBytes += Math.min(transfer.confirmed, transfer.file.size);
-      if (["queued", "preparing", "uploading"].includes(transfer.state)) remainingBytes += Math.max(0, transfer.file.size - transfer.confirmed);
+      const size = transferFileSize(transfer);
+      totalBytes += size;
+      confirmedBytes += Math.min(transfer.confirmed, size);
+      if (["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(transfer.state)) remainingBytes += Math.max(0, size - transfer.confirmed);
       if (transfer.state === "uploading" && Number.isFinite(transfer.speedBps)) speedBps += transfer.speedBps;
+      if (transfer.state === "failed" && transferSourceAvailable(transfer)) retryableFailed += 1;
     }
-    const totalCount = transfers.length;
-    const percent = totalBytes > 0
-      ? Math.round(confirmedBytes / totalBytes * 100)
-      : totalCount > 0 ? Math.round(counts.complete / totalCount * 100) : 0;
-    const active = counts.preparing + counts.uploading;
+    return finalizeTransferSummary({ counts, totalCount: transfers.length, totalBytes, confirmedBytes, remainingBytes, speedBps, retryableFailed });
+  }
+
+  function finalizeTransferSummary(summary) {
+    summary.retryableFailed = Number.isSafeInteger(summary.retryableFailed) ? summary.retryableFailed : 0;
+    summary.percent = summary.totalBytes > 0
+      ? Math.round(summary.confirmedBytes / summary.totalBytes * 100)
+      : summary.totalCount > 0 ? Math.round(summary.counts.complete / summary.totalCount * 100) : 0;
+    summary.active = summary.counts.preparing + summary.counts.uploading;
+    summary.pending = summary.counts.queued + summary.counts["retry-wait"] + summary.counts.paused + summary.counts["needs-source"];
     let eta = "ETA —";
-    if (totalCount > 0 && counts.complete === totalCount) eta = "Complete";
-    else if (!navigator.onLine && active + counts.queued > 0) eta = "Offline";
-    else if (speedBps > 0 && remainingBytes > 0) eta = formatDuration(remainingBytes / speedBps);
-    else if (active > 0) eta = "Calculating ETA";
-    else if (counts.queued > 0) eta = "Waiting";
-    else if (counts.failed > 0) eta = "Needs attention";
-    return { counts, totalCount, totalBytes, confirmedBytes, remainingBytes, speedBps, percent, active, eta };
+    if (summary.totalCount > 0 && summary.counts.complete === summary.totalCount) eta = "Complete";
+    else if (!navigator.onLine && summary.active + summary.pending > 0) eta = "Offline";
+    else if (summary.speedBps > 0 && summary.remainingBytes > 0) eta = formatDuration(summary.remainingBytes / summary.speedBps);
+    else if (summary.active > 0) eta = "Calculating ETA";
+    else if (summary.counts["needs-source"] > 0) eta = "Source needed";
+    else if (summary.pending > 0) eta = "Waiting";
+    else if (summary.counts.failed > 0) eta = "Needs attention";
+    summary.eta = eta;
+    return summary;
+  }
+
+  function rebuildTransferAggregates() {
+    state.transferSummary = aggregateTransferSummary(state.transfers);
+    const transfersByGroup = new Map();
+    for (const transfer of state.transfers) {
+      if (!transfer.groupID) continue;
+      if (!transfersByGroup.has(transfer.groupID)) transfersByGroup.set(transfer.groupID, []);
+      transfersByGroup.get(transfer.groupID).push(transfer);
+    }
+    for (const group of state.transferGroups.values()) group.transferSummary = aggregateTransferSummary(transfersByGroup.get(group.id) || []);
+  }
+
+  function updateAggregateProgress(summary, transfer, priorConfirmed, priorSpeed) {
+    if (!summary) return;
+    const size = transferFileSize(transfer);
+    const confirmedDelta = Math.min(transfer.confirmed, size) - Math.min(priorConfirmed, size);
+    summary.confirmedBytes += confirmedDelta;
+    if (["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(transfer.state)) summary.remainingBytes = Math.max(0, summary.remainingBytes - confirmedDelta);
+    if (transfer.state === "uploading") summary.speedBps = Math.max(0, summary.speedBps + transfer.speedBps - priorSpeed);
+    finalizeTransferSummary(summary);
+  }
+
+  function updateAggregateState(summary, transfer, priorState, nextState, priorSpeed) {
+    if (!summary || priorState === nextState) return;
+    const size = transferFileSize(transfer);
+    const remaining = Math.max(0, size - transfer.confirmed);
+    if (Object.hasOwn(summary.counts, priorState)) summary.counts[priorState] = Math.max(0, summary.counts[priorState] - 1);
+    if (Object.hasOwn(summary.counts, nextState)) summary.counts[nextState] += 1;
+    if (["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(priorState)) summary.remainingBytes = Math.max(0, summary.remainingBytes - remaining);
+    if (["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(nextState)) summary.remainingBytes += remaining;
+    if (priorState === "uploading") summary.speedBps = Math.max(0, summary.speedBps - priorSpeed);
+    if (nextState === "uploading") summary.speedBps += transfer.speedBps;
+    if (priorState === "failed" && transferSourceAvailable(transfer)) summary.retryableFailed = Math.max(0, summary.retryableFailed - 1);
+    if (nextState === "failed" && transferSourceAvailable(transfer)) summary.retryableFailed += 1;
+    finalizeTransferSummary(summary);
   }
 
   function transferMetricText(transfer) {
-    const total = transfer.file.size;
+    const total = transferFileSize(transfer);
     const confirmed = Math.min(transfer.confirmed, total);
     const percent = total > 0 ? Math.round(confirmed / total * 100) : transfer.state === "complete" ? 100 : 0;
     let eta = "Waiting";
     if (transfer.state === "uploading") eta = transfer.speedBps > 0 ? formatDuration((total - confirmed) / transfer.speedBps) : "Calculating ETA";
     else if (transfer.state === "preparing") eta = "Preparing";
+    else if (transfer.state === "retry-wait") eta = transfer.nextRetryAt > Date.now() ? `Retry in ${formatDuration((transfer.nextRetryAt - Date.now()) / 1000)}` : "Retrying";
+    else if (transfer.state === "paused") eta = "Offline";
+    else if (transfer.state === "needs-source") eta = "Source needed";
     else if (transfer.state === "complete") eta = "Complete";
     else if (transfer.state === "failed") eta = "Needs attention";
     else if (transfer.state === "cancelled") eta = "Cancelled";
@@ -1755,26 +2443,22 @@
     const tail = document.createElement("div");
     tail.className = "transfer-row-tail";
     tail.append(text("span", transferStateLabel(transfer.state), "transfer-row-state"));
-    if (["queued", "preparing", "uploading"].includes(transfer.state)) tail.append(iconButton("x", `Cancel upload ${label}`, () => cancelTransfer(transfer), "transfer-row-actions", "Cancel upload"));
-    if (transfer.state === "failed" || (!transfer.groupID && transfer.state === "cancelled")) {
-      tail.append(iconButton("refresh", `Retry upload ${label}`, () => {
-        transfer.state = "queued";
-        transfer.error = "";
-        transfer.speedBps = 0;
-        transfer.lastProgressAt = 0;
-        transfer.lastProgressBytes = transfer.confirmed;
-        transfer.recoveryFailures = 0;
-        pumpTransfers();
-        renderTransfers();
-      }, "transfer-row-actions", "Retry upload"));
+    if (transfer.state === "needs-source") tail.append(iconButton("upload", `Reconnect upload source for ${label}`, () => openTransferReconnect(transfer.groupID || ""), "transfer-row-actions", "Reconnect source"));
+    if (["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(transfer.state)) tail.append(iconButton("x", `Cancel upload ${label}`, () => cancelTransfer(transfer), "transfer-row-actions", "Cancel upload"));
+    if ((transfer.state === "failed" || (!transfer.groupID && transfer.state === "cancelled")) && transferSourceAvailable(transfer)) {
+      tail.append(iconButton("refresh", `Retry upload ${label}`, () => retryTransfer(transfer), "transfer-row-actions", "Retry upload"));
     }
     const metrics = document.createElement("div");
     metrics.className = "transfer-row-metrics";
-    metrics.append(text("span", transferMetricText(transfer)), text("span", `${formatBytes(transfer.confirmed)} of ${formatBytes(transfer.file.size)}`));
+    metrics.append(
+      text("span", transferMetricText(transfer), "transfer-row-metric"),
+      text("span", `${formatBytes(transfer.confirmed)} of ${formatBytes(transferFileSize(transfer))}`, "transfer-row-bytes"),
+    );
     const progress = document.createElement("progress");
-    progress.max = Math.max(1, transfer.file.size);
-    progress.value = transfer.file.size === 0 && transfer.state === "complete" ? 1 : transfer.confirmed;
+    progress.max = Math.max(1, transferFileSize(transfer));
+    progress.value = transferFileSize(transfer) === 0 && transfer.state === "complete" ? 1 : transfer.confirmed;
     progress.setAttribute("aria-label", `Upload progress for ${label}`);
+    row.dataset.transferId = transfer.id;
     row.append(text("strong", label, "transfer-row-main"), tail, metrics, progress);
     if (transfer.error) row.append(text("span", transfer.error, "transfer-row-error"));
     return row;
@@ -1792,28 +2476,49 @@
   }
 
   function transferGroupRow(group, transfers) {
-    const summary = aggregateTransferSummary(transfers);
+    const summary = group.transferSummary || aggregateTransferSummary(transfers);
     const displayState = groupDisplayState(group, transfers);
     const row = document.createElement("div");
     row.className = `transfer-group-row ${displayState}`;
     const tail = document.createElement("div");
     tail.className = "transfer-row-tail";
     tail.append(text("span", transferStateLabel(displayState), "transfer-row-state"));
+    if (transfers.some((transfer) => transfer.state === "needs-source")) tail.append(iconButton("folder-up", `Reconnect upload source for ${group.name}`, () => openTransferReconnect(group.id), "transfer-row-actions", "Reconnect source"));
     if (["preparing", "queued", "uploading"].includes(group.state)) tail.append(iconButton("x", `Cancel folder upload ${group.name}`, () => cancelTransferGroup(group), "transfer-row-actions", "Cancel folder upload"));
     if (["failed", "cancelled"].includes(group.state)) tail.append(iconButton("refresh", `Retry folder upload ${group.name}`, () => retryTransferGroup(group), "transfer-row-actions", "Retry folder upload"));
+    const expanded = state.expandedTransferGroups.has(group.id);
+    const disclosure = iconButton(expanded ? "chevron-up" : "chevron-down", `${expanded ? "Collapse" : "Expand"} upload group ${group.name}`, () => {
+      if (expanded) state.expandedTransferGroups.delete(group.id);
+      else state.expandedTransferGroups.add(group.id);
+      rebuildTransferProjection();
+      renderTransferWindow();
+    }, "transfer-row-actions", expanded ? "Collapse group" : "Expand group");
+    disclosure.setAttribute("aria-expanded", String(expanded));
+    tail.append(disclosure);
     const metrics = document.createElement("div");
     metrics.className = "transfer-row-metrics";
     const metricText = group.state === "preparing" && !transfers.some((transfer) => transfer.state !== "queued")
       ? `${summary.percent}% · Preparing · ${formatRate(summary.speedBps)}`
       : `${summary.percent}% · ${summary.eta} · ${formatRate(summary.speedBps)}`;
-    metrics.append(text("span", metricText), text("span", `${summary.counts.complete} of ${transfers.length} files${summary.counts.failed ? ` · ${summary.counts.failed} failed` : ""}`));
+    metrics.append(
+      text("span", metricText, "transfer-row-metric"),
+      text("span", `${summary.counts.complete} of ${transfers.length} files${summary.counts.failed ? ` · ${summary.counts.failed} failed` : ""}`, "transfer-row-bytes"),
+    );
     const progress = document.createElement("progress");
     progress.max = group.totalSize > 0 ? group.totalSize : Math.max(1, transfers.length);
     progress.value = group.totalSize > 0 ? summary.confirmedBytes : transfers.length ? summary.counts.complete : group.state === "complete" ? 1 : 0;
     progress.setAttribute("aria-label", `Upload progress for folder ${group.name}`);
+    row.dataset.transferGroupId = group.id;
     row.append(text("strong", group.name, "transfer-row-main"), tail, metrics, progress);
     if (group.error) row.append(text("span", group.error, "transfer-row-error"));
     return row;
+  }
+
+  function openTransferReconnect(groupID) {
+    reconnectStoredTransferSources(groupID).catch(() => {
+      state.transferReconnectGroup = groupID;
+      byID(groupID ? "folder-input" : "upload-input").click();
+    });
   }
 
   function transferMatchesFilter(item, filter) {
@@ -1823,30 +2528,37 @@
     return true;
   }
 
-  function prioritizedTransferRows(items, limit) {
-    const rank = { failed: 0, uploading: 1, preparing: 2, queued: 3, cancelled: 4, complete: 5 };
-    const ordered = items.map((item, index) => ({ item, index })).sort((left, right) => {
-      const stateOrder = (rank[left.item.state] ?? 6) - (rank[right.item.state] ?? 6);
-      if (stateOrder) return stateOrder;
-      if (["complete", "cancelled"].includes(left.item.state)) return right.index - left.index;
-      return left.index - right.index;
-    }).map(({ item }) => item);
-    return { visible: ordered.slice(0, limit), hidden: Math.max(0, ordered.length - limit) };
+  function setTabSelection(tabList, value) {
+    for (const tab of tabList.querySelectorAll("[role=tab][data-tab-value]")) {
+      const selected = tab.dataset.tabValue === value;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+    }
   }
 
-  function transferVisibleLimit(key, initial) {
-    return state.transferVisibleLimits.get(key) || initial;
-  }
-
-  function summarizeTransferRows(parent, hidden, noun, key, increment) {
-    if (!hidden) return;
-    const item = document.createElement("li");
-    item.className = "transfer-summary";
-    item.append(text("span", `${hidden} more ${noun}`), iconButton("chevron-down", `Show more ${noun}`, () => {
-      state.transferVisibleLimits.set(key, transferVisibleLimit(key, increment) + increment);
-      renderTransfers();
-    }));
-    parent.append(item);
+  function bindTabs(tabList, onSelect) {
+    const tabs = () => Array.from(tabList.querySelectorAll("[role=tab][data-tab-value]"));
+    const select = (tab, focus = false) => {
+      setTabSelection(tabList, tab.dataset.tabValue);
+      onSelect(tab.dataset.tabValue);
+      if (focus) tab.focus();
+    };
+    tabList.addEventListener("click", (event) => {
+      const tab = event.target.closest("[role=tab][data-tab-value]");
+      if (tab && tabList.contains(tab)) select(tab);
+    });
+    tabList.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      const items = tabs();
+      const current = Math.max(0, items.indexOf(document.activeElement));
+      let next = current;
+      if (event.key === "ArrowLeft") next = (current - 1 + items.length) % items.length;
+      if (event.key === "ArrowRight") next = (current + 1) % items.length;
+      if (event.key === "Home") next = 0;
+      if (event.key === "End") next = items.length - 1;
+      event.preventDefault();
+      select(items[next], true);
+    });
   }
 
   function renderTransferOverview(summary) {
@@ -1857,35 +2569,55 @@
     byID("transfer-percent").textContent = `${summary.percent}%`;
     byID("transfer-eta").textContent = summary.eta;
     byID("transfer-speed").textContent = formatRate(summary.speedBps);
-    byID("transfer-compact-metrics").textContent = `${summary.percent}% · ${summary.eta} · ${formatRate(summary.speedBps)}`;
     byID("transfer-volume").textContent = `${formatBytes(summary.confirmedBytes)} of ${formatBytes(summary.totalBytes)}`;
     const parts = [];
     if (summary.active) parts.push(`${summary.active} active`);
     if (summary.counts.queued) parts.push(`${summary.counts.queued} queued`);
+    if (summary.counts["retry-wait"]) parts.push(`${summary.counts["retry-wait"]} retrying`);
+    if (summary.counts.paused) parts.push(`${summary.counts.paused} paused`);
+    if (summary.counts["needs-source"]) parts.push(`${summary.counts["needs-source"]} need source`);
     if (summary.counts.failed) parts.push(`${summary.counts.failed} failed`);
     if (summary.counts.complete) parts.push(`${summary.counts.complete} complete`);
     if (summary.counts.cancelled) parts.push(`${summary.counts.cancelled} cancelled`);
     byID("transfer-counts").textContent = parts.join(" · ") || "0 files";
-    const filter = byID("transfer-filter");
-    filter.options[0].textContent = `Current (${summary.active + summary.counts.queued + summary.counts.failed})`;
-    filter.options[1].textContent = `Failed (${summary.counts.failed})`;
-    filter.options[2].textContent = `Complete (${summary.counts.complete})`;
-    filter.options[3].textContent = `All (${summary.totalCount})`;
+    const filterCounts = {
+      current: summary.active + summary.pending + summary.counts.failed,
+      failed: summary.counts.failed,
+      complete: summary.counts.complete,
+      all: summary.totalCount,
+    };
+    const transferTabs = byID("transfer-filter");
+    setTabSelection(transferTabs, state.transferFilter);
+    for (const [value, count] of Object.entries(filterCounts)) {
+      transferTabs.querySelector(`[data-transfer-count="${value}"]`).textContent = `(${count})`;
+    }
+    byID("header-transfer-percent").textContent = `${summary.percent}%`;
+    byID("header-transfer-speed").textContent = formatRate(summary.speedBps);
+    byID("header-transfer-eta").textContent = summary.eta.replace(" remaining", "").replace("Calculating ETA", "ETA…").replace("Needs attention", "Attention");
+    byID("header-transfer-count").textContent = `${summary.active.toLocaleString()}/${summary.totalCount.toLocaleString()}`;
+    setIconControl(byID("open-transfers"), "transfer", `View transfers, ${summary.percent}% complete, ${formatRate(summary.speedBps)}, ${summary.eta}, ${summary.active} active of ${summary.totalCount} files`);
     byID("clear-transfers").disabled = summary.counts.complete + summary.counts.cancelled === 0;
+    byID("retry-failed-transfers").disabled = summary.retryableFailed === 0;
   }
 
-  function renderTransfers() {
-    const list = byID("transfer-list");
-    list.replaceChildren();
-    const allTransfers = state.transfers.length > 0 && state.transfers.every((item) => ["complete", "cancelled"].includes(item.state));
-    const allGroups = [...state.transferGroups.values()].every((group) => ["complete", "cancelled"].includes(group.state));
-    if (allTransfers && allGroups) {
-      state.transferFilter = "all";
-      byID("transfer-filter").value = "all";
-    }
+  function orderedTransfers(items) {
+    const rank = { failed: 0, "needs-source": 1, uploading: 2, preparing: 3, "retry-wait": 4, paused: 5, queued: 6, cancelled: 7, complete: 8 };
+    return items.map((item, index) => ({ item, index })).sort((left, right) => {
+      const stateOrder = (rank[left.item.state] ?? 9) - (rank[right.item.state] ?? 9);
+      if (stateOrder) return stateOrder;
+      if (["complete", "cancelled"].includes(left.item.state)) return right.index - left.index;
+      return left.index - right.index;
+    }).map(({ item }) => item);
+  }
+
+  function transferMatchesSearch(transfer) {
+    const query = state.transferSearch.trim().toLocaleLowerCase();
+    return !query || `${transfer.relativePath || transfer.name} ${transfer.directory}`.toLocaleLowerCase().includes(query);
+  }
+
+  function rebuildTransferProjection() {
     const filter = state.transferFilter;
-    const summary = aggregateTransferSummary(state.transfers);
-    renderTransferOverview(summary);
+    const projection = [];
     const standaloneTransfers = [];
     const transfersByGroup = new Map();
     for (const transfer of state.transfers) {
@@ -1896,49 +2628,194 @@
       if (!transfersByGroup.has(transfer.groupID)) transfersByGroup.set(transfer.groupID, []);
       transfersByGroup.get(transfer.groupID).push(transfer);
     }
-    const standaloneKey = `standalone:${filter}`;
-    const standaloneItems = standaloneTransfers.filter((item) => transferMatchesFilter(item, filter));
-    const standalone = prioritizedTransferRows(standaloneItems, transferVisibleLimit(standaloneKey, maximumRenderedStandaloneTransfers));
-    for (const transfer of standalone.visible) {
-      const item = document.createElement("li");
-      item.append(transferRow(transfer));
-      list.append(item);
+    for (const transfer of orderedTransfers(standaloneTransfers.filter((item) => transferMatchesFilter(item, filter) && transferMatchesSearch(item)))) {
+      projection.push({ kind: "transfer", transfer, nested: false });
     }
-    summarizeTransferRows(list, standalone.hidden, "transfers", standaloneKey, maximumRenderedStandaloneTransfers);
     const groupItems = [...state.transferGroups.values()].filter((group) => {
       const transfers = transfersByGroup.get(group.id) || [];
-      return transfers.some((item) => transferMatchesFilter(item, filter))
-        || (!transfers.length && (filter === "all" || transferMatchesFilter(group, filter)));
+      return transfers.some((item) => transferMatchesFilter(item, filter) && transferMatchesSearch(item))
+        || (!transfers.length && (filter === "all" || transferMatchesFilter(group, filter)) && (!state.transferSearch || group.name.toLocaleLowerCase().includes(state.transferSearch.toLocaleLowerCase())));
     });
-    const groupsKey = `groups:${filter}`;
-    const groups = prioritizedTransferRows(groupItems.map((group) => ({ ...group, state: groupPriorityState(group, transfersByGroup.get(group.id) || []) })), transferVisibleLimit(groupsKey, maximumRenderedTransferGroups));
-    for (const groupView of groups.visible) {
+    const groups = orderedTransfers(groupItems.map((group) => ({ ...group, state: groupPriorityState(group, transfersByGroup.get(group.id) || []) })));
+    for (const groupView of groups) {
       const group = state.transferGroups.get(groupView.id);
       const transfers = transfersByGroup.get(group.id) || [];
-      const item = document.createElement("li");
-      item.append(transferGroupRow(group, transfers));
-      const files = document.createElement("ul");
-      files.className = "transfer-file-list";
-      const filesKey = `files:${group.id}:${filter}`;
-      const filteredFiles = transfers.filter((transfer) => transferMatchesFilter(transfer, filter));
-      const groupFiles = prioritizedTransferRows(filteredFiles, transferVisibleLimit(filesKey, maximumRenderedGroupFiles));
-      for (const transfer of groupFiles.visible) {
-        const fileItem = document.createElement("li");
-        fileItem.append(transferRow(transfer));
-        files.append(fileItem);
+      projection.push({ kind: "group", group, transfers });
+      const filteredFiles = orderedTransfers(transfers.filter((transfer) => transferMatchesFilter(transfer, filter) && transferMatchesSearch(transfer)));
+      const showAll = state.expandedTransferGroups.has(group.id) || filter === "failed" || Boolean(state.transferSearch);
+      for (const transfer of filteredFiles) {
+        if (showAll || ["failed", "needs-source", "uploading", "preparing", "retry-wait", "paused"].includes(transfer.state)) {
+          projection.push({ kind: "transfer", transfer, nested: true });
+        }
       }
-      summarizeTransferRows(files, groupFiles.hidden, "files", filesKey, maximumRenderedGroupFiles);
-      item.append(files);
+    }
+    state.transferProjection = projection;
+    state.transferVirtualStart = Math.min(state.transferVirtualStart, Math.max(0, projection.length - transferVirtualWindowSize));
+  }
+
+  function renderTransferWindow() {
+    const list = byID("transfer-list");
+    list.replaceChildren();
+    list.dataset.itemCount = String(state.transferProjection.length);
+    list.dataset.virtualStart = String(state.transferVirtualStart);
+    if (!state.transferProjection.length) {
+      const empty = text("li", state.transferSearch ? "No matching transfers" : "No transfers", "transfer-empty");
+      list.append(empty);
+      list.dataset.renderedCount = "0";
+      return;
+    }
+    const start = state.transferVirtualStart;
+    const end = Math.min(state.transferProjection.length, start + transferVirtualWindowSize);
+    list.dataset.renderedCount = String(end - start);
+    for (const [offset, view] of state.transferProjection.slice(start, end).entries()) {
+      const item = document.createElement("li");
+      item.className = view.nested ? "transfer-item nested" : "transfer-item";
+      item.setAttribute("aria-posinset", String(start + offset + 1));
+      item.setAttribute("aria-setsize", String(state.transferProjection.length));
+      item.append(view.kind === "group" ? transferGroupRow(view.group, view.transfers) : transferRow(view.transfer));
       list.append(item);
     }
-    summarizeTransferRows(list, groups.hidden, "upload groups", groupsKey, maximumRenderedTransferGroups);
+    list.setAttribute("aria-label", `Transfer items ${start + 1} to ${end} of ${state.transferProjection.length}`);
+  }
 
-    if (allTransfers && allGroups) {
-      const panel = byID("transfer-panel");
-      panel.classList.add("collapsed");
-      byID("transfer-toggle").setAttribute("aria-expanded", "false");
-      setIconControl(byID("transfer-toggle"), "chevron-up", "Expand transfers");
+  function shiftTransferWindow(direction) {
+    const list = byID("transfer-list");
+    const priorStart = state.transferVirtualStart;
+    const maximumStart = Math.max(0, state.transferProjection.length - transferVirtualWindowSize);
+    state.transferVirtualStart = Math.max(0, Math.min(maximumStart, priorStart + direction * transferVirtualWindowStep));
+    const moved = state.transferVirtualStart - priorStart;
+    if (!moved) return;
+    const priorScroll = list.scrollTop;
+    renderTransferWindow();
+    list.scrollTop = Math.max(1, priorScroll - moved * transferVirtualRowHeight);
+  }
+
+  function scheduleTransferWindow(direction) {
+    if (state.transferVirtualFrame) return;
+    state.transferVirtualFrame = requestAnimationFrame(() => {
+      state.transferVirtualFrame = 0;
+      shiftTransferWindow(direction);
+    });
+  }
+
+  function updateRenderedTransferProgress() {
+    for (const row of byID("transfer-list").querySelectorAll("[data-transfer-id], [data-transfer-group-id]")) {
+      const progress = row.querySelector("progress");
+      const metric = row.querySelector(".transfer-row-metric");
+      const bytes = row.querySelector(".transfer-row-bytes");
+      if (row.dataset.transferId) {
+        const transfer = state.transferByID.get(row.dataset.transferId);
+        if (!transfer) continue;
+        const size = transferFileSize(transfer);
+        metric.textContent = transferMetricText(transfer);
+        bytes.textContent = `${formatBytes(transfer.confirmed)} of ${formatBytes(size)}`;
+        progress.max = Math.max(1, size);
+        progress.value = size === 0 && transfer.state === "complete" ? 1 : transfer.confirmed;
+        continue;
+      }
+      const group = state.transferGroups.get(row.dataset.transferGroupId);
+      const summary = group && group.transferSummary;
+      if (!group || !summary) continue;
+      metric.textContent = group.state === "preparing"
+        ? `${summary.percent}% · Preparing · ${formatRate(summary.speedBps)}`
+        : `${summary.percent}% · ${summary.eta} · ${formatRate(summary.speedBps)}`;
+      bytes.textContent = `${summary.counts.complete} of ${summary.totalCount} files${summary.counts.failed ? ` · ${summary.counts.failed} failed` : ""}`;
+      progress.max = group.totalSize > 0 ? group.totalSize : Math.max(1, summary.totalCount);
+      progress.value = group.totalSize > 0 ? summary.confirmedBytes : summary.totalCount ? summary.counts.complete : group.state === "complete" ? 1 : 0;
     }
+  }
+
+  function renderTransferProgress() {
+    renderTransferOverview(state.transferSummary || aggregateTransferSummary(state.transfers));
+    updateRenderedTransferProgress();
+  }
+
+  function renderTransfers() {
+    rebuildTransferProjection();
+    rebuildTransferAggregates();
+    renderTransferOverview(state.transferSummary);
+    renderTransferWindow();
+
+  }
+
+  function seedTransferPreviewFixture() {
+    if (!state.config || !state.config.localFixture || new URLSearchParams(location.search).get("fixture") !== "transfers") return;
+    if (state.transfers.length > 0 || state.transferGroups.size > 0) return;
+
+    const groupID = "local-transfer-preview";
+    const baseDirectory = "/Photography";
+    let totalSize = 0;
+    for (let index = 0; index < 2000; index += 1) {
+      const size = (1 + (index % 24)) * (1 << 20);
+      let transferState = "queued";
+      if (index < 4) transferState = "uploading";
+      else if (index < 12) transferState = "failed";
+      else if (index < 132) transferState = "complete";
+      else if (index < 140) transferState = "cancelled";
+      const confirmed = transferState === "complete" ? size
+        : transferState === "uploading" ? Math.floor(size * (0.32 + index * 0.13))
+        : transferState === "failed" ? Math.floor(size * 0.18) : 0;
+      const name = `Campaign asset ${String(index + 1).padStart(4, "0")}.jpg`;
+      totalSize += size;
+      state.transfers.push({
+        id: `local-transfer-${index + 1}`,
+        file: { name, size, type: "image/jpeg" },
+        name,
+        directory: baseDirectory,
+        baseDirectory,
+        relativeDirectory: "",
+        relativePath: name,
+        groupID,
+        state: transferState,
+        confirmed,
+        size,
+        mediaType: "image/jpeg",
+        lastModified: 0,
+        error: transferState === "failed" ? "Upload interrupted. Retry when ready." : transferState === "cancelled" ? "Cancelled" : "",
+        controller: null,
+        uploadID: "",
+        speedBps: transferState === "uploading" ? (3 + index) * (1 << 20) : 0,
+        lastProgressAt: 0,
+        lastProgressBytes: confirmed,
+        recoveryFailures: transferState === "failed" ? 1 : 0,
+        retryCount: transferState === "failed" ? 1 : 0,
+        nextRetryAt: 0,
+        errorCode: transferState === "failed" ? "fixture_failure" : "",
+        fixture: true,
+      });
+    }
+    state.transferByID = new Map(state.transfers.map((transfer) => [transfer.id, transfer]));
+    state.transferGroups.set(groupID, {
+      id: groupID,
+      name: "Campaign archive",
+      baseDirectory,
+      directories: [],
+      transferIDs: state.transfers.map((transfer) => transfer.id),
+      totalSize,
+      state: "uploading",
+      error: "",
+      refreshed: false,
+      cancelled: false,
+      failureAnnounced: false,
+      discoveryDone: true,
+      fixture: true,
+    });
+    state.transferFilter = "current";
+    renderTransfers();
+    setTransferSheetOpen(true);
+
+    state.transferFixtureTimer = window.setInterval(() => {
+      let changed = false;
+      for (const transfer of state.transfers.filter((item) => item.fixture && item.state === "uploading")) {
+        const ceiling = Math.floor(transferFileSize(transfer) * 0.94);
+        const next = Math.min(ceiling, transfer.confirmed + Math.max(1, transfer.speedBps));
+        if (next !== transfer.confirmed) {
+          recordTransferProgress(transfer, next);
+          changed = true;
+        }
+      }
+      if (changed) scheduleTransferRender();
+    }, 1000);
   }
 
   async function download(entry, publicToken = "") {
@@ -2699,8 +3576,16 @@
       finally { control.disabled = false; }
     });
     byID("new-folder-button").addEventListener("click", createFolder);
-    byID("upload-input").addEventListener("change", (event) => { queueFiles(event.target.files); event.target.value = ""; });
-    byID("folder-input").addEventListener("change", (event) => { queueFolderFiles(event.target.files); event.target.value = ""; });
+    byID("upload-input").addEventListener("change", async (event) => {
+      if (state.transferReconnectGroup !== null) await reconnectTransferSources(event.target.files);
+      else await queueFiles(event.target.files);
+      event.target.value = "";
+    });
+    byID("folder-input").addEventListener("change", async (event) => {
+      if (state.transferReconnectGroup !== null) await reconnectTransferSources(event.target.files);
+      else await queueFolderFiles(event.target.files);
+      event.target.value = "";
+    });
     const drop = byID("drop-target");
     drop.addEventListener("dragover", (event) => { if (state.browserAccess !== "owner") return; event.preventDefault(); drop.classList.add("dragging"); });
     drop.addEventListener("dragleave", () => drop.classList.remove("dragging"));
@@ -2712,30 +3597,63 @@
       catch (error) { announce(friendlyError(error, "Dropped files could not be read."), true); }
     });
     drop.addEventListener("keydown", (event) => { if (state.browserAccess === "owner" && event.target === drop && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); byID("upload-input").click(); } });
-    byID("transfer-filter").addEventListener("change", (event) => {
-      state.transferFilter = event.target.value;
+    bindTabs(byID("transfer-filter"), (value) => {
+      state.transferFilter = value;
+      state.transferVirtualStart = 0;
       renderTransfers();
     });
     const transferConnection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
     if (transferConnection && transferConnection.addEventListener) transferConnection.addEventListener("change", pumpTransfers);
-    byID("clear-transfers").addEventListener("click", () => {
+    byID("clear-transfers").addEventListener("click", async () => {
+      const removedGroups = [];
+      const removedItems = [];
       for (const [groupID, group] of state.transferGroups) {
         if (["complete", "cancelled"].includes(group.state)) {
+          removedGroups.push(groupID);
+          removedItems.push(...group.transferIDs);
+          for (const id of group.transferIDs) state.transferByID.delete(id);
           state.transferGroups.delete(groupID);
           state.transfers = state.transfers.filter((item) => item.groupID !== groupID);
         }
       }
-      state.transfers = state.transfers.filter((item) => item.groupID || !["complete", "cancelled"].includes(item.state));
-      state.transferVisibleLimits.clear();
+      state.transfers = state.transfers.filter((item) => {
+        const remove = !item.groupID && ["complete", "cancelled"].includes(item.state);
+        if (remove) {
+          removedItems.push(item.id);
+          state.transferByID.delete(item.id);
+        }
+        return !remove;
+      });
+      await deleteTransferLedgerEntries(removedItems, removedGroups);
       renderTransfers();
-      byID("transfer-panel").hidden = !state.transfers.length && !state.transferGroups.size;
+      setTransferSheetOpen(!byID("transfer-panel").hidden);
     });
-    byID("transfer-toggle").addEventListener("click", () => {
-      const panel = byID("transfer-panel");
-      const collapsed = panel.classList.toggle("collapsed");
-      byID("transfer-toggle").setAttribute("aria-expanded", String(!collapsed));
-      setIconControl(byID("transfer-toggle"), collapsed ? "chevron-up" : "chevron-down", collapsed ? "Expand transfers" : "Collapse transfers");
-      if (!collapsed) renderTransfers();
+    byID("retry-failed-transfers").addEventListener("click", retryFailedTransfers);
+    byID("transfer-search").addEventListener("input", (event) => {
+      state.transferSearch = event.target.value;
+      state.transferVirtualStart = 0;
+      renderTransfers();
+    });
+    byID("transfer-list").addEventListener("scroll", () => {
+      const list = byID("transfer-list");
+      if (list.scrollTop <= transferVirtualRowHeight && state.transferVirtualStart > 0) scheduleTransferWindow(-1);
+      else if (list.scrollTop + list.clientHeight >= list.scrollHeight - transferVirtualRowHeight && state.transferVirtualStart + transferVirtualWindowSize < state.transferProjection.length) scheduleTransferWindow(1);
+    });
+    byID("open-transfers").addEventListener("click", () => setTransferSheetOpen(byID("transfer-panel").hidden, true));
+    byID("transfer-close").addEventListener("click", () => setTransferSheetOpen(false, true));
+    byID("transfer-panel").addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setTransferSheetOpen(false, true);
+        return;
+      }
+      if (event.key !== "Tab" || !matchMedia("(max-width: 760px)").matches) return;
+      const controls = Array.from(byID("transfer-panel").querySelectorAll("button:not(:disabled), input:not(:disabled), [role=tab][tabindex='0']"));
+      if (!controls.length) return;
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     });
     byID("file-filter").addEventListener("input", renderFiles); byID("file-sort").addEventListener("change", () => state.browserAccess === "owner" ? loadDirectory(state.currentDirectory) : renderFiles());
     for (const id of ["filter-kind", "filter-media", "filter-min-size", "filter-max-size", "filter-modified-after", "filter-modified-before", "filter-preview"]) byID(id).addEventListener("input", renderFiles);
@@ -2753,6 +3671,7 @@
     window.addEventListener("resize", () => {
       if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries);
       if (!byID("settings-view").hidden) { renderPasskeys(); renderShares(); }
+      if (!byID("transfer-panel").hidden) setTransferSheetOpen(true);
     });
     byID("select-all").addEventListener("change", (event) => { for (const entry of filterLoadedEntries(state.entries)) { if (event.target.checked) state.selected.set(entry.path, entry); else state.selected.delete(entry.path); } renderFiles(); updateSelection(); });
     byID("clear-selection").addEventListener("click", () => { state.selected.clear(); renderFiles(); updateSelection(); });
@@ -2760,7 +3679,7 @@
     byID("share-selected").addEventListener("click", () => createShare([...state.selected.values()][0]));
     byID("copy-selected").addEventListener("click", () => copyMove(false)); byID("move-selected").addEventListener("click", () => copyMove(true)); byID("trash-selected").addEventListener("click", trashSelected);
     byID("next-page").addEventListener("click", () => state.browserAccess === "public" ? loadPublicShare(true) : state.browserAccess === "trash" ? loadTrash(true) : loadDirectory(state.currentDirectory, true)); byID("empty-trash").addEventListener("click", emptyTrash);
-    byID("profile-form").addEventListener("submit", async (event) => { event.preventDefault(); try { const profile = await api("/api/v1/me", { method: "PATCH", body: { displayName: byID("profile-name").value } }); state.user.displayName = profile.displayName; byID("account-name").textContent = profile.displayName; announce("Display name saved."); } catch (error) { announce(friendlyError(error), true); } });
+    byID("profile-form").addEventListener("submit", async (event) => { event.preventDefault(); try { const profile = await api("/api/v1/me", { method: "PATCH", body: { displayName: byID("profile-name").value } }); state.user.displayName = profile.displayName; announce("Display name saved."); } catch (error) { announce(friendlyError(error), true); } });
     byID("theme-form").addEventListener("submit", async (event) => { event.preventDefault(); try { const dark = matchMedia("(prefers-color-scheme: dark)").matches; state.safeTheme = byID("safe-theme").checked; syncSafeThemeURL(); const selection = state.safeTheme ? await api(themePreferenceURL(dark)) : await api("/api/v1/me/preferences/theme", { method: "PUT", body: { themeID: byID("theme-select").value, dark } }); applyTheme(selection); byID("theme-note").textContent = `Using ${selection.resolved.name}.`; announce("Theme applied."); } catch (error) { announce(friendlyError(error), true); } });
     byID("safe-theme").addEventListener("change", () => byID("theme-form").requestSubmit());
     byID("theme-select").addEventListener("change", () => { byID("safe-theme").checked = false; });
@@ -2788,8 +3707,11 @@
     byID("preview-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closePreview(); });
     byID("preview-dialog").addEventListener("keydown", (event) => { if (event.key === "ArrowLeft") { event.preventDefault(); navigateViewer(-1); } if (event.key === "ArrowRight") { event.preventDefault(); navigateViewer(1); } });
     window.addEventListener("popstate", () => { if (state.user) setRoute(routeFromPath(), false); });
-    window.addEventListener("online", () => announce("Connection restored."));
-    window.addEventListener("offline", () => announce("You are offline. Active transfers may pause.", true));
+    window.addEventListener("online", resumePausedTransfers);
+    window.addEventListener("offline", () => {
+      for (const transfer of state.transfers.filter((item) => item.state === "retry-wait")) transitionTransfer(transfer, "paused", "Waiting for a network connection.", "offline");
+      renderTransfers();
+    });
   }
 
   async function revokeInvite(invite) {
@@ -2813,12 +3735,14 @@
   async function enterApplication() {
     byID("auth-view").hidden = true; byID("registration-view").hidden = true; byID("public-view").hidden = true;
     byID("authenticated-view").hidden = false; byID("loading-view").hidden = false;
-    byID("account-actions").hidden = false; byID("account-name").textContent = state.user.displayName;
+    byID("account-actions").hidden = false;
     const admin = (state.user.roles || []).includes("admin"); byID("admin-nav").hidden = !admin;
     const routeLoad = setRoute(routeFromPath(), false);
     const dark = matchMedia("(prefers-color-scheme: dark)").matches;
     const themeLoad = api(themePreferenceURL(dark)).then(applyTheme).catch(() => announce("Your selected theme could not be loaded; a built-in appearance remains active."));
     await Promise.all([routeLoad, themeLoad]);
+    await restoreTransferLedger();
+    seedTransferPreviewFixture();
     if (document.fonts && document.fonts.ready) await document.fonts.ready;
     byID("loading-view").hidden = true;
     byID("app").dataset.state = "authenticated";

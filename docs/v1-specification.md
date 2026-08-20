@@ -1029,7 +1029,7 @@ Requirements:
 
 - The control API MUST reject file bodies and request bodies over its documented limit.
 - A single upload and a batch of up to 100 upload initializations are supported.
-- The UI defaults to four concurrent transfers and allows a bounded setting from one to eight.
+- The UI automatically derives concurrency within the configured one-to-eight bound from connection, device, file-size, queue-depth, and recent-recovery signals. Concurrency is not a user-controlled input.
 - Resumable upload state tracks the confirmed provider offset, never merely bytes attempted by the browser.
 - Retry uses bounded exponential backoff with jitter and distinguishes retryable from terminal errors.
 - Resume after an interrupted request starts at the provider-confirmed offset.
@@ -1039,7 +1039,8 @@ Requirements:
 - A failed or expired upload does not create a visible complete file.
 - Durable upload intent, scope, destination, size, integrity expectations, and logical progress use canonical records. Provider-native resumable session URLs, multipart IDs, block IDs, and confirmed-native offsets are encrypted transient leases and cannot be required after a portability checkpoint.
 - Completed bytes are committed as an immutable canonical blob before the portable file-entry record becomes visible. A completion race or failed descriptor commit leaves an unreferenced blob for bounded idempotent cleanup, never a visible corrupt entry.
-- Upload status survives page navigation only if the provider/session supports it; cross-browser persistence is not required in v1.
+- A closed-schema client ledger persists safe transfer intent, confirmed offset, retry schedule, and terminal state in IndexedDB on the originating device, partitioned by authenticated owner to prevent exposure between accounts using one browser profile. It MUST NOT persist file bytes, capability URLs or headers, session/CSRF material, provider-native identifiers, or absolute local paths. Browser file handles MAY be persisted when supported; otherwise the user reconnects the source after reload. Closing the browser pauses transfers, and cross-device/account-synchronized queue persistence is not required in v1.
+- The owner-scoped upload-status response identifies `active`, `completed`, `aborted`, or `expired` state and returns the safe confirmed offset without returning capability or provider-native material. This bounded per-upload lookup is the reconciliation boundary; it is not an account-wide transfer-list API.
 - Large-object tests simulate offsets above 1 TiB without allocating equivalent storage.
 
 ### 11.3 Downloads

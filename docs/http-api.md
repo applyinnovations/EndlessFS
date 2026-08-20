@@ -42,7 +42,7 @@ This document fixes the v1 JSON field casing and control-plane routes implemente
 | `POST` | `/api/v1/directories` | `path`, optional `conflict`, `expectedVersion` |
 | `POST` | `/api/v1/uploads` | `path` or directory `path` plus `name`, `size`, `mediaType`, `resumable`, optional conflict/version |
 | `POST` | `/api/v1/uploads/batch` | `uploads` with 1–100 upload initialization objects |
-| `GET` | `/api/v1/uploads/{uploadID}` | Safe provider-confirmed offset/status; no capability token |
+| `GET` | `/api/v1/uploads/{uploadID}` | Owner-scoped `active`, `completed`, `aborted`, or `expired` state with the safe provider-confirmed offset; no capability or provider-native material |
 | `POST` | `/api/v1/uploads/{uploadID}/complete` | `path`, `size`, `mediaType`, optional `checksumSHA256` |
 | `DELETE` | `/api/v1/uploads/{uploadID}` | Abort and invalidate the upload capability |
 | `POST` | `/api/v1/downloads` | `path`, exact `version`, optional `preview` |

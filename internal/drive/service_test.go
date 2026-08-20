@@ -430,8 +430,9 @@ func TestUploadAbortBatchMoveTrashPagingAndEmptyTrash(t *testing.T) {
 	if err := env.service.AbortUpload(ctx, env.owner, capability.UploadID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := env.service.UploadStatus(ctx, env.owner, capability.UploadID); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("aborted upload status = %v", err)
+	status, err := env.service.UploadStatus(ctx, env.owner, capability.UploadID)
+	if err != nil || status.State != domain.UploadStateAborted {
+		t.Fatalf("aborted upload status = %+v, %v", status, err)
 	}
 	source := upload(t, env, env.owner, "/source.txt", []byte("source"), "text/plain", "boundary-source-upload-1")
 	if _, _, err := env.service.Download(ctx, env.owner, domain.CreateDownloadRequest{Path: source.Path, Version: "stale"}, false); !errors.Is(err, domain.ErrPreconditionFailed) {

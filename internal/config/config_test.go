@@ -78,6 +78,9 @@ func TestParseLocalFixtureIsExplicitAndLoopbackOnly(t *testing.T) {
 	if !cfg.LocalFixture {
 		t.Fatal("LocalFixture = false, want true")
 	}
+	if !cfg.Public().LocalFixture {
+		t.Fatal("Public().LocalFixture = false, want true")
+	}
 
 	tests := []struct {
 		name   string

@@ -722,6 +722,61 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		t.Fatalf("dismiss mobile action sheet: %v", err)
 	}
 	if err := chromedp.Run(ctx,
+		emulation.SetDeviceMetricsOverride(1440, 900, 1, false),
+		chromedp.Navigate(harness.origin+"/?fixture=transfers"),
+		chromedp.WaitVisible("#transfer-panel", chromedp.ByQuery),
+		chromedp.Click("#transfer-list .transfer-group-row button[aria-expanded]", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("open transfer scale fixture: %v", err)
+	}
+	var progressPreservesFocus bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`new Promise((resolve) => {
+		const row = document.querySelector("#transfer-list .transfer-group-row");
+		const control = row.querySelector("button[aria-expanded]");
+		control.focus();
+		setTimeout(() => resolve(row === document.querySelector("#transfer-list .transfer-group-row") && document.activeElement === control), 1100);
+	})`, &progressPreservesFocus)); err != nil {
+		t.Fatalf("measure transfer progress stability: %v", err)
+	}
+	if !progressPreservesFocus {
+		t.Fatal("transfer progress replaced a focused visible row")
+	}
+	var transferBenchmark struct {
+		Logical      int     `json:"logical"`
+		Rendered     int     `json:"rendered"`
+		Filtered     int     `json:"filtered"`
+		FilterMillis float64 `json:"filterMillis"`
+		ManualPaging int     `json:"manualPaging"`
+		VirtualStart int     `json:"virtualStart"`
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`(() => {
+			const list = document.querySelector("#transfer-list");
+			const input = document.querySelector("#transfer-search");
+			const logical = Number(list.dataset.itemCount || 0);
+			const rendered = Number(list.dataset.renderedCount || 0);
+			list.scrollTop = list.scrollHeight;
+			list.dispatchEvent(new Event("scroll"));
+			const started = performance.now();
+			input.value = "Campaign asset 1999";
+			input.dispatchEvent(new Event("input", {bubbles: true}));
+			return {
+				logical,
+				rendered,
+				filtered: Number(list.dataset.itemCount || 0),
+				filterMillis: performance.now() - started,
+				manualPaging: document.querySelectorAll(".transfer-summary").length,
+				virtualStart: Number(list.dataset.virtualStart || 0),
+			};
+		})()`, &transferBenchmark),
+	); err != nil {
+		t.Fatalf("measure transfer scale fixture: %v", err)
+	}
+	if transferBenchmark.Logical < 1_800 || transferBenchmark.Rendered > 72 || transferBenchmark.Filtered != 2 || transferBenchmark.FilterMillis > 250 || transferBenchmark.ManualPaging != 0 {
+		t.Fatalf("transfer benchmark: logical=%d rendered=%d filtered=%d filterMillis=%.2f manualPaging=%d", transferBenchmark.Logical, transferBenchmark.Rendered, transferBenchmark.Filtered, transferBenchmark.FilterMillis, transferBenchmark.ManualPaging)
+	}
+	t.Logf(`ui-benchmark-v1 {"transfers":{"logical":%d,"rendered":%d,"filterMillis":%.2f}}`, transferBenchmark.Logical, transferBenchmark.Rendered, transferBenchmark.FilterMillis)
+	if err := chromedp.Run(ctx,
 		chromedp.Click("#logout-button", chromedp.ByQuery),
 		chromedp.WaitVisible("#auth-view", chromedp.ByQuery),
 	); err != nil {
@@ -1575,7 +1630,7 @@ func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{BaseURL: origin, AllowedOrigin: origin, Secure: false, AllowRegistration: true, InviteRegistration: true, PreviewProvider: "disabled", PreviewFormats: []string{"image"}, PreviewResolutions: []int{256, 512, 1600}, PreviewMaxConcurrency: 2}
+	cfg := config.Config{BaseURL: origin, AllowedOrigin: origin, Secure: false, AllowRegistration: true, InviteRegistration: true, LocalFixture: true, PreviewProvider: "disabled", PreviewFormats: []string{"image"}, PreviewResolutions: []int{256, 512, 1600}, PreviewMaxConcurrency: 2}
 	var controlHandler http.Handler = httpapi.NewCompleteApplication(cfg, "e2e", identityService, sessions, driveService, themeManager)
 	if withPreviews {
 		cfg.PreviewProvider = "mock"

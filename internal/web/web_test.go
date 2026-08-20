@@ -42,11 +42,79 @@ func TestApplicationShellExposesCompleteAccessibleWorkspaces(t *testing.T) {
 			`href="#workspace"`, `id="workspace"`, `id="live-status"`,
 			`id="drive-view"`, `id="trash-view"`, `id="settings-view"`, `id="admin-view"`,
 			`id="upload-input"`, `webkitdirectory`, `id="share-list"`, `role="dialog"`,
-			`id="transfer-compact-metrics"`, `id="transfer-progress"`, `id="transfer-filter"`,
+			`id="open-transfers"`, `id="transfer-close"`, `id="transfer-progress"`, `id="transfer-filter"`,
+			`class="transfer-sheet-content"`,
+			`class="tabs transfer-tabs"`, `role="tablist"`, `data-tab-value="current"`,
+			`data-tab-value="failed"`, `data-tab-value="complete"`, `data-tab-value="all"`,
 		} {
 			if !strings.Contains(body, required) {
 				t.Errorf("GET %s shell is missing %q", path, required)
 			}
+		}
+		if strings.Contains(body, `<select id="transfer-filter"`) {
+			t.Errorf("GET %s transfer filter still uses a select instead of one-click tabs", path)
+		}
+		if strings.Contains(body, `<button class="transfer-tab"`) {
+			t.Errorf("GET %s transfer tabs inherit button presentation", path)
+		}
+	}
+}
+
+func TestTransferMonitorUsesScalableSideSheet(t *testing.T) {
+	t.Parallel()
+
+	shell := string(mustRead("ui/index.html"))
+	stylesheet := string(mustRead("ui/app.css"))
+	script := string(mustRead("ui/app.js"))
+	for _, required := range []string{
+		`class="transfer-panel transfer-sheet"`, `aria-controls="transfer-panel"`,
+		`id="transfer-close" class="icon-button"`, `setTransferSheetOpen`,
+		`id="header-transfer-summary" class="header-transfer-summary"`,
+		`id="header-transfer-percent"`, `id="header-transfer-speed"`,
+		`id="header-transfer-eta"`, `id="header-transfer-count"`,
+		`inset: var(--efs-metric-toolbarHeight) 0 0 auto;`,
+		`width: clamp(400px, 36vw, 560px);`, `flex: 1; overflow-y: auto;`,
+		`.transfer-panel { inset: 0; width: 100%;`,
+		`for (const view of byID("authenticated-view").querySelectorAll(".view")) view.inert = modal;`,
+	} {
+		if !strings.Contains(shell+stylesheet+script, required) {
+			t.Errorf("transfer side sheet is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		`<span id="header-transfer-summary" class="header-transfer-summary" aria-hidden="true">`,
+		`</span>
+            <button id="open-transfers"`,
+		`byID("header-transfer-percent").textContent =`,
+		`byID("header-transfer-speed").textContent =`,
+		`byID("header-transfer-eta").textContent =`,
+		`byID("header-transfer-count").textContent =`,
+	} {
+		if !strings.Contains(shell+script, required) {
+			t.Errorf("deterministic transfer header summary is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{`headerSummary.hidden`, `active / ${summary.totalCount`, `.toLocaleString()} files`} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("transfer header summary retains verbose or state-dependent presentation %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{"transfer-toggle", "transfer-compact-metrics", "transfer-panel.collapsed", `inset: auto 14px 14px auto;`} {
+		if strings.Contains(shell+stylesheet+script, forbidden) {
+			t.Errorf("transfer monitor retains floating or collapsible presentation %q", forbidden)
+		}
+	}
+	if strings.Index(shell, `id="transfer-panel"`) < strings.Index(shell, `id="admin-view"`) {
+		t.Error("transfer side sheet is nested in a route-specific view instead of the authenticated application shell")
+	}
+	for _, required := range []string{
+		`.transfer-row progress::-webkit-progress-value`,
+		`.transfer-group-row progress::-webkit-progress-value { background: var(--efs-color-foreground); }`,
+		`.transfer-row progress::-moz-progress-bar`,
+		`.transfer-group-row progress::-moz-progress-bar { background: var(--efs-color-foreground); }`,
+	} {
+		if !strings.Contains(stylesheet, required) {
+			t.Errorf("transfer progress does not use the theme foreground: missing %q", required)
 		}
 	}
 }
@@ -55,7 +123,7 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 	t.Parallel()
 
 	script := string(mustRead("ui/app.js"))
-	for _, forbidden := range []string{"localStorage", "sessionStorage", "indexedDB", "innerHTML", "document.write", "serviceWorker"} {
+	for _, forbidden := range []string{"localStorage", "sessionStorage", "innerHTML", "document.write", "serviceWorker"} {
 		if strings.Contains(script, forbidden) {
 			t.Errorf("browser source contains forbidden API %q", forbidden)
 		}
@@ -69,16 +137,55 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 		"navigator.credentials.create", "navigator.credentials.get", "textContent",
 		"Upload-Offset", "Content-Range", "webkitRelativePath", "history.replaceState",
 		"webkitGetAsEntry", "getAsFileSystemHandle", "readEntries", "transferGroups",
-		"maximumRenderedTransferGroups", "maximumRenderedGroupFiles", "summarizeTransferRows",
+		"indexedDB.open", "transferLedgerDatabaseName", "restoreTransferLedger", "persistTransferItem",
+		"transferVirtualWindowSize", "renderTransferWindow", "retryFailedTransfers",
+		"discoverLegacyEntry", "discoverFileSystemHandle",
+		"requestPermission", "reconnectStoredTransferSources",
 		"automaticTransferConcurrency", "aggregateTransferSummary", "recordTransferProgress", "scheduleTransferRender",
+		"transferByID", "nextQueuedTransfer", "updateRenderedTransferProgress", "scheduleTransferStructureRender",
 		"dataset.appearance", `state.themeAssets["brand.mark"]`, `state.themeAssets["brand.favicon"]`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("browser source is missing workflow primitive %q", required)
 		}
 	}
+	progressStart := strings.Index(script, "function renderTransferProgress()")
+	progressEnd := strings.Index(script[progressStart:], "\n  function renderTransfers()")
+	if progressStart < 0 || progressEnd < 0 {
+		t.Fatal("transfer progress renderer is missing")
+	}
+	if strings.Contains(script[progressStart:progressStart+progressEnd], "renderTransferWindow()") {
+		t.Error("high-frequency progress rendering replaces transfer rows and can discard keyboard focus")
+	}
 	if strings.Contains(script+string(mustRead("ui/index.html")), "transfer-concurrency") {
 		t.Error("transfer concurrency remains exposed as a user-controlled input")
+	}
+	for _, forbidden := range []string{"maximumRenderedTransferGroups", "maximumRenderedGroupFiles", "summarizeTransferRows", "more files"} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("transfer monitor retains manual pagination primitive %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{"capabilityURL", "capabilityHeaders", "csrf", "absolutePath"} {
+		if strings.Contains(script, `transferLedgerRecord.${forbidden}`) {
+			t.Errorf("durable transfer record persists forbidden field %q", forbidden)
+		}
+	}
+}
+
+func TestLocalTransferPreviewFixtureIsExplicitAndScaleOriented(t *testing.T) {
+	t.Parallel()
+
+	script := string(mustRead("ui/app.js"))
+	for _, required := range []string{
+		`state.config.localFixture`,
+		`new URLSearchParams(location.search).get("fixture") !== "transfers"`,
+		`for (let index = 0; index < 2000; index += 1)`,
+		`fixture: true`,
+		`seedTransferPreviewFixture();`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("local transfer preview fixture is missing %q", required)
+		}
 	}
 }
 
@@ -172,8 +279,10 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 			t.Errorf("select controls are missing deterministic chevron spacing %q", required)
 		}
 	}
-	if !strings.Contains(stylesheet, `.preview-actions [data-tooltip]::before { inset: calc(100% + 6px) auto auto 0; transform: none; }`) {
-		t.Error("preview action tooltips can be clipped above the metadata sheet")
+	for _, required := range []string{`.tooltip-anchor { anchor-name: --efs-action-tooltip-anchor; }`, `position-anchor: --efs-action-tooltip-anchor;`, `position-try-fallbacks: bottom;`} {
+		if !strings.Contains(stylesheet, required) {
+			t.Errorf("top-layer action tooltips are missing CSP-safe anchor positioning %q", required)
+		}
 	}
 	const fullViewportViewer = ".media-viewer { inset: 0; width: 100vw; max-width: none; height: 100vh; height: 100dvh; max-height: none; margin: 0; border: 0; border-radius: 0; padding: 0; box-shadow: none; }"
 	if !strings.Contains(stylesheet, fullViewportViewer) {
@@ -245,8 +354,19 @@ func TestWorkspaceNavigationSharesTheHeaderLineWithTheBrand(t *testing.T) {
 		t.Fatal("application header is missing")
 	}
 	header := shell[headerStart:headerEnd]
-	if !strings.Contains(header, `id="workspace-tabs" class="app-tabs" aria-label="Workspace"`) {
+	if !strings.Contains(header, `id="workspace-tabs" class="tabs app-tabs" aria-label="Workspace"`) {
 		t.Error("workspace tabs do not share the header line with the EndlessFS brand")
+	}
+	if !strings.Contains(header, `<a class="tab" href="/" data-route="drive">Files</a>`) {
+		t.Error("workspace navigation does not use the canonical tab component")
+	}
+	if !strings.Contains(header, `<button id="logout-button" class="tab header-signout" type="button">Sign out</button>`) {
+		t.Error("header sign-out action does not use the requested text tab presentation")
+	}
+	for _, forbidden := range []string{`class="brand-name"`, `id="account-name"`, `id="logout-button" class="icon-button"`} {
+		if strings.Contains(header, forbidden) {
+			t.Errorf("header retains removed identity presentation %q", forbidden)
+		}
 	}
 	authenticatedStart := strings.Index(shell, `<div id="authenticated-view"`)
 	if authenticatedStart < 0 {
@@ -264,7 +384,9 @@ func TestWorkspaceNavigationSharesTheHeaderLineWithTheBrand(t *testing.T) {
 	stylesheet := string(mustRead("ui/app.css"))
 	for _, required := range []string{
 		`grid-template-columns: auto minmax(0, 1fr) auto;`,
-		`.app-tabs {`,
+		`.app-tabs {`, `.app-tabs .tab {`, `.tab[aria-current="page"]`,
+		`font-weight: var(--efs-type-weight-regular);`, `cursor: default;`,
+		`.transfer-tabs { display: grid;`, `color: var(--efs-color-foreground);`,
 	} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("top workspace tab layout is missing %q", required)
@@ -273,6 +395,13 @@ func TestWorkspaceNavigationSharesTheHeaderLineWithTheBrand(t *testing.T) {
 	for _, forbidden := range []string{"--efs-metric-sidebarWidth", "--efs-metric-tabsHeight", ".app-rail", "grid-template-rows: var(--efs-metric-tabsHeight)"} {
 		if strings.Contains(stylesheet, forbidden) {
 			t.Errorf("workspace retains sidebar styling %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{`.app-tabs a[aria-current="page"]`, `.app-tabs a:hover { background:`, `text-decoration-line: underline`, `text-decoration-color: var(--efs-color-primary)`, `.tabs {
+  display: flex;
+  border-block-end:`, `.tab::after`} {
+		if strings.Contains(stylesheet, forbidden) {
+			t.Errorf("workspace tabs retain the legacy button-like presentation %q", forbidden)
 		}
 	}
 }
@@ -344,7 +473,7 @@ func TestSelectionActionsFloatWithoutReplacingDriveControls(t *testing.T) {
 
 	shell := string(mustRead("ui/index.html"))
 	for _, required := range []string{
-		`id="selection-bar" class="selection-bar" role="toolbar" aria-label="Selection actions" hidden`,
+		`id="selection-bar" class="selection-bar owner-only" role="toolbar" aria-label="Selection actions" hidden`,
 		`id="download-selected" class="icon-button" type="button" aria-label="Download selected" data-icon="download"`,
 		`id="share-selected" class="icon-button" type="button" aria-label="Share selected" data-icon="share-3"`,
 		`id="copy-selected" class="icon-button" type="button" aria-label="Copy selected" data-icon="copy"`,
@@ -451,6 +580,7 @@ func TestIconControlsUsePinnedTablerGeometryAndDeterministicTooltips(t *testing.
 	t.Parallel()
 
 	shell := string(mustRead("ui/index.html"))
+	stylesheet := string(mustRead("ui/app.css"))
 	for _, required := range []string{`aria-label="Sign out" data-icon="logout"`, `aria-label="Upload folder" data-icon="folder-up"`, `id="action-tooltip" class="action-tooltip" role="tooltip" hidden`} {
 		if !strings.Contains(shell, required) {
 			t.Errorf("icon tooltip shell is missing %q", required)
@@ -464,6 +594,11 @@ func TestIconControlsUsePinnedTablerGeometryAndDeterministicTooltips(t *testing.
 	for _, forbidden := range []string{`>New folder</button>`, `>Upload</button>`, `for="upload-input">Upload</label>`} {
 		if strings.Contains(shell, forbidden) {
 			t.Errorf("file header retains a text action %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{`#new-folder-button::before`, `content: "+"`} {
+		if strings.Contains(stylesheet, forbidden) {
+			t.Errorf("mobile file header replaces the canonical folder icon through %q", forbidden)
 		}
 	}
 	for _, tag := range strings.Split(shell, "<") {
@@ -491,7 +626,7 @@ func TestIconControlsUsePinnedTablerGeometryAndDeterministicTooltips(t *testing.
 			t.Errorf("deterministic icon tooltip behavior is missing %q", required)
 		}
 	}
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet = string(mustRead("ui/app.css"))
 	for _, required := range []string{
 		".icon-button {",
 		"border: 0;",
@@ -533,8 +668,8 @@ func TestTrailingTableIconActionsDoNotRepeatEndPadding(t *testing.T) {
 			t.Errorf("table action padding audit is missing %q", required)
 		}
 	}
-	if count := strings.Count(script, `className = "table-icon-action-cell"`); count < 7 {
-		t.Errorf("table action padding audit covers %d render paths, want at least 7", count)
+	if count := strings.Count(script, `className = "table-icon-action-cell"`); count < 5 {
+		t.Errorf("table action padding audit covers %d render paths, want at least 5", count)
 	}
 }
 
@@ -733,7 +868,7 @@ func TestNewProjectBrandShellAndAssetManifest(t *testing.T) {
 	shell := string(mustRead("ui/index.html"))
 	for _, required := range []string{
 		`href="/assets/ui.css"`, `src="/assets/ui.js"`, `href="/assets/brand/endlessfs-mark.svg"`,
-		`class="brand-mark`, `class="app-tabs`, `class="heading-actions command-bar"`, `class="file-workspace`,
+		`class="brand-mark`, `class="tabs app-tabs`, `class="heading-actions command-bar"`, `class="file-workspace`,
 	} {
 		if !strings.Contains(shell, required) {
 			t.Errorf("new project shell is missing %q", required)

@@ -453,7 +453,7 @@ func TestProviderFaultConflictAndCompletionMatrices(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, err := provider.UploadStatus(ctx, scope, renamed.UploadID)
-	if err != nil || status.Path != path || status.ConfirmedOffset != 0 {
+	if err != nil || status.State != domain.UploadStateActive || status.Path != path || status.ConfirmedOffset != 0 {
 		t.Fatalf("renamed upload status = %+v, %v", status, err)
 	}
 	if _, err := provider.UploadOffset(ctx, scope, "missing"); !errors.Is(err, domain.ErrNotFound) {
@@ -491,8 +491,9 @@ func TestProviderFaultConflictAndCompletionMatrices(t *testing.T) {
 	if err := provider.AbortUpload(ctx, scope, renamed.UploadID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.UploadStatus(ctx, scope, renamed.UploadID); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("aborted UploadStatus = %v", err)
+	aborted, err := provider.UploadStatus(ctx, scope, renamed.UploadID)
+	if err != nil || aborted.State != domain.UploadStateAborted {
+		t.Fatalf("aborted UploadStatus = %+v, %v", aborted, err)
 	}
 }
 

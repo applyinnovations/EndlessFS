@@ -278,11 +278,36 @@ func (s *FileStore) UploadStatus(ctx context.Context, scope domain.Scope, upload
 		return domain.UploadStatus{}, domain.NewError(domain.ErrorInvalid, "upload ID is required")
 	}
 	_, _, record, err := s.readUploadRecord(ctx, scope.UserID(), string(uploadID))
-	if err != nil || record.Area != areaName(scope.Area()) || record.State != storageformat.UploadActive {
+	if err != nil || record.Area != areaName(scope.Area()) {
 		if err != nil {
 			return domain.UploadStatus{}, err
 		}
 		return domain.UploadStatus{}, domain.NewError(domain.ErrorNotFound, "upload not found")
+	}
+	path, err := domain.ParseUserPath(record.RequestedPath)
+	if err != nil {
+		return domain.UploadStatus{}, domain.NewError(domain.ErrorInvalid, "stored upload path is invalid")
+	}
+	protocol := domain.UploadSingle
+	if record.Resumable {
+		protocol = domain.UploadResumable
+	}
+	status := domain.UploadStatus{UploadID: uploadID, State: domain.UploadStateActive, Path: path, Protocol: protocol, DeclaredSize: record.Size, ExpiresAt: record.ExpiresAt}
+	switch record.State {
+	case storageformat.UploadCompleted:
+		status.State = domain.UploadStateCompleted
+		status.ConfirmedOffset = record.Size
+		return status, nil
+	case storageformat.UploadAborted:
+		status.State = domain.UploadStateAborted
+		return status, nil
+	case storageformat.UploadActive:
+		if !s.engine.clock.Now().Before(record.ExpiresAt) {
+			status.State = domain.UploadStateExpired
+			return status, nil
+		}
+	default:
+		return domain.UploadStatus{}, domain.NewError(domain.ErrorInvalid, "stored upload state is invalid")
 	}
 	transfers, err := s.transferBackend()
 	if err != nil {
@@ -296,15 +321,8 @@ func (s *FileStore) UploadStatus(ctx context.Context, scope domain.Scope, upload
 	if err != nil {
 		return domain.UploadStatus{}, err
 	}
-	path, err := domain.ParseUserPath(record.RequestedPath)
-	if err != nil {
-		return domain.UploadStatus{}, domain.NewError(domain.ErrorInvalid, "stored upload path is invalid")
-	}
-	protocol := domain.UploadSingle
-	if record.Resumable {
-		protocol = domain.UploadResumable
-	}
-	return domain.UploadStatus{UploadID: uploadID, Path: path, Protocol: protocol, ConfirmedOffset: progress.Offset, DeclaredSize: record.Size, ExpiresAt: record.ExpiresAt}, nil
+	status.ConfirmedOffset = progress.Offset
+	return status, nil
 }
 
 func (s *FileStore) CompleteUpload(ctx context.Context, scope domain.Scope, request domain.CompleteUploadRequest) (domain.Entry, error) {

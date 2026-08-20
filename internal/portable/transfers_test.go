@@ -82,7 +82,7 @@ func TestPortableDirectUploadPublishesImmutableBlobAndRangeDownload(t *testing.T
 		t.Fatalf("upload status = %d", response.StatusCode)
 	}
 	status, err := engine.Files().UploadStatus(context.Background(), scope, capability.UploadID)
-	if err != nil || status.ConfirmedOffset != int64(len(content)) {
+	if err != nil || status.State != domain.UploadStateActive || status.ConfirmedOffset != int64(len(content)) {
 		t.Fatalf("UploadStatus() = %+v, %v", status, err)
 	}
 	if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(content)), MediaType: "text/plain", ChecksumSHA256: "wrong"}); !errors.Is(err, domain.ErrPreconditionFailed) {
@@ -92,6 +92,10 @@ func TestPortableDirectUploadPublishesImmutableBlobAndRangeDownload(t *testing.T
 	entry, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(content)), MediaType: "text/plain", ChecksumSHA256: hex.EncodeToString(sum[:])})
 	if err != nil || entry.Version == "" {
 		t.Fatalf("CompleteUpload() = %+v, %v", entry, err)
+	}
+	completed, err := engine.Files().UploadStatus(context.Background(), scope, capability.UploadID)
+	if err != nil || completed.State != domain.UploadStateCompleted || completed.ConfirmedOffset != int64(len(content)) {
+		t.Fatalf("completed UploadStatus() = %+v, %v", completed, err)
 	}
 	download, err := engine.Files().CreateDownload(context.Background(), scope, domain.CreateDownloadRequest{Path: path, Version: entry.Version, Disposition: domain.DispositionAttachment})
 	if err != nil {
@@ -384,6 +388,10 @@ func TestCheckpointWaitsForActiveCapabilityThenDrainsItAfterExpiry(t *testing.T)
 		t.Fatalf("checkpoint with active upload error = %v", err)
 	}
 	clock.Advance(11 * time.Minute)
+	expired, err := engine.Files().UploadStatus(context.Background(), scope, capability.UploadID)
+	if err != nil || expired.State != domain.UploadStateExpired || expired.ConfirmedOffset != 0 {
+		t.Fatalf("expired UploadStatus() = %+v, %v", expired, err)
+	}
 	if _, err := engine.CreateCheckpoint(context.Background(), "active-upload"); err != nil {
 		t.Fatalf("checkpoint after expiry error = %v", err)
 	}

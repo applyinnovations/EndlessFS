@@ -92,7 +92,7 @@ The new browser application is a precision filesystem instrument. Files are the 
 - Primary actions use Foreground; secondary actions use Surface or Background; icon-only controls are used only for established actions with accessible names. Hover, focus, selected, active, pressed, and disabled states are distinct without changing control geometry.
 - Substantial secondary work uses a side sheet on wide screens and a full-screen surface on narrow screens.
 - Small dialogs are reserved for short, consequential decisions.
-- Transfers use a compact, collapsible queue that aggregates routine completion, prioritizes active and failed work, remains comfortable as the transfer set grows, and gets out of the way when complete. Ordinary progress uses Foreground, Error is reserved for actionable failure, and completed work creates no persistent Success decoration.
+- Transfers use a dedicated right-side monitoring sheet on wide screens and a full-screen sheet on small screens. The sheet aggregates routine completion, prioritizes active and failed work, bounds rendered rows, and keeps large transfer sets inspectable without compressing the file browser into a floating card. A persistent header action reopens the sheet while transfer history exists. Ordinary progress uses Foreground, Error is reserved for actionable failure, and completed work creates no persistent Success decoration.
 - Feedback is concise, non-blocking, and announced accessibly without shifting the workspace.
 - Floating UI uses predictable safe regions and collision handling. It never covers the current selection, focused element, primary actions, or failure remediation; it collapses, repositions, or closes when no longer needed and restores focus deterministically.
 - Motion makes state changes feel immediate and elegant without delaying input. It uses reserved geometry, never causes layout shift or unexpected reordering, and preserves the same result when reduced motion is enabled.
@@ -237,12 +237,14 @@ Exit: the filesystem workspace is complete and files remain the dominant interfa
 
 ### Stage 5 — Build transfers, previews, and the viewer
 
-1. Build the compact transfer queue with grouping, bounded concurrency, confirmed progress, cancellation, retry, failure remediation, aggregate completion, and automatic collapse.
-2. Build visible/overscan-only preview resolution with bounded concurrency, exact artifact validation, retry limits, cache bounds, abort handling, and object-URL cleanup.
-3. Build the full-viewport viewer with previous/next navigation, Generate, Regenerate, explicit safe-original preview, Download, metadata, focus trapping/restoration, Escape, and arrow keys.
-4. Build metadata and substantial secondary actions as a wide-screen side sheet and narrow-screen full surface.
-5. Benchmark representative and stress-scale transfer queues through enqueue, progress updates, cancellation, retry, completion aggregation, failure filtering, collapse/restore, and narrow-layout presentation. Assert bounded rendering and update work, persistent failure visibility, responsive controls, and zero unexpected layout shift.
-6. Prove preview-disabled behavior, aspect-ratio preservation, deterministic file-type fallback, dark/mobile operation, capability secrecy, CSP, offline recovery, and continued interaction during background work.
+1. Build the compact transfer queue with grouping, automatically tuned bounded concurrency, confirmed progress, batch cancellation, bounded automatic retry with jitter and correlated-failure backoff, bulk failed-item retry, aggregate completion, and automatic retirement from the current view.
+2. Keep a closed-schema, device-local transfer ledger in IndexedDB, partitioned by authenticated owner only to prevent cross-account exposure on a shared browser profile. Persist safe request metadata, confirmed offsets, terminal state, retry schedule, and optional browser file handles; never persist file bytes, capability URLs or headers, session/CSRF material, provider-native identifiers, or absolute local paths. Reconcile each restored upload through the existing owner-scoped upload-status route, require explicit source reconnection when a browser handle is unavailable, and make clear that closing the browser pauses work because no service worker or account-wide server queue is introduced.
+3. Discover dropped directory trees incrementally, admit discovered files in bounded batches, and render one continuous virtual window with collapsed group summaries plus active/failure exceptions. Do not use manual “load more” controls or rebuild the full visible tree for each progress sample.
+4. Build visible/overscan-only preview resolution with bounded concurrency, exact artifact validation, retry limits, cache bounds, abort handling, and object-URL cleanup.
+5. Build the full-viewport viewer with previous/next navigation, Generate, Regenerate, explicit safe-original preview, Download, metadata, focus trapping/restoration, Escape, and arrow keys.
+6. Build metadata and substantial secondary actions as a wide-screen side sheet and narrow-screen full surface.
+7. Benchmark representative and stress-scale transfer queues through incremental discovery, enqueue, progress updates, batch cancellation, automatic and bulk retry, completion aggregation, failure search/filtering, ledger restore, source reconnection, virtual scrolling, and narrow-layout presentation. Assert bounded live DOM and per-progress update work, persistent failure visibility, responsive controls, and zero unexpected layout shift.
+8. Prove preview-disabled behavior, aspect-ratio preservation, deterministic file-type fallback, dark/mobile operation, capability secrecy, CSP, offline recovery, and continued interaction during background work.
 
 Exit: transfers and previews feel continuous, compact, recoverable, and independent of ordinary file operation availability.
 

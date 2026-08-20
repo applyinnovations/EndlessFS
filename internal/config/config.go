@@ -72,6 +72,7 @@ type Config struct {
 
 // PublicConfig contains the non-secret settings safe to expose to browsers.
 type PublicConfig struct {
+	LocalFixture                 bool     `json:"localFixture"`
 	AllowRegistration            bool     `json:"allowRegistration"`
 	InviteRegistration           bool     `json:"inviteRegistration"`
 	PasskeysAvailable            bool     `json:"passkeysAvailable"`
@@ -383,6 +384,7 @@ func (c Config) Public() PublicConfig {
 		previewAutoMaxAgeSeconds = &seconds
 	}
 	return PublicConfig{
+		LocalFixture:                 c.LocalFixture,
 		AllowRegistration:            c.AllowRegistration,
 		InviteRegistration:           c.InviteRegistration,
 		PasskeysAvailable:            true,

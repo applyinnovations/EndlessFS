@@ -460,6 +460,7 @@ type StorageProvider interface {
 Required semantics:
 
 - `List` is one directory only, stable within a page sequence, paginated with an opaque cursor, and never leaks another scope. Every page returns a typed `current` directory entry whose recursive size, recursive file count, and metadata belong to the same immutable manifest snapshot as the child rows; later cursor pages repeat that exact entry rather than resolving the current live path again.
+- The owner storage-map read returns one bounded two-level hierarchy: at most 180 largest immediate entries, children for at most eight largest non-empty directories, at most 60 children per expanded directory, and at most 420 entries in the response. Each child listing is accepted only when its current directory version, recursive size, and recursive file count match the parent entry; a concurrent mismatch leaves that directory unexpanded. Exact recursive aggregates represent omitted entries without a client-side directory crawl. A one-entry lookahead may expose only the non-negative maximum size of an omitted immediate child so the browser can drill into a **Remaining items** tile with an exact inclusive size cutoff; the lookahead entry itself is not returned.
 - `LookupChildren` accepts one validated directory and 1–1000 unique immediate-child names. It returns the current directory and every requested child, in request order, from one authoritative directory snapshot. Implementations MUST resolve the directory manifest once, MUST NOT issue one provider/application `Stat` per child, and fail closed if any requested entry is absent, negative, overflowing, malformed, or inconsistent with its directory root/manifest.
 - `Stat` returns `ErrNotFound` for missing entries without leaking whether an out-of-scope provider key exists.
 - `Entry.Size` is the immutable object length for a file and the persisted recursive sum of every descendant file byte for a directory. The root directory's size is the total logical file-byte consumption of that area.
@@ -1192,6 +1193,7 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 | Method | Route | Behavior |
 |---|---|---|
 | GET | `/api/v1/files` | List one virtual directory using `path`, `limit`, `cursor`, and sort; return the same-snapshot typed `current` directory entry. |
+| GET | `/api/v1/files/storage-map` | Return the bounded, snapshot-checked two-level hierarchy for the authenticated owner's storage map. |
 | GET | `/api/v1/files/stat` | Stat one virtual path. |
 | POST | `/api/v1/directories` | Create an empty directory. |
 | POST | `/api/v1/uploads` | Create one upload capability. |
@@ -1259,6 +1261,7 @@ The embedded UI MUST include:
 ### 13.2 Drive interaction
 
 - Breadcrumbs always represent a validated virtual path.
+- The active file-browser path, open file preview, filename search, metadata filters and disclosure, sort, and presentation mode are canonically represented in URL query parameters so refresh, browser history, and copied links restore the same view. Infinite-scroll batch depth is transient rendering state and MUST NOT be represented in the URL. Duplicate, malformed, oversized, or inapplicable values fall back to deterministic allowlisted defaults and never enter API requests unchecked.
 - List and grid modes MAY be offered; at least one polished mode is required.
 - Selection supports pointer and keyboard interaction, select all for the loaded page, and clear selection.
 - Drag-and-drop has a visible target and does not prevent ordinary page interaction outside the target.

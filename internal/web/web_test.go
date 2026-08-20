@@ -454,7 +454,6 @@ func TestStorageMapUsesBoundedSnapshotAggregatesAndAccessibleDeterministicGeomet
 
 	script := string(applicationScript)
 	for _, required := range []string{
-		`const storageMapPageSize = 240;`,
 		`const storageMapMaximumTiles = 180;`,
 		`const storageMapMinimumTileArea = 420;`,
 		`function layoutStorageMap(items, width, height)`,
@@ -462,8 +461,7 @@ func TestStorageMapUsesBoundedSnapshotAggregatesAndAccessibleDeterministicGeomet
 		`function renderStorageMap(entries)`,
 		`function renderStorageMapLoading()`,
 		`state.viewMode === "storage"`,
-		`limit=${state.viewMode === "storage" ? storageMapPageSize : 100}`,
-		`sort=${sort}&order=${order}`,
+		`/api/v1/files/storage-map?path=${encodeURIComponent(directory)}`,
 		`tile.setAttribute("role", "treeitem")`,
 		`tile.setAttribute("aria-selected", String(selected))`,
 		`event.key === "Enter"`,
@@ -471,8 +469,8 @@ func TestStorageMapUsesBoundedSnapshotAggregatesAndAccessibleDeterministicGeomet
 		`candidate.dataset.storageEntry === entry.path`,
 		`knownEntrySize(entry)`,
 		`knownEntryFileCount(entry)`,
-		`if (remainder.size > 0) items.push`,
-		`return ` + "`Remaining items, ${formatBytes(item.size)}, ${files}`" + `;`,
+		`if (remainder.size > 0 && maximumSize !== null) items.push`,
+		`return ` + "`Remaining items, ${formatBytes(item.size)}, ${files}${threshold}`" + `;`,
 		`const name = item.aggregate ? "Remaining items" : entry.name;`,
 		`sort.value = "size:desc";`,
 		`sort.disabled = true;`,
@@ -497,13 +495,62 @@ func TestStorageMapUsesBoundedSnapshotAggregatesAndAccessibleDeterministicGeomet
 	for _, required := range []string{
 		`.storage-map { position: relative; width: 100%; height: 100%;`,
 		`#drop-target[data-presentation="storage"] { padding-block-end: var(--efs-spacing-pageGutter); }`,
-		`.storage-map-tile:focus .storage-map-shape`,
-		`.storage-map-tile.selected .storage-map-shape`,
+		`.storage-map-tile:focus > .storage-map-shape`,
+		`.storage-map-tile.selected > .storage-map-shape`,
 		`@media (hover: none) { .storage-map-checkbox { opacity: 1; } }`,
 		`#drop-target[data-presentation="storage"] #drive-state`,
 	} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("storage map presentation is missing %q", required)
+		}
+	}
+}
+
+func TestStorageMapUsesOneBoundedHierarchyResponseAndAdaptiveSecondLevel(t *testing.T) {
+	t.Parallel()
+
+	script := string(applicationScript)
+	for _, required := range []string{
+		`/api/v1/files/storage-map?path=${encodeURIComponent(directory)}`,
+		`const storageMapExpandedMinimumWidth = 180;`,
+		`const storageMapExpandedMinimumHeight = 120;`,
+		`function storageMapChildItems(entry, layout, remainingNodeBudget)`,
+		`const children = Array.isArray(entry.children) ? entry.children : [];`,
+		`group.setAttribute("role", "group");`,
+		`tile.setAttribute("aria-level", String(level));`,
+		`event.stopPropagation();`,
+		`classNames.push("expanded");`,
+		`function storageMapMaximumOmittedSize(entries, renderedEntries, serverMaximumSize)`,
+		`function openStorageMapRemainder(item)`,
+		`byID("filter-max-size").value = String(item.maximumSize);`,
+		`if (disclosure) disclosure.open = false;`,
+		`setFileViewMode("list", false, false);`,
+		`byID("file-sort").value = "size:desc";`,
+		`loadDirectory(item.directory, false, true);`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("two-level storage map behavior is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`Promise.all(entries.map`,
+		`/api/v1/files?path=${encodeURIComponent(entry.path)}`,
+		`byID("file-sort").value = "size:asc";`,
+		`if (item.aggregate) tile.setAttribute("aria-disabled", "true")`,
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("storage map performs an unbounded client hierarchy crawl %q", forbidden)
+		}
+	}
+
+	stylesheet := string(applicationStylesheet)
+	for _, required := range []string{
+		`.storage-map-group-shape`,
+		`.storage-map-tile.expanded > .storage-map-labels`,
+		`.storage-map-children`,
+	} {
+		if !strings.Contains(stylesheet, required) {
+			t.Errorf("two-level storage map presentation is missing %q", required)
 		}
 	}
 }
@@ -744,7 +791,7 @@ func TestBrowserSourcesAreSplitIntoOrderedDomains(t *testing.T) {
 	scriptMarkers := map[string]string{
 		"ui/js/core.js":          "const state = {",
 		"ui/js/files.js":         "async function loadDirectory",
-		"ui/js/storage-map.js":   "const storageMapPageSize",
+		"ui/js/storage-map.js":   "const storageMapMaximumTiles",
 		"ui/js/transfers.js":     "function transferFileSize",
 		"ui/js/previews.js":      "async function download",
 		"ui/js/operations.js":    "async function copyMove",
@@ -1815,6 +1862,7 @@ func TestOwnerPublicAndTrashReuseOneFileBrowserSurface(t *testing.T) {
 		`id="file-browser-surface" data-access="owner"`,
 		`id="file-filter" type="search" placeholder="Filter loaded files"`,
 		`id="file-sort"`,
+		`<option value="modified:desc" selected>Newest</option>`,
 		`id="file-presentation"`,
 		`id="metadata-filters"`,
 		`<th scope="col">Name</th><th scope="col">Size</th><th scope="col">Details</th><th scope="col">Changed</th>`,
@@ -1853,6 +1901,87 @@ func TestOwnerPublicAndTrashReuseOneFileBrowserSurface(t *testing.T) {
 	} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("shared file-browser access policy is missing %q", required)
+		}
+	}
+}
+
+func TestFileBrowserStateUsesCanonicalShareableURLs(t *testing.T) {
+	t.Parallel()
+
+	script := string(applicationScript)
+	for _, required := range []string{
+		`const browserStateDefaultSort = "modified:desc";`,
+		`function canonicalBrowserPath(value)`,
+		`function parseBrowserURLState(access, url = new URL(location.href))`,
+		`function browserURLForState(access, pathname = location.pathname)`,
+		`function applyBrowserURLState(access)`,
+		`function syncBrowserURLState(mode = "replace", access = state.browserAccess)`,
+		`async function restoreBrowserPreview()`,
+		`params.getAll(name)`,
+		`search: readBoundedText(params, "search", 256)`,
+		`const view = readEnumParameter(params, "view", allowedViews, "list");`,
+		`readEnumParameter(params, "sort", browserSortValues, browserStateDefaultSort)`,
+		`file: readPreviewPath(params, path, access)`,
+		`params.set("path", canonicalBrowserPath(snapshot.path));`,
+		`params.set("sort", snapshot.sort);`,
+		`params.set("view", snapshot.view);`,
+		`params.set("file", snapshot.file);`,
+		`params.set("search", snapshot.search);`,
+		`params.set("filters", "open");`,
+		`window.addEventListener("popstate"`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("canonical browser URL state is missing %q", required)
+		}
+	}
+
+	for _, forbidden := range []string{
+		`localStorage.setItem("path"`,
+		`sessionStorage.setItem("path"`,
+		`params.set("page"`,
+		`readBoundedInteger(params, "page"`,
+		`browserPageDepth`,
+		`browserTargetPage`,
+		`browserRestoringPages`,
+		`restoreBrowserPageDepth`,
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("browser navigation state retains an unsafe or non-shareable implementation %q", forbidden)
+		}
+	}
+}
+
+func TestMetadataFilterControlReportsTheActiveFilterCount(t *testing.T) {
+	t.Parallel()
+
+	shell := string(mustRead("ui/index.html"))
+	for _, required := range []string{
+		`<summary><span>Filter</span><span id="active-filter-count" class="filter-count" hidden></span></summary>`,
+	} {
+		if !strings.Contains(shell, required) {
+			t.Errorf("metadata filter control is missing %q", required)
+		}
+	}
+
+	script := string(applicationScript)
+	for _, required := range []string{
+		`function activeMetadataFilterCount()`,
+		`function syncFilterIndicator()`,
+		`count.textContent = String(active);`,
+		`summary.setAttribute("aria-label", active ?`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("metadata filter indicator is missing %q", required)
+		}
+	}
+
+	stylesheet := string(applicationStylesheet)
+	for _, required := range []string{
+		`.filter-count {`,
+		`border-radius: 999px;`,
+	} {
+		if !strings.Contains(stylesheet, required) {
+			t.Errorf("metadata filter count treatment is missing %q", required)
 		}
 	}
 }

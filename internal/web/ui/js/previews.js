@@ -43,7 +43,8 @@
     for (const id of ["preview-share", "preview-copy", "preview-move", "preview-trash"]) byID(id).hidden = !ownerAccess;
   }
 
-  function closePreviewViewer() {
+  function closePreviewViewer(syncURL = true) {
+    const returnToOpener = syncURL && Boolean(history.state?.previewReturn);
     if (state.viewerController) state.viewerController.abort();
     state.viewerController = null;
     releaseViewerObjectURL();
@@ -51,19 +52,30 @@
     closeTopLayerDialog(byID("preview-dialog"));
     if (state.viewerOpener && state.viewerOpener.focus) state.viewerOpener.focus();
     state.viewerEntry = null;
+    if (!syncURL) return;
+    state.browserPreviewPath = "";
+    if (returnToOpener) history.back();
+    else syncBrowserURLState("replace");
   }
 
   function runPreviewOwnerAction(action) {
     if (state.browserAccess !== "owner" || !state.viewerEntry) return;
     const entry = state.viewerEntry;
-    closePreviewViewer();
+    closePreviewViewer(false);
+    state.browserPreviewPath = "";
+    syncBrowserURLState("replace");
     action(entry);
   }
 
-  async function openSafeOriginalPreview(entry, publicToken = "") {
+  async function openSafeOriginalPreview(entry, publicToken = "", syncURL = true) {
     if (entry.kind !== "file") return;
     clearToast();
     const dialog = byID("preview-dialog");
+    if (syncURL) {
+      const mode = dialog.open || state.browserPreviewPath ? "replace" : "push";
+      state.browserPreviewPath = entry.path;
+      syncBrowserURLState(mode);
+    }
     state.viewerEntry = entry;
     if (state.viewerController) state.viewerController.abort();
     state.viewerController = new AbortController();
@@ -111,13 +123,18 @@
     }
   }
 
-  function openMediaViewer(entry) {
+  function openMediaViewer(entry, syncURL = true) {
     if (entry.kind !== "file") return;
+    const dialog = byID("preview-dialog");
+    if (syncURL) {
+      const mode = dialog.open || state.browserPreviewPath ? "replace" : "push";
+      state.browserPreviewPath = entry.path;
+      syncBrowserURLState(mode);
+    }
     state.viewerEntries = state.filteredEntries.filter((item) => item.kind === "file");
     state.viewerIndex = state.viewerEntries.findIndex((item) => item.path === entry.path);
     if (state.viewerIndex < 0) { state.viewerEntries = [entry]; state.viewerIndex = 0; }
     state.viewerOpener = document.activeElement;
-    const dialog = byID("preview-dialog");
     if (!dialog.open) showTopLayerDialog(dialog);
     showViewerEntry(state.viewerEntries[state.viewerIndex]);
   }
@@ -328,7 +345,10 @@
     const next = state.viewerIndex + offset;
     if (next < 0 || next >= state.viewerEntries.length) return;
     state.viewerIndex = next;
-    showViewerEntry(state.viewerEntries[next]);
+    const entry = state.viewerEntries[next];
+    state.browserPreviewPath = entry.path;
+    syncBrowserURLState("replace");
+    showViewerEntry(entry);
   }
 
   function releaseViewerObjectURL() {

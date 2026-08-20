@@ -239,11 +239,15 @@
     return result;
   }
 
-  async function loadPublicShare(append = false) {
+  async function loadPublicShare(append = false, directory = state.publicPath) {
     if (append && state.publicLoading) return;
+    const directoryChanged = !append && directory !== state.publicPath;
+    state.publicPath = directory;
     syncFileBrowserAccess("public");
     showOnly("public-view");
     state.publicLoading = true;
+    if (!append) syncBrowserURLState(directoryChanged ? "push" : "replace", "public");
+    let loadedPage = false;
     if (!append) {
       cleanupGridMedia(new Set());
       state.previewStates.clear();
@@ -261,13 +265,15 @@
     try {
       const page = await api(`/api/v1/public/shares/${encodeURIComponent(state.publicToken)}?${query.toString()}`);
       byID("browser-title").textContent = page.root.name || "Shared files";
-      renderBreadcrumbs("breadcrumbs", state.publicPath, (path) => { state.publicPath = path; loadPublicShare(); });
+      renderBreadcrumbs("breadcrumbs", state.publicPath, (path) => loadPublicShare(false, path));
       state.currentEntry = page.current;
       renderPathAggregate(page.current);
       const entries = page.entries && page.entries.length ? page.entries : (page.root.kind === "file" ? [page.root] : []);
       state.entries = append ? state.entries.concat(entries) : entries;
       state.publicCursor = page.nextCursor || "";
+      loadedPage = true;
       renderFiles();
+      syncBrowserURLState("replace", "public");
     } catch (error) {
       const message = error instanceof APIError && [403, 404, 410].includes(error.status) ? "This share is unavailable. It may have expired, moved, entered trash, or been revoked." : friendlyError(error, "The share could not be loaded.");
       if (!append) {
@@ -284,4 +290,5 @@
       state.publicLoading = false;
       requestAnimationFrame(() => maybeLoadNextBrowserPage(state.viewMode === "grid" ? byID("media-grid") : byID("list-presentation")));
     }
+    if (!append && loadedPage) await restoreBrowserPreview();
   }

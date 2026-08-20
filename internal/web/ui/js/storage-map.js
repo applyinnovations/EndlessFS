@@ -1,6 +1,8 @@
-  const storageMapPageSize = 240;
   const storageMapMaximumTiles = 180;
   const storageMapMinimumTileArea = 420;
+  const storageMapExpandedMinimumWidth = 180;
+  const storageMapExpandedMinimumHeight = 120;
+  const storageMapExpandedHeaderHeight = 26;
   const storageMapNamespace = "http://www.w3.org/2000/svg";
 
   function storageMapElement(name, className = "") {
@@ -120,24 +122,80 @@
     };
   }
 
-  function storageMapCandidateEntries(entries, totalSize, area) {
+  function storageMapCandidateEntries(entries, totalSize, area, maximumTiles = storageMapMaximumTiles) {
     const candidates = entries
       .filter((entry) => knownEntrySize(entry) !== null && knownEntrySize(entry) > 0)
       .slice()
       .sort((left, right) => compareEntrySizes(left, right, -1) || left.path.localeCompare(right.path));
     const rendered = [];
     for (const entry of candidates) {
-      if (rendered.length >= storageMapMaximumTiles) break;
+      if (rendered.length >= maximumTiles) break;
       if (knownEntrySize(entry) / totalSize * area < storageMapMinimumTileArea) break;
       rendered.push(entry);
     }
     return rendered;
   }
 
+  function storageMapMaximumOmittedSize(entries, renderedEntries, serverMaximumSize) {
+    const rendered = new Set(renderedEntries);
+    let maximum = Number.isSafeInteger(serverMaximumSize) && serverMaximumSize >= 0 ? serverMaximumSize : null;
+    for (const entry of entries) {
+      if (rendered.has(entry)) continue;
+      const size = knownEntrySize(entry);
+      if (size !== null && (maximum === null || size > maximum)) maximum = size;
+    }
+    return maximum;
+  }
+
+  function openStorageMapRemainder(item) {
+    if (!Number.isSafeInteger(item.maximumSize) || item.maximumSize < 0 || !item.directory) return;
+    byID("file-filter").value = "";
+    for (const id of ["filter-kind", "filter-media", "filter-min-size", "filter-modified-after", "filter-modified-before", "filter-preview"]) byID(id).value = "";
+    byID("filter-max-size").value = String(item.maximumSize);
+    const disclosure = byID("metadata-filters").closest("details");
+    if (disclosure) disclosure.open = false;
+    setFileViewMode("list", false, false);
+    byID("file-sort").value = "size:desc";
+    syncBrowserURLState("push", "owner");
+    loadDirectory(item.directory, false, true);
+  }
+
+  function storageMapChildItems(entry, layout, remainingNodeBudget) {
+    const children = Array.isArray(entry.children) ? entry.children : [];
+    if (
+      children.length === 0 ||
+      remainingNodeBudget < 2 ||
+      layout.width < storageMapExpandedMinimumWidth ||
+      layout.height < storageMapExpandedMinimumHeight
+    ) return null;
+    const content = {
+      x: layout.x + 3,
+      y: layout.y + storageMapExpandedHeaderHeight,
+      width: Math.max(0, layout.width - 6),
+      height: Math.max(0, layout.height - storageMapExpandedHeaderHeight - 3),
+    };
+    const totalSize = knownEntrySize(entry);
+    if (totalSize === null || totalSize === 0 || content.width * content.height < storageMapMinimumTileArea * 2) return null;
+    const renderedEntries = storageMapCandidateEntries(children, totalSize, content.width * content.height, remainingNodeBudget - 1);
+    const remainder = storageMapRemainder(children, renderedEntries, entry);
+    if (!remainder) return null;
+    const items = renderedEntries.map((child) => ({ entry: child, size: knownEntrySize(child), fileCount: knownEntryFileCount(child) }));
+    const maximumSize = storageMapMaximumOmittedSize(children, renderedEntries, entry.remainingMaximumSize);
+    if (remainder.size > 0 && maximumSize !== null && items.length < remainingNodeBudget) items.push({ aggregate: true, size: remainder.size, fileCount: remainder.fileCount, directory: entry.path, maximumSize });
+    if (items.length < 2) return null;
+    const layouts = layoutStorageMap(items, content.width, content.height).map((childLayout) => ({
+      ...childLayout,
+      x: childLayout.x + content.x,
+      y: childLayout.y + content.y,
+    }));
+    return { layouts, renderedEntries };
+  }
+
   function storageMapLabel(item) {
     if (item.aggregate) {
       const files = `${item.fileCount.toLocaleString()} ${item.fileCount === 1 ? "file" : "files"}`;
-      return `Remaining items, ${formatBytes(item.size)}, ${files}`;
+      const threshold = Number.isSafeInteger(item.maximumSize) ? `, show items ${formatBytes(item.maximumSize)} or smaller` : "";
+      return `Remaining items, ${formatBytes(item.size)}, ${files}${threshold}`;
     }
     const kind = item.entry.kind === "directory" ? "Folder" : "File";
     const parts = [`${kind} ${item.entry.name}`, formatEntrySize(item.entry)];
@@ -181,7 +239,7 @@
     let best = null;
     for (let candidateIndex = 0; candidateIndex < layouts.length; candidateIndex += 1) {
       const candidate = layouts[candidateIndex];
-      if (candidateIndex === index || !candidate.item.entry) continue;
+      if (candidateIndex === index) continue;
       const x = candidate.x + candidate.width / 2;
       const y = candidate.y + candidate.height / 2;
       const primary = direction === "ArrowLeft" ? currentX - x : direction === "ArrowRight" ? x - currentX : direction === "ArrowUp" ? currentY - y : y - currentY;
@@ -193,26 +251,42 @@
     if (best) byID("storage-map-canvas").querySelector(`[data-storage-index="${best.index}"]`).focus();
   }
 
-  function storageMapTile(layout, index, layouts, definitions, setSize) {
+  function storageMapTile(layout, index, layouts, definitions, level, position, setSize, expanded = false, stopPropagation = false) {
     const item = layout.item;
     const entry = item.entry;
     const selected = Boolean(entry && state.selected.has(entrySelectionKey(entry)));
-    const classNames = ["storage-map-tile", item.aggregate ? "aggregate" : entry.kind, selected ? "selected" : ""].filter(Boolean).join(" ");
-    const tile = storageMapElement("g", classNames);
+    const classNames = ["storage-map-tile", item.aggregate ? "aggregate" : entry.kind, selected ? "selected" : ""].filter(Boolean);
+    if (expanded) classNames.push("expanded");
+    const tile = storageMapElement("g", classNames.join(" "));
     tile.dataset.storageIndex = String(index);
     tile.dataset.tooltip = storageMapLabel(item);
     tile.setAttribute("role", "treeitem");
-    tile.setAttribute("aria-level", "1");
-    tile.setAttribute("aria-posinset", String(index + 1));
+    tile.setAttribute("aria-level", String(level));
+    tile.setAttribute("aria-posinset", String(position));
     tile.setAttribute("aria-setsize", String(setSize));
     tile.setAttribute("aria-label", storageMapLabel(item));
     tile.setAttribute("aria-selected", String(selected));
-    if (item.aggregate) tile.setAttribute("aria-disabled", "true");
-    else {
+    if (expanded) tile.setAttribute("aria-expanded", "true");
+    if (item.aggregate) {
+      tile.setAttribute("tabindex", "0");
+      tile.addEventListener("click", (event) => {
+        if (stopPropagation) event.stopPropagation();
+        openStorageMapRemainder(item);
+      });
+      tile.addEventListener("keydown", (event) => {
+        if (stopPropagation) event.stopPropagation();
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openStorageMapRemainder(item); }
+        else if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) { event.preventDefault(); focusStorageMapNeighbor(tile, layouts, event.key); }
+      });
+    } else {
       tile.dataset.storageEntry = entry.path;
       tile.setAttribute("tabindex", "0");
-      tile.addEventListener("click", () => openBrowserEntry(entry));
+      tile.addEventListener("click", (event) => {
+        if (stopPropagation) event.stopPropagation();
+        openBrowserEntry(entry);
+      });
       tile.addEventListener("keydown", (event) => {
+        if (stopPropagation) event.stopPropagation();
         if (event.key === "Enter") { event.preventDefault(); openBrowserEntry(entry); }
         else if (event.key === " ") { event.preventDefault(); toggleStorageMapSelection(entry, true); }
         else if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) { event.preventDefault(); focusStorageMapNeighbor(tile, layouts, event.key); }
@@ -220,7 +294,7 @@
     }
 
     const inset = 1;
-    const shape = storageMapElement("rect", "storage-map-shape");
+    const shape = storageMapElement("rect", expanded ? "storage-map-group-shape" : "storage-map-shape");
     shape.setAttribute("x", (layout.x + inset).toFixed(2));
     shape.setAttribute("y", (layout.y + inset).toFixed(2));
     shape.setAttribute("width", Math.max(0, layout.width - inset * 2).toFixed(2));
@@ -243,8 +317,8 @@
       labels.setAttribute("clip-path", `url(#${clipID})`);
       const name = item.aggregate ? "Remaining items" : entry.name;
       labels.append(storageMapText(storageMapTruncatedName(name, layout.width), layout.x + 9, layout.y + 20, "storage-map-name"));
-      if (layout.height >= 50) labels.append(storageMapText(formatBytes(item.size), layout.x + 9, layout.y + 39, "storage-map-size"));
-      if (layout.height >= 69 && item.fileCount > 0 && (item.aggregate || entry.kind === "directory")) labels.append(storageMapText(formatEntryFileCount(item.aggregate ? item : entry), layout.x + 9, layout.y + 57, "storage-map-count"));
+      if (!expanded && layout.height >= 50) labels.append(storageMapText(formatBytes(item.size), layout.x + 9, layout.y + 39, "storage-map-size"));
+      if (!expanded && layout.height >= 69 && item.fileCount > 0 && (item.aggregate || entry.kind === "directory")) labels.append(storageMapText(formatEntryFileCount(item.aggregate ? item : entry), layout.x + 9, layout.y + 57, "storage-map-count"));
       tile.append(labels);
     }
 
@@ -292,15 +366,47 @@
     const items = renderedEntries.map((entry) => ({ entry, size: knownEntrySize(entry), fileCount: knownEntryFileCount(entry) }));
     const remainder = storageMapRemainder(entries, renderedEntries, current);
     if (!remainder) { renderStorageMapMessage("Storage map unavailable"); return; }
-    if (remainder.size > 0) items.push({ aggregate: true, size: remainder.size, fileCount: remainder.fileCount });
+    const maximumSize = storageMapMaximumOmittedSize(entries, renderedEntries, state.storageMapRemainingMaximumSize);
+    if (remainder.size > 0 && maximumSize !== null) items.push({ aggregate: true, size: remainder.size, fileCount: remainder.fileCount, directory: state.currentDirectory, maximumSize });
     if (!items.length) { renderStorageMapMessage("0 B used"); return; }
 
     state.storageMapRenderVersion += 1;
-    const layouts = layoutStorageMap(items, dimensions.width, dimensions.height);
+    const rootLayouts = layoutStorageMap(items, dimensions.width, dimensions.height);
+    let remainingNodeBudget = Math.max(0, storageMapMaximumTiles - rootLayouts.length);
+    const renderTree = rootLayouts.map((layout) => {
+      const entry = layout.item.entry;
+      const children = !filtered && entry && entry.kind === "directory"
+        ? storageMapChildItems(entry, layout, remainingNodeBudget)
+        : null;
+      if (children) remainingNodeBudget -= children.layouts.length;
+      return { layout, children };
+    });
+    const focusLayouts = [];
+    for (const node of renderTree) {
+      node.layout.storageIndex = focusLayouts.length;
+      focusLayouts.push(node.layout);
+      if (node.children) for (const childLayout of node.children.layouts) {
+        childLayout.storageIndex = focusLayouts.length;
+        focusLayouts.push(childLayout);
+      }
+    }
     const definitions = storageMapElement("defs");
     const fragment = document.createDocumentFragment();
     fragment.append(definitions);
-    for (let index = 0; index < layouts.length; index += 1) fragment.append(storageMapTile(layouts[index], index, layouts, definitions, layouts.length));
+    for (let rootIndex = 0; rootIndex < renderTree.length; rootIndex += 1) {
+      const node = renderTree[rootIndex];
+      const tile = storageMapTile(node.layout, node.layout.storageIndex, focusLayouts, definitions, 1, rootIndex + 1, renderTree.length, Boolean(node.children));
+      if (node.children) {
+        const group = storageMapElement("g", "storage-map-children");
+        group.setAttribute("role", "group");
+        for (let childIndex = 0; childIndex < node.children.layouts.length; childIndex += 1) {
+          const childLayout = node.children.layouts[childIndex];
+          group.append(storageMapTile(childLayout, childLayout.storageIndex, focusLayouts, definitions, 2, childIndex + 1, node.children.layouts.length, false, true));
+        }
+        tile.append(group);
+      }
+      fragment.append(tile);
+    }
     canvas.setAttribute("viewBox", `0 0 ${dimensions.width} ${dimensions.height}`);
     canvas.replaceChildren(fragment);
     map.removeAttribute("aria-busy");
@@ -326,7 +432,7 @@
     map.setAttribute("aria-busy", "true");
   }
 
-  function setFileViewMode(mode, reload = true) {
+  function setFileViewMode(mode, reload = true, syncURL = true) {
     const previous = state.viewMode;
     const next = mode === "storage" && state.browserAccess !== "owner" ? "list" : mode;
     const sort = byID("file-sort");
@@ -342,6 +448,9 @@
     const control = byID(`file-view-${next}`);
     if (control) control.checked = true;
     syncFilePresentation();
+    if (syncURL && previous !== next) {
+      syncBrowserURLState("push");
+    }
     if (!reload) return;
     if (state.browserAccess === "owner" && (previous === "storage" || next === "storage")) loadDirectory(state.currentDirectory, false, true);
     else renderFiles();

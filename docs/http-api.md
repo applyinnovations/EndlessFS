@@ -64,6 +64,8 @@ Each successful `GET /api/v1/trash` row preserves the prior trash-record fields 
 
 `GET /api/v1/public/shares/{token}` returns safe `root`, `current`, and child entries with the same `size` and `fileCount` contract. A nested directory's `current` aggregates describe that nested target, while `root` continues to describe the original shared root. Neither response exposes an owner path or provider identity.
 
+`GET /api/v1/public/shares/{token}/stat?path=...` returns the same safe share-relative entry metadata for one exact item inside the shared root. It exists so a copied public-preview URL can restore one file without walking paginated directory listings. Invalid, escaped, stale, revoked, expired, disabled-owner, or changed-root requests all return the same not-found boundary.
+
 ## Generated image previews (v1.1)
 
 These authenticated-owner routes use the optional independent preview store. Resolve is a POST because it may lazily generate a missing artifact. All three routes derive owner scope from the session; content identities, store keys, and bucket configuration are never public fields.

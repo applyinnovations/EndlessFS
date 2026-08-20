@@ -12,16 +12,235 @@
     "text/plain": "Plain text",
   });
 
+  const browserStateDefaultSort = "modified:desc";
+  const browserSortValues = new Set(["name:asc", "name:desc", "modified:desc", "modified:asc", "size:desc", "size:asc", "kind:asc"]);
+  const browserViewValues = new Set(["list", "grid", "storage"]);
+  const browserKindValues = new Set(["", "directory", "file"]);
+  const browserMediaValues = new Set(["", "image", "video", "pdf", "audio", "document", "archive", "unknown"]);
+  const browserPreviewValues = new Set(["", "ready", "missing", "ineligible", "unsupported", "unavailable"]);
+  const browserStateParameterNames = ["path", "search", "sort", "view", "page", "file", "kind", "media", "min", "max", "after", "before", "preview", "filters"];
+
+  function singleURLParameter(params, name) {
+    const values = params.getAll(name);
+    return values.length === 1 ? values[0] : null;
+  }
+
+  function canonicalBrowserPath(value) {
+    if (value === "/") return "/";
+    if (typeof value !== "string" || value.length < 2 || value.length > 4096 || !value.startsWith("/") || value.endsWith("/") || value.includes("\\") || value.includes("//") || /[\u0000-\u001f\u007f]/u.test(value)) return "/";
+    const segments = value.slice(1).split("/");
+    return segments.some((segment) => !segment || segment === "." || segment === "..") ? "/" : value;
+  }
+
+  function readEnumParameter(params, name, allowed, fallback) {
+    const value = singleURLParameter(params, name);
+    return value !== null && allowed.has(value) ? value : fallback;
+  }
+
+  function readBoundedText(params, name, maximumLength) {
+    const value = singleURLParameter(params, name);
+    return value !== null && value.length <= maximumLength && !/[\u0000-\u001f\u007f]/u.test(value) ? value : "";
+  }
+
+  function readBoundedInteger(params, name, minimum, maximum, fallback = null) {
+    const value = singleURLParameter(params, name);
+    if (value === null || !/^(0|[1-9]\d*)$/u.test(value)) return fallback;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
+  }
+
+  function readCanonicalDate(params, name) {
+    const value = singleURLParameter(params, name);
+    if (value === null || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return "";
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value ? value : "";
+  }
+
+  function readPreviewPath(params, directory, access) {
+    if (access === "trash") return "";
+    const value = singleURLParameter(params, "file");
+    if (value === null) return "";
+    const path = canonicalBrowserPath(value);
+    if (path !== value) return "";
+    if (access === "public" && path === "/" && directory === "/") return path;
+    return path !== "/" && parentPath(path) === directory ? path : "";
+  }
+
+  function parseBrowserURLState(access, url = new URL(location.href)) {
+    const params = url.searchParams;
+    const allowedViews = access === "owner" ? browserViewValues : new Set(["list", "grid"]);
+    const view = readEnumParameter(params, "view", allowedViews, "list");
+    const sort = view === "storage" ? "size:desc" : readEnumParameter(params, "sort", browserSortValues, browserStateDefaultSort);
+    const path = access === "trash" ? "/" : canonicalBrowserPath(singleURLParameter(params, "path") || "/");
+    return {
+      path,
+      search: readBoundedText(params, "search", 256),
+      sort,
+      view,
+      file: readPreviewPath(params, path, access),
+      kind: readEnumParameter(params, "kind", browserKindValues, ""),
+      media: readEnumParameter(params, "media", browserMediaValues, ""),
+      minimumSize: readBoundedInteger(params, "min", 0, Number.MAX_SAFE_INTEGER),
+      maximumSize: readBoundedInteger(params, "max", 0, Number.MAX_SAFE_INTEGER),
+      modifiedAfter: readCanonicalDate(params, "after"),
+      modifiedBefore: readCanonicalDate(params, "before"),
+      preview: access === "owner" ? readEnumParameter(params, "preview", browserPreviewValues, "") : "",
+      filtersOpen: singleURLParameter(params, "filters") === "open",
+    };
+  }
+
+  function browserStateSnapshot(access) {
+    const view = access === "owner" && browserViewValues.has(state.viewMode) ? state.viewMode : (state.viewMode === "grid" ? "grid" : "list");
+    const selectedSort = browserSortValues.has(byID("file-sort").value) ? byID("file-sort").value : browserStateDefaultSort;
+    const integerInput = (id) => {
+      const value = byID(id).value;
+      return /^(0|[1-9]\d*)$/u.test(value) && Number.isSafeInteger(Number(value)) ? value : "";
+    };
+    return {
+      path: access === "public" ? state.publicPath : state.currentDirectory,
+      search: byID("file-filter").value.slice(0, 256),
+      sort: view === "storage" ? "size:desc" : selectedSort,
+      view,
+      file: access !== "trash" ? state.browserPreviewPath : "",
+      kind: browserKindValues.has(byID("filter-kind").value) ? byID("filter-kind").value : "",
+      media: browserMediaValues.has(byID("filter-media").value) ? byID("filter-media").value : "",
+      minimumSize: integerInput("filter-min-size"),
+      maximumSize: integerInput("filter-max-size"),
+      modifiedAfter: byID("filter-modified-after").value,
+      modifiedBefore: byID("filter-modified-before").value,
+      preview: access === "owner" && browserPreviewValues.has(byID("filter-preview").value) ? byID("filter-preview").value : "",
+      filtersOpen: Boolean(byID("metadata-filters").closest("details")?.open),
+    };
+  }
+
+  function browserURLForState(access, pathname = location.pathname) {
+    const url = new URL(location.href);
+    const params = url.searchParams;
+    for (const name of browserStateParameterNames) params.delete(name);
+    const snapshot = browserStateSnapshot(access);
+    if (access !== "trash") params.set("path", canonicalBrowserPath(snapshot.path));
+    params.set("sort", snapshot.sort);
+    params.set("view", snapshot.view);
+    if (snapshot.file) params.set("file", snapshot.file);
+    if (snapshot.search) params.set("search", snapshot.search);
+    if (snapshot.kind) params.set("kind", snapshot.kind);
+    if (snapshot.media) params.set("media", snapshot.media);
+    if (snapshot.minimumSize) params.set("min", snapshot.minimumSize);
+    if (snapshot.maximumSize) params.set("max", snapshot.maximumSize);
+    if (snapshot.modifiedAfter) params.set("after", snapshot.modifiedAfter);
+    if (snapshot.modifiedBefore) params.set("before", snapshot.modifiedBefore);
+    if (snapshot.preview) params.set("preview", snapshot.preview);
+    if (snapshot.filtersOpen) params.set("filters", "open");
+    url.pathname = pathname;
+    url.search = params.toString();
+    url.hash = "";
+    return `${url.pathname}${url.search}`;
+  }
+
+  function browserRouteMatchesAccess(access) {
+    if (access === "owner") return location.pathname === "/";
+    if (access === "trash") return location.pathname === "/trash";
+    return access === "public" && /^\/s\/[^/]+$/u.test(location.pathname);
+  }
+
+  function syncBrowserURLState(mode = "replace", access = state.browserAccess) {
+    if (state.browserURLApplying || !browserRouteMatchesAccess(access)) return;
+    const method = mode === "push" ? "pushState" : "replaceState";
+    const next = browserURLForState(access);
+    if (`${location.pathname}${location.search}` === next) return;
+    const preview = Boolean(state.browserPreviewPath);
+    const previewReturn = preview && (mode === "push" ? !history.state?.preview : Boolean(history.state?.previewReturn));
+    history[method]({ ...(history.state || {}), browser: true, preview, previewReturn }, "", next);
+  }
+
+  function scheduleBrowserURLSync() {
+    window.clearTimeout(state.browserURLSyncTimer);
+    state.browserURLSyncTimer = window.setTimeout(() => {
+      state.browserURLSyncTimer = 0;
+      syncBrowserURLState();
+    }, 80);
+  }
+
+  function applyBrowserURLState(access) {
+    const parsed = parseBrowserURLState(access);
+    state.browserURLApplying = true;
+    byID("file-filter").value = parsed.search;
+    byID("filter-kind").value = parsed.kind;
+    byID("filter-media").value = parsed.media;
+    byID("filter-min-size").value = parsed.minimumSize === null ? "" : String(parsed.minimumSize);
+    byID("filter-max-size").value = parsed.maximumSize === null ? "" : String(parsed.maximumSize);
+    byID("filter-modified-after").value = parsed.modifiedAfter;
+    byID("filter-modified-before").value = parsed.modifiedBefore;
+    byID("filter-preview").value = parsed.preview;
+    const disclosure = byID("metadata-filters").closest("details");
+    if (disclosure) disclosure.open = parsed.filtersOpen;
+    byID("file-sort").value = parsed.view === "storage" ? browserStateDefaultSort : parsed.sort;
+    state.fileSortBeforeStorage = browserStateDefaultSort;
+    state.viewMode = "list";
+    setFileViewMode(parsed.view, false, false);
+    if (parsed.view !== "storage") byID("file-sort").value = parsed.sort;
+    if (access === "public") state.publicPath = parsed.path;
+    else if (access === "owner") state.currentDirectory = parsed.path;
+    state.browserPreviewPath = parsed.file;
+    if (!parsed.file && byID("preview-dialog").open) closePreviewViewer(false);
+    syncFilterIndicator();
+    state.browserURLApplying = false;
+    syncBrowserURLState("replace", access);
+    return parsed;
+  }
+
+  function applyBrowserPreviewHistory(access) {
+    if (!browserRouteMatchesAccess(access)) return false;
+    const current = new URL(browserURLForState(access), location.origin);
+    const target = new URL(location.href);
+    current.searchParams.delete("file");
+    target.searchParams.delete("file");
+    if (`${current.pathname}${current.search}` !== `${target.pathname}${target.search}`) return false;
+    const parsed = parseBrowserURLState(access, new URL(location.href));
+    state.browserPreviewPath = parsed.file;
+    if (!parsed.file) {
+      if (byID("preview-dialog").open) closePreviewViewer(false);
+      return true;
+    }
+    restoreBrowserPreview();
+    return true;
+  }
+
+  async function restoreBrowserPreview() {
+    const path = state.browserPreviewPath;
+    if (!path || state.browserPreviewRestoring || state.browserAccess === "trash") return;
+    if (state.viewerEntry?.path === path && byID("preview-dialog").open) return;
+    state.browserPreviewRestoring = true;
+    try {
+      let entry = state.entries.find((item) => item.path === path);
+      if (!entry && state.browserAccess === "owner") entry = await api(`/api/v1/files/stat?path=${encodeURIComponent(path)}`);
+      if (!entry && state.browserAccess === "public") entry = await api(`/api/v1/public/shares/${encodeURIComponent(state.publicToken)}/stat?path=${encodeURIComponent(path)}`);
+      if (!entry || entry.kind !== "file") throw new Error("The previewed file is unavailable.");
+      if (state.browserAccess === "public") await openSafeOriginalPreview(entry, state.publicToken, false);
+      else openMediaViewer(entry, false);
+    } catch (error) {
+      state.browserPreviewPath = "";
+      syncBrowserURLState("replace");
+      showActionErrorToast("Preview", error, "The previewed file is unavailable.");
+    } finally {
+      state.browserPreviewRestoring = false;
+    }
+  }
+
   async function loadDirectory(directory, append = false, preserveSelection = false) {
     if (append && state.directoryLoading) return;
+    const directoryChanged = !append && directory !== state.currentDirectory;
     const request = state.directoryRequest + 1;
     state.directoryRequest = request;
     state.directoryLoading = true;
     state.currentDirectory = directory;
+    if (!append) syncBrowserURLState(directoryChanged ? "push" : "replace", "owner");
+    let loadedPage = false;
     if (!append) {
       cleanupGridMedia(new Set());
       state.previewStates.clear();
       state.currentEntry = null;
+      state.storageMapRemainingMaximumSize = null;
       renderPathAggregate(null);
       state.entries = [];
       state.nextCursor = "";
@@ -33,17 +252,25 @@
       renderFileLoadingItems();
     }
     renderBreadcrumbs("breadcrumbs", directory, (path) => loadDirectory(path));
-    const [sort, order] = (state.viewMode === "storage" ? "size:desc" : byID("file-sort").value).split(":");
-    const limit = `limit=${state.viewMode === "storage" ? storageMapPageSize : 100}`;
+    const storageView = state.viewMode === "storage";
+    const [sort, order] = byID("file-sort").value.split(":");
     const cursor = append && state.nextCursor ? `&cursor=${encodeURIComponent(state.nextCursor)}` : "";
     try {
-      const page = await api(`/api/v1/files?path=${encodeURIComponent(directory)}&${limit}&sort=${sort}&order=${order}${cursor}`);
+      const endpoint = storageView
+        ? `/api/v1/files/storage-map?path=${encodeURIComponent(directory)}`
+        : `/api/v1/files?path=${encodeURIComponent(directory)}&limit=100&sort=${sort}&order=${order}${cursor}`;
+      const page = await api(endpoint);
       if (request !== state.directoryRequest) return;
       state.currentEntry = page.current;
+      state.storageMapRemainingMaximumSize = storageView && Number.isSafeInteger(page.remainingMaximumSize) && page.remainingMaximumSize >= 0
+        ? page.remainingMaximumSize
+        : null;
       renderPathAggregate(page.current);
       state.entries = append ? state.entries.concat(page.entries || []) : (page.entries || []);
       state.nextCursor = page.nextCursor || "";
+      loadedPage = true;
       renderFiles();
+      syncBrowserURLState("replace", "owner");
       announce(`${page.entries.length} item${page.entries.length === 1 ? "" : "s"} loaded from ${pathName(directory)}.`);
     } catch (error) {
       if (request !== state.directoryRequest) return;
@@ -64,6 +291,7 @@
         requestAnimationFrame(() => maybeLoadNextBrowserPage(state.viewMode === "grid" ? byID("media-grid") : byID("list-presentation")));
       }
     }
+    if (!append && loadedPage) await restoreBrowserPreview();
   }
 
   function renderPathAggregate(entry) {
@@ -124,6 +352,21 @@
     return categories[mediaCategory(entry)] || "File";
   }
 
+  function activeMetadataFilterCount() {
+    const filterIDs = ["filter-kind", "filter-media", "filter-min-size", "filter-max-size", "filter-modified-after", "filter-modified-before"];
+    if (state.browserAccess === "owner") filterIDs.push("filter-preview");
+    return filterIDs.reduce((total, id) => total + (byID(id).value !== "" ? 1 : 0), 0);
+  }
+
+  function syncFilterIndicator() {
+    const count = byID("active-filter-count");
+    const summary = count.closest("summary");
+    const active = activeMetadataFilterCount();
+    count.textContent = String(active);
+    count.hidden = active === 0;
+    summary.setAttribute("aria-label", active ? `Filter, ${active} active` : "Filter");
+  }
+
   function compareEntrySizes(left, right, direction) {
     const leftSize = knownEntrySize(left);
     const rightSize = knownEntrySize(right);
@@ -134,6 +377,7 @@
   }
 
   function renderFiles() {
+    syncFilterIndicator();
     const visible = filterLoadedEntries(state.entries);
     state.filteredEntries = visible;
     finishListLoading("file-rows");
@@ -177,9 +421,9 @@
 
   function loadNextBrowserPage() {
     if (!browserNextCursor() || browserPageLoading()) return;
-    if (state.browserAccess === "public") loadPublicShare(true);
-    else if (state.browserAccess === "trash") loadTrash(true);
-    else loadDirectory(state.currentDirectory, true);
+    if (state.browserAccess === "public") return loadPublicShare(true);
+    if (state.browserAccess === "trash") return loadTrash(true);
+    return loadDirectory(state.currentDirectory, true);
   }
 
   function maybeLoadNextBrowserPage(scroller) {
@@ -670,10 +914,8 @@
 
   function openBrowserEntry(entry) {
     if (entry.kind === "directory") {
-      if (state.browserAccess === "public") {
-        state.publicPath = entry.path;
-        loadPublicShare();
-      } else loadDirectory(entry.path);
+      if (state.browserAccess === "public") loadPublicShare(false, entry.path);
+      else loadDirectory(entry.path);
       return;
     }
     preview(entry, state.browserAccess === "public" ? state.publicToken : "");

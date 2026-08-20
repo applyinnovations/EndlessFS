@@ -269,6 +269,24 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := closeTransferSheet(ctx); err != nil {
 		t.Fatalf("close upload transfer sheet: %v (%s)", err, browserStatus(ctx))
 	}
+	if err := chromedp.Run(ctx, chromedp.Click(`[aria-label="Preview file browser-proof.txt"]`, chromedp.ByQuery)); err != nil {
+		t.Fatalf("open file preview with canonical URL state: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#preview-dialog").open && new URL(location.href).searchParams.get("file") === "/browser-proof.txt" && !new URL(location.href).searchParams.has("page")`, 5*time.Second); err != nil {
+		t.Fatalf("file preview did not enter canonical URL state: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Reload()); err != nil {
+		t.Fatalf("reload file preview URL state: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#preview-dialog").open && document.querySelector("#preview-metadata").textContent.includes("/browser-proof.txt")`, 10*time.Second); err != nil {
+		t.Fatalf("file preview URL state did not survive reload: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Click("#preview-close", chromedp.ByQuery)); err != nil {
+		t.Fatalf("close restored file preview: %v", err)
+	}
+	if err := waitFor(ctx, `!document.querySelector("#preview-dialog").open && !new URL(location.href).searchParams.has("file") && !new URL(location.href).searchParams.has("page")`, 10*time.Second); err != nil {
+		t.Fatalf("closing the file preview did not clear its URL state: %v (%s)", err, browserStatus(ctx))
+	}
 	if err := chromedp.Run(ctx,
 		chromedp.Click("#file-rows input[type='checkbox']", chromedp.ByQuery),
 		chromedp.WaitEnabled("#download-selected", chromedp.ByQuery),
@@ -480,7 +498,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	})()`, nil)); err != nil {
 		t.Fatalf("filter directory aggregates by minimum size: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector("#file-rows").dataset.itemCount === "1" && !document.querySelector("#file-rows").textContent.includes("Dropped Folder")`, 5*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector("#file-rows").dataset.itemCount === "1" && !document.querySelector("#file-rows").textContent.includes("Dropped Folder") && document.querySelector("#active-filter-count").textContent === "1" && document.querySelector(".filter-disclosure summary").getAttribute("aria-label") === "Filter, 1 active"`, 5*time.Second); err != nil {
 		t.Fatalf("directory ignored the minimum-size filter: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
@@ -525,6 +543,17 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 	if err := waitFor(ctx, `document.querySelector('.media-tile-open[aria-label="View file Dropped Folder"], .media-tile-open[aria-label="Open folder Dropped Folder"]')?.querySelector(".media-tile-meta")?.textContent === "11 B"`, 5*time.Second); err != nil {
 		t.Fatalf("directory aggregate is missing from grid view: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("#file-view-storage").click()`, nil)); err != nil {
+		t.Fatalf("show adaptive storage map hierarchy: %v", err)
+	}
+	if err := waitFor(ctx, `(() => {
+		const parent = document.querySelector('[data-storage-entry="/Dropped Folder"][aria-level="1"]');
+		const first = document.querySelector('[data-storage-entry="/Dropped Folder/first.txt"][aria-level="2"]');
+		const nested = document.querySelector('[data-storage-entry="/Dropped Folder/Nested"][aria-level="2"]');
+		return parent?.getAttribute("aria-expanded") === "true" && first && nested && parent.contains(first) && parent.contains(nested);
+	})()`, 10*time.Second); err != nil {
+		t.Fatalf("storage map did not expose its bounded second level: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("#file-view-list").click()`, nil)); err != nil {
 		t.Fatalf("restore list view after directory aggregate proof: %v", err)
@@ -759,10 +788,11 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		t.Fatalf("virtual list benchmark: logical=%d rendered=%d filtered=%d filterMillis=%.2f", listBenchmark.Logical, listBenchmark.Rendered, listBenchmark.FilteredItems, listBenchmark.FilterMillis)
 	}
 	mu.Lock()
-	fileRequestsBeforeStorage := countRequestPath(requestedURLs, "/api/v1/files")
+	storageRequestsBefore := countRequestPath(requestedURLs, "/api/v1/files/storage-map")
 	mu.Unlock()
 	var storageBenchmark struct {
 		Rendered     int  `json:"rendered"`
+		GroupShapes  int  `json:"groupShapes"`
 		NoOverlaps   bool `json:"noOverlaps"`
 		PositiveArea bool `json:"positiveArea"`
 		SortDisabled bool `json:"sortDisabled"`
@@ -794,6 +824,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		}
 		return {
 			rendered: rectangles.length,
+			groupShapes: document.querySelectorAll(".storage-map-group-shape").length,
 			noOverlaps,
 			positiveArea: rectangles.every((rectangle) => rectangle.width > 0 && rectangle.height > 0),
 			sortDisabled: document.querySelector("#file-sort").disabled,
@@ -804,10 +835,10 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		t.Fatalf("measure storage map benchmark: %v", err)
 	}
 	mu.Lock()
-	storageRequests := countRequestPath(requestedURLs, "/api/v1/files") - fileRequestsBeforeStorage
+	storageRequests := countRequestPath(requestedURLs, "/api/v1/files/storage-map") - storageRequestsBefore
 	mu.Unlock()
-	if storageBenchmark.Rendered == 0 || storageBenchmark.Rendered > 181 || storageBenchmark.TreeItems != storageBenchmark.Rendered || !storageBenchmark.NoOverlaps || !storageBenchmark.PositiveArea || !storageBenchmark.SortDisabled || !storageBenchmark.ExactCount || storageRequests > 2 {
-		t.Fatalf("storage map benchmark: rendered=%d treeItems=%d noOverlaps=%v positiveArea=%v sortDisabled=%v exactCount=%v requests=%d", storageBenchmark.Rendered, storageBenchmark.TreeItems, storageBenchmark.NoOverlaps, storageBenchmark.PositiveArea, storageBenchmark.SortDisabled, storageBenchmark.ExactCount, storageRequests)
+	if storageBenchmark.Rendered == 0 || storageBenchmark.TreeItems > 180 || storageBenchmark.TreeItems != storageBenchmark.Rendered+storageBenchmark.GroupShapes || !storageBenchmark.NoOverlaps || !storageBenchmark.PositiveArea || !storageBenchmark.SortDisabled || !storageBenchmark.ExactCount || storageRequests != 1 {
+		t.Fatalf("storage map benchmark: rendered=%d groups=%d treeItems=%d noOverlaps=%v positiveArea=%v sortDisabled=%v exactCount=%v requests=%d", storageBenchmark.Rendered, storageBenchmark.GroupShapes, storageBenchmark.TreeItems, storageBenchmark.NoOverlaps, storageBenchmark.PositiveArea, storageBenchmark.SortDisabled, storageBenchmark.ExactCount, storageRequests)
 	}
 	if err := chromedp.Run(ctx,
 		chromedp.Focus(`#storage-map .storage-map-tile[tabindex="0"]`, chromedp.ByQuery),
@@ -818,11 +849,41 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := waitFor(ctx, `!document.querySelector("#selection-bar").hidden && document.activeElement?.matches('#storage-map .storage-map-tile[tabindex="0"]')`, time.Second); err != nil {
 		t.Fatalf("storage map selection did not reuse the canonical selection surface: %v", err)
 	}
-	if err := chromedp.Run(ctx,
-		chromedp.Click("#clear-selection", chromedp.ByQuery),
-		chromedp.Evaluate(`document.querySelector("#file-view-list").click()`, nil),
-	); err != nil {
-		t.Fatalf("leave storage map benchmark: %v", err)
+	if err := chromedp.Run(ctx, chromedp.Click("#clear-selection", chromedp.ByQuery)); err != nil {
+		t.Fatalf("clear storage map selection: %v", err)
+	}
+	if err := chromedp.Run(ctx, chromedp.Click(`#storage-map .storage-map-tile.aggregate[aria-level="1"]`, chromedp.ByQuery)); err != nil {
+		t.Fatalf("open remaining storage-map items: %v", err)
+	}
+	if err := waitFor(ctx, `(() => {
+		const url = new URL(location.href);
+		return document.querySelector("#file-view-list").checked &&
+			Number(document.querySelector("#filter-max-size").value) > 0 &&
+			document.querySelector("#file-sort").value === "size:desc" &&
+			!document.querySelector("#metadata-filters").closest("details").open &&
+			document.querySelector("#breadcrumbs").textContent.trim() === "Files" &&
+			url.searchParams.get("path") === "/" &&
+			url.searchParams.get("sort") === "size:desc" &&
+			url.searchParams.get("view") === "list" &&
+			!url.searchParams.has("page") &&
+			url.searchParams.get("max") === document.querySelector("#filter-max-size").value &&
+			!url.searchParams.has("filters");
+	})()`, 10*time.Second); err != nil {
+		t.Fatalf("remaining items did not open the filtered detail view: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Reload()); err != nil {
+		t.Fatalf("reload remaining-items URL state: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#file-view-list").checked && Number(document.querySelector("#filter-max-size").value) > 0 && document.querySelector("#file-sort").value === "size:desc" && !document.querySelector("#metadata-filters").closest("details").open && document.querySelector("#breadcrumbs").textContent.trim() === "Files"`, 10*time.Second); err != nil {
+		t.Fatalf("remaining-items URL state did not survive reload: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const maximum = document.querySelector("#filter-max-size");
+		maximum.value = "";
+		maximum.dispatchEvent(new Event("input", {bubbles: true}));
+		document.querySelector("#metadata-filters").closest("details").open = false;
+	})()`, nil)); err != nil {
+		t.Fatalf("clear remaining-items filter: %v", err)
 	}
 	t.Logf(`ui-benchmark-v1 {"directory":{"logical":%d,"listRendered":%d,"gridRendered":%d,"filterMillis":%.2f,"storageRendered":%d,"storageRequests":%d},"previewRequests":%d}`,
 		loaded, listBenchmark.Rendered, renderedTiles, listBenchmark.FilterMillis, storageBenchmark.Rendered, storageRequests, resolveRequestsAfterScale-resolveRequestsBeforeScale)
@@ -882,7 +943,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 	var mobileStorageFits bool
 	if err := chromedp.Run(ctx,
-		chromedp.Evaluate(`document.documentElement.scrollWidth <= 320 && document.querySelector("#storage-map").getBoundingClientRect().width <= 320 && document.querySelectorAll(".storage-map-shape").length <= 181`, &mobileStorageFits),
+		chromedp.Evaluate(`document.documentElement.scrollWidth <= 320 && document.querySelector("#storage-map").getBoundingClientRect().width <= 320 && document.querySelectorAll('#storage-map [role="treeitem"]').length <= 180`, &mobileStorageFits),
 		chromedp.Evaluate(`document.querySelector("#file-view-list").click()`, nil),
 	); err != nil {
 		t.Fatalf("inspect mobile storage map: %v", err)
@@ -1977,11 +2038,17 @@ func seedVirtualFiles(t *testing.T, harness harness, count int) {
 	}
 	for index := range count {
 		path := domain.MustParseUserPath(fmt.Sprintf("/virtual-%05d.bin", index))
-		capability, err := harness.storage.CreateUpload(context.Background(), scope, domain.CreateUploadRequest{Path: path, Size: 0, MediaType: "application/octet-stream"})
+		size := int64(1)
+		body := []byte{0}
+		if index == 0 {
+			size = 0
+			body = nil
+		}
+		capability, err := harness.storage.CreateUpload(context.Background(), scope, domain.CreateUploadRequest{Path: path, Size: size, MediaType: "application/octet-stream"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		request := httptest.NewRequest(capability.Method, capability.URL, nil)
+		request := httptest.NewRequest(capability.Method, capability.URL, bytes.NewReader(body))
 		for name, value := range capability.Headers {
 			request.Header.Set(name, value)
 		}
@@ -1990,7 +2057,7 @@ func seedVirtualFiles(t *testing.T, harness harness, count int) {
 		if response.Code != http.StatusNoContent {
 			t.Fatalf("seed upload %d status = %d", index, response.Code)
 		}
-		if _, err := harness.storage.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: 0, MediaType: "application/octet-stream"}); err != nil {
+		if _, err := harness.storage.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: size, MediaType: "application/octet-stream"}); err != nil {
 			t.Fatal(err)
 		}
 	}

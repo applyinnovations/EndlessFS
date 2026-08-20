@@ -176,8 +176,14 @@
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     });
-    byID("file-filter").addEventListener("input", renderFiles); byID("file-sort").addEventListener("change", () => state.browserAccess === "owner" ? loadDirectory(state.currentDirectory) : renderFiles());
-    for (const id of ["filter-kind", "filter-media", "filter-min-size", "filter-max-size", "filter-modified-after", "filter-modified-before", "filter-preview"]) byID(id).addEventListener("input", renderFiles);
+    byID("file-filter").addEventListener("input", () => { renderFiles(); scheduleBrowserURLSync(); });
+    byID("file-sort").addEventListener("change", () => {
+      syncBrowserURLState("push");
+      if (state.browserAccess === "owner") loadDirectory(state.currentDirectory);
+      else renderFiles();
+    });
+    for (const id of ["filter-kind", "filter-media", "filter-min-size", "filter-max-size", "filter-modified-after", "filter-modified-before", "filter-preview"]) byID(id).addEventListener("input", () => { renderFiles(); scheduleBrowserURLSync(); });
+    byID("metadata-filters").closest("details").addEventListener("toggle", scheduleBrowserURLSync);
     for (const id of ["file-view-list", "file-view-grid", "file-view-storage"]) byID(id).addEventListener("change", (event) => { if (event.target.checked) setFileViewMode(event.target.value); });
     byID("media-grid").addEventListener("scroll", () => { if (!state.gridRenderFrame) state.gridRenderFrame = requestAnimationFrame(() => { state.gridRenderFrame = 0; if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries); }); maybeLoadNextBrowserPage(byID("media-grid")); });
     byID("list-presentation").addEventListener("scroll", () => {
@@ -229,7 +235,7 @@
     byID("preview-next").addEventListener("click", () => navigateViewer(1));
     byID("preview-generate").addEventListener("click", () => generateViewerPreview(false));
     byID("preview-regenerate").addEventListener("click", () => generateViewerPreview(true));
-    byID("preview-original").addEventListener("click", () => { if (state.viewerEntry) openSafeOriginalPreview(state.viewerEntry); });
+    byID("preview-original").addEventListener("click", () => { if (state.viewerEntry) openSafeOriginalPreview(state.viewerEntry, "", false); });
     byID("preview-share").addEventListener("click", () => runPreviewOwnerAction(createShare));
     byID("preview-copy").addEventListener("click", () => runPreviewOwnerAction((entry) => copyMove(false, [entry], false)));
     byID("preview-move").addEventListener("click", () => runPreviewOwnerAction((entry) => copyMove(true, [entry], false)));
@@ -237,7 +243,19 @@
     byID("preview-close").addEventListener("click", closePreviewViewer);
     byID("preview-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closePreviewViewer(); });
     byID("preview-dialog").addEventListener("keydown", (event) => { if (event.key === "ArrowLeft") { event.preventDefault(); navigateViewer(-1); } if (event.key === "ArrowRight") { event.preventDefault(); navigateViewer(1); } });
-    window.addEventListener("popstate", () => { if (state.user) setRoute(routeFromPath(), false); });
+    window.addEventListener("popstate", () => {
+      if (state.user) {
+        const route = routeFromPath();
+        const access = route === "drive" ? "owner" : route === "trash" ? "trash" : "";
+        if (!access || !applyBrowserPreviewHistory(access)) setRoute(route, false);
+      }
+      else if (state.publicToken) {
+        if (!applyBrowserPreviewHistory("public")) {
+          const browserState = applyBrowserURLState("public");
+          loadPublicShare(false, browserState.path);
+        }
+      }
+    });
     window.addEventListener("online", resumePausedTransfers);
     window.addEventListener("offline", () => {
       for (const transfer of state.transfers.filter((item) => item.state === "retry-wait")) transitionTransfer(transfer, "paused", "Waiting for a network connection.", "offline");
@@ -283,7 +301,12 @@
     consumePathTokens(); wireIconControls(); wireActionTooltips(); wireEvents();
     try { state.config = await api("/api/v1/config"); }
     catch (error) { showState("drive-state", friendlyError(error, "EndlessFS configuration is unavailable."), "error"); }
-    if (state.publicToken) { loadPublicShare(); return; }
+    if (state.publicToken) {
+      syncFileBrowserAccess("public");
+      const browserState = applyBrowserURLState("public");
+      loadPublicShare(false, browserState.path);
+      return;
+    }
     if (["/bootstrap", "/register", "/recover"].includes(location.pathname) || state.inviteToken || state.recoveryToken) { configureRegistration(); showOnly("registration-view"); byID("display-name").focus(); return; }
     try { state.user = await api("/api/v1/me"); await enterApplication(); }
     catch (error) {

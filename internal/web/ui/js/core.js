@@ -58,6 +58,11 @@
     viewMode: "list",
     fileSortBeforeStorage: "",
     storageMapRenderVersion: 0,
+    storageMapRemainingMaximumSize: null,
+    browserPreviewPath: "",
+    browserPreviewRestoring: false,
+    browserURLApplying: false,
+    browserURLSyncTimer: 0,
     filteredEntries: [],
     themeAssets: {},
     previewStates: new Map(),
@@ -457,7 +462,7 @@
     const accessChanged = state.browserAccess !== access;
     if (surface.parentElement !== host) host.append(surface);
     state.browserAccess = access;
-    if (access !== "owner" && state.viewMode === "storage") setFileViewMode("list", false);
+    if (access !== "owner" && state.viewMode === "storage") setFileViewMode("list", false, false);
     if (accessChanged) { state.selected.clear(); updateSelection(); }
     surface.dataset.access = access;
     byID("breadcrumbs").setAttribute("aria-label", access === "public" ? "Shared folder path" : "Current folder");
@@ -694,18 +699,31 @@
     if (!state.user) return Promise.resolve();
     const paths = { drive: "/", trash: "/trash", settings: "/settings", admin: "/admin" };
     if (route === "admin" && !(state.user.roles || []).includes("admin")) route = "drive";
+    const previousRoute = routeFromPath();
+    if (push && (previousRoute === "drive" || previousRoute === "trash")) {
+      window.clearTimeout(state.browserURLSyncTimer);
+      state.browserURLSyncTimer = 0;
+      syncBrowserURLState("replace", previousRoute === "drive" ? "owner" : "trash");
+    }
     if (route === "drive") syncFileBrowserAccess("owner");
     if (route === "trash") syncFileBrowserAccess("trash");
     if (route === "drive" || route === "trash") byID("browser-title").textContent = route === "trash" ? "Trash" : "Files";
-    const routeURL = `${paths[route]}${state.safeTheme ? "?safe-theme=1" : ""}`;
-    if (push && `${location.pathname}${location.search}` !== routeURL) history.pushState({ route }, "", routeURL);
+    const browserAccess = route === "drive" ? "owner" : route === "trash" ? "trash" : "";
+    if (push && browserAccess) {
+      const routeURL = browserURLForState(browserAccess, paths[route]);
+      if (`${location.pathname}${location.search}` !== routeURL) history.pushState({ route }, "", routeURL);
+    } else if (push) {
+      const routeURL = `${paths[route]}${state.safeTheme ? "?safe-theme=1" : ""}`;
+      if (`${location.pathname}${location.search}` !== routeURL) history.pushState({ route }, "", routeURL);
+    }
+    const browserState = browserAccess ? applyBrowserURLState(browserAccess) : null;
     for (const name of Object.keys(paths)) byID(`${name}-view`).hidden = name !== route;
     document.querySelectorAll("[data-route]").forEach((link) => {
       if (link.closest(".app-tabs, .mobile-navigation")) link.setAttribute("aria-current", link.dataset.route === route ? "page" : "false");
     });
     const heading = route === "drive" || route === "trash" ? byID("browser-title") : byID(`${route}-title`);
     if (heading) heading.focus({ preventScroll: true });
-    if (route === "drive") return loadDirectory(state.currentDirectory);
+    if (route === "drive") return loadDirectory(browserState.path);
     if (route === "trash") return loadTrash();
     if (route === "settings") return loadSettings();
     if (route === "admin") return loadAdmin();

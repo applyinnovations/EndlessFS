@@ -71,6 +71,7 @@
       state.entries = append ? state.entries.concat(entries) : entries;
       state.trashCursor = page.nextCursor || "";
       renderFiles();
+      syncBrowserURLState("replace", "trash");
       byID("empty-trash").disabled = state.entries.length === 0;
       announce(entries.length ? `${entries.length} trashed item${entries.length === 1 ? "" : "s"} loaded.` : "Trash is empty.");
     } catch (error) {

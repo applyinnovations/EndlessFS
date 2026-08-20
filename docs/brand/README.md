@@ -189,8 +189,12 @@ The reference behavior is closer to a dense photo library/contact sheet than a c
 
 - A storage map is a third file presentation for identifying disproportionately large files and directories in the current path.
 - Rectangle area represents recursive consumed bytes only. Folder file count is secondary metadata and never changes area.
-- Use the aggregate tree already returned with directory entries; never discover descendants through client-side recursive requests.
-- Render a deterministic bounded set of the largest useful items and combine the remaining positive byte total into one exact **Other** tile. Zero-byte entries remain represented by the current-path count and do not receive dishonest visible area.
+- Use one bounded, owner-scoped hierarchy response derived from aggregate-tree entries; never discover descendants through client-side recursive or per-directory requests.
+- Render a deterministic bounded set of the largest useful items and combine every omitted positive byte total into one exact **Remaining items** tile. Zero-byte entries remain represented by the current-path count and do not receive dishonest visible area.
+- Adaptively reveal one second level inside large directory tiles only when the tile has enough area for legible child geometry. Keep the total interactive tree capped across both levels, and retain the directory boundary so hierarchy never becomes ambiguous.
+- Treat **Remaining items** as progressive disclosure: activating it opens the represented directory in the detail view, sorts largest first, keeps the filter controls closed, and applies the exact maximum-size cutoff for the omitted set. The bounded hierarchy response supplies a one-entry lookahead so the cutoff remains correct when the response itself is truncated.
+- Encode navigational file-browser state in the URL. Path, open file preview, search, filter values and disclosure, sort, and presentation must survive refresh, browser history navigation, and link sharing. Infinite-scroll batch depth is transient rendering state and must remain out of the URL. Parse these values through a bounded allowlisted schema; duplicate, malformed, oversized, or inapplicable values fall back to canonical defaults.
+- The Filter control must show a compact count of active metadata criteria. Filename search remains self-evident in its populated field and is not included in that count.
 - Keep navigation, selection, filtering, and actions consistent with the list and grid. The map is not a dashboard or a separate storage-management workflow.
 - Tiles use plain neutral surfaces and restrained dividers. Size creates visual emphasis; decorative color, gradients, shadows, and nested cards do not.
 - Every actionable tile is keyboard reachable, exposes its complete accessible name and values, and supports spatial arrow-key navigation. Small tiles may omit visible labels but not accessible identity.

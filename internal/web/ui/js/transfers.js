@@ -208,7 +208,7 @@
   }
 
   async function restoreTransferLedger() {
-    if (!state.user || !state.user.userID || (state.config && state.config.localFixture && new URLSearchParams(location.search).get("fixture") === "transfers")) return;
+    if (!state.user || !state.user.userID || (state.config && state.config.localFixture)) return;
     state.transferLedgerOwner = state.user.userID;
     try {
       const [itemRecords, groupRecords, storedSources] = await Promise.all([
@@ -1045,10 +1045,6 @@
     byID(groupID ? "folder-input" : "upload-input").click();
   }
 
-  function transferStateLabel(value) {
-    return ({ queued: "Queued", preparing: "Preparing", uploading: "Uploading", "retry-wait": "Retrying", paused: "Paused", "needs-source": "Source needed", complete: "Complete", failed: "Failed", cancelled: "Cancelled" })[value] || "Waiting";
-  }
-
   function aggregateTransferSummary(transfers) {
     const counts = { queued: 0, preparing: 0, uploading: 0, "retry-wait": 0, paused: 0, "needs-source": 0, complete: 0, failed: 0, cancelled: 0 };
     let totalBytes = 0;
@@ -1123,10 +1119,16 @@
     finalizeTransferSummary(summary);
   }
 
+  function transferPercent(transfer) {
+    const total = transferFileSize(transfer);
+    const confirmed = Math.min(transfer.confirmed, total);
+    return total > 0 ? Math.round(confirmed / total * 100) : transfer.state === "complete" ? 100 : 0;
+  }
+
   function transferMetricText(transfer) {
     const total = transferFileSize(transfer);
     const confirmed = Math.min(transfer.confirmed, total);
-    const percent = total > 0 ? Math.round(confirmed / total * 100) : transfer.state === "complete" ? 100 : 0;
+    const percent = transferPercent(transfer);
     let eta = "Waiting";
     if (transfer.state === "uploading") eta = transfer.speedBps > 0 ? formatDuration((total - confirmed) / transfer.speedBps) : "Calculating ETA";
     else if (transfer.state === "preparing") eta = "Preparing";
@@ -1134,7 +1136,6 @@
     else if (transfer.state === "paused") eta = "Offline";
     else if (transfer.state === "needs-source") eta = "Source needed";
     else if (transfer.state === "complete") eta = "Complete";
-    else if (transfer.state === "failed") eta = "Needs attention";
     else if (transfer.state === "cancelled") eta = "Cancelled";
     return `${percent}% · ${eta} · ${formatRate(transfer.speedBps)}`;
   }
@@ -1145,11 +1146,29 @@
     const label = transfer.groupID ? transfer.relativePath : transfer.name;
     const tail = document.createElement("div");
     tail.className = "transfer-row-tail";
-    tail.append(text("span", transferStateLabel(transfer.state), "transfer-row-state"));
     if (transfer.state === "needs-source") tail.append(iconButton("upload", `Reconnect upload source for ${label}`, () => openTransferReconnect(transfer.groupID || ""), "transfer-row-actions", "Reconnect source"));
     if (["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(transfer.state)) tail.append(iconButton("x", `Cancel upload ${label}`, () => cancelTransfer(transfer), "transfer-row-actions", "Cancel upload"));
     if ((transfer.state === "failed" || (!transfer.groupID && transfer.state === "cancelled")) && transferSourceAvailable(transfer)) {
       tail.append(iconButton("refresh", `Retry upload ${label}`, () => retryTransfer(transfer), "transfer-row-actions", "Retry upload"));
+    }
+    const header = document.createElement("div");
+    header.className = "transfer-row-header";
+    header.append(text("strong", label, "transfer-row-main"), tail);
+    row.dataset.transferId = transfer.id;
+    if (transfer.state === "failed") {
+      const failure = document.createElement("div");
+      failure.className = "transfer-row-failure";
+      failure.append(
+        text("span", transfer.error || "Upload failed.", "transfer-row-error"),
+        text("span", `${transferPercent(transfer)}%`, "transfer-row-failure-percent"),
+      );
+      const progress = document.createElement("progress");
+      progress.className = "transfer-row-progress transfer-row-progress-error";
+      progress.max = Math.max(1, transferFileSize(transfer));
+      progress.value = transfer.confirmed;
+      progress.setAttribute("aria-label", `Failed upload progress for ${label}`);
+      row.append(header, failure, progress);
+      return row;
     }
     const metrics = document.createElement("div");
     metrics.className = "transfer-row-metrics";
@@ -1161,8 +1180,7 @@
     progress.max = Math.max(1, transferFileSize(transfer));
     progress.value = transferFileSize(transfer) === 0 && transfer.state === "complete" ? 1 : transfer.confirmed;
     progress.setAttribute("aria-label", `Upload progress for ${label}`);
-    row.dataset.transferId = transfer.id;
-    row.append(text("strong", label, "transfer-row-main"), tail, metrics, progress);
+    row.append(header, metrics, progress);
     if (transfer.error) row.append(text("span", transfer.error, "transfer-row-error"));
     return row;
   }
@@ -1185,7 +1203,6 @@
     row.className = `transfer-group-row ${displayState}`;
     const tail = document.createElement("div");
     tail.className = "transfer-row-tail";
-    tail.append(text("span", transferStateLabel(displayState), "transfer-row-state"));
     if (transfers.some((transfer) => transfer.state === "needs-source")) tail.append(iconButton("folder-up", `Reconnect upload source for ${group.name}`, () => openTransferReconnect(group.id), "transfer-row-actions", "Reconnect source"));
     if (["preparing", "queued", "uploading"].includes(group.state)) tail.append(iconButton("x", `Cancel folder upload ${group.name}`, () => cancelTransferGroup(group), "transfer-row-actions", "Cancel folder upload"));
     if (["failed", "cancelled"].includes(group.state)) tail.append(iconButton("refresh", `Retry folder upload ${group.name}`, () => retryTransferGroup(group), "transfer-row-actions", "Retry folder upload"));
@@ -1198,6 +1215,9 @@
     }, "transfer-row-actions", expanded ? "Collapse group" : "Expand group");
     disclosure.setAttribute("aria-expanded", String(expanded));
     tail.append(disclosure);
+    const header = document.createElement("div");
+    header.className = "transfer-row-header";
+    header.append(text("strong", group.name, "transfer-row-main"), tail);
     const metrics = document.createElement("div");
     metrics.className = "transfer-row-metrics";
     const metricText = group.state === "preparing" && !transfers.some((transfer) => transfer.state !== "queued")
@@ -1212,7 +1232,7 @@
     progress.value = group.totalSize > 0 ? summary.confirmedBytes : transfers.length ? summary.counts.complete : group.state === "complete" ? 1 : 0;
     progress.setAttribute("aria-label", `Upload progress for folder ${group.name}`);
     row.dataset.transferGroupId = group.id;
-    row.append(text("strong", group.name, "transfer-row-main"), tail, metrics, progress);
+    row.append(header, metrics, progress);
     if (group.error) row.append(text("span", group.error, "transfer-row-error"));
     return row;
   }
@@ -1270,19 +1290,11 @@
     progress.value = summary.totalBytes > 0 ? summary.confirmedBytes : summary.counts.complete;
     progress.setAttribute("aria-valuetext", `${summary.percent}% uploaded`);
     byID("transfer-percent").textContent = `${summary.percent}%`;
-    byID("transfer-eta").textContent = summary.eta;
+    const eta = summary.eta.replace(" remaining", "");
+    byID("transfer-eta").textContent = /^\d/.test(eta) ? `ETA ${eta}` : eta === "Calculating ETA" ? "ETA …" : eta;
     byID("transfer-speed").textContent = formatRate(summary.speedBps);
-    byID("transfer-volume").textContent = `${formatBytes(summary.confirmedBytes)} of ${formatBytes(summary.totalBytes)}`;
-    const parts = [];
-    if (summary.active) parts.push(`${summary.active} active`);
-    if (summary.counts.queued) parts.push(`${summary.counts.queued} queued`);
-    if (summary.counts["retry-wait"]) parts.push(`${summary.counts["retry-wait"]} retrying`);
-    if (summary.counts.paused) parts.push(`${summary.counts.paused} paused`);
-    if (summary.counts["needs-source"]) parts.push(`${summary.counts["needs-source"]} need source`);
-    if (summary.counts.failed) parts.push(`${summary.counts.failed} failed`);
-    if (summary.counts.complete) parts.push(`${summary.counts.complete} complete`);
-    if (summary.counts.cancelled) parts.push(`${summary.counts.cancelled} cancelled`);
-    byID("transfer-counts").textContent = parts.join(" · ") || "0 files";
+    byID("transfer-volume").textContent = `${formatBytes(summary.confirmedBytes)} / ${formatBytes(summary.totalBytes)}`;
+    byID("transfer-active").textContent = `${summary.active.toLocaleString()} active`;
     const filterCounts = {
       current: summary.active + summary.pending + summary.counts.failed,
       failed: summary.counts.failed,
@@ -1344,12 +1356,10 @@
       const group = state.transferGroups.get(groupView.id);
       const transfers = transfersByGroup.get(group.id) || [];
       projection.push({ kind: "group", group, transfers });
+      if (!state.expandedTransferGroups.has(group.id)) continue;
       const filteredFiles = orderedTransfers(transfers.filter((transfer) => transferMatchesFilter(transfer, filter) && transferMatchesSearch(transfer)));
-      const showAll = state.expandedTransferGroups.has(group.id) || filter === "failed" || Boolean(state.transferSearch);
       for (const transfer of filteredFiles) {
-        if (showAll || ["failed", "needs-source", "uploading", "preparing", "retry-wait", "paused"].includes(transfer.state)) {
-          projection.push({ kind: "transfer", transfer, nested: true });
-        }
+        projection.push({ kind: "transfer", transfer, nested: true });
       }
     }
     state.transferProjection = projection;
@@ -1409,6 +1419,15 @@
       if (row.dataset.transferId) {
         const transfer = state.transferByID.get(row.dataset.transferId);
         if (!transfer) continue;
+        if (transfer.state === "failed") {
+          const error = row.querySelector(".transfer-row-error");
+          const percent = row.querySelector(".transfer-row-failure-percent");
+          if (error) error.textContent = transfer.error || "Upload failed.";
+          if (percent) percent.textContent = `${transferPercent(transfer)}%`;
+          progress.max = Math.max(1, transferFileSize(transfer));
+          progress.value = transfer.confirmed;
+          continue;
+        }
         const size = transferFileSize(transfer);
         metric.textContent = transferMetricText(transfer);
         bytes.textContent = `${formatBytes(transfer.confirmed)} of ${formatBytes(size)}`;
@@ -1442,7 +1461,7 @@
   }
 
   function seedTransferPreviewFixture() {
-    if (!state.config || !state.config.localFixture || new URLSearchParams(location.search).get("fixture") !== "transfers") return;
+    if (!state.config || !state.config.localFixture) return;
     if (state.transfers.length > 0 || state.transferGroups.size > 0) return;
 
     const groupID = "local-transfer-preview";
@@ -1505,7 +1524,7 @@
     });
     state.transferFilter = "current";
     renderTransfers();
-    setTransferSheetOpen(true);
+    setTransferSheetOpen(false);
 
     state.transferFixtureTimer = window.setInterval(() => {
       let changed = false;

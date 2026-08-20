@@ -1,3 +1,17 @@
+  const fileDetailsByMediaType = Object.freeze({
+    "application/pdf": "PDF document",
+    "application/json": "JSON document",
+    "application/zip": "ZIP archive",
+    "image/gif": "GIF image",
+    "image/jpeg": "JPEG image",
+    "image/png": "PNG image",
+    "image/svg+xml": "SVG image",
+    "image/webp": "WebP image",
+    "text/csv": "CSV document",
+    "text/html": "HTML document",
+    "text/plain": "Plain text",
+  });
+
   async function loadDirectory(directory, append = false) {
     if (append && state.directoryLoading) return;
     const request = state.directoryRequest + 1;
@@ -44,7 +58,10 @@
         announce(friendlyError(error), true);
       }
     } finally {
-      if (request === state.directoryRequest) state.directoryLoading = false;
+      if (request === state.directoryRequest) {
+        state.directoryLoading = false;
+        requestAnimationFrame(() => maybeLoadNextBrowserPage(state.viewMode === "grid" ? byID("media-grid") : byID("list-presentation")));
+      }
     }
   }
 
@@ -94,6 +111,18 @@
     return fileCount === null ? "—" : `${fileCount.toLocaleString()} ${fileCount === 1 ? "file" : "files"}`;
   }
 
+  function entrySelectionKey(entry) {
+    return entry && entry.trash && entry.trash.trashID ? `trash:${entry.trash.trashID}` : entry.path;
+  }
+
+  function formatEntryDetails(entry) {
+    if (entry.kind === "directory") return formatEntryFileCount(entry);
+    const mediaType = (entry.mediaType || "").toLocaleLowerCase();
+    if (fileDetailsByMediaType[mediaType]) return fileDetailsByMediaType[mediaType];
+    const categories = { image: "Image", video: "Video", audio: "Audio", document: "Document", archive: "Archive" };
+    return categories[mediaCategory(entry)] || "File";
+  }
+
   function compareEntrySizes(left, right, direction) {
     const leftSize = knownEntrySize(left);
     const rightSize = knownEntrySize(right);
@@ -121,13 +150,58 @@
     };
     const emptyMessage = emptyMessages[state.browserAccess] || emptyMessages.owner;
     showState("drive-state", visible.length ? "" : (state.entries.length ? "No loaded items match this filter." : emptyMessage));
-    const nextCursor = state.browserAccess === "public" ? state.publicCursor : state.browserAccess === "trash" ? state.trashCursor : state.nextCursor;
-    byID("next-page").hidden = !nextCursor;
-    if (state.browserAccess === "owner") {
-      const selectedVisible = visible.filter((entry) => state.selected.has(entry.path)).length;
+    syncBrowserPagingSentinels();
+    const selectionAccess = state.browserAccess === "owner" || state.browserAccess === "trash";
+    if (selectionAccess) {
+      const selectedVisible = visible.filter((entry) => state.selected.has(entrySelectionKey(entry))).length;
       byID("select-all").checked = visible.length > 0 && selectedVisible === visible.length;
       byID("select-all").indeterminate = selectedVisible > 0 && selectedVisible < visible.length;
     }
+  }
+
+  function browserNextCursor() {
+    if (state.browserAccess === "public") return state.publicCursor;
+    if (state.browserAccess === "trash") return state.trashCursor;
+    return state.nextCursor;
+  }
+
+  function browserPageLoading() {
+    if (state.browserAccess === "public") return state.publicLoading;
+    if (state.browserAccess === "trash") return state.trashLoading;
+    return state.directoryLoading;
+  }
+
+  function loadNextBrowserPage() {
+    if (!browserNextCursor() || browserPageLoading()) return;
+    if (state.browserAccess === "public") loadPublicShare(true);
+    else if (state.browserAccess === "trash") loadTrash(true);
+    else loadDirectory(state.currentDirectory, true);
+  }
+
+  function maybeLoadNextBrowserPage(scroller) {
+    if (!scroller || scroller.hidden || !browserNextCursor() || browserPageLoading()) return;
+    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - (listRowHeight * 6)) loadNextBrowserPage();
+  }
+
+  function syncBrowserPagingSentinels() {
+    const hasNextPage = Boolean(browserNextCursor());
+    byID("list-page-sentinel").hidden = !hasNextPage || state.viewMode !== "list";
+    byID("grid-page-sentinel").hidden = !hasNextPage || state.viewMode !== "grid";
+  }
+
+  function setupAutomaticPaging() {
+    if (!("IntersectionObserver" in window)) return;
+    const observe = (rootID, sentinelID, action) => {
+      const root = byID(rootID);
+      const sentinel = byID(sentinelID);
+      const observer = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) action();
+      }, { root, rootMargin: "0px 0px 240px" });
+      observer.observe(sentinel);
+    };
+    observe("list-presentation", "list-page-sentinel", loadNextBrowserPage);
+    observe("media-grid", "grid-page-sentinel", loadNextBrowserPage);
+    observe("users-table-scroll", "users-page-sentinel", loadMoreUsers);
   }
 
   function listSpacerRow(height, columns = 6) {
@@ -324,18 +398,20 @@
     const tile = document.createElement("article");
     const ownerAccess = state.browserAccess === "owner";
     const trashAccess = state.browserAccess === "trash";
-    tile.className = `media-tile${ownerAccess && state.selected.has(entry.path) ? " selected" : ""}`;
+    const selectionAccess = ownerAccess || trashAccess;
+    const selectionKey = entrySelectionKey(entry);
+    tile.className = `media-tile${selectionAccess && state.selected.has(selectionKey) ? " selected" : ""}`;
     tile.setAttribute("role", "gridcell");
     tile.setAttribute("aria-rowindex", String(Math.floor(index / columns) + 1));
     tile.setAttribute("aria-colindex", String(index % columns + 1));
     if (trashAccess) tile.setAttribute("aria-label", `Trashed ${entry.name}`);
     const checkbox = document.createElement("input");
-    checkbox.className = "owner-only";
+    checkbox.className = "selectable-only";
     checkbox.type = "checkbox";
-    checkbox.checked = state.selected.has(entry.path);
+    checkbox.checked = state.selected.has(selectionKey);
     checkbox.setAttribute("aria-label", `Select ${entry.name}`);
     checkbox.addEventListener("change", () => {
-      if (checkbox.checked) state.selected.set(entry.path, entry); else state.selected.delete(entry.path);
+      if (checkbox.checked) state.selected.set(selectionKey, entry); else state.selected.delete(selectionKey);
       renderFiles(); updateSelection();
     });
     const open = document.createElement(trashAccess ? "div" : "button");
@@ -530,15 +606,17 @@
     const row = document.createElement("tr");
     const ownerAccess = state.browserAccess === "owner";
     const trashAccess = state.browserAccess === "trash";
-    if (ownerAccess && state.selected.has(entry.path)) row.className = "selected";
+    const selectionAccess = ownerAccess || trashAccess;
+    const selectionKey = entrySelectionKey(entry);
+    if (selectionAccess && state.selected.has(selectionKey)) row.className = "selected";
     const selectCell = document.createElement("td");
-    selectCell.className = "owner-only";
+    selectCell.className = "selectable-only";
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
-    checkbox.checked = state.selected.has(entry.path);
+    checkbox.checked = state.selected.has(selectionKey);
     checkbox.setAttribute("aria-label", `Select ${entry.name}`);
     checkbox.addEventListener("change", () => {
-      if (checkbox.checked) state.selected.set(entry.path, entry); else state.selected.delete(entry.path);
+      if (checkbox.checked) state.selected.set(selectionKey, entry); else state.selected.delete(selectionKey);
       renderFiles();
       updateSelection();
     });
@@ -555,7 +633,7 @@
       nameCell.append(open);
     }
     const sizeCell = text("td", formatEntrySize(entry));
-    const mediaTypeCell = text("td", entry.kind === "directory" ? "—" : entry.mediaType || "application/octet-stream");
+    const detailsCell = text("td", formatEntryDetails(entry));
     const dateCell = text("td", formatDate(entry.modifiedAt));
     const actionCell = document.createElement("td");
     actionCell.className = "table-icon-action-cell";
@@ -572,7 +650,7 @@
     }
     if (trashAccess) actions.append(...trashActionGroup(entry.trash).children);
     actionCell.append(actions);
-    row.append(selectCell, nameCell, sizeCell, mediaTypeCell, dateCell, actionCell);
+    row.append(selectCell, nameCell, sizeCell, detailsCell, dateCell, actionCell);
     return row;
   }
 
@@ -599,12 +677,15 @@
 
   function updateSelection() {
     const count = state.selected.size;
-    byID("selection-bar").hidden = count === 0;
+    const selectionAccess = state.browserAccess === "owner" || state.browserAccess === "trash";
+    byID("selection-bar").hidden = count === 0 || !selectionAccess;
     if (count > 0) byID("app").dataset.selectionActive = "true";
     else delete byID("app").dataset.selectionActive;
     byID("selection-count").textContent = `${count} selected`;
     byID("download-selected").disabled = count !== 1 || [...state.selected.values()][0].kind !== "file";
     byID("share-selected").disabled = count !== 1;
+    byID("restore-selected").disabled = count === 0;
+    byID("delete-selected-permanently").disabled = count === 0;
   }
 
   async function createFolder() {

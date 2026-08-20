@@ -40,6 +40,10 @@
     themes: [],
     passkeys: [],
     shares: [],
+    invites: [],
+    users: [],
+    usersCursor: "",
+    usersLoading: false,
     publicToken: "",
     publicPath: "/",
     publicCursor: "",
@@ -68,6 +72,8 @@
     listRenderFrame: 0,
     passkeyRenderFrame: 0,
     shareRenderFrame: 0,
+    inviteRenderFrame: 0,
+    userRenderFrame: 0,
     viewerEntries: [],
     viewerIndex: -1,
     viewerObjectURL: "",
@@ -92,7 +98,7 @@
   const transferLedgerVersion = 1;
   const transferVirtualWindowSize = 72;
   const transferVirtualWindowStep = 32;
-  const transferVirtualRowHeight = 72;
+  const transferVirtualRowHeight = 60;
   const transferDiscoveryBatchSize = 64;
   const transferRetryBaseDelay = 1000;
   const transferRetryMaximumDelay = 60000;
@@ -144,6 +150,8 @@
     list: ["M9 6l11 0", "M9 12l11 0", "M9 18l11 0", "M5 6l0 .01", "M5 12l0 .01", "M5 18l0 .01"],
     "link-off": ["M10 13a5 5 0 0 0 7.54 .54l1 -1a5 5 0 0 0 -7.07 -7.07l-.57 .57", "M14 11a5 5 0 0 0 -7.54 -.54l-1 1a5 5 0 0 0 7.07 7.07l.57 -.57", "M3 3l18 18"],
     logout: ["M14 8v-2a2 2 0 0 0 -2 -2h-7a2 2 0 0 0 -2 2v12a2 2 0 0 0 2 2h7a2 2 0 0 0 2 -2v-2", "M9 12h12l-3 -3", "M18 15l3 -3"],
+    "menu-2": ["M4 6h16", "M4 12h16", "M4 18h16"],
+    "message-report": ["M18 4a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-5l-5 3v-3h-2a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3h12", "M12 8v3", "M12 14v.01"],
     refresh: ["M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4", "M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"],
     restore: ["M3.06 13a9 9 0 1 0 .49 -4.087", "M3 4.001v5h5", "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"],
     "share-3": ["M13 4v4c-6.575 1.028 -9.02 6.788 -10 12c-.037 .206 5.384 -5.962 10 -6v4l8 -7l-8 -7"],
@@ -304,26 +312,6 @@
     target.setAttribute("aria-busy", "true");
   }
 
-  function renderRecordLoadingItems(targetID, count = 1) {
-    const target = byID(targetID);
-    const fragment = document.createDocumentFragment();
-    for (let index = 0; index < count; index += 1) {
-      const item = document.createElement("li");
-      item.className = "loading-record-row";
-      item.setAttribute("aria-hidden", "true");
-      const main = document.createElement("div");
-      main.className = "record-main";
-      const copy = document.createElement("div");
-      copy.className = "loading-record-copy";
-      copy.append(text("span", "", "loading-record-line"), text("span", "", "loading-record-line"));
-      main.append(copy, text("span", "", "loading-record-action"));
-      item.append(main);
-      fragment.append(item);
-    }
-    target.replaceChildren(fragment);
-    target.setAttribute("aria-busy", "true");
-  }
-
   function finishListLoading(targetID) {
     byID(targetID).removeAttribute("aria-busy");
   }
@@ -337,6 +325,7 @@
   }
 
   function renderFileLoadingItems() {
+    syncBrowserPagingSentinels();
     const gridEnabled = syncFilePresentation();
     if (!gridEnabled) {
       renderTableLoadingRows("file-rows", "file", 6, 6);
@@ -376,11 +365,15 @@
     if (byID("toast-region").childElementCount) activeToastRegion();
   }
 
+  function dismissToastButton() {
+    return iconButton("x", "Dismiss notification", clearToast, "toast-dismiss", "Dismiss");
+  }
+
   function showToast(message, level, duration = 8000) {
     clearToast();
     const toast = document.createElement("div");
     toast.className = `toast ${level}`;
-    toast.append(text("span", message), iconButton("x", "Dismiss notification", clearToast, "", "Dismiss"));
+    toast.append(text("span", message), dismissToastButton());
     activeToastRegion().append(toast);
     announce(message, level === "error");
     toastTimer = window.setTimeout(clearToast, duration);
@@ -417,7 +410,10 @@
         announce(friendlyError(error, "Undo could not be completed."), true);
       }
     }, "quiet");
-    toast.append(undo);
+    const actions = document.createElement("div");
+    actions.className = "toast-actions";
+    actions.append(undo, dismissToastButton());
+    toast.append(actions);
     activeToastRegion().append(toast);
     toastTimer = window.setTimeout(clearToast, 10000);
   }
@@ -448,18 +444,20 @@
   function syncFileBrowserAccess(access) {
     const surface = byID("file-browser-surface");
     const host = byID(`${access}-browser-host`);
+    const accessChanged = state.browserAccess !== access;
     if (surface.parentElement !== host) host.append(surface);
     state.browserAccess = access;
+    if (accessChanged) { state.selected.clear(); updateSelection(); }
     surface.dataset.access = access;
     byID("breadcrumbs").setAttribute("aria-label", access === "public" ? "Shared folder path" : "Current folder");
     const collectionLabel = access === "trash" ? "Items in trash" : access === "public" ? "Files in shared folder" : "Files in the current folder";
     byID("file-table-caption").textContent = collectionLabel;
     byID("media-grid").setAttribute("aria-label", collectionLabel);
+    byID("select-all").setAttribute("aria-label", access === "trash" ? "Select all trashed items on this page" : "Select all files on this page");
+    byID("selection-bar").setAttribute("aria-label", access === "trash" ? "Trash selection actions" : "Selection actions");
     if (access !== "trash") state.trashRequest += 1;
     if (access !== "owner") {
       state.directoryRequest += 1;
-      state.selected.clear();
-      updateSelection();
       byID("drop-target").removeAttribute("aria-describedby");
     } else {
       byID("drop-target").setAttribute("aria-describedby", "drop-help");
@@ -691,7 +689,7 @@
     if (push && `${location.pathname}${location.search}` !== routeURL) history.pushState({ route }, "", routeURL);
     for (const name of Object.keys(paths)) byID(`${name}-view`).hidden = name !== route;
     document.querySelectorAll("[data-route]").forEach((link) => {
-      if (link.closest(".app-tabs")) link.setAttribute("aria-current", link.dataset.route === route ? "page" : "false");
+      if (link.closest(".app-tabs, .mobile-navigation")) link.setAttribute("aria-current", link.dataset.route === route ? "page" : "false");
     });
     const heading = route === "drive" || route === "trash" ? byID("browser-title") : byID(`${route}-title`);
     if (heading) heading.focus({ preventScroll: true });

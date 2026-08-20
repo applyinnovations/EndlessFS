@@ -32,26 +32,44 @@ func TestSeedBuildsRepresentativeDeterministicWorkspace(t *testing.T) {
 	if result.UserID != FixtureUserID() || result.CredentialID == "" {
 		t.Fatalf("fixture identity = %+v", result)
 	}
-	if len(repository.profiles) != 3 || len(repository.accounts) != 3 {
+	if len(repository.profiles) < 150 || len(repository.accounts) < 150 {
 		t.Fatalf("seeded identities = %d profiles, %d accounts", len(repository.profiles), len(repository.accounts))
 	}
 	if len(repository.roles.UserIDs) != 1 || repository.roles.UserIDs[0] != result.UserID {
 		t.Fatalf("admin roles = %+v", repository.roles)
 	}
-	if len(repository.credentials) != 1 || len(repository.indexes) != 1 {
+	if len(repository.credentials) < 60 || len(repository.indexes) != 1 || len(repository.indexes[0].CredentialIDs) != len(repository.credentials) {
 		t.Fatalf("passkeys = %d credentials, %d indexes", len(repository.credentials), len(repository.indexes))
+	}
+	if len(repository.invites) < 60 {
+		t.Fatalf("invites = %d, want a dense administration collection", len(repository.invites))
 	}
 	if len(files.directories) < 6 {
 		t.Fatalf("directories = %d, want representative hierarchy", len(files.directories))
 	}
-	if len(files.uploads) < 200 || len(data.bodies) != len(files.uploads) || len(files.completed) != len(files.uploads) {
+	if len(files.uploads) < 1000 || len(data.bodies) != len(files.uploads) || len(files.completed) != len(files.uploads) {
 		t.Fatalf("files = %d uploads, %d transferred, %d completed", len(files.uploads), len(data.bodies), len(files.completed))
 	}
-	if len(files.trashed) < 2 {
-		t.Fatalf("trashed files = %d, want multiple recovery cases", len(files.trashed))
+	for _, prefix := range []string{
+		"/Workspace item ", "/Brand/Brand asset ", "/Photography/Contact sheet ",
+		"/Projects/Project file ", "/Projects/Archive/Archived file ", "/Scale Lab/Scale sample ",
+		"/Scale Lab/Reference/Asset ",
+	} {
+		count := 0
+		for _, upload := range files.uploads {
+			if strings.HasPrefix(upload.Path.String(), prefix) {
+				count++
+			}
+		}
+		if count < 100 {
+			t.Errorf("fixture collection %q has %d files, want automatic-paging scale", prefix, count)
+		}
 	}
-	if len(files.shared) != 1 {
-		t.Fatalf("shares = %d, want one existing share", len(files.shared))
+	if len(files.trashed) < 120 {
+		t.Fatalf("trashed files = %d, want a dense recovery collection", len(files.trashed))
+	}
+	if len(files.shared) < 60 {
+		t.Fatalf("shares = %d, want a dense shares collection", len(files.shared))
 	}
 	if _, ok := data.bodies["/Photography/Coastline.png"]; !ok {
 		t.Fatal("fixture is missing image preview ground truth")
@@ -106,6 +124,7 @@ type recordingRepository struct {
 	accounts    []model.Account
 	credentials []model.Credential
 	indexes     []model.CredentialIndex
+	invites     []model.Invite
 	roles       model.AdminRoles
 }
 
@@ -123,6 +142,10 @@ func (r *recordingRepository) CreateCredential(_ context.Context, value model.Cr
 }
 func (r *recordingRepository) CreateCredentialIndex(_ context.Context, value model.CredentialIndex) error {
 	r.indexes = append(r.indexes, value)
+	return value.Validate()
+}
+func (r *recordingRepository) CreateInvite(_ context.Context, value model.Invite) error {
+	r.invites = append(r.invites, value)
 	return value.Validate()
 }
 func (r *recordingRepository) CreateAdminRoles(_ context.Context, value model.AdminRoles) error {

@@ -15,6 +15,7 @@
     <a class="skip-link" href="#workspace">Files</a>
     <div id="app" data-state="loading">
       <header class="app-header">
+        <button id="mobile-navigation-toggle" class="icon-button mobile-navigation-toggle" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="mobile-navigation" data-icon="menu-2"></button>
         <a class="brand" href="/" data-route="drive" aria-label="EndlessFS files">
           <img class="brand-mark" src="/assets/brand/endlessfs-mark.svg" width="36" height="28" alt="">
         </a>
@@ -34,14 +35,27 @@
             </span>
             <button id="open-transfers" class="icon-button transfer-launcher" type="button" aria-label="View transfers" aria-expanded="false" aria-controls="transfer-panel" data-icon="transfer"></button>
           </div>
+          <a id="report-issue" class="button icon-button header-report" href="https://github.com/applyinnovations/EndlessFS/issues/new/choose" target="_blank" rel="noopener noreferrer" aria-label="Report an issue" data-icon="message-report"></a>
           <button id="logout-button" class="tab header-signout" type="button">Sign out</button>
         </div>
       </header>
+      <div id="mobile-navigation" class="mobile-navigation" hidden>
+        <nav class="mobile-navigation-routes" aria-label="Workspace">
+          <a class="mobile-navigation-item" href="/" data-route="drive">Files</a>
+          <a class="mobile-navigation-item" href="/trash" data-route="trash">Trash</a>
+          <a class="mobile-navigation-item" href="/settings" data-route="settings">Settings</a>
+          <a id="mobile-admin-nav" class="mobile-navigation-item" href="/admin" data-route="admin" hidden>Admin</a>
+        </nav>
+        <div class="mobile-navigation-actions">
+          <a id="mobile-report-issue" class="mobile-navigation-item" href="https://github.com/applyinnovations/EndlessFS/issues/new/choose" target="_blank" rel="noopener noreferrer">Report an issue</a>
+          <button id="mobile-logout-button" class="mobile-navigation-item" type="button">Sign out</button>
+        </div>
+      </div>
 
       <main id="workspace" tabindex="-1">
         <div id="loading-view" class="app-frame loading-shell" aria-labelledby="loading-title" aria-busy="true">
           <div class="app-content" aria-hidden="true">
-            <section class="view loading-content">
+            <section class="view loading-content file-browser-view">
               <div class="surface-header drive-header">
                 <div class="location-heading"><h1 id="loading-title">Files</h1></div>
                 <div class="heading-actions command-bar">
@@ -64,7 +78,7 @@
               </div>
               <section class="file-workspace">
                 <div class="loading-table table-scroll">
-                  <table><caption class="visually-hidden">Files in the current folder</caption><thead><tr><th class="select-column" scope="col"><input type="checkbox" aria-label="Select all files on this page" disabled></th><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Mime type</th><th scope="col">Changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+                  <table><caption class="visually-hidden">Files in the current folder</caption><thead><tr><th class="select-column" scope="col"><input type="checkbox" aria-label="Select all files on this page" disabled></th><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Details</th><th scope="col">Changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
                     <tbody aria-busy="true">
                       <tr class="loading-item-row loading-file-row"><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td></tr>
                       <tr class="loading-item-row loading-file-row"><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td><td><span></span></td></tr>
@@ -76,7 +90,6 @@
                   </table>
                 </div>
               </section>
-              <div class="pagination"></div>
             </section>
           </div>
         </div>
@@ -108,12 +121,12 @@
           <a id="registration-signin" class="text-link" href="/">Sign in</a>
         </section>
 
-        <section id="public-view" class="public-layout" hidden aria-labelledby="browser-title"><div id="public-browser-host"></div></section>
+        <section id="public-view" class="public-layout file-browser-view" hidden aria-labelledby="browser-title"><div id="public-browser-host" class="file-browser-host"></div></section>
 
         <div id="authenticated-view" class="app-frame" hidden>
           <div class="app-content">
-            <section id="drive-view" class="view" hidden aria-labelledby="browser-title">
-              <div id="owner-browser-host">
+            <section id="drive-view" class="view file-browser-view" hidden aria-labelledby="browser-title">
+              <div id="owner-browser-host" class="file-browser-host">
                 <div id="file-browser-surface" data-access="owner">
               <div class="surface-header drive-header">
                 <div class="location-heading"><h1 id="browser-title" tabindex="-1">Files</h1></div>
@@ -137,7 +150,7 @@
                   <details class="filter-disclosure"><summary>Filter</summary><div id="metadata-filters" class="metadata-filters"><label for="filter-kind">Kind<select id="filter-kind"><option value="">All</option><option value="directory">Folders</option><option value="file">Files</option></select></label><label for="filter-media">Media<select id="filter-media"><option value="">All</option><option value="image">Images</option><option value="video">Videos</option><option value="pdf">PDFs</option><option value="audio">Audio</option><option value="document">Documents</option><option value="archive">Archives</option><option value="unknown">Other</option></select></label><label for="filter-min-size">Min bytes<input id="filter-min-size" type="number" min="0" inputmode="numeric"></label><label for="filter-max-size">Max bytes<input id="filter-max-size" type="number" min="0" inputmode="numeric"></label><label for="filter-modified-after">After<input id="filter-modified-after" type="date"></label><label for="filter-modified-before">Before<input id="filter-modified-before" type="date"></label><label class="owner-only" for="filter-preview">Preview<select id="filter-preview"><option value="">Any</option><option value="ready">Ready</option><option value="missing">Missing</option><option value="ineligible">Excluded</option><option value="unsupported">Unsupported</option><option value="unavailable">Unavailable</option></select></label></div></details>
                 </div>
 
-                <div id="selection-bar" class="selection-bar owner-only" role="toolbar" aria-label="Selection actions" hidden><strong id="selection-count">0 selected</strong><button id="download-selected" class="icon-button" type="button" aria-label="Download selected" data-icon="download"></button><button id="share-selected" class="icon-button" type="button" aria-label="Share selected" data-icon="share-3"></button><button id="copy-selected" class="icon-button" type="button" aria-label="Copy selected" data-icon="copy"></button><button id="move-selected" class="icon-button" type="button" aria-label="Move selected" data-icon="folder-symlink"></button><button id="trash-selected" class="danger icon-button" type="button" aria-label="Move selected to trash" data-icon="trash"></button><button id="clear-selection" class="icon-button" type="button" aria-label="Clear selection" data-icon="x"></button></div>
+                <div id="selection-bar" class="selection-bar selectable-only" role="toolbar" aria-label="Selection actions" hidden><strong id="selection-count">0 selected</strong><button id="download-selected" class="owner-only icon-button" type="button" aria-label="Download selected" data-icon="download"></button><button id="share-selected" class="owner-only icon-button" type="button" aria-label="Share selected" data-icon="share-3"></button><button id="copy-selected" class="owner-only icon-button" type="button" aria-label="Copy selected" data-icon="copy"></button><button id="move-selected" class="owner-only icon-button" type="button" aria-label="Move selected" data-icon="folder-symlink"></button><button id="trash-selected" class="owner-only danger icon-button" type="button" aria-label="Move selected to trash" data-icon="trash"></button><button id="restore-selected" class="trash-only icon-button" type="button" aria-label="Restore selected" data-icon="restore"></button><button id="delete-selected-permanently" class="trash-only danger icon-button" type="button" aria-label="Delete selected permanently" data-icon="trash-x"></button><button id="clear-selection" class="icon-button" type="button" aria-label="Clear selection" data-icon="x"></button></div>
               </div>
 
               <div class="drive-breadcrumb-row">
@@ -147,17 +160,16 @@
 
               <section id="drop-target" class="file-workspace drop-target" data-presentation="list" aria-describedby="drop-help">
                 <span id="drop-help" class="drop-hint owner-only">Drop to upload</span>
-                <div id="list-presentation" class="table-scroll"><table id="file-table"><caption id="file-table-caption" class="visually-hidden">Files in the current folder</caption><thead><tr><th class="select-column owner-only" scope="col"><input id="select-all" type="checkbox" aria-label="Select all files on this page"></th><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Mime type</th><th scope="col">Changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead><tbody id="file-rows"></tbody></table></div>
-                <div id="media-grid" class="media-grid" role="grid" aria-label="Files in the current folder" tabindex="0" hidden><div id="media-grid-content" class="media-grid-content"></div></div>
+                <div id="list-presentation" class="table-scroll"><table id="file-table"><caption id="file-table-caption" class="visually-hidden">Files in the current folder</caption><thead><tr><th class="select-column selectable-only" scope="col"><input id="select-all" type="checkbox" aria-label="Select all files on this page"></th><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Details</th><th scope="col">Changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead><tbody id="file-rows"></tbody></table><span id="list-page-sentinel" class="page-sentinel" hidden aria-hidden="true"></span></div>
+                <div id="media-grid" class="media-grid" role="grid" aria-label="Files in the current folder" tabindex="0" hidden><div id="media-grid-content" class="media-grid-content"></div><span id="grid-page-sentinel" class="page-sentinel" hidden aria-hidden="true"></span></div>
                 <div id="drive-state" class="state-panel" hidden></div>
               </section>
 
-              <div class="pagination"><button id="next-page" class="secondary more-button" type="button" hidden>More</button></div>
                 </div>
               </div>
             </section>
 
-            <section id="trash-view" class="view" hidden aria-labelledby="browser-title"><div id="trash-browser-host"></div></section>
+            <section id="trash-view" class="view file-browser-view" hidden aria-labelledby="browser-title"><div id="trash-browser-host" class="file-browser-host"></div></section>
 
             <section id="settings-view" class="view" hidden aria-labelledby="settings-title">
               <div class="surface-header"><h1 id="settings-title" tabindex="-1">Settings</h1></div>
@@ -203,17 +215,26 @@
             <section id="admin-view" class="view" hidden aria-labelledby="admin-title">
               <div class="surface-header"><h1 id="admin-title" tabindex="-1">Admin</h1></div>
               <div class="settings-list">
-                <section class="settings-section settings-wide"><div class="panel-heading"><h2>Invites</h2><button id="create-invite" class="icon-button" type="button" aria-label="Create invite" data-icon="user-plus"></button></div><div id="invite-link-result" class="secret-result" hidden><output id="invite-link"></output><button id="copy-invite" class="icon-button" type="button" aria-label="Copy invite link" data-icon="copy"></button></div><ul id="invite-list" class="record-list"></ul></section>
+                <section class="settings-section settings-wide">
+                  <div class="panel-heading"><h2>Invites</h2><button id="create-invite" class="icon-button" type="button" aria-label="Create invite" data-icon="user-plus"></button></div>
+                  <div id="invite-link-result" class="secret-result" hidden><output id="invite-link"></output><button id="copy-invite" class="icon-button" type="button" aria-label="Copy invite link" data-icon="copy"></button></div>
+                  <div id="invite-table-scroll" class="table-scroll settings-table-scroll" tabindex="0" aria-label="Invitations table">
+                    <table id="invite-table">
+                      <caption class="visually-hidden">Invitations</caption>
+                      <thead><tr><th scope="col">Status</th><th scope="col">Created</th><th scope="col">Expires</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+                      <tbody id="invite-list"></tbody>
+                    </table>
+                  </div>
+                </section>
                 <section class="settings-section settings-wide admin-users-section">
                   <div class="panel-heading"><h2>Users</h2><button id="refresh-users" class="icon-button" type="button" aria-label="Refresh users" data-icon="refresh"></button></div>
-                  <div class="table-scroll">
+                  <div id="users-table-scroll" class="table-scroll settings-table-scroll" tabindex="0" aria-label="Users table">
                     <table id="users-table">
                       <caption class="visually-hidden">Instance users</caption>
                       <thead><tr><th scope="col">Name</th><th scope="col">Status</th><th scope="col">Role</th><th scope="col">Added</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
                       <tbody id="user-list"></tbody>
-                    </table>
+                    </table><span id="users-page-sentinel" class="page-sentinel" hidden aria-hidden="true"></span>
                   </div>
-                  <button id="users-next" class="icon-button more-button" type="button" aria-label="Load more users" data-icon="chevron-down" hidden></button>
                 </section>
               </div>
             </section>
@@ -224,11 +245,11 @@
                 <div class="heading-actions"><button id="clear-transfers" class="icon-button" type="button" aria-label="Clear finished transfers" data-icon="trash"></button><button id="transfer-close" class="icon-button" type="button" aria-label="Close transfers" data-icon="x"></button></div>
               </div>
               <div class="transfer-sheet-content">
-                <progress id="transfer-progress" class="transfer-overall-progress" max="1" value="0" aria-label="Overall upload progress"></progress>
                 <div class="transfer-overview">
-                  <div class="transfer-overview-primary"><strong id="transfer-percent">0%</strong><span id="transfer-eta">ETA —</span><span id="transfer-speed">—/s</span></div>
-                  <div class="transfer-overview-secondary"><span id="transfer-volume">0 B of 0 B</span><span id="transfer-counts">0 files</span></div>
+                  <div class="transfer-overview-progress"><strong id="transfer-percent">0%</strong><span class="transfer-overview-separator" aria-hidden="true">·</span><span id="transfer-volume">0 B / 0 B</span></div>
+                  <div class="transfer-overview-operation"><span id="transfer-eta">ETA —</span><span class="transfer-overview-separator" aria-hidden="true">·</span><span id="transfer-speed">—/s</span><span class="transfer-overview-separator" aria-hidden="true">·</span><span id="transfer-active">0 active</span></div>
                 </div>
+                <progress id="transfer-progress" class="transfer-overall-progress" max="1" value="0" aria-label="Overall upload progress"></progress>
                 <div id="transfer-filter" class="tabs transfer-tabs" role="tablist" aria-label="Show transfers">
                   <span class="tab" role="tab" aria-selected="true" aria-controls="transfer-list" data-tab-value="current">Current <span class="tab-count" data-transfer-count="current">(0)</span></span>
                   <span class="tab" role="tab" aria-selected="false" aria-controls="transfer-list" data-tab-value="failed" tabindex="-1">Failed <span class="tab-count" data-transfer-count="failed">(0)</span></span>

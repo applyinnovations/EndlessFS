@@ -130,43 +130,85 @@
   }
 
   async function loadAdmin() {
-    renderRecordLoadingItems("invite-list");
+    state.invites = [];
+    state.users = [];
+    state.usersCursor = "";
+    state.usersLoading = true;
+    byID("invite-table-scroll").scrollTop = 0;
+    byID("users-table-scroll").scrollTop = 0;
+    renderTableLoadingRows("invite-list", "invite", 4, 3);
     renderTableLoadingRows("user-list", "user", 5, 3);
     try {
       const [invites, users] = await Promise.all([api("/api/v1/admin/invites"), api("/api/v1/admin/users?limit=100")]);
-      renderInvites(invites.invites || []); renderUsers(users.users || [], false); byID("users-next").hidden = !users.nextCursor; byID("users-next").dataset.cursor = users.nextCursor || "";
+      renderInvites(invites.invites || []);
+      state.users = users.users || [];
+      state.usersCursor = users.nextCursor || "";
+      renderUsers(state.users, true);
+      syncUsersPagingSentinel();
     } catch (error) {
-      byID("invite-list").replaceChildren();
+      state.invites = [];
+      byID("invite-list").replaceChildren(emptyTableRow("Invitations unavailable", 4));
       byID("user-list").replaceChildren();
       finishListLoading("invite-list");
       finishListLoading("user-list");
       announce(friendlyError(error, "Administration could not be loaded."), true);
+    } finally {
+      state.usersLoading = false;
     }
   }
 
   function renderInvites(invites) {
-    const list = byID("invite-list"); list.replaceChildren();
-    for (const invite of invites) {
-      const item = document.createElement("li"); const main = document.createElement("div"); main.className = "record-main";
+    if (invites) state.invites = invites;
+    renderVirtualSettingsTable("invite-table-scroll", "invite-list", state.invites, 4, (invite) => {
+      const row = document.createElement("tr");
       const status = invite.revokedAt ? "Revoked" : invite.usedAt ? "Used" : invite.expiresAt && new Date(invite.expiresAt) <= new Date() ? "Expired" : "Available";
-      const details = document.createElement("div"); details.append(text("strong", `Invite · ${status}`), text("p", `Created ${formatDate(invite.createdAt)}${invite.expiresAt ? ` · Expires ${formatDate(invite.expiresAt)}` : ""}`, "field-help"));
-      main.append(details); if (status === "Available") main.append(iconButton("link-off", "Revoke invite", () => revokeInvite(invite), "danger", "Revoke invite")); item.append(main); list.append(item);
-    }
-    if (!invites.length) list.append(text("li", "No invites have been created."));
-    finishListLoading("invite-list");
+      const statusCell = text("td", status);
+      const created = text("td", formatDate(invite.createdAt));
+      const expires = text("td", invite.expiresAt ? formatDate(invite.expiresAt) : "—");
+      const actionCell = document.createElement("td");
+      actionCell.className = "table-icon-action-cell";
+      if (status === "Available") {
+        const actions = document.createElement("div");
+        actions.className = "row-actions";
+        actions.append(iconButton("link-off", "Revoke invite", () => revokeInvite(invite), "danger", "Revoke invite"));
+        actionCell.append(actions);
+      }
+      row.append(statusCell, created, expires, actionCell);
+      return row;
+    }, "No invitations", invites !== undefined);
   }
 
-  function renderUsers(users, append) {
-    const list = byID("user-list"); if (!append) list.replaceChildren();
-    for (const user of users) {
+  function renderUsers(users, force = false) {
+    if (users) state.users = users;
+    renderVirtualSettingsTable("users-table-scroll", "user-list", state.users, 5, (user) => {
       const row = document.createElement("tr");
       row.append(text("td", user.displayName), text("td", user.status), text("td", user.admin ? "Administrator" : "Member"), text("td", formatDate(user.createdAt)));
       const actionCell = document.createElement("td"); actionCell.className = "table-icon-action-cell"; const actions = document.createElement("div"); actions.className = "user-actions";
       actions.append(iconButton(user.status === "enabled" ? "user-off" : "user-check", `${user.status === "enabled" ? "Disable" : "Enable"} ${user.displayName}`, () => adminUserAction(user, user.status === "enabled" ? "disable" : "enable"), `admin-row-action${user.status === "enabled" ? " danger" : ""}`, user.status === "enabled" ? "Disable user" : "Enable user"));
       actions.append(iconButton(user.admin ? "shield-minus" : "shield-plus", user.admin ? `Remove administrator access from ${user.displayName}` : `Make ${user.displayName} an administrator`, () => adminUserAction(user, "admin", user.admin ? "DELETE" : "POST"), `admin-row-action${user.admin ? " danger" : ""}`, user.admin ? "Remove administrator" : "Make administrator"));
-      actions.append(iconButton("key", `Create recovery link for ${user.displayName}`, () => createRecovery(user), "admin-row-action", "Create recovery link")); actionCell.append(actions); row.append(actionCell); list.append(row);
+      actions.append(iconButton("key", `Create recovery link for ${user.displayName}`, () => createRecovery(user), "admin-row-action", "Create recovery link")); actionCell.append(actions); row.append(actionCell);
+      return row;
+    }, "No users", force);
+  }
+
+  function syncUsersPagingSentinel() {
+    byID("users-page-sentinel").hidden = !state.usersCursor;
+  }
+
+  async function loadMoreUsers() {
+    if (!state.usersCursor || state.usersLoading) return;
+    state.usersLoading = true;
+    try {
+      const page = await api(`/api/v1/admin/users?limit=100&cursor=${encodeURIComponent(state.usersCursor)}`);
+      state.users = state.users.concat(page.users || []);
+      state.usersCursor = page.nextCursor || "";
+      renderUsers(state.users, true);
+      syncUsersPagingSentinel();
+    } catch (error) {
+      announce(friendlyError(error, "More users could not be loaded."), true);
+    } finally {
+      state.usersLoading = false;
     }
-    finishListLoading("user-list");
   }
 
   async function adminUserAction(user, action, method = "POST") {
@@ -240,5 +282,6 @@
       showState("drive-state", message, "error");
     } finally {
       state.publicLoading = false;
+      requestAnimationFrame(() => maybeLoadNextBrowserPage(state.viewMode === "grid" ? byID("media-grid") : byID("list-presentation")));
     }
   }

@@ -126,7 +126,7 @@ input[type="radio"] { accent-color: var(--efs-color-primary); }
 #app[data-selection-active="true"] .toast-region { bottom: 64px; }
 @keyframes selection-enter { from { opacity: 0; } }
 
-.file-workspace { position: relative; min-height: 20rem; }
+.file-workspace { position: relative; width: 100%; min-height: 0; flex: 1; }
 .drop-hint {
   position: absolute;
   z-index: 25;
@@ -154,7 +154,8 @@ input[type="radio"] { accent-color: var(--efs-color-primary); }
 #drop-target[data-presentation="grid"] #drive-state { inset-block-start: 0; }
 
 .table-scroll { width: 100%; overflow: auto; }
-#list-presentation { height: calc(100vh - 224px); min-height: 20rem; contain: strict; }
+.page-sentinel { display: block; width: 100%; height: 1px; pointer-events: none; }
+#list-presentation { width: 100%; height: 100%; min-height: 0; contain: strict; }
 table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
 th,
 td { height: var(--efs-metric-rowHeight); border-bottom: var(--efs-border-tableDivider); padding: 4px 8px; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
@@ -193,7 +194,7 @@ tbody tr.selected { background: var(--efs-color-primary-tint); }
 .row-actions button { min-height: 28px; padding-block: 3px; }
 .file-row-actions { flex-wrap: nowrap; gap: 2px; }
 
-.media-grid { position: relative; height: calc(100vh - 224px); min-height: 20rem; overflow: auto; background: var(--efs-color-surface); contain: strict; }
+.media-grid { position: relative; height: 100%; min-height: 0; overflow: auto; background: var(--efs-color-surface); contain: strict; }
 .media-grid-content { min-height: 100%; }
 .media-grid-layer { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(6rem, 100%), 1fr)); gap: 0; }
 .media-grid-spacer { display: block; width: 1px; }
@@ -211,7 +212,3 @@ tbody tr.selected { background: var(--efs-color-primary-tint); }
 .media-tile-name,
 .media-tile-meta { display: none; }
 .trash-media-actions { position: absolute; z-index: 4; inset: auto 4px 4px auto; display: flex; gap: 2px; }
-
-.pagination { display: flex; justify-content: center; min-height: 40px; padding-block: 8px; }
-.more-button { min-width: 86px; }
-.icon-button.more-button { min-width: var(--efs-metric-controlHeight); }

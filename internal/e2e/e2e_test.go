@@ -699,15 +699,11 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		if err := chromedp.Run(ctx, chromedp.Evaluate(`Number(document.querySelector("#media-grid-content").dataset.itemCount)`, &loaded)); err != nil {
 			t.Fatal(err)
 		}
-		var nextHidden bool
-		if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("#next-page").hidden`, &nextHidden)); err != nil {
-			t.Fatal(err)
-		}
-		if nextHidden {
+		if loaded >= 10_003 {
 			break
 		}
-		if err := chromedp.Run(ctx, chromedp.Click("#next-page", chromedp.ByQuery)); err != nil {
-			t.Fatalf("load virtual grid page after %d items: %v", loaded, err)
+		if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => { const grid = document.querySelector("#media-grid"); grid.scrollTop = grid.scrollHeight; grid.dispatchEvent(new Event("scroll")); })()`, nil)); err != nil {
+			t.Fatalf("scroll virtual grid after %d items: %v", loaded, err)
 		}
 	}
 	if err := waitFor(ctx, `(() => {
@@ -842,7 +838,8 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 	if err := chromedp.Run(ctx,
 		emulation.SetDeviceMetricsOverride(1440, 900, 1, false),
-		chromedp.Navigate(harness.origin+"/?fixture=transfers"),
+		chromedp.Navigate(harness.origin+"/"),
+		chromedp.Click("#open-transfers", chromedp.ByQuery),
 		chromedp.WaitVisible("#transfer-panel", chromedp.ByQuery),
 		chromedp.Click("#transfer-list .transfer-group-row button[aria-expanded]", chromedp.ByQuery),
 	); err != nil {

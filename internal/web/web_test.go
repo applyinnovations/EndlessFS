@@ -72,7 +72,7 @@ func TestTransferMonitorUsesScalableSideSheet(t *testing.T) {
 		`id="header-transfer-summary" class="header-transfer-summary"`,
 		`id="header-transfer-percent"`, `id="header-transfer-speed"`,
 		`id="header-transfer-eta"`, `id="header-transfer-count"`,
-		`inset: var(--efs-metric-toolbarHeight) 0 0 auto;`,
+		`inset: var(--efs-metric-headerHeight) 0 0 auto;`,
 		`width: clamp(400px, 36vw, 560px);`, `flex: 1; overflow-y: auto;`,
 		`.transfer-panel { inset: 0; width: 100%;`,
 		`for (const view of byID("authenticated-view").querySelectorAll(".view")) view.inert = modal;`,
@@ -115,6 +115,38 @@ func TestTransferMonitorUsesScalableSideSheet(t *testing.T) {
 	} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("transfer progress does not use the theme foreground: missing %q", required)
+		}
+	}
+}
+
+func TestTransferOverviewUsesOneNonDuplicativeMetricsRow(t *testing.T) {
+	t.Parallel()
+
+	shell := string(mustRead("ui/index.html"))
+	stylesheet := string(applicationStylesheet)
+	script := string(applicationScript)
+	for _, required := range []string{
+		`class="transfer-overview-progress"`,
+		`class="transfer-overview-operation"`,
+		`id="transfer-active"`,
+		`.transfer-overview { display: flex;`,
+		`flex-wrap: wrap;`,
+		`const eta = summary.eta.replace(" remaining", "");`,
+		"byID(\"transfer-volume\").textContent = `${formatBytes(summary.confirmedBytes)} / ${formatBytes(summary.totalBytes)}`;",
+		"byID(\"transfer-active\").textContent = `${summary.active.toLocaleString()} active`;",
+	} {
+		if !strings.Contains(shell+stylesheet+script, required) {
+			t.Errorf("transfer overview is missing %q", required)
+		}
+	}
+	overview := strings.Index(shell, `<div class="transfer-overview">`)
+	progress := strings.Index(shell, `id="transfer-progress"`)
+	if overview < 0 || progress < overview {
+		t.Error("aggregate progress track is not positioned beneath its metrics")
+	}
+	for _, forbidden := range []string{`id="transfer-counts"`, `byID("transfer-counts")`, "parts.push(`${summary.counts.queued} queued`)"} {
+		if strings.Contains(shell+script, forbidden) {
+			t.Errorf("transfer overview still duplicates tab state %q", forbidden)
 		}
 	}
 }
@@ -172,19 +204,98 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 	}
 }
 
-func TestLocalTransferPreviewFixtureIsExplicitAndScaleOriented(t *testing.T) {
+func TestLocalTransferPreviewFixtureIsDefaultAndScaleOriented(t *testing.T) {
 	t.Parallel()
 
 	script := string(applicationScript)
 	for _, required := range []string{
 		`state.config.localFixture`,
-		`new URLSearchParams(location.search).get("fixture") !== "transfers"`,
 		`for (let index = 0; index < 2000; index += 1)`,
 		`fixture: true`,
+		"renderTransfers();\n    setTransferSheetOpen(false);",
 		`seedTransferPreviewFixture();`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("local transfer preview fixture is missing %q", required)
+		}
+	}
+	if strings.Contains(script, `new URLSearchParams(location.search).get("fixture")`) {
+		t.Error("local transfers still require a separate query-string fixture")
+	}
+}
+
+func TestFailedTransfersPrioritizeErrorsAndGroupsActuallyCollapse(t *testing.T) {
+	t.Parallel()
+
+	script := string(applicationScript)
+	for _, required := range []string{
+		`if (transfer.state === "failed") {`,
+		"text(\"span\", `${transferPercent(transfer)}%`, \"transfer-row-failure-percent\"),",
+		`progress.className = "transfer-row-progress transfer-row-progress-error";`,
+		`row.append(header, failure, progress);`,
+		`const error = row.querySelector(".transfer-row-error");`,
+		`if (!state.expandedTransferGroups.has(group.id)) continue;`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("transfer error or disclosure behavior is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`const showAll = state.expandedTransferGroups.has(group.id) || filter === "failed" || Boolean(state.transferSearch);`,
+		`else if (transfer.state === "failed") eta = "Needs attention";`,
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("transfer rows retain misleading failed-state detail %q", forbidden)
+		}
+	}
+
+	stylesheet := string(applicationStylesheet)
+	for _, required := range []string{
+		`.transfer-row-progress-error::-webkit-progress-value { background: var(--efs-color-error); }`,
+		`.transfer-row-progress-error::-moz-progress-bar { background: var(--efs-color-error); }`,
+		`.transfer-row-failure-percent { color: var(--efs-color-error) !important;`,
+		`.transfer-row.failed .transfer-row-error {`,
+		`white-space: normal;`,
+		`overflow-wrap: anywhere;`,
+	} {
+		if !strings.Contains(stylesheet, required) {
+			t.Errorf("failed transfer errors can still crop: missing %q", required)
+		}
+	}
+	if strings.Contains(stylesheet, `.transfer-group-row { display: grid; height: 60px; grid-template-columns: minmax(0, 1fr); gap: 1px; border-top:`) {
+		t.Error("transfer rows still combine a divider border with progress tracks")
+	}
+}
+
+func TestTransferRowsUseDenseAlignedHeaders(t *testing.T) {
+	t.Parallel()
+
+	script := string(applicationScript)
+	for _, required := range []string{
+		`const transferVirtualRowHeight = 60;`,
+		`header.className = "transfer-row-header";`,
+		`header.append(text("strong", label, "transfer-row-main"), tail);`,
+		`row.append(header, failure, progress);`,
+		`row.append(header, metrics, progress);`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("transfer rows are missing dense aligned structure %q", required)
+		}
+	}
+	if strings.Contains(script, `tail.append(text("span", transferStateLabel(transfer.state), "transfer-row-state"));`) {
+		t.Error("per-file transfer rows still repeat their state beside the action")
+	}
+
+	stylesheet := string(applicationStylesheet)
+	for _, required := range []string{
+		`.transfer-item { height: 60px;`,
+		`.transfer-row-header {`,
+		`align-items: center;`,
+		`.transfer-row-tail .icon-button:last-child .app-icon { transform: translateX(6px); }`,
+		`.transfer-tools > .icon-button:last-child .app-icon { transform: translateX(8px); }`,
+	} {
+		if !strings.Contains(stylesheet, required) {
+			t.Errorf("transfer row density or alignment is missing %q", required)
 		}
 	}
 }
@@ -302,14 +413,14 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 		}
 	}
 	for _, required := range []string{
-		`<th scope="col">Name</th><th scope="col">Size</th><th scope="col">Mime type</th><th scope="col">Changed</th>`,
-		`const mediaTypeCell = text("td", entry.kind === "directory" ? "—" : entry.mediaType || "application/octet-stream")`,
+		`<th scope="col">Name</th><th scope="col">Size</th><th scope="col">Details</th><th scope="col">Changed</th>`,
+		`const detailsCell = text("td", formatEntryDetails(entry));`,
 		`function trashBrowserEntry(item)`,
 		`size: item.size,`,
 		`mediaType: item.mediaType || "",`,
 	} {
 		if !strings.Contains(shell+script+stylesheet, required) {
-			t.Errorf("MIME type table presentation is missing %q", required)
+			t.Errorf("file Details table presentation is missing %q", required)
 		}
 	}
 	if strings.Contains(stylesheet, ".metadata-list { display: none; }") {
@@ -340,8 +451,8 @@ func TestHorizontalDividersOnlySeparateRepeatedPeerItems(t *testing.T) {
 			t.Errorf("singleton or container is bounded by a horizontal divider: %q", forbidden)
 		}
 	}
-	if !strings.Contains(stylesheet, ".record-list > li + li { border-top: 1px solid var(--efs-color-border);") {
-		t.Error("repeated record rows do not retain a divider between peer items")
+	if !strings.Contains(stylesheet, `border-bottom: var(--efs-border-tableDivider);`) {
+		t.Error("repeated table rows do not retain a divider between peer items")
 	}
 }
 
@@ -403,6 +514,128 @@ func TestWorkspaceNavigationSharesTheHeaderLineWithTheBrand(t *testing.T) {
   border-block-end:`, `.tab::after`} {
 		if strings.Contains(stylesheet, forbidden) {
 			t.Errorf("workspace tabs retain the legacy button-like presentation %q", forbidden)
+		}
+	}
+}
+
+func TestHeaderOffersGitHubIssueChooser(t *testing.T) {
+	t.Parallel()
+
+	shell := string(mustRead("ui/index.html"))
+	const issueLink = `<a id="report-issue" class="button icon-button header-report" href="https://github.com/applyinnovations/EndlessFS/issues/new/choose" target="_blank" rel="noopener noreferrer" aria-label="Report an issue" data-icon="message-report"></a>`
+	if !strings.Contains(shell, issueLink) {
+		t.Error("authenticated header does not offer the repository issue chooser as a safe external action")
+	}
+	if strings.Index(shell, issueLink) > strings.Index(shell, `id="logout-button"`) {
+		t.Error("report action is not grouped with the account controls before sign out")
+	}
+	if !strings.Contains(string(applicationScript), `"message-report":`) {
+		t.Error("report action does not use a pinned application icon")
+	}
+}
+
+func TestMobileHeaderUsesCompactNavigationMenu(t *testing.T) {
+	t.Parallel()
+
+	shell := string(mustRead("ui/index.html"))
+	for _, required := range []string{
+		`id="mobile-navigation-toggle" class="icon-button mobile-navigation-toggle" type="button" aria-label="Open navigation" aria-expanded="false" aria-controls="mobile-navigation" data-icon="menu-2"`,
+		`id="mobile-navigation" class="mobile-navigation" hidden`,
+		`id="mobile-admin-nav" class="mobile-navigation-item" href="/admin" data-route="admin" hidden>Admin</a>`,
+		`id="mobile-report-issue" class="mobile-navigation-item" href="https://github.com/applyinnovations/EndlessFS/issues/new/choose"`,
+		`id="mobile-logout-button" class="mobile-navigation-item" type="button">Sign out</button>`,
+	} {
+		if !strings.Contains(shell, required) {
+			t.Errorf("compact mobile navigation is missing %q", required)
+		}
+	}
+
+	stylesheet := string(applicationStylesheet)
+	for _, required := range []string{
+		`--efs-metric-headerHeight: var(--efs-metric-toolbarHeight);`,
+		`.app-header { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 0; }`,
+		`.mobile-navigation-toggle { display: inline-flex; grid-column: 1; justify-self: start; margin-inline-start: calc(-1 * var(--efs-spacing-iconVisualInset)); }`,
+		`.app-header > .brand { grid-column: 2; justify-self: center; }`,
+		`.account-actions { min-width: 0; grid-column: 3; justify-self: end; }`,
+		`.app-tabs, .header-report, .header-signout { display: none; }`,
+		`.mobile-navigation { position: fixed; z-index: 49; inset: var(--efs-metric-headerHeight) 0 0;`,
+		`height: calc(100dvh - var(--efs-metric-headerHeight));`,
+	} {
+		if !strings.Contains(stylesheet, required) {
+			t.Errorf("mobile header does not use the compact navigation menu: missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`:root { --efs-spacing-pageGutter: 12px; --efs-metric-headerHeight: calc(var(--efs-metric-toolbarHeight) + var(--efs-metric-targetMinimum)); }`,
+		`grid-template-rows: var(--efs-metric-toolbarHeight) var(--efs-metric-targetMinimum)`,
+		`grid-row: 2;`,
+	} {
+		if strings.Contains(stylesheet, forbidden) {
+			t.Errorf("mobile header retains the discarded second navigation row %q", forbidden)
+		}
+	}
+
+	script := string(applicationScript)
+	for _, required := range []string{
+		`function setMobileNavigationOpen(open, restoreFocus = false)`,
+		`byID("mobile-navigation-toggle").addEventListener("click"`,
+		`byID("mobile-logout-button").addEventListener("click"`,
+		`if (link.closest(".mobile-navigation")) setMobileNavigationOpen(false);`,
+		`byID("mobile-admin-nav").hidden = !admin;`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("mobile navigation behavior is missing %q", required)
+		}
+	}
+}
+
+func TestMobilePageTitlesRemainVisible(t *testing.T) {
+	t.Parallel()
+
+	stylesheet := string(applicationStylesheet)
+	if strings.Contains(stylesheet, `.location-heading h1 { display: none; }`) {
+		t.Error("mobile file-browser routes hide their page title")
+	}
+	for _, required := range []string{
+		`.location-heading h1 { display: block; }`,
+		`.drive-header { min-height: 42px; align-items: center; }`,
+	} {
+		if !strings.Contains(stylesheet, required) {
+			t.Errorf("mobile page-title layout is missing %q", required)
+		}
+	}
+}
+
+func TestMobileNavigationAlignsWithThePageContentGutter(t *testing.T) {
+	t.Parallel()
+
+	stylesheet := string(applicationStylesheet)
+	for _, required := range []string{
+		`--efs-spacing-iconVisualInset: 8px;`,
+		`margin-inline-start: calc(-1 * var(--efs-spacing-iconVisualInset));`,
+		`@media (max-width: 390px) {
+  :root { --efs-spacing-pageGutter: 8px; }`,
+		`.mobile-navigation-item {`,
+		`padding: 8px 0;`,
+	} {
+		if !strings.Contains(stylesheet, required) {
+			t.Errorf("mobile navigation alignment is missing %q", required)
+		}
+	}
+	if strings.Contains(stylesheet, `.mobile-navigation-item {
+    display: flex;
+    width: 100%;
+    min-height: var(--efs-metric-targetMinimum);
+    align-items: center;
+    justify-content: flex-start;
+    border: 0;
+    border-radius: 0;
+    padding: 8px;`) {
+		t.Error("mobile menu text still adds a second horizontal padding inset")
+	}
+	for _, forbidden := range []string{`.app-header { padding-inline: 8px; }`, `.view { padding-inline: 8px; }`} {
+		if strings.Contains(stylesheet, forbidden) {
+			t.Errorf("mobile layout overrides the shared page gutter through %q", forbidden)
 		}
 	}
 }
@@ -515,13 +748,16 @@ func TestSelectionActionsFloatWithoutReplacingDriveControls(t *testing.T) {
 
 	shell := string(mustRead("ui/index.html"))
 	for _, required := range []string{
-		`id="selection-bar" class="selection-bar owner-only" role="toolbar" aria-label="Selection actions" hidden`,
-		`id="download-selected" class="icon-button" type="button" aria-label="Download selected" data-icon="download"`,
-		`id="share-selected" class="icon-button" type="button" aria-label="Share selected" data-icon="share-3"`,
-		`id="copy-selected" class="icon-button" type="button" aria-label="Copy selected" data-icon="copy"`,
-		`id="move-selected" class="icon-button" type="button" aria-label="Move selected" data-icon="folder-symlink"`,
-		`id="trash-selected" class="danger icon-button" type="button" aria-label="Move selected to trash" data-icon="trash"`,
+		`id="selection-bar" class="selection-bar selectable-only" role="toolbar" aria-label="Selection actions" hidden`,
+		`id="download-selected" class="owner-only icon-button" type="button" aria-label="Download selected" data-icon="download"`,
+		`id="share-selected" class="owner-only icon-button" type="button" aria-label="Share selected" data-icon="share-3"`,
+		`id="copy-selected" class="owner-only icon-button" type="button" aria-label="Copy selected" data-icon="copy"`,
+		`id="move-selected" class="owner-only icon-button" type="button" aria-label="Move selected" data-icon="folder-symlink"`,
+		`id="trash-selected" class="owner-only danger icon-button" type="button" aria-label="Move selected to trash" data-icon="trash"`,
+		`id="restore-selected" class="trash-only icon-button" type="button" aria-label="Restore selected" data-icon="restore"`,
+		`id="delete-selected-permanently" class="trash-only danger icon-button" type="button" aria-label="Delete selected permanently" data-icon="trash-x"`,
 		`id="clear-selection" class="icon-button" type="button" aria-label="Clear selection" data-icon="x"`,
+		`<th class="select-column selectable-only" scope="col"><input id="select-all" type="checkbox" aria-label="Select all files on this page">`,
 	} {
 		if !strings.Contains(shell, required) {
 			t.Errorf("floating selection control is missing %q", required)
@@ -540,6 +776,7 @@ func TestSelectionActionsFloatWithoutReplacingDriveControls(t *testing.T) {
 		`transform: translateX(-50%);`,
 		`.selection-bar .icon-button { flex: 0 0 var(--efs-metric-controlHeight); }`,
 		`#app[data-selection-active="true"] .toast-region`,
+		`#file-browser-surface[data-access="public"] .selectable-only { display: none !important; }`,
 	} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("selection action surface is missing %q", required)
@@ -552,6 +789,26 @@ func TestSelectionActionsFloatWithoutReplacingDriveControls(t *testing.T) {
 	script := string(applicationScript)
 	if strings.Contains(script, `classList.toggle("selection-active"`) {
 		t.Error("selection still swaps the drive control surface")
+	}
+
+	for _, required := range []string{
+		`function entrySelectionKey(entry)`,
+		`const selectionAccess = state.browserAccess === "owner" || state.browserAccess === "trash";`,
+		`const accessChanged = state.browserAccess !== access;`,
+		`if (accessChanged) { state.selected.clear(); updateSelection(); }`,
+		`async function restoreSelectedTrash()`,
+		`async function deleteSelectedTrash()`,
+		`for (const entry of entries) {`,
+		`selectionBar.setAttribute("aria-busy", "true");`,
+		`byID("restore-selected").addEventListener("click", restoreSelectedTrash);`,
+		`byID("delete-selected-permanently").addEventListener("click", deleteSelectedTrash);`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("trash multi-selection behavior is missing %q", required)
+		}
+	}
+	if strings.Contains(script, `Array.from({ length: Math.min(4, entries.length) }`) {
+		t.Error("trash batch actions run conflicting mutations against the shared Trash root concurrently")
 	}
 }
 
@@ -589,7 +846,7 @@ func TestAdminUsersUseDeterministicTableColumns(t *testing.T) {
 		".user-actions { display: grid;",
 		"grid-template-columns: repeat(3, var(--efs-metric-controlHeight));",
 		"@media (max-width: 900px)",
-		"#users-table { min-width: 0; }",
+		"#users-table { --efs-tableMinimumWidth: 100%; }",
 		"#users-table th:nth-child(4)",
 		"#users-table td:nth-child(4) { display: none; }",
 		"@media (max-width: 560px)",
@@ -614,6 +871,50 @@ func TestAdminUsersUseDeterministicTableColumns(t *testing.T) {
 	for _, forbidden := range []string{`button(user.status === "enabled" ? "Disable" : "Enable"`, `button(user.admin ? "Remove admin" : "Make admin"`, `button("Recovery link"`} {
 		if strings.Contains(script, forbidden) {
 			t.Errorf("admin user action still exposes visible text: %q", forbidden)
+		}
+	}
+}
+
+func TestAdminCollectionsUseFullWidthVirtualTables(t *testing.T) {
+	t.Parallel()
+
+	shell := string(mustRead("ui/index.html"))
+	for _, required := range []string{
+		`id="invite-table-scroll" class="table-scroll settings-table-scroll"`,
+		`<table id="invite-table">`,
+		`<th scope="col">Status</th><th scope="col">Created</th><th scope="col">Expires</th>`,
+		`<tbody id="invite-list"></tbody>`,
+	} {
+		if !strings.Contains(shell, required) {
+			t.Errorf("admin invite table is missing %q", required)
+		}
+	}
+	if strings.Contains(shell, `<ul id="invite-list"`) {
+		t.Error("admin invitations retain the vertically expansive record list")
+	}
+
+	script := string(applicationScript)
+	for _, required := range []string{
+		`invites: [],`,
+		`inviteRenderFrame: 0,`,
+		`renderTableLoadingRows("invite-list", "invite", 4, 3)`,
+		`renderVirtualSettingsTable("invite-table-scroll", "invite-list", state.invites, 4`,
+		`byID("invite-table-scroll").addEventListener("scroll"`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("scalable invitation rendering is missing %q", required)
+		}
+	}
+
+	stylesheet := string(applicationStylesheet)
+	for _, required := range []string{
+		`.settings-wide { display: block; width: 100%; min-width: 0; justify-self: stretch; }`,
+		`.settings-table-scroll > table { width: max(100%, var(--efs-tableMinimumWidth, 100%)); min-width: 100%; }`,
+		`#invite-table { --efs-tableMinimumWidth: 650px; }`,
+		`.settings-table-scroll > table { width: 100%; table-layout: auto; }`,
+	} {
+		if !strings.Contains(stylesheet, required) {
+			t.Errorf("shared full-width table architecture is missing %q", required)
 		}
 	}
 }
@@ -761,6 +1062,84 @@ func TestRecursiveAggregatesHaveLosslessFileBrowserPresentation(t *testing.T) {
 	}
 }
 
+func TestFileBrowserUsesTypeSpecificDetailsWithoutClippingTheScrollViewport(t *testing.T) {
+	t.Parallel()
+
+	shell := string(mustRead("ui/index.html"))
+	if count := strings.Count(shell, `<th scope="col">Name</th><th scope="col">Size</th><th scope="col">Details</th><th scope="col">Changed</th>`); count != 2 {
+		t.Errorf("loaded and fixed-geometry loading tables expose Details %d times, want 2", count)
+	}
+	if strings.Contains(shell, `<th scope="col">Mime type</th>`) {
+		t.Error("file browser still exposes a file-only MIME type heading")
+	}
+
+	script := string(applicationScript)
+	for _, required := range []string{
+		`function formatEntryDetails(entry)`,
+		`if (entry.kind === "directory") return formatEntryFileCount(entry);`,
+		`const detailsCell = text("td", formatEntryDetails(entry));`,
+		`row.append(selectCell, nameCell, sizeCell, detailsCell, dateCell, actionCell);`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("type-specific Details presentation is missing %q", required)
+		}
+	}
+
+	stylesheet := string(applicationStylesheet)
+	for _, required := range []string{
+		`.file-browser-view { height: 100%; min-height: 0; padding-block-end: 0; }`,
+		`.file-browser-host { width: 100%; height: 100%; min-height: 0; }`,
+		`#file-browser-surface { display: flex; width: 100%; height: 100%; min-height: 0; flex-direction: column; }`,
+		`.file-workspace { position: relative; width: 100%; min-height: 0; flex: 1; }`,
+		`#list-presentation { width: 100%; height: 100%; min-height: 0; contain: strict; }`,
+		`#file-table { table-layout: auto; }`,
+		`.media-grid { position: relative; height: 100%; min-height: 0;`,
+	} {
+		if !strings.Contains(stylesheet, required) {
+			t.Errorf("dense file browser scroll geometry is missing %q", required)
+		}
+	}
+}
+
+func TestPagedCollectionsLoadAutomaticallyWithoutManualMoreControls(t *testing.T) {
+	t.Parallel()
+
+	shell := string(mustRead("ui/index.html"))
+	for _, required := range []string{
+		`id="list-page-sentinel" class="page-sentinel"`,
+		`id="grid-page-sentinel" class="page-sentinel"`,
+		`id="users-table-scroll" class="table-scroll settings-table-scroll"`,
+		`id="users-page-sentinel" class="page-sentinel"`,
+	} {
+		if !strings.Contains(shell, required) {
+			t.Errorf("automatic collection paging is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{`id="next-page"`, `id="users-next"`, `class="pagination"`, `>More</button>`} {
+		if strings.Contains(shell, forbidden) {
+			t.Errorf("manual collection paging remains in the shell: %q", forbidden)
+		}
+	}
+
+	script := string(applicationScript)
+	for _, required := range []string{
+		`function loadNextBrowserPage()`,
+		`function syncBrowserPagingSentinels()`,
+		`function setupAutomaticPaging()`,
+		`function loadMoreUsers()`,
+		`maybeLoadNextBrowserPage(byID("media-grid"))`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("automatic collection paging is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{`byID("next-page")`, `byID("users-next")`} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("manual collection paging remains in the client: %q", forbidden)
+		}
+	}
+}
+
 func TestSettingsAndAdminActionsUseCanonicalTransparentIcons(t *testing.T) {
 	t.Parallel()
 
@@ -774,7 +1153,6 @@ func TestSettingsAndAdminActionsUseCanonicalTransparentIcons(t *testing.T) {
 		`id="create-invite" class="icon-button" type="button" aria-label="Create invite" data-icon="user-plus"`,
 		`id="copy-invite" class="icon-button" type="button" aria-label="Copy invite link" data-icon="copy"`,
 		`id="refresh-users" class="icon-button" type="button" aria-label="Refresh users" data-icon="refresh"`,
-		`id="users-next" class="icon-button more-button" type="button" aria-label="Load more users" data-icon="chevron-down"`,
 		`id="dialog-cancel" class="icon-button"`,
 		`id="dialog-confirm" class="icon-button"`,
 	} {
@@ -786,7 +1164,7 @@ func TestSettingsAndAdminActionsUseCanonicalTransparentIcons(t *testing.T) {
 		`type="submit">Save</button>`, `type="submit">Apply</button>`, `id="add-passkey" class="secondary"`,
 		`id="refresh-shares" class="secondary"`, `id="settings-logout" class="danger" type="button">Sign out`,
 		`id="create-invite" class="primary"`, `id="copy-invite" type="button">Copy`,
-		`id="refresh-users" class="secondary"`, `id="users-next" class="secondary`,
+		`id="refresh-users" class="secondary"`,
 	} {
 		if strings.Contains(shell, forbidden) {
 			t.Errorf("Settings or Admin retains a visible text button: %q", forbidden)
@@ -799,7 +1177,6 @@ func TestSettingsAndAdminActionsUseCanonicalTransparentIcons(t *testing.T) {
 		`iconButton("link-off", `, `"Revoke share"`, `"Revoke invite"`,
 		`setIconControl(confirmControl, options.confirmIcon || "check", confirmLabel)`,
 		`iconButton("copy", "Copy link"`,
-		`.icon-button.more-button { min-width: var(--efs-metric-controlHeight); }`,
 	} {
 		if !strings.Contains(script+string(applicationStylesheet), required) {
 			t.Errorf("dynamic Settings or Admin icon action is missing %q", required)
@@ -918,8 +1295,7 @@ func TestHeaderActionsAlignWithThePageContentEdge(t *testing.T) {
 	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`padding-inline: var(--efs-spacing-pageGutter);`,
-		`.app-header { padding-inline: 8px; }`,
-		`.view { padding-inline: 8px; }`,
+		`:root { --efs-spacing-pageGutter: 8px; }`,
 	} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("header actions do not share the page content edge: missing %q", required)
@@ -1116,6 +1492,27 @@ func TestToastsUseNeutralSurfacesWithSemanticAccents(t *testing.T) {
 	}
 }
 
+func TestEveryToastHasAnExplicitDismissAction(t *testing.T) {
+	t.Parallel()
+
+	script := string(applicationScript)
+	for _, required := range []string{
+		`function dismissToastButton()`,
+		`iconButton("x", "Dismiss notification", clearToast, "toast-dismiss", "Dismiss")`,
+		`toast.append(text("span", message), dismissToastButton());`,
+		`actions.append(undo, dismissToastButton());`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("toast dismissal is missing %q", required)
+		}
+	}
+
+	stylesheet := string(applicationStylesheet)
+	if !strings.Contains(stylesheet, `.toast-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }`) {
+		t.Error("toast actions do not keep Undo and Dismiss in a compact deterministic group")
+	}
+}
+
 func TestAllActionsUseResponsiveSheetInsteadOfCenteredModal(t *testing.T) {
 	t.Parallel()
 
@@ -1189,9 +1586,9 @@ func TestLoadingWorkspaceOwnsTheLoadedGeometry(t *testing.T) {
 	for _, required := range []string{
 		`id="loading-view" class="app-frame loading-shell"`,
 		`class="app-content" aria-hidden="true"`,
-		`class="view loading-content"`,
+		`class="view loading-content file-browser-view"`,
 		`class="loading-table table-scroll"`,
-		`<th scope="col">Name</th><th scope="col">Size</th><th scope="col">Mime type</th><th scope="col">Changed</th>`,
+		`<th scope="col">Name</th><th scope="col">Size</th><th scope="col">Details</th><th scope="col">Changed</th>`,
 		`<tr class="loading-item-row loading-file-row">`,
 	} {
 		if !strings.Contains(shell, required) {
@@ -1201,10 +1598,10 @@ func TestLoadingWorkspaceOwnsTheLoadedGeometry(t *testing.T) {
 
 	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
-		`.loading-shell { min-height: calc(100vh - var(--efs-metric-toolbarHeight));`,
+		`.loading-shell { min-height: calc(100vh - var(--efs-metric-headerHeight));`,
 		`.loading-shell { position: fixed;`,
-		`.loading-content { min-height: calc(100vh - var(--efs-metric-toolbarHeight));`,
-		`.loading-table { height: calc(100vh - 224px);`,
+		`.loading-content { min-height: 0;`,
+		`.loading-table { height: 100%;`,
 		`.compact-field { display: flex; width: 132px; flex: 0 0 132px;`,
 		`.drive-controls > button.secondary { width: 64px; flex: 0 0 64px; }`,
 	} {
@@ -1252,9 +1649,9 @@ func TestDriveBreadcrumbsSitBetweenControlsAndFileContent(t *testing.T) {
 	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`.drive-breadcrumbs { min-height: 30px; padding-block: 1px; }`,
-		`.loading-table { height: calc(100vh - 224px);`,
-		`#list-presentation { height: calc(100vh - 224px);`,
-		`.media-grid { position: relative; height: calc(100vh - 224px);`,
+		`.loading-table { height: 100%;`,
+		`#list-presentation { width: 100%; height: 100%;`,
+		`.media-grid { position: relative; height: 100%;`,
 	} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("drive breadcrumb geometry is missing %q", required)
@@ -1338,7 +1735,7 @@ func TestOwnerPublicAndTrashReuseOneFileBrowserSurface(t *testing.T) {
 		`id="file-sort"`,
 		`id="file-presentation"`,
 		`id="metadata-filters"`,
-		`<th scope="col">Name</th><th scope="col">Size</th><th scope="col">Mime type</th><th scope="col">Changed</th>`,
+		`<th scope="col">Name</th><th scope="col">Size</th><th scope="col">Details</th><th scope="col">Changed</th>`,
 	} {
 		if !strings.Contains(shell, required) {
 			t.Errorf("shared file browser surface is missing %q", required)
@@ -1388,7 +1785,7 @@ func TestListLoadingOnlyReplacesPerItemContent(t *testing.T) {
 		`renderFileLoadingItems();`,
 		`renderTableLoadingRows("passkey-list", "passkey", 4, 3)`,
 		`renderTableLoadingRows("share-list", "share", 6, 3)`,
-		`renderRecordLoadingItems("invite-list")`,
+		`renderTableLoadingRows("invite-list", "invite", 4, 3)`,
 		`renderTableLoadingRows("user-list", "user", 5, 3)`,
 		`target.setAttribute("aria-busy", "true")`,
 	} {
@@ -1460,12 +1857,13 @@ func TestSettingsCollectionsUseBoundedVirtualTables(t *testing.T) {
 		`max-height: min(42vh, 360px);`,
 		`overscroll-behavior: contain;`,
 		`scrollbar-gutter: stable;`,
-		`#passkey-table { min-width: 600px; }`,
-		`#share-table { min-width: 820px; }`,
+		`#passkey-table { --efs-tableMinimumWidth: 600px; }`,
+		`#share-table { --efs-tableMinimumWidth: 820px; }`,
 		`@media (max-width: 900px) {`,
-		`#share-table { min-width: 0; }`,
+		`#share-table,
+  #users-table { --efs-tableMinimumWidth: 100%; }`,
 		`@media (max-width: 560px) {`,
-		`#passkey-table { min-width: 0; }`,
+		`#passkey-table { --efs-tableMinimumWidth: 100%; }`,
 	} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("bounded settings table styling is missing %q", required)

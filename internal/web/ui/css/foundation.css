@@ -55,9 +55,11 @@
   --efs-radius-thumbnail: 0px;
   --efs-spacing-pageGutter: 20px;
   --efs-spacing-controlPadding: 8px;
+  --efs-spacing-iconVisualInset: 8px;
   --efs-spacing-componentGap: 6px;
   --efs-spacing-sectionGap: 20px;
   --efs-metric-toolbarHeight: 48px;
+  --efs-metric-headerHeight: var(--efs-metric-toolbarHeight);
   --efs-metric-rowHeight: 36px;
   --efs-metric-controlHeight: 32px;
   --efs-metric-thumbnailSize: 96px;

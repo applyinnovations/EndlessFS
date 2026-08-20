@@ -57,10 +57,34 @@
     catch { announce("Copy was unavailable. Select and copy the link manually.", true); }
   }
 
+  function setMobileNavigationOpen(open, restoreFocus = false) {
+    const menu = byID("mobile-navigation");
+    const toggle = byID("mobile-navigation-toggle");
+    const shouldOpen = Boolean(open && state.user && matchMedia("(max-width: 760px)").matches);
+    const wasOpen = !menu.hidden;
+    menu.hidden = !shouldOpen;
+    toggle.setAttribute("aria-expanded", String(shouldOpen));
+    setIconControl(toggle, shouldOpen ? "x" : "menu-2", shouldOpen ? "Close navigation" : "Open navigation");
+    byID("workspace").inert = shouldOpen;
+    hideActionTooltip();
+    if (shouldOpen && !wasOpen) {
+      const current = menu.querySelector('[aria-current="page"]') || menu.querySelector("a, button");
+      if (current) current.focus();
+    } else if (!shouldOpen && wasOpen && restoreFocus) {
+      toggle.focus();
+    }
+  }
+
   function wireEvents() {
+    setupAutomaticPaging();
     byID("signin-button").addEventListener("click", signIn);
     byID("logout-button").addEventListener("click", logout); byID("settings-logout").addEventListener("click", logout);
-    document.querySelectorAll("[data-route]").forEach((link) => link.addEventListener("click", (event) => { if (!state.user) return; event.preventDefault(); setRoute(link.dataset.route); }));
+    byID("mobile-logout-button").addEventListener("click", () => { setMobileNavigationOpen(false); logout(); });
+    byID("mobile-navigation-toggle").addEventListener("click", () => setMobileNavigationOpen(byID("mobile-navigation").hidden, true));
+    byID("mobile-report-issue").addEventListener("click", () => setMobileNavigationOpen(false));
+    document.querySelectorAll("[data-route]").forEach((link) => link.addEventListener("click", (event) => { if (!state.user) return; event.preventDefault(); if (link.closest(".mobile-navigation")) setMobileNavigationOpen(false); setRoute(link.dataset.route); }));
+    byID("mobile-navigation").addEventListener("keydown", (event) => { if (event.key === "Escape") { event.preventDefault(); setMobileNavigationOpen(false, true); } });
+    window.addEventListener("resize", () => { if (!matchMedia("(max-width: 760px)").matches) setMobileNavigationOpen(false); });
     byID("registration-form").addEventListener("submit", async (event) => {
       event.preventDefault(); const control = event.submitter; control.disabled = true;
       const path = location.pathname; const flow = state.recoveryToken ? "recovery" : state.inviteToken ? "invite" : path === "/bootstrap" ? "bootstrap" : "public";
@@ -136,7 +160,7 @@
       if (list.scrollTop <= transferVirtualRowHeight && state.transferVirtualStart > 0) scheduleTransferWindow(-1);
       else if (list.scrollTop + list.clientHeight >= list.scrollHeight - transferVirtualRowHeight && state.transferVirtualStart + transferVirtualWindowSize < state.transferProjection.length) scheduleTransferWindow(1);
     });
-    byID("open-transfers").addEventListener("click", () => setTransferSheetOpen(byID("transfer-panel").hidden, true));
+    byID("open-transfers").addEventListener("click", () => { setMobileNavigationOpen(false); setTransferSheetOpen(byID("transfer-panel").hidden, true); });
     byID("transfer-close").addEventListener("click", () => setTransferSheetOpen(false, true));
     byID("transfer-panel").addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
@@ -155,27 +179,25 @@
     byID("file-filter").addEventListener("input", renderFiles); byID("file-sort").addEventListener("change", () => state.browserAccess === "owner" ? loadDirectory(state.currentDirectory) : renderFiles());
     for (const id of ["filter-kind", "filter-media", "filter-min-size", "filter-max-size", "filter-modified-after", "filter-modified-before", "filter-preview"]) byID(id).addEventListener("input", renderFiles);
     for (const id of ["file-view-list", "file-view-grid"]) byID(id).addEventListener("change", (event) => { if (event.target.checked) { state.viewMode = event.target.value; renderFiles(); } });
-    byID("media-grid").addEventListener("scroll", () => { if (state.gridRenderFrame) return; state.gridRenderFrame = requestAnimationFrame(() => { state.gridRenderFrame = 0; if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries); }); });
+    byID("media-grid").addEventListener("scroll", () => { if (!state.gridRenderFrame) state.gridRenderFrame = requestAnimationFrame(() => { state.gridRenderFrame = 0; if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries); }); maybeLoadNextBrowserPage(byID("media-grid")); });
     byID("list-presentation").addEventListener("scroll", () => {
       if (!state.listRenderFrame) state.listRenderFrame = requestAnimationFrame(() => { state.listRenderFrame = 0; if (state.viewMode === "list") renderVirtualList(state.filteredEntries); });
-      const scroller = byID("list-presentation");
-      if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - (listRowHeight * 6)) {
-        if (state.browserAccess === "public" && state.publicCursor && !state.publicLoading) loadPublicShare(true);
-        else if (state.browserAccess === "trash" && state.trashCursor && !state.trashLoading) loadTrash(true);
-        else if (state.browserAccess === "owner" && state.nextCursor && !state.directoryLoading) loadDirectory(state.currentDirectory, true);
-      }
+      maybeLoadNextBrowserPage(byID("list-presentation"));
     });
     window.addEventListener("resize", () => {
       if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries);
       if (!byID("settings-view").hidden) { renderPasskeys(); renderShares(); }
+      if (!byID("admin-view").hidden) renderUsers();
       if (!byID("transfer-panel").hidden) setTransferSheetOpen(true);
     });
-    byID("select-all").addEventListener("change", (event) => { for (const entry of filterLoadedEntries(state.entries)) { if (event.target.checked) state.selected.set(entry.path, entry); else state.selected.delete(entry.path); } renderFiles(); updateSelection(); });
+    byID("select-all").addEventListener("change", (event) => { for (const entry of filterLoadedEntries(state.entries)) { const key = entrySelectionKey(entry); if (event.target.checked) state.selected.set(key, entry); else state.selected.delete(key); } renderFiles(); updateSelection(); });
     byID("clear-selection").addEventListener("click", () => { state.selected.clear(); renderFiles(); updateSelection(); });
     byID("download-selected").addEventListener("click", () => download([...state.selected.values()][0]));
     byID("share-selected").addEventListener("click", () => createShare([...state.selected.values()][0]));
     byID("copy-selected").addEventListener("click", () => copyMove(false)); byID("move-selected").addEventListener("click", () => copyMove(true)); byID("trash-selected").addEventListener("click", trashSelected);
-    byID("next-page").addEventListener("click", () => state.browserAccess === "public" ? loadPublicShare(true) : state.browserAccess === "trash" ? loadTrash(true) : loadDirectory(state.currentDirectory, true)); byID("empty-trash").addEventListener("click", emptyTrash);
+    byID("restore-selected").addEventListener("click", restoreSelectedTrash);
+    byID("delete-selected-permanently").addEventListener("click", deleteSelectedTrash);
+    byID("empty-trash").addEventListener("click", emptyTrash);
     byID("profile-form").addEventListener("submit", async (event) => { event.preventDefault(); try { const profile = await api("/api/v1/me", { method: "PATCH", body: { displayName: byID("profile-name").value } }); state.user.displayName = profile.displayName; announce("Display name saved."); } catch (error) { announce(friendlyError(error), true); } });
     byID("theme-form").addEventListener("submit", async (event) => { event.preventDefault(); try { const dark = matchMedia("(prefers-color-scheme: dark)").matches; state.safeTheme = byID("safe-theme").checked; syncSafeThemeURL(); const selection = state.safeTheme ? await api(themePreferenceURL(dark)) : await api("/api/v1/me/preferences/theme", { method: "PUT", body: { themeID: byID("theme-select").value, dark } }); applyTheme(selection); byID("theme-note").textContent = `Using ${selection.resolved.name}.`; announce("Theme applied."); } catch (error) { announce(friendlyError(error), true); } });
     byID("safe-theme").addEventListener("change", () => byID("theme-form").requestSubmit());
@@ -189,11 +211,19 @@
       if (state.shareRenderFrame) return;
       state.shareRenderFrame = requestAnimationFrame(() => { state.shareRenderFrame = 0; renderShares(); });
     });
+    byID("invite-table-scroll").addEventListener("scroll", () => {
+      if (state.inviteRenderFrame) return;
+      state.inviteRenderFrame = requestAnimationFrame(() => { state.inviteRenderFrame = 0; renderInvites(); });
+    });
     byID("add-passkey").addEventListener("click", async () => { const result = await ask({ title: "Add a passkey", description: "Give this passkey an optional device label.", confirm: "Create passkey", confirmIcon: "key-plus", fields: [{ id: "passkey-label", label: "Label (optional)", maxLength: 100 }] }); if (!result) return; try { await register("add", "", "", result["passkey-label"]); announce("Passkey added and session renewed."); await loadSettings(); } catch (error) { announce(friendlyError(error), true); } });
     byID("create-invite").addEventListener("click", async () => { const result = await ask({ title: "Create an invite", description: "The link can create one account. Optionally set an expiry.", confirm: "Create invite", confirmIcon: "user-plus", fields: [{ id: "invite-expires", label: "Expiry (optional)", type: "datetime-local" }] }); if (!result) return; try { const body = {}; if (result["invite-expires"]) body.expiresAt = new Date(result["invite-expires"]).toISOString(); const created = await api("/api/v1/admin/invites", { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body }); await revealLink("Invite link", created.link); announce("Invite created."); await loadAdmin(); } catch (error) { announce(friendlyError(error), true); } });
     byID("copy-invite").addEventListener("click", () => copyText(byID("invite-link").textContent));
     byID("refresh-users").addEventListener("click", loadAdmin);
-    byID("users-next").addEventListener("click", async () => { try { const page = await api(`/api/v1/admin/users?limit=100&cursor=${encodeURIComponent(byID("users-next").dataset.cursor)}`); renderUsers(page.users || [], true); byID("users-next").hidden = !page.nextCursor; byID("users-next").dataset.cursor = page.nextCursor || ""; } catch (error) { announce(friendlyError(error), true); } });
+    byID("users-table-scroll").addEventListener("scroll", () => {
+      if (!state.userRenderFrame) state.userRenderFrame = requestAnimationFrame(() => { state.userRenderFrame = 0; renderUsers(); });
+      const scroller = byID("users-table-scroll");
+      if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - (settingsRowHeight * 6)) loadMoreUsers();
+    });
     const closePreview = () => { if (state.viewerController) state.viewerController.abort(); state.viewerController = null; releaseViewerObjectURL(); byID("preview-content").replaceChildren(); closeTopLayerDialog(byID("preview-dialog")); if (state.viewerOpener && state.viewerOpener.focus) state.viewerOpener.focus(); state.viewerEntry = null; };
     byID("preview-previous").addEventListener("click", () => navigateViewer(-1));
     byID("preview-next").addEventListener("click", () => navigateViewer(1));
@@ -233,7 +263,7 @@
     byID("auth-view").hidden = true; byID("registration-view").hidden = true; byID("public-view").hidden = true;
     byID("authenticated-view").hidden = false; byID("loading-view").hidden = false;
     byID("account-actions").hidden = false;
-    const admin = (state.user.roles || []).includes("admin"); byID("admin-nav").hidden = !admin;
+    const admin = (state.user.roles || []).includes("admin"); byID("admin-nav").hidden = !admin; byID("mobile-admin-nav").hidden = !admin;
     const routeLoad = setRoute(routeFromPath(), false);
     const dark = matchMedia("(prefers-color-scheme: dark)").matches;
     const themeLoad = api(themePreferenceURL(dark)).then(applyTheme).catch(() => announce("Your selected theme could not be loaded; a built-in appearance remains active."));

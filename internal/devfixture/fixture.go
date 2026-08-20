@@ -55,6 +55,7 @@ type identityRepository interface {
 	CreateAccount(context.Context, model.Account) error
 	CreateCredential(context.Context, model.Credential) error
 	CreateCredentialIndex(context.Context, model.CredentialIndex) error
+	CreateInvite(context.Context, model.Invite) error
 	CreateAdminRoles(context.Context, model.AdminRoles) error
 }
 
@@ -66,8 +67,8 @@ type fileService interface {
 	CreateShare(context.Context, domain.UserID, domain.UserPath, *time.Time, string) (drive.CreatedShare, error)
 }
 
-// Seed creates accounts, a representative file hierarchy, recoverable trash,
-// a share, previewable media, and a paged collection through normal contracts.
+// Seed creates dense accounts and file collections, recoverable trash, shares,
+// passkeys, invites, and previewable media through normal contracts.
 func Seed(ctx context.Context, repository identityRepository, files fileService, dataPlane http.Handler, clock domain.Clock) (Result, error) {
 	if repository == nil || files == nil || dataPlane == nil || clock == nil {
 		return Result{}, domain.NewError(domain.ErrorInvalid, "invalid local fixture dependencies")
@@ -93,6 +94,23 @@ func seedIdentities(ctx context.Context, repository identityRepository, now time
 		{id: "EREREREREREREREREREREQ", displayName: "Morgan Lee", status: model.AccountEnabled, age: 45 * 24 * time.Hour},
 		{id: "IiIiIiIiIiIiIiIiIiIiIg", displayName: "Avery Quinn", status: model.AccountDisabled, age: 21 * 24 * time.Hour},
 	}
+	for index := 4; index <= 160; index++ {
+		status := model.AccountEnabled
+		if index%11 == 0 {
+			status = model.AccountDisabled
+		}
+		identities = append(identities, struct {
+			id          string
+			displayName string
+			status      model.AccountStatus
+			age         time.Duration
+		}{
+			id:          deterministicOpaqueID(fmt.Sprintf("local-fixture-user-%04d", index)),
+			displayName: fmt.Sprintf("Fixture member %03d", index),
+			status:      status,
+			age:         time.Duration(160-index) * 6 * time.Hour,
+		})
+	}
 	for _, identity := range identities {
 		userID, err := domain.ParseUserID(identity.id)
 		if err != nil {
@@ -113,28 +131,59 @@ func seedIdentities(ctx context.Context, repository identityRepository, now time
 			return fmt.Errorf("seed local account: %w", err)
 		}
 	}
-	label, err := domain.ParseCredentialLabel("Local fixture")
-	if err != nil {
-		return err
-	}
-	credential := model.Credential{
-		SchemaVersion: model.SchemaVersion, CredentialID: FixtureCredentialID(), UserID: fixtureUserID,
-		PublicKey:  base64.RawURLEncoding.EncodeToString([]byte("inert-local-fixture-public-key")),
-		Transports: []string{"internal"}, Label: &label,
-		CreatedAt: now.Add(-90 * 24 * time.Hour).UTC(), LastUsedAt: now.UTC(),
-	}
-	if err := repository.CreateCredential(ctx, credential); err != nil {
-		return fmt.Errorf("seed local credential: %w", err)
+	credentialIDs := make([]string, 0, 64)
+	for index := 1; index <= 64; index++ {
+		label, err := domain.ParseCredentialLabel(fmt.Sprintf("Fixture device %02d", index))
+		if err != nil {
+			return err
+		}
+		credentialID := FixtureCredentialID()
+		if index > 1 {
+			credentialID = base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("local fixture passkey %02d", index)))
+		}
+		credential := model.Credential{
+			SchemaVersion: model.SchemaVersion, CredentialID: credentialID, UserID: fixtureUserID,
+			PublicKey:  base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("inert-local-fixture-public-key-%02d", index))),
+			Transports: []string{"internal"}, Label: &label,
+			CreatedAt: now.Add(-time.Duration(90-index) * 24 * time.Hour).UTC(), LastUsedAt: now.Add(-time.Duration(index-1) * time.Hour).UTC(),
+		}
+		if err := repository.CreateCredential(ctx, credential); err != nil {
+			return fmt.Errorf("seed local credential: %w", err)
+		}
+		credentialIDs = append(credentialIDs, credentialID)
 	}
 	if err := repository.CreateCredentialIndex(ctx, model.CredentialIndex{
-		SchemaVersion: model.SchemaVersion, UserID: fixtureUserID, CredentialIDs: []string{FixtureCredentialID()},
+		SchemaVersion: model.SchemaVersion, UserID: fixtureUserID, CredentialIDs: credentialIDs,
 	}); err != nil {
 		return fmt.Errorf("seed local credential index: %w", err)
+	}
+	for index := 1; index <= 64; index++ {
+		createdAt := now.Add(-time.Duration(index) * time.Hour).UTC()
+		if err := repository.CreateInvite(ctx, model.Invite{
+			SchemaVersion:   model.SchemaVersion,
+			InviteID:        deterministicOpaqueID(fmt.Sprintf("local-fixture-invite-id-%04d", index)),
+			TokenHash:       deterministicHash(fmt.Sprintf("local-fixture-invite-token-%04d", index)),
+			CreatedByUserID: fixtureUserID,
+			CreatedAt:       createdAt,
+			MaxUses:         1,
+		}); err != nil {
+			return fmt.Errorf("seed local invite: %w", err)
+		}
 	}
 	if err := repository.CreateAdminRoles(ctx, model.AdminRoles{SchemaVersion: model.SchemaVersion, UserIDs: []domain.UserID{fixtureUserID}}); err != nil {
 		return fmt.Errorf("seed local administrator: %w", err)
 	}
 	return nil
+}
+
+func deterministicOpaqueID(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return base64.RawURLEncoding.EncodeToString(digest[:16])
+}
+
+func deterministicHash(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
 type fixtureFile struct {
@@ -158,7 +207,28 @@ func seedWorkspace(ctx context.Context, files fileService, dataPlane http.Handle
 	if err != nil {
 		return err
 	}
-	for index := 1; index <= 240; index++ {
+	denseCollections := []struct {
+		directory string
+		prefix    string
+		count     int
+	}{
+		{directory: "", prefix: "Workspace item", count: 140},
+		{directory: "/Brand", prefix: "Brand asset", count: 110},
+		{directory: "/Photography", prefix: "Contact sheet", count: 110},
+		{directory: "/Projects", prefix: "Project file", count: 110},
+		{directory: "/Projects/Archive", prefix: "Archived file", count: 110},
+		{directory: "/Scale Lab", prefix: "Scale sample", count: 110},
+	}
+	for _, collection := range denseCollections {
+		for index := 1; index <= collection.count; index++ {
+			fixtureFiles = append(fixtureFiles, fixtureFile{
+				path:      fmt.Sprintf("%s/%s %04d.txt", collection.directory, collection.prefix, index),
+				mediaType: "text/plain",
+				body:      []byte(fmt.Sprintf("%s %04d\n", collection.prefix, index)),
+			})
+		}
+	}
+	for index := 1; index <= 360; index++ {
 		fixtureFiles = append(fixtureFiles, fixtureFile{
 			path:      fmt.Sprintf("/Scale Lab/Reference/Asset %04d.txt", index),
 			mediaType: "text/plain",
@@ -175,17 +245,29 @@ func seedWorkspace(ctx context.Context, files fileService, dataPlane http.Handle
 		domain.MustParseUserPath("/Discarded direction.txt"),
 		domain.MustParseUserPath("/Old contact sheet.png"),
 	}
-	trashResult, err := files.Trash(ctx, userID, trashed, "local-fixture-trash-0001")
-	if err != nil {
-		return fmt.Errorf("seed local trash: %w", err)
+	for index := 1; index <= 140; index++ {
+		trashed = append(trashed, domain.MustParseUserPath(fmt.Sprintf("/Scale Lab/Reference/Asset %04d.txt", index)))
 	}
-	for _, item := range trashResult.Items {
-		if item.State != domain.OperationSucceeded {
-			return domain.NewError(domain.ErrorInternal, "local fixture trash operation failed")
+	for offset := 0; offset < len(trashed); offset += drive.MaxBatchItems {
+		end := min(offset+drive.MaxBatchItems, len(trashed))
+		trashResult, err := files.Trash(ctx, userID, trashed[offset:end], fmt.Sprintf("local-fixture-trash-%04d", offset/drive.MaxBatchItems+1))
+		if err != nil {
+			return fmt.Errorf("seed local trash: %w", err)
+		}
+		for _, item := range trashResult.Items {
+			if item.State != domain.OperationSucceeded {
+				return domain.NewError(domain.ErrorInternal, "local fixture trash operation failed")
+			}
 		}
 	}
-	if _, err := files.CreateShare(ctx, userID, domain.MustParseUserPath("/Photography"), nil, "local-fixture-share-0001"); err != nil {
-		return fmt.Errorf("seed local share: %w", err)
+	sharePaths := []string{"/Photography"}
+	for index := 201; index <= 263; index++ {
+		sharePaths = append(sharePaths, fmt.Sprintf("/Scale Lab/Reference/Asset %04d.txt", index))
+	}
+	for index, value := range sharePaths {
+		if _, err := files.CreateShare(ctx, userID, domain.MustParseUserPath(value), nil, fmt.Sprintf("local-fixture-share-%04d", index+1)); err != nil {
+			return fmt.Errorf("seed local share: %w", err)
+		}
 	}
 	return nil
 }

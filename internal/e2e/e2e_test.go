@@ -466,6 +466,69 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := closeTransferSheet(ctx); err != nil {
 		t.Fatalf("close folder transfer sheet: %v (%s)", err, browserStatus(ctx))
 	}
+	if err := waitFor(ctx, `(() => {
+		const open = document.querySelector('[aria-label="Open folder Dropped Folder"]');
+		const row = open && open.closest("tr");
+		return row?.children[2]?.textContent === "11 B" && document.querySelector("#path-aggregate")?.textContent === "35 B · 3 files";
+	})()`, 5*time.Second); err != nil {
+		t.Fatalf("wait for directory and current-path aggregates: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const minimum = document.querySelector("#filter-min-size");
+		minimum.value = "12";
+		minimum.dispatchEvent(new Event("input", {bubbles: true}));
+	})()`, nil)); err != nil {
+		t.Fatalf("filter directory aggregates by minimum size: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#file-rows").dataset.itemCount === "1" && !document.querySelector("#file-rows").textContent.includes("Dropped Folder")`, 5*time.Second); err != nil {
+		t.Fatalf("directory ignored the minimum-size filter: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const minimum = document.querySelector("#filter-min-size");
+		const maximum = document.querySelector("#filter-max-size");
+		minimum.value = "";
+		maximum.value = "11";
+		maximum.dispatchEvent(new Event("input", {bubbles: true}));
+	})()`, nil)); err != nil {
+		t.Fatalf("filter directory aggregates by maximum size: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#file-rows").dataset.itemCount === "1" && document.querySelector("#file-rows").textContent.includes("Dropped Folder")`, 5*time.Second); err != nil {
+		t.Fatalf("directory did not participate in the maximum-size filter: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const maximum = document.querySelector("#filter-max-size");
+		maximum.value = "";
+		maximum.dispatchEvent(new Event("input", {bubbles: true}));
+		const sort = document.querySelector("#file-sort");
+		sort.value = "size:asc";
+		sort.dispatchEvent(new Event("change", {bubbles: true}));
+	})()`, nil)); err != nil {
+		t.Fatalf("sort directory aggregates ascending: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#file-rows tr:not(.list-spacer) .file-name")?.getAttribute("aria-label") === "Open folder Dropped Folder"`, 5*time.Second); err != nil {
+		t.Fatalf("directory did not participate in ascending size sort: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const sort = document.querySelector("#file-sort");
+		sort.value = "size:desc";
+		sort.dispatchEvent(new Event("change", {bubbles: true}));
+	})()`, nil)); err != nil {
+		t.Fatalf("sort directory aggregates descending: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#file-rows tr:not(.list-spacer) .file-name")?.getAttribute("aria-label") === "Preview file browser-proof.txt"`, 5*time.Second); err != nil {
+		t.Fatalf("directory did not participate in descending size sort: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		document.querySelector("#file-view-grid").click();
+	})()`, nil)); err != nil {
+		t.Fatalf("show directory aggregate in grid view: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector('.media-tile-open[aria-label="View file Dropped Folder"], .media-tile-open[aria-label="Open folder Dropped Folder"]')?.querySelector(".media-tile-meta")?.textContent === "11 B"`, 5*time.Second); err != nil {
+		t.Fatalf("directory aggregate is missing from grid view: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("#file-view-list").click()`, nil)); err != nil {
+		t.Fatalf("restore list view after directory aggregate proof: %v", err)
+	}
 	if err := chromedp.Run(ctx, chromedp.Click(`[aria-label="Open folder Dropped Folder"]`, chromedp.ByQuery)); err != nil {
 		t.Fatalf("open dropped folder: %v", err)
 	}
@@ -646,6 +709,12 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		if err := chromedp.Run(ctx, chromedp.Click("#next-page", chromedp.ByQuery)); err != nil {
 			t.Fatalf("load virtual grid page after %d items: %v", loaded, err)
 		}
+	}
+	if err := waitFor(ctx, `(() => {
+		const aggregate = document.querySelector("#path-aggregate")?.textContent || "";
+		return document.querySelector('.media-tile-open[aria-label="View file virtual-00000.bin"] .media-tile-meta')?.textContent === "0 B" && !aggregate.startsWith("—") && aggregate.endsWith("· 10,004 files");
+	})()`, 5*time.Second); err != nil {
+		t.Fatalf("zero-byte file or current-path aggregate is missing from grid view: %v (%s)", err, browserStatus(ctx))
 	}
 	var renderedTiles int
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelectorAll(".media-tile").length`, &renderedTiles)); err != nil {

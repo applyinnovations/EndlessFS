@@ -305,7 +305,7 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 		`<th scope="col">Name</th><th scope="col">Size</th><th scope="col">Mime type</th><th scope="col">Changed</th>`,
 		`const mediaTypeCell = text("td", entry.kind === "directory" ? "—" : entry.mediaType || "application/octet-stream")`,
 		`function trashBrowserEntry(item)`,
-		`size: item.size || 0,`,
+		`size: item.size,`,
 		`mediaType: item.mediaType || "",`,
 	} {
 		if !strings.Contains(shell+script+stylesheet, required) {
@@ -715,7 +715,7 @@ func TestTrailingTableIconActionsDoNotRepeatEndPadding(t *testing.T) {
 	}
 }
 
-func TestRecursiveAggregatesAppearInEveryFileBrowser(t *testing.T) {
+func TestRecursiveAggregatesHaveLosslessFileBrowserPresentation(t *testing.T) {
 	t.Parallel()
 
 	shell := string(mustRead("ui/index.html"))
@@ -730,11 +730,17 @@ func TestRecursiveAggregatesAppearInEveryFileBrowser(t *testing.T) {
 
 	script := string(applicationScript)
 	for _, required := range []string{
-		`text("span", formatBytes(entry.size), "media-tile-meta")`,
-		`const sizeCell = text("td", formatBytes(entry.size));`,
+		`function knownEntrySize(entry)`,
+		`function formatEntrySize(entry)`,
+		`function formatEntryFileCount(entry)`,
+		`function compareEntrySizes(left, right, direction)`,
+		`text("span", formatEntrySize(entry), "media-tile-meta")`,
+		`const sizeCell = text("td", formatEntrySize(entry));`,
 		`state.currentEntry = page.current;`,
 		`renderPathAggregate(page.current);`,
-		`${formatBytes(entry.size)} · ${fileCount.toLocaleString()} ${fileCount === 1 ? "file" : "files"}`,
+		"aggregate.textContent = `${size} · ${fileCount}`;",
+		`size: item.size,`,
+		`fileCount: item.fileCount,`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("recursive aggregate behavior is missing %q", required)
@@ -744,6 +750,10 @@ func TestRecursiveAggregatesAppearInEveryFileBrowser(t *testing.T) {
 		`entry.kind === "directory" ? "" : formatBytes(entry.size)`,
 		`entry.kind === "directory" || entry.size >= minimumSize`,
 		`entry.kind === "directory" || entry.size <= maximumSize`,
+		`left.size || 0`,
+		`right.size || 0`,
+		`size: item.size || 0`,
+		`fileCount: item.fileCount || 0`,
 	} {
 		if strings.Contains(script, forbidden) {
 			t.Errorf("directory aggregates are still excluded from the file browser: %q", forbidden)

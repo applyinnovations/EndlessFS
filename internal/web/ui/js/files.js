@@ -50,16 +50,57 @@
 
   function renderPathAggregate(entry) {
     const aggregate = byID("path-aggregate");
-    if (!entry || state.browserAccess === "trash") {
+    if (state.browserAccess === "trash") {
       aggregate.textContent = "";
       aggregate.removeAttribute("aria-label");
+      aggregate.removeAttribute("aria-hidden");
+      aggregate.classList.remove("pending");
       aggregate.hidden = true;
       return;
     }
-    const fileCount = Number.isFinite(entry.fileCount) ? Math.max(0, entry.fileCount) : 0;
-    aggregate.textContent = `${formatBytes(entry.size)} · ${fileCount.toLocaleString()} ${fileCount === 1 ? "file" : "files"}`;
-    aggregate.setAttribute("aria-label", `${formatBytes(entry.size)} across ${fileCount.toLocaleString()} ${fileCount === 1 ? "file" : "files"}`);
     aggregate.hidden = false;
+    if (!entry) {
+      aggregate.textContent = "— · —";
+      aggregate.removeAttribute("aria-label");
+      aggregate.setAttribute("aria-hidden", "true");
+      aggregate.classList.add("pending");
+      return;
+    }
+    const size = formatEntrySize(entry);
+    const fileCount = formatEntryFileCount(entry);
+    aggregate.textContent = `${size} · ${fileCount}`;
+    aggregate.setAttribute("aria-label", `Current path total: ${size}, ${fileCount}`);
+    aggregate.removeAttribute("aria-hidden");
+    aggregate.classList.remove("pending");
+  }
+
+  function knownEntrySize(entry) {
+    const value = entry && entry.size;
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  }
+
+  function knownEntryFileCount(entry) {
+    const value = entry && entry.fileCount;
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  }
+
+  function formatEntrySize(entry) {
+    const size = knownEntrySize(entry);
+    return size === null ? "—" : formatBytes(size);
+  }
+
+  function formatEntryFileCount(entry) {
+    const fileCount = knownEntryFileCount(entry);
+    return fileCount === null ? "—" : `${fileCount.toLocaleString()} ${fileCount === 1 ? "file" : "files"}`;
+  }
+
+  function compareEntrySizes(left, right, direction) {
+    const leftSize = knownEntrySize(left);
+    const rightSize = knownEntrySize(right);
+    if (leftSize === null) return rightSize === null ? 0 : 1;
+    if (rightSize === null) return -1;
+    if (leftSize === rightSize) return 0;
+    return direction * (leftSize < rightSize ? -1 : 1);
   }
 
   function renderFiles() {
@@ -173,11 +214,12 @@
     const filtered = entries.filter((entry) => {
       const changed = new Date(entry.modifiedAt).valueOf();
       const knownPreviewState = state.previewStates.get(entry.path);
+      const entrySize = knownEntrySize(entry);
       return (!query || entry.name.toLocaleLowerCase().includes(query)) &&
         (!kind || entry.kind === kind) &&
         (!media || mediaCategory(entry) === media) &&
-        (!Number.isFinite(minimumSize) || entry.size >= minimumSize) &&
-        (!Number.isFinite(maximumSize) || entry.size <= maximumSize) &&
+        (!Number.isFinite(minimumSize) || (entrySize !== null && entrySize >= minimumSize)) &&
+        (!Number.isFinite(maximumSize) || (entrySize !== null && entrySize <= maximumSize)) &&
         (!Number.isFinite(changed) || (changed >= modifiedAfter && changed <= modifiedBefore)) &&
         (!previewState || (knownPreviewState ? knownPreviewState.state : "missing") === previewState);
     });
@@ -185,7 +227,7 @@
     const direction = order === "desc" ? -1 : 1;
     const compare = (left, right) => {
       if (sort === "modified") return direction * (new Date(left.modifiedAt).valueOf() - new Date(right.modifiedAt).valueOf());
-      if (sort === "size") return direction * ((left.size || 0) - (right.size || 0));
+      if (sort === "size") return compareEntrySizes(left, right, direction);
       if (sort === "kind") return direction * (left.kind.localeCompare(right.kind) || left.name.localeCompare(right.name));
       return direction * left.name.localeCompare(right.name);
     };
@@ -308,7 +350,7 @@
     const objectURL = state.previewObjectURLs.get(entry.path);
     if (objectURL) setPreviewImage(frame, entry, objectURL, state.previewStates.get(entry.path));
     else frame.append(fileTypeIcon(entry, "media-fallback-icon"));
-    open.append(frame, text("strong", entry.name, "media-tile-name"), text("span", formatBytes(entry.size), "media-tile-meta"));
+    open.append(frame, text("strong", entry.name, "media-tile-name"), text("span", formatEntrySize(entry), "media-tile-meta"));
     if (!trashAccess) open.addEventListener("click", () => openBrowserEntry(entry));
     tile.append(checkbox, open);
     if (trashAccess) tile.append(trashActionGroup(entry.trash, "trash-media-actions"));
@@ -512,7 +554,7 @@
       open.setAttribute("aria-label", `${entry.kind === "directory" ? "Open folder" : "Preview file"} ${entry.name}`);
       nameCell.append(open);
     }
-    const sizeCell = text("td", formatBytes(entry.size));
+    const sizeCell = text("td", formatEntrySize(entry));
     const mediaTypeCell = text("td", entry.kind === "directory" ? "—" : entry.mediaType || "application/octet-stream");
     const dateCell = text("td", formatDate(entry.modifiedAt));
     const actionCell = document.createElement("td");

@@ -33,6 +33,7 @@ type Entry struct {
 	Name       string    `json:"name"`
 	Kind       EntryKind `json:"kind"`
 	Size       int64     `json:"size"`
+	FileCount  int64     `json:"fileCount"`
 	MediaType  string    `json:"mediaType,omitempty"`
 	ModifiedAt time.Time `json:"modifiedAt"`
 	Version    Version   `json:"version"`
@@ -88,8 +89,21 @@ type ListRequest struct {
 }
 
 type ListPage struct {
+	Current    Entry   `json:"current"`
 	Entries    []Entry `json:"entries"`
 	NextCursor string  `json:"nextCursor,omitempty"`
+}
+
+// ChildLookupRequest resolves a bounded set of immediate children from one
+// authoritative directory snapshot. Names are returned in request order.
+type ChildLookupRequest struct {
+	Directory UserPath
+	Names     []string
+}
+
+type ChildLookup struct {
+	Current Entry
+	Entries []Entry
 }
 
 type CreateDirectoryRequest struct {

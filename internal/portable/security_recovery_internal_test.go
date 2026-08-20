@@ -416,6 +416,98 @@ func TestAdmissionAndGateCorruptionAreFailClosed(t *testing.T) {
 	})
 }
 
+func TestFinishClosingWritesConvergesAcrossConcurrentGateTransitions(t *testing.T) {
+	ctx := context.Background()
+	clock := domain.NewFixedClock(time.Date(2044, 5, 7, 7, 8, 9, 0, time.UTC))
+	newEngine := func(t *testing.T) (*objectmemory.Backend, *hookedBackend, *Engine) {
+		t.Helper()
+		memory := objectmemory.New()
+		hooks := &hookedBackend{Backend: memory}
+		return memory, hooks, openInternalTestEngine(t, hooks, clock, strings.NewReader(strings.Repeat(t.Name(), 1<<16)))
+	}
+	setGate := func(t *testing.T, memory *objectmemory.Backend, mode storageformat.GateMode, checkpointID string) {
+		t.Helper()
+		key := storageformat.WriteGateKey()
+		object, err := memory.Get(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope storageformat.Envelope
+		var gate storageformat.WriteGate
+		if err := storageformat.DecodeEnvelope(object.Body, key, writeGateSchema, &envelope, &gate); err != nil {
+			t.Fatal(err)
+		}
+		gate.Mode = mode
+		gate.CheckpointID = checkpointID
+		body := encodeInternalEnvelope(t, writeGateSchema, key, envelope.Revision+1, gate)
+		replaceInternalObject(t, memory, key, object.Version, body)
+	}
+
+	t.Run("already-closed", func(t *testing.T) {
+		memory, _, engine := newEngine(t)
+		setGate(t, memory, storageformat.GateClosed, "checkpoint")
+		if err := engine.finishClosingWrites(ctx, "checkpoint"); err != nil {
+			t.Fatalf("finishClosingWrites() error = %v", err)
+		}
+	})
+
+	t.Run("changed-before-drain", func(t *testing.T) {
+		_, _, engine := newEngine(t)
+		if err := engine.finishClosingWrites(ctx, "checkpoint"); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("finishClosingWrites() error = %v", err)
+		}
+	})
+
+	t.Run("changed-during-drain", func(t *testing.T) {
+		memory, hooks, engine := newEngine(t)
+		setGate(t, memory, storageformat.GateClosing, "checkpoint")
+		changed := false
+		hooks.list = func(ctx context.Context, request objectstore.ListRequest) (objectstore.ListPage, error) {
+			if !changed {
+				changed = true
+				setGate(t, memory, storageformat.GateOpen, "")
+			}
+			return memory.List(ctx, request)
+		}
+		if err := engine.finishClosingWrites(ctx, "checkpoint"); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("finishClosingWrites() error = %v", err)
+		}
+	})
+
+	t.Run("concurrent-closer-wins-final-cas", func(t *testing.T) {
+		memory, hooks, engine := newEngine(t)
+		setGate(t, memory, storageformat.GateClosing, "checkpoint")
+		won := false
+		hooks.put = func(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+			if key == storageformat.WriteGateKey() && !won {
+				var envelope storageformat.Envelope
+				var gate storageformat.WriteGate
+				if err := storageformat.DecodeEnvelope(body, key, writeGateSchema, &envelope, &gate); err != nil {
+					return "", err
+				}
+				if gate.Mode == storageformat.GateClosed {
+					won = true
+					if _, err := memory.Put(ctx, key, body, condition); err != nil {
+						return "", err
+					}
+					return "", domain.NewError(domain.ErrorPreconditionFailed, "concurrent closer won")
+				}
+			}
+			return memory.Put(ctx, key, body, condition)
+		}
+		if err := engine.finishClosingWrites(ctx, "checkpoint"); err != nil {
+			t.Fatalf("finishClosingWrites() error = %v", err)
+		}
+		if !won {
+			t.Fatal("concurrent closer did not win final gate CAS")
+		}
+		gate, err := engine.GateStatus(ctx)
+		if err != nil || gate.Mode != storageformat.GateClosed || gate.CheckpointID != "checkpoint" {
+			t.Fatalf("GateStatus() = %+v, %v", gate, err)
+		}
+	})
+}
+
 func TestGateDrainRejectsInvalidDurableRecords(t *testing.T) {
 	ctx := context.Background()
 	clock := domain.NewFixedClock(time.Date(2044, 6, 7, 8, 9, 10, 0, time.UTC))
@@ -983,12 +1075,7 @@ func TestFileOperationValidationAndRecoveryMatrix(t *testing.T) {
 	t.Run("operation-building-guards", func(t *testing.T) {
 		_, _, engine := newEngine(t)
 		rootKey := storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID).String()
-		updates := map[string]struct {
-			scope       domain.Scope
-			directoryID string
-			snapshot    directorySnapshot
-			entries     []storageformat.DirectoryEntry
-		}{rootKey: {scope: scope, directoryID: storageformat.RootDirectoryID, snapshot: directorySnapshot{pending: true}}}
+		updates := map[string]directoryUpdate{rootKey: {scope: scope, directoryID: storageformat.RootDirectoryID, snapshot: directorySnapshot{pending: true}}}
 		if _, _, err := engine.Files().buildFileOperation(ctx, user, "operation", "owner", operationDelete, updates, nil, nil); !errors.Is(err, domain.ErrUnavailable) {
 			t.Fatalf("buildFileOperation(pending) error = %v", err)
 		}

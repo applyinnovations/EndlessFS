@@ -38,6 +38,7 @@ import (
 	previewmemory "github.com/applyinnovations/endlessfs/internal/preview/memory"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
 	"github.com/applyinnovations/endlessfs/internal/theme"
 )
 
@@ -374,7 +375,7 @@ func buildWriterConfiguration(cfg config.Config, sessionKeyringID string) (porta
 		return portable.WriterConfiguration{}, domain.NewError(domain.ErrorInvalid, "invalid storage key identifier")
 	}
 	keyringIdentifiers := []string{sessionKeyringID}
-	requiredFeatures := []string{"directory-manifests", "fenced-operations", "portable-checkpoints"}
+	requiredFeatures := []string{"directory-manifests", "fenced-operations", "portable-checkpoints", storageformat.FeatureRecursiveBytes}
 	previewProfile := "disabled"
 	if cfg.PreviewProvider != "" && cfg.PreviewProvider != "disabled" {
 		if err := validatePreviewCapabilities(cfg.PreviewFormats); err != nil {

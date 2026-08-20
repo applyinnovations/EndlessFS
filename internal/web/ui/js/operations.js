@@ -52,6 +52,8 @@
     if (!append) {
       cleanupGridMedia(new Set());
       state.previewStates.clear();
+      state.currentEntry = null;
+      renderPathAggregate(null);
       state.entries = [];
       state.trashCursor = "";
       byID("list-presentation").scrollTop = 0;
@@ -92,6 +94,7 @@
       name: item.originalPath,
       kind: item.kind,
       size: item.size || 0,
+      fileCount: item.fileCount || 0,
       mediaType: item.mediaType || "",
       modifiedAt: item.trashedAt,
       version: item.originalVersion,

@@ -235,6 +235,11 @@ func TestIntegrationFileHTTPDirectDataPathTrashAndShare(t *testing.T) {
 	if listing.Code != http.StatusOK || !bytes.Contains(listing.Body.Bytes(), []byte("file.txt")) {
 		t.Fatalf("listing = %d %s", listing.Code, listing.Body.String())
 	}
+	var listed domain.ListPage
+	decodeResponse(t, listing, &listed)
+	if listed.Current.Path != domain.MustParseUserPath("/docs") || listed.Current.Size != 5 || listed.Current.FileCount != 1 {
+		t.Fatalf("listing current directory = %+v; want /docs size/count 5/1", listed.Current)
+	}
 	otherListing := performRequest(t, env.handler, http.MethodGet, "/api/v1/files?path=/docs", "", "", []*http.Cookie{env.otherSession}, nil)
 	if otherListing.Code != http.StatusNotFound {
 		t.Fatalf("cross-user listing = %d", otherListing.Code)
@@ -277,9 +282,20 @@ func TestIntegrationFileHTTPDirectDataPathTrashAndShare(t *testing.T) {
 	if public.Code != http.StatusOK || public.Header().Get("Referrer-Policy") != "no-referrer" {
 		t.Fatalf("public share = %d %v %s", public.Code, public.Header(), public.Body.String())
 	}
+	var publicPage drive.PublicPage
+	decodeResponse(t, public, &publicPage)
+	if publicPage.Root.Path != "/" || publicPage.Current.Path != "/" || publicPage.Current.Size != 5 || publicPage.Current.FileCount != 1 {
+		t.Fatalf("public current target = %+v; root=%+v", publicPage.Current, publicPage.Root)
+	}
 	trashed := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"paths":["/docs"]}`, cookies, driveMutationHeaders(env.csrf.Value, "http-trash-request-00001"))
 	if trashed.Code != http.StatusAccepted {
 		t.Fatalf("trash = %d %s", trashed.Code, trashed.Body.String())
+	}
+	trashListing := performRequest(t, env.handler, http.MethodGet, "/api/v1/trash", "", "", []*http.Cookie{env.session}, nil)
+	var trashPage drive.TrashPage
+	decodeResponse(t, trashListing, &trashPage)
+	if trashListing.Code != http.StatusOK || len(trashPage.Items) != 1 || trashPage.Items[0].Size != 5 || trashPage.Items[0].FileCount != 1 || trashPage.Items[0].MediaType != "" {
+		t.Fatalf("trash metadata response = %d %+v %s", trashListing.Code, trashPage, trashListing.Body.String())
 	}
 	unavailable := performRequest(t, env.handler, http.MethodGet, "/api/v1/public/shares/"+token+"?path=/", "", "", nil, nil)
 	if unavailable.Code != http.StatusNotFound {
@@ -643,6 +659,10 @@ func TestIntegrationCrossUserPrivateEndpointMatrix(t *testing.T) {
 	if trashResponse.Code != http.StatusAccepted || len(ownerTrash.Items) != 1 || ownerTrash.Items[0].TrashID == "" {
 		t.Fatalf("owner trash = %d %s", trashResponse.Code, trashResponse.Body.String())
 	}
+	ownerTrashListing := performRequest(t, env.handler, http.MethodGet, "/api/v1/trash?limit=1000", "", "", []*http.Cookie{env.otherSession}, nil)
+	if ownerTrashListing.Code != http.StatusOK || !bytes.Contains(ownerTrashListing.Body.Bytes(), []byte(ownerTrash.Items[0].TrashID)) || !bytes.Contains(ownerTrashListing.Body.Bytes(), []byte(`"size":5`)) {
+		t.Fatalf("owner trash listing = %d %s", ownerTrashListing.Code, ownerTrashListing.Body.String())
+	}
 
 	checks := []struct {
 		name, method, target, body string
@@ -692,6 +712,10 @@ func TestIntegrationCrossUserPrivateEndpointMatrix(t *testing.T) {
 	shares := performRequest(t, env.handler, http.MethodGet, "/api/v1/shares", "", "", []*http.Cookie{env.session}, nil)
 	if shares.Code != http.StatusOK || bytes.Contains(shares.Body.Bytes(), []byte(ownerShare.Share.ShareID)) {
 		t.Fatalf("attacker share listing leaked owner record: %d %s", shares.Code, shares.Body.String())
+	}
+	attackerTrashListing := performRequest(t, env.handler, http.MethodGet, "/api/v1/trash?limit=1000", "", "", []*http.Cookie{env.session}, nil)
+	if attackerTrashListing.Code != http.StatusOK || bytes.Contains(attackerTrashListing.Body.Bytes(), []byte(ownerTrash.Items[0].TrashID)) {
+		t.Fatalf("attacker trash listing leaked owner record: %d %s", attackerTrashListing.Code, attackerTrashListing.Body.String())
 	}
 	ownerStillPresent := performRequest(t, env.handler, http.MethodGet, "/api/v1/files/stat?path=/foreign/owned.txt", "", "", []*http.Cookie{env.otherSession}, nil)
 	if ownerStillPresent.Code != http.StatusOK {

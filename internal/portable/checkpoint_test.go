@@ -105,8 +105,21 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 	if _, err := destinationEngine.Files().Stat(context.Background(), trashScope, domain.MustParseUserPath("/trash-folder/deleted.txt")); err != nil {
 		t.Fatalf("destination trash file missing: %v", err)
 	}
+	for path, expected := range map[string][2]int64{"/": {28, 2}, "/documents": {14, 1}, "/copy": {14, 1}} {
+		entry, statErr := destinationEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath(path))
+		if statErr != nil || entry.Size != expected[0] || entry.FileCount != expected[1] {
+			t.Fatalf("raw-copy aggregate %s = %+v, %v; want %d bytes/%d files", path, entry, statErr, expected[0], expected[1])
+		}
+	}
+	if entry, statErr := destinationEngine.Files().Stat(context.Background(), trashScope, domain.MustParseUserPath("/")); statErr != nil || entry.Size != 11 || entry.FileCount != 1 {
+		t.Fatalf("raw-copy trash aggregate = %+v, %v; want 11 bytes/1 file", entry, statErr)
+	}
 	if _, err := destinationEngine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/after-cutover")}); err != nil {
 		t.Fatalf("destination continued mutation error = %v", err)
+	}
+	uploadPortableFile(t, destinationServer.Client(), destinationEngine.Files(), scope, domain.MustParseUserPath("/after-cutover/new.txt"), []byte("continued"))
+	if entry, statErr := destinationEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/")); statErr != nil || entry.Size != 37 || entry.FileCount != 3 {
+		t.Fatalf("continued aggregate = %+v, %v; want 37 bytes/3 files", entry, statErr)
 	}
 	returnCheckpoint, err := destinationEngine.CreateCheckpoint(context.Background(), "return-checkpoint")
 	if err != nil {
@@ -123,6 +136,9 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 	}
 	if _, err := returnedEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/after-cutover")); err != nil {
 		t.Fatalf("reverse-copy continued state missing: %v", err)
+	}
+	if entry, err := returnedEngine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/")); err != nil || entry.Size != 37 || entry.FileCount != 3 {
+		t.Fatalf("reverse-copy aggregate = %+v, %v; want 37 bytes/3 files", entry, err)
 	}
 }
 
@@ -202,8 +218,8 @@ func TestPortabilityRawCopyPreservesSplitStateAndFileBackends(t *testing.T) {
 		t.Fatalf("destination state = %+v, %v", value, err)
 	}
 	entry, err := destination.Files().Stat(context.Background(), scope, path)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || entry.FileCount != 1 {
+		t.Fatalf("split raw-copy file = %+v, %v", entry, err)
 	}
 	download, err := destination.Files().CreateDownload(context.Background(), scope, domain.CreateDownloadRequest{Path: path, Version: entry.Version})
 	if err != nil {

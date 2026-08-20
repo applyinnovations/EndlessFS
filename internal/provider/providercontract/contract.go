@@ -63,7 +63,7 @@ func Run(t *testing.T, factory Factory) {
 			}
 		}
 		first, err := harness.Storage.List(context.Background(), userA, domain.ListRequest{Directory: root, PageSize: 2})
-		if err != nil || len(first.Entries) != 2 || first.NextCursor == "" {
+		if err != nil || first.Current.Path != root || first.Current.Kind != domain.EntryDirectory || first.Current.Size != 0 || first.Current.FileCount != 0 || len(first.Entries) != 2 || first.NextCursor == "" {
 			t.Fatalf("first List() = %+v, %v", first, err)
 		}
 		_, _ = harness.Storage.CreateDirectory(context.Background(), userA, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/later")})
@@ -71,15 +71,72 @@ func Run(t *testing.T, factory Factory) {
 			t.Fatalf("cross-scope cursor error = %v", err)
 		}
 		second, err := harness.Storage.List(context.Background(), userA, domain.ListRequest{Directory: root, PageSize: 2, Cursor: first.NextCursor})
-		if err != nil || len(second.Entries) != 2 {
+		if err != nil || second.Current != first.Current || len(second.Entries) != 2 {
 			t.Fatalf("second List() = %+v, %v", second, err)
 		}
 		third, err := harness.Storage.List(context.Background(), userA, domain.ListRequest{Directory: root, PageSize: 2, Cursor: second.NextCursor})
-		if err != nil || len(third.Entries) != 1 || third.NextCursor != "" {
+		if err != nil || third.Current != first.Current || len(third.Entries) != 1 || third.NextCursor != "" {
 			t.Fatalf("third List() = %+v, %v", third, err)
 		}
 		if _, err := harness.Storage.Stat(context.Background(), userB, domain.MustParseUserPath("/folder-0")); !errors.Is(err, domain.ErrNotFound) {
 			t.Fatalf("cross-scope Stat() error = %v", err)
+		}
+	})
+
+	t.Run("snapshot-consistent current directory and batched child lookup", func(t *testing.T) {
+		harness := factory(t)
+		scope := testScope(t, 0x23, domain.AreaLive)
+		other := testScope(t, 0x24, domain.AreaLive)
+		root := domain.MustParseUserPath("/")
+		folder := domain.MustParseUserPath("/folder")
+		empty := domain.MustParseUserPath("/empty")
+		for _, path := range []domain.UserPath{folder, empty} {
+			if _, err := harness.Storage.CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: path}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		uploadFile(t, harness, scope, domain.MustParseUserPath("/folder/a.txt"), []byte("four"), false)
+		uploadFile(t, harness, scope, domain.MustParseUserPath("/folder/b.txt"), []byte("sixsix"), false)
+
+		first, err := harness.Storage.List(context.Background(), scope, domain.ListRequest{Directory: folder, PageSize: 1})
+		if err != nil || first.Current.Path != folder || first.Current.Kind != domain.EntryDirectory || first.Current.Size != 10 || first.Current.FileCount != 2 || len(first.Entries) != 1 || first.NextCursor == "" {
+			t.Fatalf("first folder List() = %+v, %v", first, err)
+		}
+		uploadFile(t, harness, scope, domain.MustParseUserPath("/folder/c.txt"), []byte("new"), false)
+		second, err := harness.Storage.List(context.Background(), scope, domain.ListRequest{Directory: folder, PageSize: 1, Cursor: first.NextCursor})
+		if err != nil || second.Current != first.Current || second.Current.Size != 10 || second.Current.FileCount != 2 || len(second.Entries) != 1 {
+			t.Fatalf("snapshot folder List() = %+v, %v; want current %+v", second, err, first.Current)
+		}
+		fresh, err := harness.Storage.List(context.Background(), scope, domain.ListRequest{Directory: folder})
+		if err != nil || fresh.Current.Size != 13 || fresh.Current.FileCount != 3 {
+			t.Fatalf("fresh folder List() = %+v, %v; want current size/count 13/3", fresh, err)
+		}
+		emptyPage, err := harness.Storage.List(context.Background(), scope, domain.ListRequest{Directory: empty})
+		if err != nil || emptyPage.Current.Path != empty || emptyPage.Current.Size != 0 || emptyPage.Current.FileCount != 0 || len(emptyPage.Entries) != 0 {
+			t.Fatalf("empty List() = %+v, %v", emptyPage, err)
+		}
+
+		lookup, err := harness.Storage.LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: root, Names: []string{"empty", "folder"}})
+		if err != nil || lookup.Current.Path != root || lookup.Current.Size != 13 || lookup.Current.FileCount != 3 || len(lookup.Entries) != 2 || lookup.Entries[0].Path != empty || lookup.Entries[0].Size != 0 || lookup.Entries[0].FileCount != 0 || lookup.Entries[1].Path != folder || lookup.Entries[1].Size != 13 || lookup.Entries[1].FileCount != 3 {
+			t.Fatalf("LookupChildren() = %+v, %v", lookup, err)
+		}
+		if _, err := harness.Storage.LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: root, Names: []string{"folder", "folder"}}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("duplicate LookupChildren() error = %v", err)
+		}
+		if _, err := harness.Storage.LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: root}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("empty LookupChildren() error = %v", err)
+		}
+		if _, err := harness.Storage.LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: root, Names: []string{"../folder"}}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid-name LookupChildren() error = %v", err)
+		}
+		if _, err := harness.Storage.LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: root, Names: make([]string, 1001)}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("oversized LookupChildren() error = %v", err)
+		}
+		if _, err := harness.Storage.LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: root, Names: []string{"missing"}}); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("missing LookupChildren() error = %v", err)
+		}
+		if _, err := harness.Storage.LookupChildren(context.Background(), other, domain.ChildLookupRequest{Directory: root, Names: []string{"folder"}}); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("cross-scope LookupChildren() error = %v", err)
 		}
 	})
 
@@ -326,6 +383,59 @@ func Run(t *testing.T, factory Factory) {
 		}
 	})
 
+	t.Run("recursive byte and file-count aggregate lifecycle", func(t *testing.T) {
+		harness := factory(t)
+		live := testScope(t, 0x73, domain.AreaLive)
+		trash := testScope(t, 0x73, domain.AreaTrash)
+		for _, path := range []string{"/tree", "/tree/nested"} {
+			if _, err := harness.Storage.CreateDirectory(context.Background(), live, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		uploadFile(t, harness, live, domain.MustParseUserPath("/tree/nested/file.txt"), []byte("four"), false)
+		assertAggregate := func(scope domain.Scope, path string, size, fileCount int64) {
+			t.Helper()
+			entry, err := harness.Storage.Stat(context.Background(), scope, domain.MustParseUserPath(path))
+			if err != nil || entry.Size != size || entry.FileCount != fileCount {
+				t.Fatalf("Stat(%s) = %+v, %v; want recursive size/count %d/%d", path, entry, err, size, fileCount)
+			}
+		}
+		assertAggregate(live, "/", 4, 1)
+		assertAggregate(live, "/tree", 4, 1)
+		assertAggregate(live, "/tree/nested", 4, 1)
+		page, err := harness.Storage.List(context.Background(), live, domain.ListRequest{Directory: domain.MustParseUserPath("/tree")})
+		if err != nil || len(page.Entries) != 1 || page.Entries[0].Size != 4 || page.Entries[0].FileCount != 1 {
+			t.Fatalf("List(/tree) = %+v, %v; want child recursive size/count 4/1", page, err)
+		}
+		if operation, err := harness.Storage.Copy(context.Background(), live, live, domain.CopyRequest{
+			Source: domain.MustParseUserPath("/tree"), Destination: domain.MustParseUserPath("/copy"), IdempotencyKey: "aggregate-copy",
+		}); err != nil || operation.State != domain.OperationSucceeded {
+			t.Fatalf("Copy() = %+v, %v", operation, err)
+		}
+		assertAggregate(live, "/", 8, 2)
+		assertAggregate(live, "/copy", 4, 1)
+		if operation, err := harness.Storage.Move(context.Background(), live, trash, domain.MoveRequest{
+			Source: domain.MustParseUserPath("/copy/nested"), Destination: domain.MustParseUserPath("/trashed"), IdempotencyKey: "aggregate-trash",
+		}); err != nil || operation.State != domain.OperationSucceeded {
+			t.Fatalf("trash Move() = %+v, %v", operation, err)
+		}
+		assertAggregate(live, "/", 4, 1)
+		assertAggregate(trash, "/", 4, 1)
+		if operation, err := harness.Storage.Move(context.Background(), trash, live, domain.MoveRequest{
+			Source: domain.MustParseUserPath("/trashed"), Destination: domain.MustParseUserPath("/restored"), IdempotencyKey: "aggregate-restore",
+		}); err != nil || operation.State != domain.OperationSucceeded {
+			t.Fatalf("restore Move() = %+v, %v", operation, err)
+		}
+		assertAggregate(live, "/", 8, 2)
+		assertAggregate(trash, "/", 0, 0)
+		if operation, err := harness.Storage.Delete(context.Background(), live, domain.DeleteRequest{
+			Path: domain.MustParseUserPath("/restored"), IdempotencyKey: "aggregate-delete",
+		}); err != nil || operation.State != domain.OperationSucceeded {
+			t.Fatalf("Delete() = %+v, %v", operation, err)
+		}
+		assertAggregate(live, "/", 4, 1)
+	})
+
 	t.Run("preview content identity lifecycle", func(t *testing.T) {
 		harness := factory(t)
 		live := testScope(t, 0x79, domain.AreaLive)
@@ -430,7 +540,7 @@ func Run(t *testing.T, factory Factory) {
 		entry, err := harness.Storage.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{
 			UploadID: capability.UploadID, Path: path, Size: size, MediaType: "application/octet-stream",
 		})
-		if err != nil || entry.Size != size {
+		if err != nil || entry.Size != size || entry.FileCount != 1 {
 			t.Fatalf("CompleteUpload() = %+v, %v", entry, err)
 		}
 		download, err := harness.Storage.CreateDownload(context.Background(), scope, domain.CreateDownloadRequest{Path: path, Version: entry.Version})

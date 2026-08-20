@@ -16,6 +16,7 @@ import (
 	endlesslogging "github.com/applyinnovations/endlessfs/internal/logging"
 	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
 	"github.com/applyinnovations/endlessfs/internal/secret"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
 func TestMain(m *testing.M) {
@@ -165,7 +166,7 @@ func TestWriterCompatibilityIncludesDurablePreviewConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(initial.KeyringIdentifiers) != 2 || !contains(initial.RequiredFeatures, "generated-previews-v1") || !contains(initial.RequiredFeatures, "preview-integrity-crc32c-v1") {
+	if len(initial.KeyringIdentifiers) != 2 || !contains(initial.RequiredFeatures, "generated-previews-v1") || !contains(initial.RequiredFeatures, "preview-integrity-crc32c-v1") || !contains(initial.RequiredFeatures, storageformat.FeatureRecursiveBytes) {
 		t.Fatalf("preview compatibility markers = %+v", initial)
 	}
 	variations := []config.Config{

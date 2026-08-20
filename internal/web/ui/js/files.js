@@ -7,6 +7,8 @@
     if (!append) {
       cleanupGridMedia(new Set());
       state.previewStates.clear();
+      state.currentEntry = null;
+      renderPathAggregate(null);
       state.entries = [];
       state.nextCursor = "";
       state.selected.clear();
@@ -22,6 +24,8 @@
     try {
       const page = await api(`/api/v1/files?path=${encodeURIComponent(directory)}&limit=100&sort=${sort}&order=${order}${cursor}`);
       if (request !== state.directoryRequest) return;
+      state.currentEntry = page.current;
+      renderPathAggregate(page.current);
       state.entries = append ? state.entries.concat(page.entries || []) : (page.entries || []);
       state.nextCursor = page.nextCursor || "";
       renderFiles();
@@ -30,6 +34,8 @@
       if (request !== state.directoryRequest) return;
       if (append) announce(friendlyError(error, "More files could not be loaded."), true);
       else {
+        state.currentEntry = null;
+        renderPathAggregate(null);
         showState("drive-state", friendlyError(error, "Files could not be loaded."), "error");
         byID("file-rows").replaceChildren();
         byID("media-grid-content").replaceChildren();
@@ -40,6 +46,20 @@
     } finally {
       if (request === state.directoryRequest) state.directoryLoading = false;
     }
+  }
+
+  function renderPathAggregate(entry) {
+    const aggregate = byID("path-aggregate");
+    if (!entry || state.browserAccess === "trash") {
+      aggregate.textContent = "";
+      aggregate.removeAttribute("aria-label");
+      aggregate.hidden = true;
+      return;
+    }
+    const fileCount = Number.isFinite(entry.fileCount) ? Math.max(0, entry.fileCount) : 0;
+    aggregate.textContent = `${formatBytes(entry.size)} · ${fileCount.toLocaleString()} ${fileCount === 1 ? "file" : "files"}`;
+    aggregate.setAttribute("aria-label", `${formatBytes(entry.size)} across ${fileCount.toLocaleString()} ${fileCount === 1 ? "file" : "files"}`);
+    aggregate.hidden = false;
   }
 
   function renderFiles() {
@@ -156,8 +176,8 @@
       return (!query || entry.name.toLocaleLowerCase().includes(query)) &&
         (!kind || entry.kind === kind) &&
         (!media || mediaCategory(entry) === media) &&
-        (!Number.isFinite(minimumSize) || entry.kind === "directory" || entry.size >= minimumSize) &&
-        (!Number.isFinite(maximumSize) || entry.kind === "directory" || entry.size <= maximumSize) &&
+        (!Number.isFinite(minimumSize) || entry.size >= minimumSize) &&
+        (!Number.isFinite(maximumSize) || entry.size <= maximumSize) &&
         (!Number.isFinite(changed) || (changed >= modifiedAfter && changed <= modifiedBefore)) &&
         (!previewState || (knownPreviewState ? knownPreviewState.state : "missing") === previewState);
     });
@@ -288,7 +308,7 @@
     const objectURL = state.previewObjectURLs.get(entry.path);
     if (objectURL) setPreviewImage(frame, entry, objectURL, state.previewStates.get(entry.path));
     else frame.append(fileTypeIcon(entry, "media-fallback-icon"));
-    open.append(frame, text("strong", entry.name, "media-tile-name"), text("span", entry.kind === "directory" ? "" : formatBytes(entry.size), "media-tile-meta"));
+    open.append(frame, text("strong", entry.name, "media-tile-name"), text("span", formatBytes(entry.size), "media-tile-meta"));
     if (!trashAccess) open.addEventListener("click", () => openBrowserEntry(entry));
     tile.append(checkbox, open);
     if (trashAccess) tile.append(trashActionGroup(entry.trash, "trash-media-actions"));
@@ -492,7 +512,7 @@
       open.setAttribute("aria-label", `${entry.kind === "directory" ? "Open folder" : "Preview file"} ${entry.name}`);
       nameCell.append(open);
     }
-    const sizeCell = text("td", entry.kind === "directory" ? "" : formatBytes(entry.size));
+    const sizeCell = text("td", formatBytes(entry.size));
     const mediaTypeCell = text("td", entry.kind === "directory" ? "—" : entry.mediaType || "application/octet-stream");
     const dateCell = text("td", formatDate(entry.modifiedAt));
     const actionCell = document.createElement("td");

@@ -103,7 +103,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#dev-fixture` | Run the loopback-only ephemeral UI fixture with mock previews and one-click local access. |
 | `nix run .#generate-secret` | Generate one canonical 256-bit base64url environment secret. |
 | `nix run .#fmt` / `.#fmt-check` | Apply or verify Go and Nix formatting. |
-| `nix run .#lint` | Run `actionlint`, `go vet`, and `staticcheck`. |
+| `nix run .#lint` | Run Tekton policy validation, `go vet`, and `staticcheck`. |
 | `nix run .#test` / `.#test-unit` | Run the current Go suite. |
 | `nix run .#test-integration` | Run tests named as integration tests. |
 | `nix run .#test-contract` | Run reusable provider and state-store contract suites. |
@@ -199,8 +199,8 @@ tools/provider-verify/   read-only closed-checkpoint verifier for copied storage
 tools/theme/             theme validation, generated API inventory, build embedding, and preview fixture
 tools/repository-policy/ checked-in GitHub ruleset validator/applier
 tools/coverage.awk       repository and security-boundary coverage policy
+.tekton/                 xlab Linux PaC CI, publishing, release, and retired Darwin definition
 .github/rulesets/        declarative default-branch and release-tag policy
-.github/workflows/       PR, CI, GHCR, release, and policy workflows
 docs/                    normative specification and project documentation
 AGENTS.md                repository instructions for implementation agents
 ```
@@ -211,23 +211,51 @@ The imported [EndlessFS brand guidelines](./docs/brand/README.md), their visual 
 
 ## CI, containers, releases, and branch protection
 
-GitHub Actions contains no project test selection or tool installation logic beyond bootstrapping Nix. Actions are pinned to immutable revisions, Nix build outputs are cached, full checks use a standard Ubuntu runner, and a bounded macOS job proves contributor-platform compatibility.
+Tekton Pipelines-as-Code runs the project-owned CI and release lifecycle on the
+xlab bare-metal Talos Linux cluster. Active runs use local-NVMe source, Git, and
+Nix caches plus generous CPU and memory reservations; they invoke only the
+repository's Nix interface for build and test logic. xlab is CI compute only:
+these pipelines neither target nor configure the GKE cluster that hosts
+`drive.endlessfs.com`.
 
-- `CI` runs the authoritative Nix gate and host-side Chromium coverage through Nix on pull requests and merge groups, plus a Darwin build/unit smoke test on pull requests. Coverage reuses the fixed-output vendored module closure instead of downloading modules.
-- `PR` provides early format, lint, and source-policy feedback while the live required-check policy transitions to the single authoritative gate.
-- `Container` publishes `sha-<commit>` and `edge` images to `ghcr.io/applyinnovations/endlessfs` after merge-queue-verified changes reach `main`; it does not repeat the gate.
-- `Release` re-verifies `v*.*.*` tags, publishes version and `latest` images, and creates a GitHub release containing the Nix-built binary/archive, OCI archive, checksums, dependency/license inventory, theme inventory, and release evidence.
-- `Repository Policy` explicitly applies the checked-in branch and tag rulesets.
+- `endlessfs-ci-` runs the fast policy check, authoritative Nix gate, and
+  host-side Chromium coverage on pull requests and merge-queue refs.
+- `endlessfs-container-` publishes `sha-<commit>` and `edge` images after
+  merge-queue-verified changes reach `main`.
+- `endlessfs-release-` re-verifies `v*.*.*` tags, publishes version and `latest`
+  images, and creates a GitHub release containing every Nix-built artifact.
+- The short-lived PaC GitHub App installation token used for cloning is reused
+  for release creation and asset upload. GHCR rejected that general App token,
+  so container publishing uses a separate SOPS-encrypted classic PAT with only
+  `write:packages`; it is mounted only into trusted publishing Tasks.
+  Repository administration remains outside ordinary CI.
+
+The former Darwin smoke job is deprecated. Its triggerless PaC definition
+cannot start a PipelineRun and contains no Namespace Mac runner reference.
+GitHub Actions workflows and their Actions-only Dependabot configuration are
+retired after the pull-request, merge-queue, cache-placement, Chromium, and GHCR
+cutover proof recorded in [.tekton/README.md](./.tekton/README.md). Automated
+build, test, container, and release work now runs only through xlab PaC.
 
 To run the image against Google Cloud Storage, follow the short [GCS container guide](./docs/gcs-container.md).
 
 Repository rules are external GitHub state, so checking in JSON does not activate them by itself. A repository administrator must:
 
-1. Create a fine-grained token limited to this repository with **Administration: write**.
-2. Add it as the `REPOSITORY_RULESET_TOKEN` secret in the protected `repository-policy` environment.
-3. Run the `Repository Policy` workflow once, and again after intentionally changing `.github/rulesets/*.json`.
+1. Create a short-lived fine-grained token limited to this repository with
+   **Administration: write**.
+2. Validate the desired state with `nix run .#repository-policy -- check`.
+3. Export the token as `GH_TOKEN` and the repository as `GITHUB_REPOSITORY`, then
+   run `nix run .#repository-policy -- apply` from a trusted administrator
+   checkout. Repeat only after intentionally changing the checked-in JSON.
 
-The policy requires pull requests, resolved review threads, squash-only linear history, the GitHub-Actions-owned `Nix checks` context, and a one-at-a-time merge queue. While the repository has one maintainer it requires no separate approval; enable final-push and code-owner approval when a second maintainer joins. It blocks deletion and force-push of the default branch, limits `v*.*.*` tag creation to the current release maintainer, and prevents release-tag mutation or deletion.
+The policy requires pull requests, resolved review threads, squash-only linear
+history, the xlab App-owned `tekton-xlab / endlessfs-ci-` context, and a
+one-at-a-time merge queue. Do not apply that context until the safe-cutover proof
+in `.tekton/README.md` is complete. While the repository has one maintainer it
+requires no separate approval; enable final-push and code-owner approval when a
+second maintainer joins. It blocks deletion and force-push of the default branch,
+limits `v*.*.*` tag creation to the current release maintainer, and prevents
+release-tag mutation or deletion.
 
 ## Delivery roadmap
 

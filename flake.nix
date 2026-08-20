@@ -35,21 +35,41 @@
       headlessBrowserFor =
         pkgs:
         let
-          component = pkgs.playwright-driver.components."chromium-headless-shell";
+          fontConfig = pkgs.makeFontsConf {
+            fontDirectories = [ pkgs.dejavu_fonts ];
+          };
         in
         pkgs.runCommand "endlessfs-headless-browser"
           {
             nativeBuildInputs = [
-              pkgs.findutils
               pkgs.makeWrapper
             ];
           }
           ''
-            browser="$(find ${component} -type f -name chrome-headless-shell -perm -0100 -print -quit)"
-            test -n "$browser"
             mkdir -p "$out/bin"
-            makeWrapper "$browser" "$out/bin/chrome-headless-shell"
+            makeWrapper ${pkgs.chromium}/bin/chromium "$out/bin/chrome-headless-shell" \
+              --set FONTCONFIG_FILE ${fontConfig}
           '';
+      containerTransportPolicyFor =
+        pkgs:
+        pkgs.writeText "endlessfs-container-transport-policy.json" ''
+          {
+            "default": [
+              {
+                "type": "reject"
+              }
+            ],
+            "transports": {
+              "docker-archive": {
+                "": [
+                  {
+                    "type": "insecureAcceptAnything"
+                  }
+                ]
+              }
+            }
+          }
+        '';
       dependencyPolicyCommand = moduleClosure: ''
         vulndb_locked_url="$(jq -er '.nodes.vulndb.locked.url' flake.lock)"
         vulndb_original_url="$(jq -er '.nodes.vulndb.original.url' flake.lock)"
@@ -83,6 +103,105 @@
           fi
         done < "$dependency_inventory"
         echo "dependency policy: $(wc -l < "$dependency_inventory" | tr -d ' ') locked modules with licenses"
+      '';
+      pipelinePolicyCommand = ''
+        active_pipelines="
+          .tekton/endlessfs-ci.yaml
+          .tekton/endlessfs-container.yaml
+          .tekton/endlessfs-release.yaml
+        "
+
+        if [ -d .github/workflows ] && [ -n "$(rg --files .github/workflows)" ]; then
+          echo "GitHub Actions workflows must remain retired after the Tekton cutover" >&2
+          exit 1
+        fi
+        if [ -e .github/dependabot.yml ]; then
+          echo "the GitHub-Actions-only Dependabot configuration must remain retired" >&2
+          exit 1
+        fi
+
+        for pipeline in $active_pipelines; do
+          test -f "$pipeline" || {
+            echo "missing active Tekton PipelineRun: $pipeline" >&2
+            exit 1
+          }
+          yq -e '.apiVersion == "tekton.dev/v1" and .kind == "PipelineRun"' "$pipeline" >/dev/null
+          yq -e '.metadata.annotations."pipelinesascode.tekton.dev/target-namespace" == "tekton-buildkit"' "$pipeline" >/dev/null
+          yq -e '.spec.taskRunTemplate.podTemplate.nodeSelector."storage.xlab.now/fast-local" == "true"' "$pipeline" >/dev/null
+          yq -e '.spec.taskRunTemplate.podTemplate.securityContext.fsGroup == 1000' "$pipeline" >/dev/null
+          yq -e '.spec.workspaces[] | select(.name == "nix-store") | .persistentVolumeClaim.claimName == "nix-store"' "$pipeline" >/dev/null
+          yq -e '.spec.workspaces[] | select(.name == "git-cache") | .persistentVolumeClaim.claimName == "git-repo-cache"' "$pipeline" >/dev/null
+          yq -e '.spec.workspaces[] | select(.name == "source") | .volumeClaimTemplate.spec.resources.requests.storage == "10Gi"' "$pipeline" >/dev/null
+          if rg -ni 'gke|drive\.endlessfs\.com|namespace-macos-fastlane|runs-on:[[:space:]]*macos' "$pipeline"; then
+            echo "active CI must stay on xlab Linux compute: $pipeline" >&2
+            exit 1
+          fi
+        done
+
+        duplicate_generate_names="$({
+          for pipeline in $active_pipelines; do
+            yq -r '.metadata.generateName' "$pipeline"
+          done
+        } | LC_ALL=C sort | uniq -d)"
+        if [ -n "$duplicate_generate_names" ]; then
+          echo "active PaC PipelineRuns must have unique metadata.generateName values:" >&2
+          printf '%s\n' "$duplicate_generate_names" >&2
+          exit 1
+        fi
+
+        yq -e '.metadata.generateName == "endlessfs-ci-"' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-cel-expression" | contains("event == \"pull_request\" && target_branch == \"main\"")' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '(.metadata.annotations."pipelinesascode.tekton.dev/on-cel-expression" | contains("event == \"push\"")) and (.metadata.annotations."pipelinesascode.tekton.dev/on-cel-expression" | contains("target_branch.startsWith(\"refs/heads/gh-readonly-queue/main/\")"))' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.metadata.annotations | has("pipelinesascode.tekton.dev/on-event") == false and has("pipelinesascode.tekton.dev/on-target-branch") == false' .tekton/endlessfs-ci.yaml >/dev/null
+
+        yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-event" == "[push]"' .tekton/endlessfs-container.yaml >/dev/null
+        yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[main]"' .tekton/endlessfs-container.yaml >/dev/null
+        yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-event" == "[push]"' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[refs/tags/v*.*.*]"' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '.spec.params[] | select(.name == "release_tag") | .value == "{{ git_tag }}"' .tekton/endlessfs-release.yaml >/dev/null
+
+        for task in prepare-cache fast-checks nix-checks coverage; do
+          yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-ci.yaml >/dev/null
+        done
+        yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "coverage" and .podTemplate.automountServiceAccountToken == false)' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .taskRef.params[] | select(.name == "name" and .value == "nix-run-v2")' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .runAfter[] | select(. == "fast-checks")' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .runAfter[] | select(. == "nix-checks")' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "publish") | .podTemplate.hostUsers == false' .tekton/endlessfs-container.yaml >/dev/null
+        for task in verify release; do
+          yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-release.yaml >/dev/null
+        done
+
+        check_packages_binding() {
+          pipeline="$1"
+          task="$2"
+          yq -e ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | .workspaces[] | select(.name == \"github-packages-auth\" and .workspace == \"github-packages-auth\")" "$pipeline" >/dev/null
+          yq -e '.spec.workspaces[] | select(.name == "github-packages-auth") | .secret.secretName == "github-packages-credentials"' "$pipeline" >/dev/null
+        }
+        check_packages_binding .tekton/endlessfs-container.yaml publish
+        check_packages_binding .tekton/endlessfs-release.yaml release
+        if rg -n 'github-packages-(auth|credentials)' .tekton/endlessfs-ci.yaml; then
+          echo "pull-request and merge-queue CI must not receive the GitHub Packages credential" >&2
+          exit 1
+        fi
+
+        darwin_pipeline=.tekton/endlessfs-darwin-smoke.disabled.yaml
+        test -f "$darwin_pipeline" || {
+          echo "missing retired Darwin workflow definition: $darwin_pipeline" >&2
+          exit 1
+        }
+        yq -e '.apiVersion == "tekton.dev/v1" and .kind == "Pipeline"' "$darwin_pipeline" >/dev/null
+        yq -e '.metadata.labels."endlessfs.dev/workflow-state" == "deprecated-disabled"' "$darwin_pipeline" >/dev/null
+        if yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-event" // .metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" // .metadata.annotations."pipelinesascode.tekton.dev/on-cel-expression"' "$darwin_pipeline" >/dev/null 2>&1; then
+          echo "retired Darwin workflow must not have a Pipelines-as-Code trigger" >&2
+          exit 1
+        fi
+        if rg -ni 'namespace-macos-fastlane|nsc[[:space:]]|macos/[a-z0-9]|runs-on:[[:space:]]*macos' "$darwin_pipeline"; then
+          echo "retired Darwin workflow must not run or allocate macOS compute" >&2
+          exit 1
+        fi
+
+        echo "Tekton policy: xlab Linux CI active; Darwin smoke deprecated and disabled"
       '';
       fuzzSmokeCommand = ''
         go test ./internal/config -run '^$' -fuzz '^FuzzParse$' -fuzztime "$fuzztime"
@@ -439,6 +558,7 @@
           go = goFor pkgs;
           packages = self.packages.${system};
           headlessBrowser = headlessBrowserFor pkgs;
+          containerTransportPolicy = containerTransportPolicyFor pkgs;
           relativePath = path: lib.removePrefix (toString ./. + "/") (toString path);
           coverageSource = lib.cleanSourceWith {
             src = ./.;
@@ -461,10 +581,11 @@
             pkgs.libraw
           ];
           qualityTools = goTools ++ [
-            pkgs.actionlint
             pkgs.go-tools
             pkgs.gosec
             pkgs.nixfmt
+            pkgs.ripgrep
+            pkgs.yq-go
           ];
           mkTask = name: runtimeInputs: text: {
             type = "app";
@@ -543,7 +664,7 @@
               '';
 
           lint = mkTask "endlessfs-lint" qualityTools ''
-            actionlint .github/workflows/*.yml
+            ${pipelinePolicyCommand}
             go vet ./...
             staticcheck ./...
           '';
@@ -607,6 +728,7 @@
             mkTask "endlessfs-test-coverage"
               (goTools ++ [ pkgs.gawk ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
               ''
+                export CGO_ENABLED=0
                 export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
                 export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
                 export ENDLESSFS_RUN_E2E=1
@@ -670,7 +792,7 @@
                 ]
               )
               ''
-                actionlint .github/workflows/*.yml
+                ${pipelinePolicyCommand}
                 go vet ./...
                 staticcheck ./...
                 gosec -quiet -nosec-require-justification -nosec-require-rules ./...
@@ -689,6 +811,7 @@
           ] (dependencyPolicyCommand packages.default.goModules);
 
           pr-check = mkTask "endlessfs-pr-check" qualityTools ''
+            export CGO_ENABLED=0
             unformatted="$(gofmt -l .)"
             if [ -n "$unformatted" ]; then
               echo "Go files need formatting:" >&2
@@ -696,7 +819,7 @@
               exit 1
             fi
             nixfmt --check flake.nix
-            actionlint .github/workflows/*.yml
+            ${pipelinePolicyCommand}
             go vet ./...
             staticcheck ./...
             go run ./tools/check-source .
@@ -705,6 +828,11 @@
           repository-policy = goTask "endlessfs-repository-policy" ''
             exec go run ./tools/repository-policy "$@"
           '';
+
+          pipeline-policy = mkTask "endlessfs-pipeline-policy" [
+            pkgs.ripgrep
+            pkgs.yq-go
+          ] pipelinePolicyCommand;
 
           provider-verify = goTask "endlessfs-provider-verify" ''
             exec go run ./tools/provider-verify "$@"
@@ -731,7 +859,7 @@
                 fi
                 printf '%s' "$GHCR_TOKEN" | skopeo login --username "$GHCR_USER" --password-stdin ghcr.io >/dev/null
                 for destination in "$@"; do
-                  skopeo copy --all "docker-archive:${packages.container}" "docker://$destination"
+                  skopeo --policy ${containerTransportPolicy} copy --all "docker-archive:${packages.container}" "docker://$destination"
                 done
               '';
         }
@@ -755,11 +883,6 @@
             || lib.hasPrefix "internal/" relative
             || relative == "tools"
             || lib.hasPrefix "tools/" relative;
-          isWorkflowSource =
-            relative:
-            relative == ".github"
-            || relative == ".github/workflows"
-            || lib.hasPrefix ".github/workflows/" relative;
           testSource = lib.cleanSourceWith {
             src = ./.;
             filter = path: _type: isGoTestSource (relativePath path);
@@ -773,14 +896,19 @@
               in
               isGoTestSource relative || relative == "flake.nix";
           };
-          lintSource = lib.cleanSourceWith {
+          pipelineSource = lib.cleanSourceWith {
             src = ./.;
             filter =
               path: _type:
               let
                 relative = relativePath path;
               in
-              isGoTestSource relative || isWorkflowSource relative;
+              relative == ".tekton"
+              || lib.hasPrefix ".tekton/" relative
+              || relative == ".github"
+              || relative == ".github/workflows"
+              || lib.hasPrefix ".github/workflows/" relative
+              || relative == ".github/dependabot.yml";
           };
           policySource = lib.cleanSourceWith {
             src = ./.;
@@ -872,6 +1000,36 @@
           testSuite = goCheck "tests" "go test ./..." [ ];
           e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
           coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
+          publishContainerPolicy =
+            pkgs.runCommand "endlessfs-publish-container-policy"
+              {
+                nativeBuildInputs = [
+                  pkgs.jq
+                  pkgs.ripgrep
+                ];
+              }
+              ''
+                rg --fixed-strings --quiet -- 'skopeo --policy ' ${self.apps.${system}.publish-container.program}
+                jq -e '
+                  .default == [{"type": "reject"}]
+                  and .transports."docker-archive"."" == [{"type": "insecureAcceptAnything"}]
+                ' ${containerTransportPolicyFor pkgs} >/dev/null
+                touch "$out"
+              '';
+          linuxCiAppPolicy =
+            pkgs.runCommand "endlessfs-linux-ci-app-policy"
+              {
+                nativeBuildInputs = [ pkgs.ripgrep ];
+              }
+              ''
+                for program in \
+                  ${self.apps.${system}.pr-check.program} \
+                  ${self.apps.${system}.test-coverage.program}; do
+                  rg --quiet '^export CGO_ENABLED=0$' "$program"
+                done
+                rg --fixed-strings --quiet 'FONTCONFIG_FILE' ${headlessBrowser}/bin/chrome-headless-shell
+                touch "$out"
+              '';
           formatCheck =
             goCheckWithSource "format" formatSource
               ''
@@ -887,16 +1045,29 @@
                 pkgs.nixfmt
               ];
           lintCheck =
-            goCheckWithSource "lint" lintSource
+            goCheckWithSource "lint" testSource
               ''
-                actionlint .github/workflows/*.yml
                 go vet ./...
                 ${sandboxedStaticcheck}
               ''
               [
-                pkgs.actionlint
                 pkgs.go-tools
               ];
+          pipelinePolicyCheck =
+            pkgs.runCommand "endlessfs-pipeline-policy"
+              {
+                nativeBuildInputs = [
+                  pkgs.ripgrep
+                  pkgs.yq-go
+                ];
+              }
+              ''
+                cp -R ${pipelineSource} source
+                chmod -R u+w source
+                cd source
+                ${pipelinePolicyCommand}
+                touch "$out"
+              '';
           raceCheck = goCheck "race" "CGO_ENABLED=1 go test -race ./..." [ pkgs.stdenv.cc ];
           fuzzCheck = goCheck "fuzz" ''
             fuzztime=1000x
@@ -905,14 +1076,12 @@
           securityCheck =
             goCheckWithSource "security" fullSource
               ''
-                actionlint .github/workflows/*.yml
                 gosec -quiet -nosec-require-justification -nosec-require-rules ./...
                 govulncheck -db=file://${vulndb} ./...
                 ${dependencyPolicyCommand self.packages.${system}.default.goModules}
                 go run ./tools/check-source .
               ''
               [
-                pkgs.actionlint
                 pkgs.findutils
                 pkgs.gawk
                 pkgs.gnugrep
@@ -937,6 +1106,7 @@
           format = formatCheck;
 
           lint = lintCheck;
+          pipeline-policy = pipelinePolicyCheck;
 
           tests = testSuite;
           integration = testSuite;
@@ -948,12 +1118,16 @@
           theme = testSuite;
           race = raceCheck;
           coverage = coverageCompile;
+          publish-container-policy = publishContainerPolicy;
           fuzz = fuzzCheck;
           offline = testSuite;
           security = securityCheck;
           dependencies = securityCheck;
 
           repository-policy = repositoryPolicyCheck;
+        }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          linux-ci-app-policy = linuxCiAppPolicy;
         }
       );
 
@@ -971,10 +1145,10 @@
               go
               pkgs.go-tools
               pkgs.gosec
-              pkgs.actionlint
               pkgs.nixfmt
               pkgs.ripgrep
               pkgs.skopeo
+              pkgs.yq-go
               pkgs.libraw
             ];
             shellHook = ''

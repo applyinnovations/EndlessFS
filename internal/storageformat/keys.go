@@ -3,10 +3,12 @@ package storageformat
 import (
 	"crypto/sha256"
 	"encoding/base32"
+	"encoding/base64"
 	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 )
 
@@ -83,6 +85,49 @@ func DirectoryManifestKey(userID, area, directoryID, manifestID string) objectst
 
 func DirectoryPageKey(userID, area, directoryID, pageID string) objectstore.Key {
 	return fixedKey(strings.Join([]string{"fs", encodedPart(userID), area, "dirs", encodedPart(directoryID), "pages", encodedPart(pageID) + ".json"}, "/"))
+}
+
+func FilesystemPrefix() string { return root + "fs/" }
+
+// ParseDirectoryRootKey validates and decodes a canonical directory-root key.
+// The boolean is false for canonical filesystem objects of another kind.
+func ParseDirectoryRootKey(key objectstore.Key) (userID, area, directoryID string, matched bool, err error) {
+	segments := strings.Split(key.String(), "/")
+	if len(segments) != 8 || segments[0] != "endlessfs" || segments[1] != "v1" || segments[2] != "fs" || segments[5] != "dirs" || segments[7] != "directory.json" {
+		return "", "", "", false, nil
+	}
+	decode := func(value string) (string, error) {
+		decoded, decodeErr := base32Lower.DecodeString(value)
+		if decodeErr != nil || encodedPart(string(decoded)) != value {
+			return "", domain.NewError(domain.ErrorInvalid, "invalid encoded directory-root key component")
+		}
+		return string(decoded), nil
+	}
+	userID, err = decode(segments[3])
+	if err != nil {
+		return "", "", "", true, err
+	}
+	if _, parseErr := domain.ParseUserID(userID); parseErr != nil {
+		return "", "", "", true, parseErr
+	}
+	area = segments[4]
+	if area != "live" && area != "trash" {
+		return "", "", "", true, domain.NewError(domain.ErrorInvalid, "invalid directory-root area")
+	}
+	directoryID, err = decode(segments[6])
+	if err != nil {
+		return "", "", "", true, err
+	}
+	if directoryID != RootDirectoryID {
+		decoded, decodeErr := base64.RawURLEncoding.DecodeString(directoryID)
+		if decodeErr != nil || len(decoded) < 16 || base64.RawURLEncoding.EncodeToString(decoded) != directoryID {
+			return "", "", "", true, domain.NewError(domain.ErrorInvalid, "invalid directory ID in root key")
+		}
+	}
+	if DirectoryRootKey(userID, area, directoryID) != key {
+		return "", "", "", true, domain.NewError(domain.ErrorInvalid, "non-canonical directory-root key")
+	}
+	return userID, area, directoryID, true, nil
 }
 
 func OperationKey(userID, operationID string) objectstore.Key {

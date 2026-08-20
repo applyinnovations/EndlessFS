@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,6 +24,7 @@ import (
 
 const (
 	OperationList            = "list"
+	OperationLookupChildren  = "lookup_children"
 	OperationStat            = "stat"
 	OperationCreateDirectory = "create_directory"
 	OperationCreateUpload    = "create_upload"
@@ -108,6 +110,7 @@ type listSnapshot struct {
 	sort       domain.SortField
 	descending bool
 	entries    []domain.Entry
+	current    domain.Entry
 	index      int
 }
 
@@ -255,11 +258,12 @@ func (p *Provider) List(ctx context.Context, scope domain.Scope, request domain.
 		}
 		return p.listPageLocked(request.Cursor, snapshot), nil
 	}
-	if !request.Directory.IsRoot() {
-		item, found := p.scopeObjectsLocked(scope)[request.Directory.String()]
-		if !found || item.entry.Kind != domain.EntryDirectory {
-			return domain.ListPage{}, domain.NewError(domain.ErrorNotFound, "directory not found")
+	current, err := p.statLocked(scope, request.Directory)
+	if err != nil || current.Kind != domain.EntryDirectory {
+		if err != nil {
+			return domain.ListPage{}, err
 		}
+		return domain.ListPage{}, domain.NewError(domain.ErrorNotFound, "directory not found")
 	}
 	entries := make([]domain.Entry, 0)
 	for _, item := range p.scopeObjectsLocked(scope) {
@@ -269,7 +273,7 @@ func (p *Provider) List(ctx context.Context, scope domain.Scope, request domain.
 	}
 	sortEntries(entries, request.Sort, request.Descending)
 	if len(entries) <= pageSize {
-		return domain.ListPage{Entries: entries}, nil
+		return domain.ListPage{Current: current, Entries: entries}, nil
 	}
 	cursor, err := p.ids.OpaqueID()
 	if err != nil {
@@ -277,7 +281,7 @@ func (p *Provider) List(ctx context.Context, scope domain.Scope, request domain.
 	}
 	snapshot := &listSnapshot{
 		scope: scope, directory: request.Directory, pageSize: pageSize,
-		sort: request.Sort, descending: request.Descending, entries: entries,
+		sort: request.Sort, descending: request.Descending, entries: entries, current: current,
 	}
 	p.listSnapshots[cursor] = snapshot
 	return p.listPageLocked(cursor, snapshot), nil
@@ -291,7 +295,51 @@ func (p *Provider) listPageLocked(cursor string, snapshot *listSnapshot) domain.
 		delete(p.listSnapshots, cursor)
 		cursor = ""
 	}
-	return domain.ListPage{Entries: entries, NextCursor: cursor}
+	return domain.ListPage{Current: snapshot.current, Entries: entries, NextCursor: cursor}
+}
+
+func (p *Provider) LookupChildren(ctx context.Context, scope domain.Scope, request domain.ChildLookupRequest) (domain.ChildLookup, error) {
+	if err := validateContextScope(ctx, scope); err != nil {
+		return domain.ChildLookup{}, err
+	}
+	if !request.Directory.Valid() || len(request.Names) < 1 || len(request.Names) > 1000 {
+		return domain.ChildLookup{}, domain.NewError(domain.ErrorInvalid, "child lookup request is invalid")
+	}
+	paths := make([]domain.UserPath, 0, len(request.Names))
+	seen := make(map[string]struct{}, len(request.Names))
+	for _, name := range request.Names {
+		path, err := request.Directory.Join(name)
+		if err != nil {
+			return domain.ChildLookup{}, domain.NewError(domain.ErrorInvalid, "child lookup name is invalid")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return domain.ChildLookup{}, domain.NewError(domain.ErrorInvalid, "child lookup contains duplicate names")
+		}
+		seen[name] = struct{}{}
+		paths = append(paths, path)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.beforeLocked(OperationLookupChildren); err != nil {
+		return domain.ChildLookup{}, err
+	}
+	current, err := p.statLocked(scope, request.Directory)
+	if err != nil {
+		return domain.ChildLookup{}, err
+	}
+	if current.Kind != domain.EntryDirectory {
+		return domain.ChildLookup{}, domain.NewError(domain.ErrorNotFound, "directory not found")
+	}
+	result := domain.ChildLookup{Current: current, Entries: make([]domain.Entry, 0, len(paths))}
+	objects := p.scopeObjectsLocked(scope)
+	for _, path := range paths {
+		item, found := objects[path.String()]
+		if !found || item.entry.Path.Parent() != request.Directory {
+			return domain.ChildLookup{}, domain.NewError(domain.ErrorNotFound, "entry not found")
+		}
+		result.Entries = append(result.Entries, item.entry)
+	}
+	return result, nil
 }
 
 func (p *Provider) Stat(ctx context.Context, scope domain.Scope, path domain.UserPath) (domain.Entry, error) {
@@ -311,8 +359,13 @@ func (p *Provider) Stat(ctx context.Context, scope domain.Scope, path domain.Use
 
 func (p *Provider) statLocked(scope domain.Scope, path domain.UserPath) (domain.Entry, error) {
 	if path.IsRoot() {
+		recursiveBytes, err := p.rootRecursiveBytesLocked(scope)
+		if err != nil {
+			return domain.Entry{}, err
+		}
+		fileCount := p.rootRecursiveFileCountLocked(scope)
 		return domain.Entry{
-			Path: path, Kind: domain.EntryDirectory, ModifiedAt: time.Unix(0, 0).UTC(), Version: "root",
+			Path: path, Kind: domain.EntryDirectory, Size: recursiveBytes, FileCount: fileCount, ModifiedAt: time.Unix(0, 0).UTC(), Version: "root",
 		}, nil
 	}
 	item, found := p.scopeObjectsLocked(scope)[path.String()]
@@ -345,8 +398,13 @@ func (p *Provider) CreateDirectory(ctx context.Context, scope domain.Scope, requ
 	if err != nil {
 		return domain.Entry{}, err
 	}
+	original := cloneObjects(p.scopeObjectsLocked(scope))
 	entry := p.newEntryLocked(path, domain.EntryDirectory, 0, "")
 	p.scopeObjectsLocked(scope)[path.String()] = object{entry: entry, materialized: true}
+	if err := p.recomputeRecursiveBytesLocked(scope); err != nil {
+		p.objects[scope] = original
+		return domain.Entry{}, err
+	}
 	return entry, nil
 }
 
@@ -424,8 +482,12 @@ func (p *Provider) availableRenamedPathLocked(scope domain.Scope, path domain.Us
 
 func (p *Provider) newEntryLocked(path domain.UserPath, kind domain.EntryKind, size int64, mediaType string) domain.Entry {
 	p.versions++
+	fileCount := int64(0)
+	if kind == domain.EntryFile {
+		fileCount = 1
+	}
 	return domain.Entry{
-		Path: path, Name: path.Name(), Kind: kind, Size: size, MediaType: mediaType,
+		Path: path, Name: path.Name(), Kind: kind, Size: size, FileCount: fileCount, MediaType: mediaType,
 		ModifiedAt: p.clock.Now().UTC(), Version: domain.Version(fmt.Sprintf("p%016x", p.versions)),
 	}
 }
@@ -455,6 +517,73 @@ func (p *Provider) deleteTreeLocked(scope domain.Scope, path domain.UserPath) {
 			delete(objects, candidate)
 		}
 	}
+}
+
+func (p *Provider) rootRecursiveBytesLocked(scope domain.Scope) (int64, error) {
+	var total int64
+	for _, item := range p.scopeObjectsLocked(scope) {
+		if item.entry.Kind != domain.EntryFile {
+			continue
+		}
+		if item.entry.Size < 0 || item.entry.Size > math.MaxInt64-total {
+			return 0, domain.NewError(domain.ErrorInvalid, "directory recursive byte aggregate overflows")
+		}
+		total += item.entry.Size
+	}
+	return total, nil
+}
+
+func (p *Provider) rootRecursiveFileCountLocked(scope domain.Scope) int64 {
+	var total int64
+	for _, item := range p.scopeObjectsLocked(scope) {
+		if item.entry.Kind == domain.EntryFile {
+			total++
+		}
+	}
+	return total
+}
+
+func (p *Provider) recomputeRecursiveBytesLocked(scope domain.Scope) error {
+	if _, err := p.rootRecursiveBytesLocked(scope); err != nil {
+		return err
+	}
+	objects := p.scopeObjectsLocked(scope)
+	totals := make(map[string]int64)
+	counts := make(map[string]int64)
+	for _, item := range objects {
+		if item.entry.Kind != domain.EntryFile {
+			continue
+		}
+		parent := item.entry.Path.Parent()
+		for !parent.IsRoot() {
+			current := totals[parent.String()]
+			if item.entry.Size < 0 || item.entry.Size > math.MaxInt64-current {
+				return domain.NewError(domain.ErrorInvalid, "directory recursive byte aggregate overflows")
+			}
+			totals[parent.String()] = current + item.entry.Size
+			counts[parent.String()]++
+			parent = parent.Parent()
+		}
+	}
+	for path, item := range objects {
+		if item.entry.Kind != domain.EntryDirectory || item.entry.Size == totals[path] && item.entry.FileCount == counts[path] {
+			continue
+		}
+		item.entry.Size = totals[path]
+		item.entry.FileCount = counts[path]
+		p.versions++
+		item.entry.Version = domain.Version(fmt.Sprintf("p%016x", p.versions))
+		objects[path] = item
+	}
+	return nil
+}
+
+func cloneObjects(objects map[string]object) map[string]object {
+	cloned := make(map[string]object, len(objects))
+	for path, item := range objects {
+		cloned[path] = item
+	}
+	return cloned
 }
 
 func (p *Provider) beforeLocked(operation string) error {

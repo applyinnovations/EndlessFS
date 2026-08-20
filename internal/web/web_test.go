@@ -714,21 +714,39 @@ func TestTrailingTableIconActionsDoNotRepeatEndPadding(t *testing.T) {
 	}
 }
 
-func TestDirectorySizesRemainBlankWithoutRecursiveAggregate(t *testing.T) {
+func TestRecursiveAggregatesAppearInEveryFileBrowser(t *testing.T) {
 	t.Parallel()
+
+	shell := string(mustRead("ui/index.html"))
+	for _, required := range []string{
+		`class="drive-breadcrumb-row"`,
+		`id="path-aggregate" class="path-aggregate"`,
+	} {
+		if !strings.Contains(shell, required) {
+			t.Errorf("recursive aggregate presentation is missing %q", required)
+		}
+	}
 
 	script := string(applicationScript)
 	for _, required := range []string{
-		`text("span", entry.kind === "directory" ? "" : formatBytes(entry.size), "media-tile-meta")`,
-		`const sizeCell = text("td", entry.kind === "directory" ? "" : formatBytes(entry.size));`,
-		`text("td", entry.kind === "directory" ? "" : formatBytes(entry.size))`,
+		`text("span", formatBytes(entry.size), "media-tile-meta")`,
+		`const sizeCell = text("td", formatBytes(entry.size));`,
+		`state.currentEntry = page.current;`,
+		`renderPathAggregate(page.current);`,
+		`${formatBytes(entry.size)} · ${fileCount.toLocaleString()} ${fileCount === 1 ? "file" : "files"}`,
 	} {
 		if !strings.Contains(script, required) {
-			t.Errorf("directory size presentation is missing %q", required)
+			t.Errorf("recursive aggregate behavior is missing %q", required)
 		}
 	}
-	if strings.Contains(script, `entry.kind === "directory" ? "Folder" : formatBytes(entry.size)`) {
-		t.Error("directory rows still use a type label in the size field")
+	for _, forbidden := range []string{
+		`entry.kind === "directory" ? "" : formatBytes(entry.size)`,
+		`entry.kind === "directory" || entry.size >= minimumSize`,
+		`entry.kind === "directory" || entry.size <= maximumSize`,
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("directory aggregates are still excluded from the file browser: %q", forbidden)
+		}
 	}
 }
 

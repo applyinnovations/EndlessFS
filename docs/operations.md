@@ -10,6 +10,14 @@ Several replicas may share one storage set. They must use the same state/file bu
 
 If a replica disappears while it owns a mutation, the durable operation remains. The affected resource can be temporarily unavailable until the lease expires. One competing replica wins the takeover CAS, increments the fence, reconciles any ambiguous provider result, and resumes the same intent. A returning stale replica cannot commit, unlock, or replace the recovered result; its old fence and object preconditions fail.
 
+## Automatic recursive-aggregate upgrade
+
+Starting this release against either supported exact predecessor automatically adds the missing recursive aggregates. A bucket already upgraded by the preceding EndlessFS release retains `recursive-byte-aggregates-v1` and receives `recursive-file-count-aggregates-v1`; the older pre-aggregate format receives both. No operator migration command is required. Startup CAS-closes the durable write gate, drains admitted mutations and expired upload capabilities, walks every live and trash directory graph bottom-up, creates deterministic immutable pages/manifests containing the computed byte and file-count totals, and conditionally advances each directory root. It verifies pre-existing byte totals rather than recomputing over provider blobs. It then verifies every parent/child aggregate, updates the writer-set and superblock feature lists, binds the gate to the current writer features, creates a closed-gate checkpoint, and reopens at the next epoch.
+
+The migration is safe to retry after process loss and safe for several new replicas to attempt concurrently. A replica that loses a CAS follows the durable winner. It also resumes a partially completed earlier recursive-byte migration, including a safe mixture of old and byte-only directory roots. The gate feature binding fences an old process that was already running because its admitted writer features no longer match. Until migration commits, predecessor directory records remain authoritative and the gate stays closed once migration has begun.
+
+An unexpired upload or admitted operation can temporarily prevent startup; allow the existing operation to finish or its lease to expire and retry startup. Missing roots, cycles, multiple parents, unreachable roots, malformed canonical records, overflow, an unrelated closed-gate maintenance operation, or any feature/configuration difference other than this specifically supported addition fails closed. The migration supports both single- and split-bucket storage sets. It does not discover or import arbitrary provider objects outside the canonical `endlessfs/v1` filesystem metadata graph.
+
 ## Local start and stop
 
 Generate independent bootstrap and session secrets, export them only in the process environment, and start through Nix as shown in the README. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after the first administrator exists. Use HTTPS with a matching base URL and RP ID for any non-loopback listener.
@@ -65,7 +73,7 @@ The verifier configuration is strict JSON. For GCS:
   "writerSetID": "BASE64URL_WRITER_SET_ID",
   "configurationDigest": "EXPECTED_CONFIGURATION_DIGEST",
   "keyringIdentifiers": ["EXPECTED_KEYRING_ID"],
-  "requiredFeatures": ["directory-manifests", "fenced-operations", "portable-checkpoints"]
+  "requiredFeatures": ["directory-manifests", "fenced-operations", "portable-checkpoints", "recursive-byte-aggregates-v1", "recursive-file-count-aggregates-v1"]
 }
 ```
 
@@ -122,7 +130,19 @@ No required gate needs GCP credentials or a cloud service. The release inventory
 
 The release output includes `SHA256SUMS`, `RELEASE-INVENTORY.txt`, the binary/archive, OCI archive, `CAPABILITIES.json`, dependency and license inventories, installed-theme inventory, release notes, and the acceptance record. Verify `SHA256SUMS` before distribution. The inventory records the source revision, `flake.lock` hash, pinned vulnerability database hash, Go toolchain, artifact hashes, thresholds, provider kind, and explicit no-cloud/no-deployment status.
 
-GitHub publishing is tag-driven. Protected `vMAJOR.MINOR.PATCH` tags cause the release workflow to repeat the full gate, push version and `latest` tags to GHCR, and attach the Nix-built evidence. Applying branch/tag rules is an explicit administrator operation through the protected Repository Policy workflow.
+Tekton publishing on the xlab bare-metal Talos Linux cluster is tag-driven.
+Protected `vMAJOR.MINOR.PATCH` tags cause the PaC release workflow to repeat the
+full gate, push version and `latest` tags to GHCR, and attach the Nix-built
+evidence. The same short-lived xlab.now GitHub App installation token used to
+clone the tag performs release creation and asset upload. GHCR publishing uses
+a separate SOPS-encrypted classic PAT limited to `write:packages`, mounted only
+into the trusted publishing step after the general App installation token was
+rejected by the registry. The workflow never targets the production GKE
+cluster. GitHub Actions workflows are retired; build, test, publish, and release
+automation is owned by these PaC definitions. Applying branch/tag rules is a
+separate explicit administrator operation through
+`nix run .#repository-policy -- apply`; the ordinary CI token cannot administer
+repository policy.
 
 ## Failure handling
 

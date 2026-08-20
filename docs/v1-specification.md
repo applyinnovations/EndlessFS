@@ -441,6 +441,7 @@ Only trusted application code may create a `Scope`. Provider implementations rec
 ```go
 type StorageProvider interface {
     List(ctx context.Context, scope Scope, req ListRequest) (ListPage, error)
+    LookupChildren(ctx context.Context, scope Scope, req ChildLookupRequest) (ChildLookup, error)
     Stat(ctx context.Context, scope Scope, path UserPath) (Entry, error)
     CreateDirectory(ctx context.Context, scope Scope, req CreateDirectoryRequest) (Entry, error)
 
@@ -458,8 +459,10 @@ type StorageProvider interface {
 
 Required semantics:
 
-- `List` is one directory only, stable within a page sequence, paginated with an opaque cursor, and never leaks another scope.
+- `List` is one directory only, stable within a page sequence, paginated with an opaque cursor, and never leaks another scope. Every page returns a typed `current` directory entry whose recursive size, recursive file count, and metadata belong to the same immutable manifest snapshot as the child rows; later cursor pages repeat that exact entry rather than resolving the current live path again.
+- `LookupChildren` accepts one validated directory and 1–1000 unique immediate-child names. It returns the current directory and every requested child, in request order, from one authoritative directory snapshot. Implementations MUST resolve the directory manifest once, MUST NOT issue one provider/application `Stat` per child, and fail closed if any requested entry is absent, negative, overflowing, malformed, or inconsistent with its directory root/manifest.
 - `Stat` returns `ErrNotFound` for missing entries without leaking whether an out-of-scope provider key exists.
+- `Entry.Size` is the immutable object length for a file and the persisted recursive sum of every descendant file byte for a directory. The root directory's size is the total logical file-byte consumption of that area.
 - `CreateDirectory` supports empty directories independent of how a provider represents them.
 - `CreateUpload` binds a capability to one authenticated scope, one destination path, declared size, safe media type, and expiration.
 - `CompleteUpload` verifies that the uploaded object matches the initiated destination and declared constraints before making it visible as complete.
@@ -685,17 +688,19 @@ Canonical object keys:
 - use lowercase base32 SHA-256 digests for untrusted names and idempotency lookup components; and
 - are created only by the canonical-format package, never by HTTP handlers, application use cases, or backend adapters.
 
-The state backend's `superblock.json` object identifies `endlessfs-portable-bucket-v1`, the immutable storage-set ID, canonical encoder version, key-format version, writer-protocol version, creation time, and required feature set. Startup MUST reject a missing, corrupt, mixed, newer-unsupported, or incompatible superblock before serving authenticated or public operations. The file backend does not define another writer set, gate, or filesystem schema.
+The state backend's `superblock.json` object identifies `endlessfs-portable-bucket-v1`, the immutable storage-set ID, canonical encoder version, key-format version, writer-protocol version, creation time, and required feature set. Startup MUST reject a missing, corrupt, mixed, newer-unsupported, or incompatible superblock before serving authenticated or public operations. The approved exceptions are the reviewed automatic aggregate migration from either the exact pre-aggregate feature set or the exact `recursive-byte-aggregates-v1` predecessor into the current feature set, which also requires `recursive-file-count-aggregates-v1`. Startup MUST complete or resume the closed-gate migration below before readiness. The file backend does not define another writer set, gate, or filesystem schema.
 
 Each current state record also has one immutable `state-versions` snapshot addressed by its logical key and logical version. It gives paginated state enumeration a provider-independent stable view across replicas while ordinary CAS updates continue. Cursor capabilities are authenticated-encrypted, bounded, expire, bind the exact prefix/limit plus gate epoch and logical gate version, and reveal neither state keys nor provider keys. Gate closure invalidates outstanding cursors and prunes every snapshot except the current version of each live state record before checkpoint inventory is created. Snapshots are authoritative canonical bodies; no cursor token is stored in the bucket.
 
-The root directory ID is a fixed format constant. Every other directory and blob ID is a stable opaque random identifier stored in canonical records. Each mutable `directory.json` root points to one immutable manifest whose immutable pages contain the directory's sorted child entries. The root also contains its logical revision and any operation-owned pending pre/post-manifest transition. A page entry is addressed by the digest of its normalized child name and stores the complete normalized name. On every read, list, create, move, copy, restore, or delete, the stored name MUST hash to its recorded digest and match the requested name; a mismatch is a collision or corruption and fails closed.
+The root directory ID is a fixed format constant. Every other directory and blob ID is a stable opaque random identifier stored in canonical records. Each mutable `directory.json` root points to one immutable manifest whose immutable pages contain the directory's sorted child entries. The root contains its logical revision, non-negative persisted recursive-byte and recursive-file-count aggregates, and any operation-owned pending pre/post-manifest and pre/post-aggregate transition; the selected immutable manifest header repeats both aggregates so `Stat` can verify them without loading manifest pages. A page entry is addressed by the digest of its normalized child name and stores the complete normalized name. On every read, list, create, move, copy, restore, or delete, the stored name MUST hash to its recorded digest and match the requested name; a mismatch is a collision or corruption and fails closed.
 
-A single-directory content change writes new immutable page/manifest objects and conditionally replaces `directory.json`; that root replacement is its visibility point. Unreferenced pages or manifests are garbage, never visible entries. A multi-directory operation first CAS-locks every affected root in canonical resource-ID order, records immutable pre/post manifests and the current operation fence in each pending transition, and then conditionally changes the durable operation record to `committed`. Readers encountering a pending transition use the pre-manifest before that commit and the post-manifest after it. Root finalization and garbage collection are idempotent consequences of the operation state, so a node failure cannot expose a half-move, duplicate tree, or partially deleted directory.
+A single-directory content change writes new immutable page/manifest objects and conditionally replaces `directory.json`; that root replacement is its visibility point. Unreferenced pages or manifests are garbage, never visible entries. A multi-directory operation first CAS-locks every affected root in canonical resource-ID order, records immutable pre/post manifests, both pre/post recursive aggregates, and the current operation fence in each pending transition, and then conditionally changes the durable operation record to `committed`. Readers encountering a pending transition use the pre-manifest and pre-aggregates before that commit and the post-manifest and post-aggregates after it. Root finalization and garbage collection are idempotent consequences of the operation state, so a node failure cannot expose a half-move, duplicate tree, partially deleted directory, or aggregate that describes a different visible tree.
 
 Virtual paths are resolved one validated segment at a time through directory IDs. Provider object-key length therefore does not grow with virtual-path depth, and the full 4096-byte `UserPath` contract remains available on backends with shorter object-name limits. Empty directories exist as canonical directory and parent-entry records; they do not depend on provider folders, delimiter behavior, or zero-byte marker conventions.
 
-File blobs are immutable and live only under the file backend's blob namespace for their owner. File-entry records in state-backend directory pages contain the blob ID, normalized name, size, safe media type, integrity digests, timestamps, and portable logical version. Copy creates the required new portable entry/blob relationship according to the file-operation state machine; cross-user blob references and cross-user deduplication are forbidden.
+File blobs are immutable and live only under the file backend's blob namespace for their owner. File-entry records in state-backend directory pages contain the blob ID, normalized name, size, safe media type, integrity digests, timestamps, and portable logical version. A logical file contributes one to the recursive file count irrespective of its byte length. Directory entries use `size` and `fileCount` for the child's recursive byte and file-count aggregates; directories themselves do not contribute to `fileCount`. Every directory root's byte aggregate MUST equal the overflow-checked sum of child sizes, its file-count aggregate MUST equal the overflow-checked sum of one per immediate file plus every immediate child directory's count, and every parent directory entry aggregate MUST equal the referenced child root aggregates. Upload, replacement, move, copy, live-to-trash transfer, restore, and permanent deletion update every affected ancestor through the same committed multi-root operation as the visible file-tree change. A zero-byte file therefore has `size: 0` and `fileCount: 1`; an empty directory has zero for both. Negative, overflowing, missing, or inconsistent aggregates fail closed. Copy creates the required new portable entry/blob relationship according to the file-operation state machine; cross-user blob references and cross-user deduplication are forbidden.
+
+When the superblock and writer set match either supported exact predecessor—the pre-aggregate format lacking both aggregate features or the byte-only format lacking `recursive-file-count-aggregates-v1`—startup automatically closes and drains the canonical write gate under the reserved aggregate-migration checkpoint ID. It walks every user/area graph from the fixed root, rejects missing children, cycles, multiple parents, unreachable directory roots, malformed records, byte/count overflow, and contradictions in any already-persisted byte aggregates, and computes the missing totals bottom-up from authoritative file entries and stored child aggregates. New page and manifest IDs are deterministic functions of the predecessor root identity so concurrent migrators create identical immutable prerequisites; each root advances by native CAS. A migration interrupted while upgrading the pre-aggregate format may contain a safe mixture of pre-aggregate, byte-only, and current roots, which the new binary resumes and verifies. After a complete second verification, startup conditionally updates the writer set and superblock, binds the current writer feature set into the closed gate, creates/verifies the checkpoint, and reopens at a new epoch. Every boundary is idempotent and crash-resumable. The gate's feature binding prevents an already-running predecessor binary from admitting a post-migration mutation. Active work can delay startup; no timeout forces it. Arbitrary provider objects outside the canonical graph are never inferred or imported.
 
 All authoritative properties are encoded in object bodies. Correctness MUST NOT depend on provider custom metadata, tags, ACLs, storage class, object versioning, soft delete, native timestamps, checksums, listing order, folder resources, or preservation of those values by a cross-cloud copy tool. Provider-side integrity and encryption features MAY add defense in depth.
 
@@ -705,7 +710,7 @@ The `admissions`, `staging`, and `leases` namespaces are transient and are exclu
 
 `control/writer-set.json` binds the state backend and its configured file-backend role to one stable operator-configured writer-set ID, writer-protocol version, canonical feature set, security-critical configuration fingerprint, and provider-independent keyring identifiers. It contains no secret values or provider identifiers. Every replica validates it during startup and readiness. A replica with a different writer set, unsupported writer protocol/feature, origin/RP configuration, registration policy, or keyring identity MUST NOT serve any request against the storage set. A compatible rolling binary MAY join only when its declared reader and writer protocols accept the active versions; a writer-protocol or security-critical configuration change requires the closed-gate procedure.
 
-`control/write-gate.json` is a canonical state-backend CAS record containing a positive epoch and mode `open`, `closing`, or `closed`. It is the storage-set-wide mutation-admission barrier. A replica MUST NOT cache an `open` decision across mutations. Admission is:
+`control/write-gate.json` is a canonical state-backend CAS record containing a positive epoch, mode `open`, `closing`, or `closed`, and the sorted active writer feature set. It is the storage-set-wide mutation-admission barrier. A replica MUST reject a gate whose feature binding differs from its validated writer set and MUST NOT cache an `open` decision across mutations. Admission is:
 
 1. Read the gate and require `open`; capture its epoch.
 2. Create-only a `candidate` admission ticket under that epoch containing a stable operation ID, writer-set ID, replica-attempt ID, creation/expiry times, the observed gate logical version, and enough non-secret canonical intent to locate the durable operation.
@@ -894,7 +899,7 @@ The theme preference is presentation state, not identity. It MUST remain separat
 - Canonical mutable records use the envelope and logical-version algorithm in section 8.6.
 - The canonical encoder emits one deterministic UTF-8 byte representation with fixed field ordering, minimal JSON escaping, no insignificant whitespace, integers only for numeric persisted fields, and no maps with uncontrolled key ordering.
 - Backend adapters store canonical bytes unchanged and never decode/re-encode them into a provider-specific schema.
-- A future format version requires an explicit reviewed compatibility/migration design; silent in-place reinterpretation is forbidden.
+- A future format version requires an explicit reviewed compatibility/migration design; silent in-place reinterpretation is forbidden. The automatic recursive-aggregate migration in section 9.1 is such an explicit design and recognizes only its two declared exact predecessor feature sets.
 
 ### 9.14 Crash-safe multi-record changes
 
@@ -1041,6 +1046,8 @@ Requirements:
 - Completed bytes are committed as an immutable canonical blob before the portable file-entry record becomes visible. A completion race or failed descriptor commit leaves an unreferenced blob for bounded idempotent cleanup, never a visible corrupt entry.
 - A closed-schema client ledger persists safe transfer intent, confirmed offset, retry schedule, and terminal state in IndexedDB on the originating device, partitioned by authenticated owner to prevent exposure between accounts using one browser profile. It MUST NOT persist file bytes, capability URLs or headers, session/CSRF material, provider-native identifiers, or absolute local paths. Browser file handles MAY be persisted when supported; otherwise the user reconnects the source after reload. Closing the browser pauses transfers, and cross-device/account-synchronized queue persistence is not required in v1.
 - The owner-scoped upload-status response identifies `active`, `completed`, `aborted`, or `expired` state and returns the safe confirmed offset without returning capability or provider-native material. This bounded per-upload lookup is the reconciliation boundary; it is not an account-wide transfer-list API.
+- A completion that loses an ancestor directory-root CAS to an unrelated file mutation advances its canonical upload record to a fresh durable completion-operation attempt and retries from authoritative directory state. A true same-target create or replacement race still has exactly one version-precondition winner.
+- Upload publication and replacement update the destination directory and every changed ancestor recursive-byte and recursive-file-count aggregate at the same durable operation commit point.
 - Large-object tests simulate offsets above 1 TiB without allocating equivalent storage.
 
 ### 11.3 Downloads
@@ -1063,6 +1070,7 @@ Requirements:
 - Batch requests contain at most 100 selected source items and return per-item results plus an overall operation ID.
 - Repeating a request with the same user-scoped idempotency key returns the original outcome.
 - Durable operation manifests, request fingerprints, item progress, compensation state, and final outcomes are canonical and provider independent. Native rewrite/copy continuation tokens are encrypted transient leases only.
+- Move and copy transfer or duplicate both stored source subtree aggregates and update all affected ancestors at the operation's existing single commit point. Aggregate maintenance does not scan descendant blobs.
 - Source and destination are reauthorized when an asynchronous operation begins and before final commit where feasible.
 - The UI displays progress for asynchronous operations and exposes actionable failures.
 
@@ -1070,13 +1078,15 @@ Requirements:
 
 - Normal delete means move to trash, not permanent deletion.
 - Trash is not addressable by normal file paths and is exposed through dedicated endpoints.
-- Trash listings include original path, trash time, kind, and the provider-validated media type for files. The media type is read from the isolated trashed entry and is not duplicated into the canonical trash record.
+- Trash listings include original path, trash time, kind, exact non-negative logical `size`, and exact non-negative logical `fileCount`. File rows retain their provider-validated media type and directory rows have no media type. Empty directories return zero for both, while zero-byte files return `size: 0` and `fileCount: 1`; zero never means unavailable. Display metadata is read from the isolated trashed entry and is not duplicated into the canonical trash record.
 - Restore returns to the original path by default.
 - Restore conflicts fail unless the user explicitly chooses generated-name restore.
 - Permanent deletion requires an explicit confirmation action and deletes only the selected trash ID.
 - Empty trash is a separate confirmed batch action.
 - Trashed content cannot be downloaded or shared through normal file/share APIs.
 - Existing share links to trashed content become unavailable.
+- Trash and restore transfer both stored subtree aggregates between the live and trash area roots; permanent deletion subtracts both from the trash tree. Neither transition scans descendant blobs to maintain or answer later aggregate lookups.
+- Trash pagination joins its bounded canonical state-record page to one snapshot lookup of the corresponding immediate children in the persisted trash root. It MUST NOT perform one `Stat` or provider lookup per row. The canonical trash-record schema remains unchanged; records written by the preceding release acquire these response fields from the automatically migrated trash tree described in section 9.1. Missing or contradictory state/tree metadata fails closed.
 
 ### 11.6 Safe previews
 
@@ -1102,6 +1112,7 @@ Security rules:
 - A token authorizes read-only access to one recorded file or one recorded directory subtree.
 - The share landing page discloses the owner’s display name only if the product explicitly chooses to show it; default behavior is not to expose it.
 - Public folder listing paths are always relative to the shared root.
+- Public metadata distinguishes the immutable recorded `root` from the relative `current` target. A directory target carries its recursive size and recursive file count from the same listing snapshot as its child rows; a file share returns its root as the current target with `fileCount: 1`.
 - `..`, encoded traversal, alternate separators, and absolute paths cannot escape the root.
 - File bytes use a fresh short-lived provider capability after each public authorization.
 - Share pages and API responses use `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
@@ -1180,7 +1191,7 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 
 | Method | Route | Behavior |
 |---|---|---|
-| GET | `/api/v1/files` | List one virtual directory using `path`, `limit`, `cursor`, and sort. |
+| GET | `/api/v1/files` | List one virtual directory using `path`, `limit`, `cursor`, and sort; return the same-snapshot typed `current` directory entry. |
 | GET | `/api/v1/files/stat` | Stat one virtual path. |
 | POST | `/api/v1/directories` | Create an empty directory. |
 | POST | `/api/v1/uploads` | Create one upload capability. |
@@ -1193,7 +1204,7 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 | POST | `/api/v1/files/move` | Start idempotent rename/move. |
 | POST | `/api/v1/files/trash` | Move one or more items to trash. |
 | GET | `/api/v1/operations/{operationID}` | Poll a user-scoped operation. |
-| GET | `/api/v1/trash` | List trash records. |
+| GET | `/api/v1/trash` | List trash records with exact file/directory size, recursive file count, and file media type through one bounded tree lookup per page. |
 | POST | `/api/v1/trash/{trashID}/restore` | Restore with explicit conflict policy. |
 | DELETE | `/api/v1/trash/{trashID}` | Permanently delete one item. |
 | POST | `/api/v1/trash/empty` | Confirmed empty-trash operation. |
@@ -1208,7 +1219,7 @@ The browser sends virtual paths only. Any JSON field resembling a provider key, 
 | POST | `/api/v1/shares` | Create a read-only file/folder link and return the raw link once. |
 | DELETE | `/api/v1/shares/{shareID}` | Revoke an owned share. |
 | GET | `/s/{token}` | Serve the public share shell with no token-referring assets. |
-| GET | `/api/v1/public/shares/{token}` | Return safe root metadata or folder page. |
+| GET | `/api/v1/public/shares/{token}` | Return safe original-root metadata plus the relative current target and folder page. |
 | POST | `/api/v1/public/shares/{token}/downloads` | Authorize a path under the root and create a direct download capability. |
 
 ### 12.7 Security headers
@@ -1587,6 +1598,7 @@ Rules:
 - The writer-set ID is a non-secret unpadded base64url identifier containing at least 128 random bits. It is not a replica/pod ID; replacing a process does not change it.
 - On first initialization, the canonical writer-set record is created conditionally. Thereafter the writer-set ID, writer protocol, security-critical configuration fingerprint, and non-secret keyed identifiers MUST match before readiness. The fingerprint covers origin/RP policy, registration policy, canonical feature set, and identifiers for every provider-independent secret/keyring needed to interpret shared state, but never contains a secret value.
 - A security-critical configuration or writer-protocol change closes the write gate, drains the prior epoch, conditionally updates the writer-set record, and opens a new epoch. Independently changing replicas while the gate is open is prohibited.
+- The exact pre-aggregate feature set and the exact byte-only feature set without `recursive-file-count-aggregates-v1` are upgraded automatically through the reviewed closed-gate migration in section 9.1. Every other feature-set difference remains incompatible and requires a separately reviewed procedure.
 - Production/secure mode requires HTTPS and forbids wildcard origins.
 - Loopback development is explicit and cannot bind publicly.
 - Unknown `ENDLESSFS_` variables SHOULD cause a warning to catch misspellings without logging values.
@@ -1963,6 +1975,8 @@ This order is recommended because each stage establishes contracts used by the n
 - Upload/download capability lifecycle and control-plane byte exclusion.
 - Copy/move/batch operations and idempotency.
 - Trash/restore/permanent delete.
+- Persisted overflow-checked recursive-byte and recursive-file-count aggregates for every directory and area root across upload, replace, move, copy, trash, restore, and permanent delete.
+- Automatic crash-resumable migration of both supported predecessor canonical directory formats computes and verifies all missing aggregates before activating the features and reopening writes.
 
 ### Milestone 4 — Data-only theme system
 
@@ -2044,15 +2058,17 @@ Each criterion MUST have an automated test unless marked “inspection”.
 **AC-086** — Compatible rolling replicas can join one writer set; replicas with a different writer-set ID, writer protocol, security configuration fingerprint, canonical feature set, or keyring identity fail readiness before serving any bucket-backed request.
 **AC-087** — A crashed admitted operation delays gate closure until fenced recovery completes; checkpoint creation never forces lock deletion or sacrifices consistency for availability.
 **AC-088** — Every object backend proves atomic single-object mutation plus strong read-after-success and complete-prefix listing visibility; an eventually consistent backend fails the contract suite.
+**AC-089** — Opening the exact pre-recursive-aggregate canonical feature set automatically quiesces and migrates every live/trash directory graph, fences old writers, checkpoints, and reopens; crashes and two-to-eight concurrent starters converge, while corruption, overflow, undrained work, or unrelated compatibility drift fail closed.
 
 ### 21.5 Isolation and files
 
 **AC-030** — For every private API family, user A cannot list, stat, upload, download, preview, copy, move, trash, restore, delete, share, poll, or reference user B’s resources using paths, IDs, versions, cursors, or idempotency keys.  
 **AC-031** — Raw, encoded, double-encoded, Unicode-normalized, slash/backslash, dot-segment, reserved-name, NUL/control, and overlong traversal attempts fail without provider access.  
-**AC-032** — Users can browse paginated root/nested folders, create empty folders, and view required metadata.  
+**AC-032** — Users can browse paginated root/nested folders, create empty folders, and view required metadata; every page repeats a typed current-directory entry from the same snapshot as its rows.
 **AC-033** — Rename, move, copy, and batch selection work for files and directory trees with deterministic conflict modes and idempotency.  
-**AC-034** — Normal delete moves content to isolated trash; restore, rename-on-conflict, permanent delete, and empty-trash behave as specified.  
+**AC-034** — Normal delete moves content to isolated trash; paginated trash rows expose exact file/directory sizes and recursive file counts without per-row storage calls; restore, rename-on-conflict, permanent delete, and empty-trash behave as specified.
 **AC-035** — Trashed or moved share roots no longer issue share capabilities.
+**AC-036** — `Stat` and listing return overflow-checked persisted recursive byte and logical-file-count totals for every directory, the listing's current-directory totals are from the same snapshot on every cursor page, each area root returns that tree's total logical file bytes and file count, and upload/replacement/move/copy/trash/restore/permanent-delete plus crash recovery and raw-copy cutover preserve both aggregates at the same visibility point as the file tree. Corrupt or inconsistent aggregates fail closed.
 
 ### 21.6 Direct transfer behavior
 
@@ -2158,6 +2174,7 @@ An implementation agent should keep this checklist current and attach test names
 - [ ] Two-to-eight-replica deterministic crash schedules cover every admission, lease, provider-response, prepare, commit, finalization, gate, and checkpoint boundary.
 - [x] The required `test-replica` Nix command is implemented and included in the umbrella gate.
 - [x] Compatible rolling replicas work; mismatched writer-set, protocol, configuration, feature, and keyring identities fail readiness.
+- [x] Exact pre-aggregate buckets automatically migrate under the closed gate; concurrent starters and crash resumption converge, old writers are fenced, and corrupt or undrained buckets fail closed.
 - [x] Node loss may delay an affected resource or checkpoint but never causes a permanent lock, split-brain commit, or forced unsafe cutover.
 
 ### 22.5 Authentication and accounts
@@ -2191,6 +2208,7 @@ An implementation agent should keep this checklist current and attach test names
 ### 22.7 File and folder operations
 
 - [x] Root/nested paginated listing and stat work.
+- [x] Every owner listing page returns its current directory, recursive size, and recursive file count from the same cursor snapshot.
 - [x] Deterministic sorting and opaque scoped cursors work.
 - [x] Empty folder creation works.
 - [x] File and tree rename/move/copy work.
@@ -2199,6 +2217,7 @@ An implementation agent should keep this checklist current and attach test names
 - [x] Idempotency keys prevent duplicate mutations.
 - [x] Normal delete moves to dedicated trash.
 - [x] Trash list, restore, restore conflict, permanent delete, and empty-trash work.
+- [x] Trash pages batch-resolve exact file/directory sizes, recursive file counts, and file media types for current and legacy schema-v1 records without per-row stats.
 - [x] Asynchronous operation polling is user scoped and fault safe.
 - [x] Complete cross-user and reserved-namespace matrices pass for every operation.
 
@@ -2221,6 +2240,7 @@ An implementation agent should keep this checklist current and attach test names
 - [x] Owners can create/list/revoke expiring file and folder shares.
 - [x] Share tokens are high entropy, hash-at-rest, no-store, and no-referrer.
 - [x] Public folder traversal cannot escape its recorded subtree.
+- [x] Public folder responses distinguish the original root from the current nested target and expose its same-snapshot recursive size and file count.
 - [x] Shares are read-only and cannot re-share.
 - [x] Share errors avoid record-existence leakage.
 - [x] Disabled owner, moved root, trash, expiry, and revocation block new capabilities.

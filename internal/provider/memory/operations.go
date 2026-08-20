@@ -85,6 +85,17 @@ func (p *Provider) copyOrMove(ctx context.Context, operationName string, move bo
 		p.saveIdempotentLocked(from.UserID(), operationName, request.IdempotencyKey, fingerprint, operation)
 		return operation, nil
 	}
+	originalFrom := cloneObjects(p.scopeObjectsLocked(from))
+	var originalTo map[string]object
+	if from != to {
+		originalTo = cloneObjects(p.scopeObjectsLocked(to))
+	}
+	restoreObjects := func() {
+		p.objects[from] = originalFrom
+		if from != to {
+			p.objects[to] = originalTo
+		}
+	}
 
 	type treeItem struct {
 		oldPath domain.UserPath
@@ -135,6 +146,16 @@ func (p *Provider) copyOrMove(ctx context.Context, operationName string, move bo
 	if move {
 		for _, item := range items {
 			delete(p.scopeObjectsLocked(from), item.oldPath.String())
+		}
+	}
+	if err := p.recomputeRecursiveBytesLocked(to); err != nil {
+		restoreObjects()
+		return domain.Operation{}, err
+	}
+	if from != to {
+		if err := p.recomputeRecursiveBytesLocked(from); err != nil {
+			restoreObjects()
+			return domain.Operation{}, err
 		}
 	}
 	operation.State = domain.OperationSucceeded
@@ -200,6 +221,9 @@ func (p *Provider) Delete(ctx context.Context, scope domain.Scope, request domai
 		operation.Error = "injected partial operation failure"
 	} else {
 		p.deleteTreeLocked(scope, request.Path)
+		if err := p.recomputeRecursiveBytesLocked(scope); err != nil {
+			return domain.Operation{}, err
+		}
 		operation.State = domain.OperationSucceeded
 	}
 	operation.UpdatedAt = p.clock.Now().UTC()

@@ -205,6 +205,8 @@
     if (!append) {
       cleanupGridMedia(new Set());
       state.previewStates.clear();
+      state.currentEntry = null;
+      renderPathAggregate(null);
       state.entries = [];
       state.publicCursor = "";
       byID("list-presentation").scrollTop = 0;
@@ -218,6 +220,8 @@
       const page = await api(`/api/v1/public/shares/${encodeURIComponent(state.publicToken)}?${query.toString()}`);
       byID("browser-title").textContent = page.root.name || "Shared files";
       renderBreadcrumbs("breadcrumbs", state.publicPath, (path) => { state.publicPath = path; loadPublicShare(); });
+      state.currentEntry = page.current;
+      renderPathAggregate(page.current);
       const entries = page.entries && page.entries.length ? page.entries : (page.root.kind === "file" ? [page.root] : []);
       state.entries = append ? state.entries.concat(entries) : entries;
       state.publicCursor = page.nextCursor || "";
@@ -225,6 +229,8 @@
     } catch (error) {
       const message = error instanceof APIError && [403, 404, 410].includes(error.status) ? "This share is unavailable. It may have expired, moved, entered trash, or been revoked." : friendlyError(error, "The share could not be loaded.");
       if (!append) {
+        state.currentEntry = null;
+        renderPathAggregate(null);
         state.entries = [];
         byID("file-rows").replaceChildren();
         byID("media-grid-content").replaceChildren();

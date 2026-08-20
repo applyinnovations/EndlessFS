@@ -17,11 +17,13 @@ import (
 )
 
 const (
-	FormatID              = "endlessfs-portable-bucket-v1"
-	CanonicalEncoder      = "canonical-json-v1"
-	KeyFormatVersion      = 1
-	WriterProtocolVersion = 1
-	MaxCanonicalBytes     = 1 << 20
+	FormatID                   = "endlessfs-portable-bucket-v1"
+	CanonicalEncoder           = "canonical-json-v1"
+	KeyFormatVersion           = 1
+	WriterProtocolVersion      = 1
+	MaxCanonicalBytes          = 1 << 20
+	FeatureRecursiveBytes      = "recursive-byte-aggregates-v1"
+	FeatureRecursiveFileCounts = "recursive-file-count-aggregates-v1"
 )
 
 type Envelope struct {
@@ -144,10 +146,11 @@ const (
 )
 
 type WriteGate struct {
-	SchemaVersion int      `json:"schemaVersion"`
-	Epoch         uint64   `json:"epoch"`
-	Mode          GateMode `json:"mode"`
-	CheckpointID  string   `json:"checkpointID,omitempty"`
+	SchemaVersion  int      `json:"schemaVersion"`
+	Epoch          uint64   `json:"epoch"`
+	Mode           GateMode `json:"mode"`
+	CheckpointID   string   `json:"checkpointID,omitempty"`
+	WriterFeatures []string `json:"writerFeatures,omitempty"`
 }
 
 type AdmissionState string
@@ -220,26 +223,32 @@ type StateVersionRecord struct {
 }
 
 type DirectoryRoot struct {
-	SchemaVersion int                  `json:"schemaVersion"`
-	DirectoryID   string               `json:"directoryID"`
-	ManifestID    string               `json:"manifestID"`
-	Pending       *DirectoryTransition `json:"pending,omitempty"`
+	SchemaVersion      int                  `json:"schemaVersion"`
+	DirectoryID        string               `json:"directoryID"`
+	ManifestID         string               `json:"manifestID"`
+	RecursiveBytes     int64                `json:"recursiveBytes"`
+	RecursiveFileCount int64                `json:"recursiveFileCount"`
+	Pending            *DirectoryTransition `json:"pending,omitempty"`
 }
 
 type DirectoryTransition struct {
-	OperationID    string `json:"operationID"`
-	Fence          uint64 `json:"fence"`
-	PreManifestID  string `json:"preManifestID,omitempty"`
-	PostManifestID string `json:"postManifestID"`
+	OperationID            string `json:"operationID"`
+	Fence                  uint64 `json:"fence"`
+	PreManifestID          string `json:"preManifestID,omitempty"`
+	PostManifestID         string `json:"postManifestID"`
+	PostRecursiveBytes     int64  `json:"postRecursiveBytes"`
+	PostRecursiveFileCount int64  `json:"postRecursiveFileCount"`
 }
 
 type DirectoryManifest struct {
-	SchemaVersion int       `json:"schemaVersion"`
-	DirectoryID   string    `json:"directoryID"`
-	ManifestID    string    `json:"manifestID"`
-	PageIDs       []string  `json:"pageIDs"`
-	EntryCount    int       `json:"entryCount"`
-	CreatedAt     time.Time `json:"createdAt"`
+	SchemaVersion      int       `json:"schemaVersion"`
+	DirectoryID        string    `json:"directoryID"`
+	ManifestID         string    `json:"manifestID"`
+	PageIDs            []string  `json:"pageIDs"`
+	EntryCount         int       `json:"entryCount"`
+	RecursiveBytes     int64     `json:"recursiveBytes"`
+	RecursiveFileCount int64     `json:"recursiveFileCount"`
+	CreatedAt          time.Time `json:"createdAt"`
 }
 
 type DirectoryPage struct {
@@ -256,6 +265,7 @@ type DirectoryEntry struct {
 	DirectoryID    string           `json:"directoryID,omitempty"`
 	BlobID         string           `json:"blobID,omitempty"`
 	Size           int64            `json:"size"`
+	FileCount      int64            `json:"fileCount,omitempty"`
 	MediaType      string           `json:"mediaType,omitempty"`
 	SHA256         string           `json:"sha256,omitempty"`
 	ModifiedAt     time.Time        `json:"modifiedAt"`
@@ -271,24 +281,25 @@ const (
 )
 
 type UploadRecord struct {
-	SchemaVersion   int                 `json:"schemaVersion"`
-	UploadID        string              `json:"uploadID"`
-	UserID          string              `json:"userID"`
-	Area            string              `json:"area"`
-	RequestedPath   string              `json:"requestedPath"`
-	ResolvedPath    string              `json:"resolvedPath"`
-	StagingKey      string              `json:"stagingKey"`
-	BackendKind     string              `json:"backendKind,omitempty"`
-	LeaseKey        string              `json:"leaseKey,omitempty"`
-	Size            int64               `json:"size"`
-	MediaType       string              `json:"mediaType"`
-	Conflict        domain.ConflictMode `json:"conflict"`
-	ExpectedVersion domain.Version      `json:"expectedVersion,omitempty"`
-	TargetExisted   bool                `json:"targetExisted"`
-	Resumable       bool                `json:"resumable"`
-	State           UploadState         `json:"state"`
-	CreatedAt       time.Time           `json:"createdAt"`
-	ExpiresAt       time.Time           `json:"expiresAt"`
+	SchemaVersion         int                 `json:"schemaVersion"`
+	UploadID              string              `json:"uploadID"`
+	CompletionOperationID string              `json:"completionOperationID"`
+	UserID                string              `json:"userID"`
+	Area                  string              `json:"area"`
+	RequestedPath         string              `json:"requestedPath"`
+	ResolvedPath          string              `json:"resolvedPath"`
+	StagingKey            string              `json:"stagingKey"`
+	BackendKind           string              `json:"backendKind,omitempty"`
+	LeaseKey              string              `json:"leaseKey,omitempty"`
+	Size                  int64               `json:"size"`
+	MediaType             string              `json:"mediaType"`
+	Conflict              domain.ConflictMode `json:"conflict"`
+	ExpectedVersion       domain.Version      `json:"expectedVersion,omitempty"`
+	TargetExisted         bool                `json:"targetExisted"`
+	Resumable             bool                `json:"resumable"`
+	State                 UploadState         `json:"state"`
+	CreatedAt             time.Time           `json:"createdAt"`
+	ExpiresAt             time.Time           `json:"expiresAt"`
 }
 
 type TransferLease struct {
@@ -372,6 +383,9 @@ func Digest(data []byte) string {
 func ValidateGate(gate WriteGate) error {
 	if gate.SchemaVersion != 1 || gate.Epoch == 0 || (gate.Mode != GateOpen && gate.Mode != GateClosing && gate.Mode != GateClosed) {
 		return domain.NewError(domain.ErrorInvalid, "invalid write gate")
+	}
+	if len(gate.WriterFeatures) > 0 && !SortedUnique(gate.WriterFeatures) {
+		return domain.NewError(domain.ErrorInvalid, "invalid write-gate feature binding")
 	}
 	return nil
 }

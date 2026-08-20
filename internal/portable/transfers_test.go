@@ -454,3 +454,63 @@ func TestUploadCompletionLostSuccessIsIdempotentlyReconciled(t *testing.T) {
 		t.Fatalf("replayed CompleteUpload() = %+v, %v", replayed, err)
 	}
 }
+
+func TestUploadCompletionRecoversAtEveryAggregateCommitBoundary(t *testing.T) {
+	for index, step := range []string{
+		portable.StepUploadCompletionAfterPrepared,
+		portable.StepUploadCompletionAfterCommitted,
+		portable.StepUploadCompletionAfterFinalized,
+	} {
+		t.Run(step, func(t *testing.T) {
+			backend := objectmemory.New()
+			server := httptest.NewServer(backend)
+			t.Cleanup(server.Close)
+			clock := domain.NewFixedClock(time.Date(2039, 4, 6+index, 6, 7, 8, 0, time.UTC))
+			if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(byte(170+index), 1<<20)))); err != nil {
+				t.Fatal(err)
+			}
+			crasher := &stepFailure{step: step}
+			engine := openEngine(t, backend, clock, byte(180+index), crasher)
+			user, _ := domain.ParseUserID("RkdHRkdHRkdHRkdHRkdHRw")
+			scope, _ := domain.NewScope(user, domain.AreaLive)
+			path := domain.MustParseUserPath("/aggregate.txt")
+			content := []byte("durable aggregate")
+			capability, err := engine.Files().CreateUpload(context.Background(), scope, domain.CreateUploadRequest{Path: path, Size: int64(len(content)), MediaType: "text/plain"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, _ := http.NewRequest(capability.Method, capability.URL, bytes.NewReader(content))
+			for name, value := range capability.Headers {
+				request.Header.Set(name, value)
+			}
+			response, err := server.Client().Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			completion := domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(content)), MediaType: "text/plain"}
+			if _, err := engine.Files().CompleteUpload(context.Background(), scope, completion); !errors.Is(err, domain.ErrUnavailable) {
+				t.Fatalf("interrupted CompleteUpload() error = %v", err)
+			}
+			root, err := engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantBeforeRetry := int64(0)
+			if step != portable.StepUploadCompletionAfterPrepared {
+				wantBeforeRetry = int64(len(content))
+			}
+			if root.Size != wantBeforeRetry {
+				t.Fatalf("interrupted root aggregate = %d; want %d", root.Size, wantBeforeRetry)
+			}
+			completed, err := engine.Files().CompleteUpload(context.Background(), scope, completion)
+			if err != nil || completed.Size != int64(len(content)) {
+				t.Fatalf("retried CompleteUpload() = %+v, %v", completed, err)
+			}
+			root, err = engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/"))
+			if err != nil || root.Size != int64(len(content)) {
+				t.Fatalf("recovered root aggregate = %+v, %v", root, err)
+			}
+		})
+	}
+}

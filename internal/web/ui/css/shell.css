@@ -129,7 +129,7 @@
 #file-browser-surface:not([data-access="owner"]) .owner-only { display: none !important; }
 #file-browser-surface .trash-only { display: none !important; }
 #file-browser-surface[data-access="trash"] .trash-only { display: flex !important; }
-#file-browser-surface[data-access="trash"] .drive-breadcrumbs { display: none; }
+#file-browser-surface[data-access="trash"] .drive-breadcrumb-row { display: none; }
 
 .loading-shell { min-height: calc(100vh - var(--efs-metric-toolbarHeight)); }
 .loading-shell { position: fixed; z-index: 40; inset: var(--efs-metric-toolbarHeight) 0 0; width: 100%; height: calc(100dvh - var(--efs-metric-toolbarHeight)); background: var(--efs-color-background); }

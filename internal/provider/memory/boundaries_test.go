@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -764,5 +765,70 @@ func TestProviderTransferEntropyAndDispatchFailuresFailClosed(t *testing.T) {
 	}
 	if _, _, _, err := parseRange("bytes=1-2-3", 4); err == nil {
 		t.Fatal("multi-dash byte range succeeded")
+	}
+}
+
+func TestRecursiveAggregateOverflowFailsClosedAndRollsBackUpload(t *testing.T) {
+	provider, scope, _ := boundaryProvider(t)
+	ctx := context.Background()
+	hugePath := domain.MustParseUserPath("/huge.bin")
+	huge := provider.newEntryLocked(hugePath, domain.EntryFile, math.MaxInt64, "application/octet-stream")
+	provider.scopeObjectsLocked(scope)[hugePath.String()] = object{entry: huge}
+	if root, err := provider.Stat(ctx, scope, domain.MustParseUserPath("/")); err != nil || root.Size != math.MaxInt64 {
+		t.Fatalf("Stat(root) = %+v, %v", root, err)
+	}
+
+	path := domain.MustParseUserPath("/overflow.bin")
+	capability, err := provider.CreateUpload(ctx, scope, domain.CreateUploadRequest{Path: path, Size: 1, MediaType: "application/octet-stream", Resumable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SimulateUploadOffset(ctx, scope, capability.UploadID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.CompleteUpload(ctx, scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: 1, MediaType: "application/octet-stream"}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("CompleteUpload() error = %v", err)
+	}
+	if _, err := provider.Stat(ctx, scope, path); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("rolled-back path Stat() error = %v", err)
+	}
+	if root, err := provider.Stat(ctx, scope, domain.MustParseUserPath("/")); err != nil || root.Size != math.MaxInt64 {
+		t.Fatalf("rolled-back root Stat() = %+v, %v", root, err)
+	}
+
+	secondPath := domain.MustParseUserPath("/corrupt.bin")
+	second := provider.newEntryLocked(secondPath, domain.EntryFile, 1, "application/octet-stream")
+	provider.scopeObjectsLocked(scope)[secondPath.String()] = object{entry: second}
+	if _, err := provider.Stat(ctx, scope, domain.MustParseUserPath("/")); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("overflowing root Stat() error = %v", err)
+	}
+	directoryPath := domain.MustParseUserPath("/must-rollback")
+	if _, err := provider.CreateDirectory(ctx, scope, domain.CreateDirectoryRequest{Path: directoryPath}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("CreateDirectory() error = %v", err)
+	}
+	if _, found := provider.scopeObjectsLocked(scope)[directoryPath.String()]; found {
+		t.Fatal("overflowing CreateDirectory() was not rolled back")
+	}
+
+	copyProvider, live, _ := boundaryProvider(t)
+	trash, err := domain.NewScope(live.UserID(), domain.AreaTrash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := domain.MustParseUserPath("/source.bin")
+	source := copyProvider.newEntryLocked(sourcePath, domain.EntryFile, 1, "application/octet-stream")
+	copyProvider.scopeObjectsLocked(live)[sourcePath.String()] = object{entry: source}
+	trashHugePath := domain.MustParseUserPath("/huge.bin")
+	trashHuge := copyProvider.newEntryLocked(trashHugePath, domain.EntryFile, math.MaxInt64, "application/octet-stream")
+	copyProvider.scopeObjectsLocked(trash)[trashHugePath.String()] = object{entry: trashHuge}
+	copyPath := domain.MustParseUserPath("/copy.bin")
+	if _, err := copyProvider.Copy(ctx, live, trash, domain.CopyRequest{Source: sourcePath, Destination: copyPath}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Copy() error = %v", err)
+	}
+	if _, found := copyProvider.scopeObjectsLocked(trash)[copyPath.String()]; found {
+		t.Fatal("overflowing Copy() destination was not rolled back")
+	}
+	if _, found := copyProvider.scopeObjectsLocked(live)[sourcePath.String()]; !found {
+		t.Fatal("overflowing Copy() removed its source")
 	}
 }

@@ -39,8 +39,8 @@
         "do_not_enforce_on_create": true,
         "required_status_checks": [
           {
-            "context": "Nix checks",
-            "integration_id": 15368
+            "context": "tekton-xlab / endlessfs-ci-",
+            "integration_id": 949094
           }
         ],
         "strict_required_status_checks_policy": false
@@ -49,7 +49,7 @@
     {
       "type": "merge_queue",
       "parameters": {
-        "check_response_timeout_minutes": 30,
+        "check_response_timeout_minutes": 60,
         "grouping_strategy": "ALLGREEN",
         "max_entries_to_build": 1,
         "max_entries_to_merge": 1,

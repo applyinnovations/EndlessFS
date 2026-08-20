@@ -5,6 +5,7 @@
     config: null,
     user: null,
     currentDirectory: "/",
+    currentEntry: null,
     entries: [],
     nextCursor: "",
     directoryLoading: false,

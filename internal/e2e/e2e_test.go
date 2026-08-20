@@ -48,6 +48,13 @@ import (
 	"github.com/chromedp/chromedp/kb"
 )
 
+func TestVirtualAuthenticatorUsesPlatformTransport(t *testing.T) {
+	options := virtualAuthenticatorOptions()
+	if options.Transport != cdpwebauthn.AuthenticatorTransportInternal {
+		t.Fatalf("virtual authenticator transport = %q, want internal", options.Transport)
+	}
+}
+
 func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
@@ -813,6 +820,9 @@ func claimConcurrentBrowserPreview(t *testing.T, harness harness, path domain.Us
 		Owner: accounts[0].UserID, ContentID: entry.ContentID, ContentVersion: entry.ContentVersion,
 		MediaType: entry.MediaType, SourceSize: entry.Size, RecipeID: "image-webp-q80-v1", Variant: variant,
 	}
+	if !binding.Valid() {
+		t.Fatalf("browser preview binding invalid: contentID=%q contentVersion=%q mediaType=%q sourceSize=%d variant=%d", binding.ContentID, binding.ContentVersion, binding.MediaType, binding.SourceSize, binding.Variant)
+	}
 	const generationID = "browser-contending-generation"
 	claim, err := harness.previewStore.Claim(context.Background(), binding, generationID, harness.clock.Now().Add(time.Minute))
 	if err != nil {
@@ -1495,11 +1505,7 @@ func bootstrapKeyboardActions(token string) chromedp.Tasks {
 }
 
 func addVirtualAuthenticator(ctx context.Context) (cdpwebauthn.AuthenticatorID, error) {
-	authenticatorID, err := cdpwebauthn.AddVirtualAuthenticator(&cdpwebauthn.VirtualAuthenticatorOptions{
-		Protocol: cdpwebauthn.AuthenticatorProtocolCtap2, Ctap2version: cdpwebauthn.Ctap2versionCtap20,
-		Transport: cdpwebauthn.AuthenticatorTransportUsb, HasResidentKey: true,
-		HasUserVerification: true, AutomaticPresenceSimulation: true, IsUserVerified: true,
-	}).Do(ctx)
+	authenticatorID, err := cdpwebauthn.AddVirtualAuthenticator(virtualAuthenticatorOptions()).Do(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -1510,6 +1516,14 @@ func addVirtualAuthenticator(ctx context.Context) (cdpwebauthn.AuthenticatorID, 
 		return "", err
 	}
 	return authenticatorID, nil
+}
+
+func virtualAuthenticatorOptions() *cdpwebauthn.VirtualAuthenticatorOptions {
+	return &cdpwebauthn.VirtualAuthenticatorOptions{
+		Protocol: cdpwebauthn.AuthenticatorProtocolCtap2, Ctap2version: cdpwebauthn.Ctap2versionCtap20,
+		Transport: cdpwebauthn.AuthenticatorTransportInternal, HasResidentKey: true,
+		HasUserVerification: true, AutomaticPresenceSimulation: true, IsUserVerified: true,
+	}
 }
 
 func browserStatus(ctx context.Context) string {

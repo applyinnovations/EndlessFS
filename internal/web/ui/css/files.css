@@ -29,6 +29,10 @@
 .breadcrumbs button { min-height: 28px; overflow: hidden; border-color: transparent; padding: 3px 5px; background: transparent; color: inherit; text-overflow: ellipsis; }
 .breadcrumb-separator { opacity: .55; }
 .drive-breadcrumbs { min-height: 30px; padding-block: 1px; }
+.drive-breadcrumb-row { display: flex; min-width: 0; min-height: 30px; align-items: center; justify-content: space-between; gap: 12px; }
+.drive-breadcrumb-row .breadcrumbs { flex: 1 1 auto; }
+.path-aggregate { min-width: 9rem; flex: 0 0 auto; color: var(--efs-color-text-muted); font-size: var(--efs-type-size-xs); font-variant-numeric: tabular-nums; text-align: end; white-space: nowrap; }
+.loading-path-aggregate { visibility: hidden; }
 
 .drive-controls {
   display: flex;

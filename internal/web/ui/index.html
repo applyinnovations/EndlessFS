@@ -58,7 +58,10 @@
                   <button class="secondary" type="button" disabled>Filter</button>
                 </div>
               </div>
-              <nav class="breadcrumbs drive-breadcrumbs" aria-label="Current folder">Files</nav>
+              <div class="drive-breadcrumb-row">
+                <nav class="breadcrumbs drive-breadcrumbs" aria-label="Current folder">Files</nav>
+                <span class="path-aggregate loading-path-aggregate" aria-hidden="true">0 B · 0 files</span>
+              </div>
               <section class="file-workspace">
                 <div class="loading-table table-scroll">
                   <table><caption class="visually-hidden">Files in the current folder</caption><thead><tr><th class="select-column" scope="col"><input type="checkbox" aria-label="Select all files on this page" disabled></th><th scope="col">Name</th><th scope="col">Size</th><th scope="col">Mime type</th><th scope="col">Changed</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
@@ -137,7 +140,10 @@
                 <div id="selection-bar" class="selection-bar owner-only" role="toolbar" aria-label="Selection actions" hidden><strong id="selection-count">0 selected</strong><button id="download-selected" class="icon-button" type="button" aria-label="Download selected" data-icon="download"></button><button id="share-selected" class="icon-button" type="button" aria-label="Share selected" data-icon="share-3"></button><button id="copy-selected" class="icon-button" type="button" aria-label="Copy selected" data-icon="copy"></button><button id="move-selected" class="icon-button" type="button" aria-label="Move selected" data-icon="folder-symlink"></button><button id="trash-selected" class="danger icon-button" type="button" aria-label="Move selected to trash" data-icon="trash"></button><button id="clear-selection" class="icon-button" type="button" aria-label="Clear selection" data-icon="x"></button></div>
               </div>
 
-              <nav id="breadcrumbs" class="breadcrumbs drive-breadcrumbs" aria-label="Current folder"></nav>
+              <div class="drive-breadcrumb-row">
+                <nav id="breadcrumbs" class="breadcrumbs drive-breadcrumbs" aria-label="Current folder"></nav>
+                <span id="path-aggregate" class="path-aggregate" hidden></span>
+              </div>
 
               <section id="drop-target" class="file-workspace drop-target" data-presentation="list" aria-describedby="drop-help">
                 <span id="drop-help" class="drop-hint owner-only">Drop to upload</span>

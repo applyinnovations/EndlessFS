@@ -3,6 +3,7 @@ package portable
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -49,6 +50,9 @@ func (e *Engine) admit(ctx context.Context, intent storageformat.MutationIntent)
 	if gate.Mode != storageformat.GateOpen {
 		return admissionLease{}, domain.NewError(domain.ErrorUnavailable, "bucket write gate is not open")
 	}
+	if !reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
+		return admissionLease{}, domain.NewError(domain.ErrorPreconditionFailed, "write gate is bound to an incompatible writer feature set")
+	}
 	operationRandom, err := e.ids.OpaqueID()
 	if err != nil {
 		return admissionLease{}, err
@@ -89,7 +93,7 @@ func (e *Engine) admit(ctx context.Context, intent storageformat.MutationIntent)
 		_ = e.backend.Delete(ctx, key, objectstore.DeleteCondition{Version: candidateVersion})
 		return admissionLease{}, err
 	}
-	if secondGate.Mode != storageformat.GateOpen || secondGate.Epoch != gate.Epoch || secondEnvelope.LogicalVersion != gateEnvelope.LogicalVersion {
+	if secondGate.Mode != storageformat.GateOpen || secondGate.Epoch != gate.Epoch || secondEnvelope.LogicalVersion != gateEnvelope.LogicalVersion || !reflect.DeepEqual(secondGate.WriterFeatures, e.writer.RequiredFeatures) {
 		_ = e.cancelAdmission(ctx, key, candidateVersion, candidate)
 		return admissionLease{}, domain.NewError(domain.ErrorUnavailable, "bucket write gate changed during admission")
 	}

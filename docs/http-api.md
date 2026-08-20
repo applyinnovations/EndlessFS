@@ -56,6 +56,14 @@ This document fixes the v1 JSON field casing and control-plane routes implemente
 
 `preview: true` is accepted only for provider-validated PNG, JPEG, GIF, WebP, PDF, and UTF-8 `text/plain` within `ENDLESSFS_TEXT_PREVIEW_MAX_BYTES`. HTML, JavaScript, SVG, XML, office, unknown, oversized, and media-spoofed files remain attachment-only.
 
+Every entry returns `fileCount`. A file has `fileCount: 1`. A directory has the persisted recursive number of descendant logical files; directories themselves are not counted. File-entry `size` is the file's byte length. Directory-entry `size`, including the entry returned for `/`, is the persisted recursive sum of all descendant file bytes in that live or trash tree. Both directory aggregates are retrieved by verifying constant-size root and manifest metadata without scanning the subtree. Empty directories return `size: 0` and `fileCount: 0`; a zero-byte file returns `size: 0` and `fileCount: 1`.
+
+`GET /api/v1/files` returns `{ "current": Entry, "entries": [Entry...], "nextCursor": "..." }`. `current` is the directory represented by `path`; its `size`, `fileCount`, and every child row come from the same immutable manifest snapshot. Every subsequent page selected by `nextCursor` repeats that exact `current` entry even if the live directory changes between requests.
+
+Each successful `GET /api/v1/trash` row preserves the prior trash-record fields and adds exact `size`, `fileCount`, and file `mediaType`. Directory media type is absent. The service joins each state page to one bounded snapshot lookup in the persisted trash root, rather than issuing one `Stat` per row. Canonical trash records remain schema v1: buckets upgraded from either supported predecessor use the automatically migrated trash directory tree without rewriting application records.
+
+`GET /api/v1/public/shares/{token}` returns safe `root`, `current`, and child entries with the same `size` and `fileCount` contract. A nested directory's `current` aggregates describe that nested target, while `root` continues to describe the original shared root. Neither response exposes an owner path or provider identity.
+
 ## Generated image previews (v1.1)
 
 These authenticated-owner routes use the optional independent preview store. Resolve is a POST because it may lazily generate a missing artifact. All three routes derive owner scope from the session; content identities, store keys, and bucket configuration are never public fields.
@@ -78,4 +86,4 @@ Resolve items return `disabled`, `unsupported`, `ineligible`, `missing`, `genera
 | `GET` | `/api/v1/public/shares/{token}` | Relative `path`, `limit`, and scoped `cursor` |
 | `POST` | `/api/v1/public/shares/{token}/downloads` | Relative `path`, exact `version`, optional `preview` |
 
-Public errors deliberately do not distinguish absent, expired, revoked, disabled-owner, moved, replaced, or trashed roots. Folder output paths are relative to the recorded root, and public routes cannot upload, mutate, re-share, or escape that subtree.
+Successful public-share metadata is `{ "root": PublicEntry, "current": PublicEntry, "entries": [PublicEntry...], "nextCursor": "..." }`. `root` is always the originally shared file or directory. `current` is the relative target currently being viewed and, for a directory, carries recursive `size` and `fileCount` from the listing snapshot. A file share returns the root as `current` with `fileCount: 1`. Public errors deliberately do not distinguish absent, expired, revoked, disabled-owner, moved, replaced, or trashed roots. Folder output paths are relative to the recorded root, and public routes cannot upload, mutate, re-share, expose owner/provider identifiers, or escape that subtree.

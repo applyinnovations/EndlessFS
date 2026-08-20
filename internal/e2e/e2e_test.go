@@ -260,9 +260,11 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 	if err := chromedp.Run(ctx,
 		chromedp.SetUploadFiles("#upload-input", []string{uploadPath}, chromedp.ByQuery),
-		chromedp.WaitVisible("#file-rows tr", chromedp.ByQuery),
 	); err != nil {
 		t.Fatalf("upload file: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#file-rows").textContent.includes("browser-proof.txt")`, 15*time.Second); err != nil {
+		t.Fatalf("wait for uploaded file: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := closeTransferSheet(ctx); err != nil {
 		t.Fatalf("close upload transfer sheet: %v (%s)", err, browserStatus(ctx))
@@ -422,6 +424,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		chromedp.Navigate(harness.origin+"/"),
 		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
 		chromedp.Evaluate(`(() => {
+			window.__endlessfsTransferCountBeforeFolder = Number(document.querySelector("[data-transfer-count='all']")?.textContent.match(/\d+/)?.[0] || 0);
 			const fileEntry = (name, body) => ({
 				isFile: true, isDirectory: false, name,
 				file: (success) => success(new File([body], name, {type: "text/plain"})),
@@ -446,15 +449,15 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		t.Fatalf("drop folder tree: %v", err)
 	}
 	if err := waitFor(ctx, `(() => {
-		const completed = Number(document.querySelector("[data-transfer-count='complete']")?.textContent.match(/\d+/)?.[0] || 0);
-		return completed >= 2 && document.querySelector("#transfer-percent")?.textContent === "100%";
+		const total = Number(document.querySelector("[data-transfer-count='all']")?.textContent.match(/\d+/)?.[0] || 0);
+		return total >= window.__endlessfsTransferCountBeforeFolder + 2;
 	})()`, 15*time.Second); err != nil {
-		t.Fatalf("wait for folder uploads to complete: %v (%s)", err, browserStatus(ctx))
+		t.Fatalf("wait for folder uploads to queue: %v (%s)", err, browserStatus(ctx))
 	}
-	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("[role='tab'][data-tab-value='complete']").click()`, nil)); err != nil {
-		t.Fatalf("show completed folder uploads: %v", err)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("[role='tab'][data-tab-value='all']").click()`, nil)); err != nil {
+		t.Fatalf("show all folder uploads: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector(".transfer-group-row.complete")?.textContent.includes("2 of 2 files") && (() => { const progress = document.querySelector("progress[aria-label='Upload progress for folder Dropped Folder']"); return progress && progress.value === progress.max; })()`, 5*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector(".transfer-group-row.complete")?.textContent.includes("2 of 2 files") && (() => { const progress = document.querySelector("progress[aria-label='Upload progress for folder Dropped Folder']"); return progress && progress.value === progress.max; })()`, 15*time.Second); err != nil {
 		t.Fatalf("wait for aggregate folder upload progress: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := waitFor(ctx, `document.querySelector("#file-rows").textContent.includes("Dropped Folder")`, 10*time.Second); err != nil {

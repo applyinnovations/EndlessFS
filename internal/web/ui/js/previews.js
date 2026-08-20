@@ -224,8 +224,8 @@
     }
     const response = await fetch(result.capability.url, { method: result.capability.method || "GET", headers: result.capability.headers || {}, signal, credentials: "omit" });
     const blob = await validatedPreviewBlob(response, result.artifact);
-    await displayViewerBlob(entry, result.artifact, blob, signal);
     cacheViewerPreview(entry, variant, result, blob);
+    await displayViewerBlob(entry, result.artifact, blob, signal);
   }
 
   async function displayViewerBlob(entry, artifact, blob, signal) {

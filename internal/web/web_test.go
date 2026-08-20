@@ -218,6 +218,7 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 		"/api/v1/previews/resolve", "/api/v1/previews/generations", "/api/v1/previews/operations/", "image/webp", "validatedPreviewBlob", "Invalid preview artifact body", "filterLoadedEntries",
 		`crypto.subtle.digest("SHA-256"`, "Invalid preview artifact checksum", "await image.decode()", "previewLoaded",
 		"viewerPreviewCache", "cachedViewerPreview", "cacheViewerPreview",
+		"cacheViewerPreview(entry, variant, result, blob);\n    await displayViewerBlob(entry, result.artifact, blob, signal);",
 		"syncPreviewGenerationActions", `syncPreviewGenerationActions(canGenerate, result.state === "ready")`,
 		`byID("preview-generation-action").hidden = !canGenerate;`,
 		"waitForPreviewOperation", "previewRetryTimers", "Idempotency-Key",
@@ -1132,11 +1133,16 @@ func TestAllActionsUseResponsiveSheetInsteadOfCenteredModal(t *testing.T) {
 		`.action-sheet .sheet-heading {`,
 		`.action-sheet .dialog-actions {`,
 		`animation: action-sheet-enter var(--efs-motion-duration-normal) var(--efs-motion-easing);`,
+		`from { opacity: 0; }`,
+		`to { opacity: 1; }`,
 		`.action-sheet { inset: 0; width: 100%;`,
 	} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("responsive action sheet is missing %q", required)
 		}
+	}
+	if strings.Contains(stylesheet, `transform: translateX(16px)`) {
+		t.Error("action-sheet controls move after becoming visible, making fast pointer input nondeterministic")
 	}
 }
 

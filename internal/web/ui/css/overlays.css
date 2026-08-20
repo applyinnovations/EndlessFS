@@ -81,8 +81,8 @@ dialog::backdrop { background: color-mix(in srgb, var(--efs-color-foreground) 38
 .action-sheet .dialog-actions button:not(.icon-button) { max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
 
 @keyframes action-sheet-enter {
-  from { opacity: 0; transform: translateX(16px); }
-  to { opacity: 1; transform: translateX(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .media-viewer { inset: 0; width: 100vw; max-width: none; height: 100vh; height: 100dvh; max-height: none; margin: 0; border: 0; border-radius: 0; padding: 0; box-shadow: none; }

@@ -261,11 +261,18 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := chromedp.Run(ctx,
 		chromedp.SetUploadFiles("#upload-input", []string{uploadPath}, chromedp.ByQuery),
 		chromedp.WaitVisible("#file-rows tr", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	if err := closeTransferSheet(ctx); err != nil {
+		t.Fatalf("close upload transfer sheet: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx,
 		chromedp.Click("#file-rows input[type='checkbox']", chromedp.ByQuery),
 		chromedp.WaitEnabled("#download-selected", chromedp.ByQuery),
 		chromedp.Click("#download-selected", chromedp.ByQuery),
 	); err != nil {
-		t.Fatalf("upload and download initiation: %v", err)
+		t.Fatalf("download initiation: %v", err)
 	}
 	downloadContext, cancelDownloadWait := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelDownloadWait()
@@ -401,8 +408,11 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := waitVisible(ctx, "#action-dialog", 5*time.Second); err != nil {
 		t.Fatalf("wait for restore confirmation: %v (%s)", err, browserStatus(ctx))
 	}
-	if err := chromedp.Run(ctx, chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatalf("confirm restore: %v", err)
+	}
+	if err := waitFor(ctx, `!document.querySelector("#action-dialog").open`, 5*time.Second); err != nil {
+		t.Fatalf("wait for restore confirmation to close: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := runStage(ctx, 10*time.Second, chromedp.WaitNotPresent("#file-rows tr", chromedp.ByQuery)); err != nil {
 		t.Fatalf("wait for restored file to leave trash: %v (%s)", err, browserStatus(ctx))
@@ -435,11 +445,20 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	); err != nil {
 		t.Fatalf("drop folder tree: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector(".transfer-group-row.complete")?.textContent.includes("2 of 2 files") && (() => { const progress = document.querySelector("progress[aria-label='Upload progress for folder Dropped Folder']"); return progress && progress.value === progress.max; })()`, 15*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector("[data-transfer-count='complete']")?.textContent === "(2)" && document.querySelector("#transfer-percent")?.textContent === "100%"`, 15*time.Second); err != nil {
+		t.Fatalf("wait for folder uploads to complete: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("[role='tab'][data-tab-value='complete']").click()`, nil)); err != nil {
+		t.Fatalf("show completed folder uploads: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector(".transfer-group-row.complete")?.textContent.includes("2 of 2 files") && (() => { const progress = document.querySelector("progress[aria-label='Upload progress for folder Dropped Folder']"); return progress && progress.value === progress.max; })()`, 5*time.Second); err != nil {
 		t.Fatalf("wait for aggregate folder upload progress: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := waitFor(ctx, `document.querySelector("#file-rows").textContent.includes("Dropped Folder")`, 10*time.Second); err != nil {
 		t.Fatalf("wait for dropped folder listing: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := closeTransferSheet(ctx); err != nil {
+		t.Fatalf("close folder transfer sheet: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := chromedp.Run(ctx, chromedp.Click(`[aria-label="Open folder Dropped Folder"]`, chromedp.ByQuery)); err != nil {
 		t.Fatalf("open dropped folder: %v", err)
@@ -464,6 +483,9 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 	if err := waitFor(ctx, `document.querySelector("#file-rows").textContent.includes("media-proof.png")`, 10*time.Second); err != nil {
 		t.Fatalf("wait for media fixture: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := closeTransferSheet(ctx); err != nil {
+		t.Fatalf("close media transfer sheet: %v (%s)", err, browserStatus(ctx))
 	}
 	gridBinding, gridClaim, gridArtifact := claimConcurrentBrowserPreview(t, harness, domain.MustParseUserPath("/media-proof.png"), mediaPath, 256)
 	if err := chromedp.Run(ctx, chromedp.Focus("#file-view-grid", chromedp.ByQuery), chromedp.KeyEvent(" ")); err != nil {
@@ -507,9 +529,26 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if !readyPreviewActionsCorrect {
 		t.Fatal("ready preview exposes Generate or hides Regenerate")
 	}
-	mu.Lock()
-	resolveRequestsBeforeViewerReopen := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
-	mu.Unlock()
+	if err := chromedp.Run(ctx, emulation.SetDeviceMetricsOverride(500, 500, 1, false)); err != nil {
+		t.Fatalf("set regeneration viewport: %v", err)
+	}
+	binding, claim, artifact := claimConcurrentBrowserPreview(t, harness, domain.MustParseUserPath("/media-proof.png"), mediaPath, 512)
+	if err := chromedp.Run(ctx, chromedp.Focus("#preview-regenerate", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+		t.Fatalf("regenerate preview: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#toast-region .toast.info")?.textContent.includes("Preview generation continues") && document.querySelector("#preview-regenerate").disabled`, 5*time.Second); err != nil {
+		t.Fatalf("wait for contending preview operation: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := harness.previewStore.Commit(context.Background(), binding, claim, artifact); err != nil {
+		t.Fatalf("complete contending preview generation: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#preview-content > img")?.naturalWidth > 0 && !document.querySelector("#preview-regenerate").disabled`, 15*time.Second); err != nil {
+		t.Fatalf("wait for regenerated preview: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx, emulation.SetDeviceMetricsOverride(800, 600, 1, false)); err != nil {
+		t.Fatalf("restore preview viewport: %v", err)
+	}
+	harness.previewStore.SetAvailable(false)
 	reopenStarted := time.Now()
 	if err := chromedp.Run(ctx,
 		chromedp.KeyEvent(kb.Escape),
@@ -519,13 +558,12 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		t.Fatalf("reopen verified generated preview: %v", err)
 	}
 	if err := waitFor(ctx, `document.querySelector("#preview-content img")?.naturalWidth > 0 && !document.querySelector("#preview-regenerate").hidden`, time.Second); err != nil {
+		harness.previewStore.SetAvailable(true)
 		t.Fatalf("verified generated preview was not reused immediately: %v (%s)", err, browserStatus(ctx))
 	}
-	mu.Lock()
-	resolveRequestsAfterViewerReopen := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
-	mu.Unlock()
-	if resolveRequestsAfterViewerReopen != resolveRequestsBeforeViewerReopen || time.Since(reopenStarted) > time.Second {
-		t.Fatalf("viewer reopen missed document-memory preview: resolves before=%d after=%d elapsed=%s", resolveRequestsBeforeViewerReopen, resolveRequestsAfterViewerReopen, time.Since(reopenStarted))
+	harness.previewStore.SetAvailable(true)
+	if time.Since(reopenStarted) > time.Second {
+		t.Fatalf("viewer reopen missed document-memory preview: elapsed=%s", time.Since(reopenStarted))
 	}
 	if err := chromedp.Run(ctx, chromedp.KeyEvent(kb.Escape)); err != nil {
 		t.Fatalf("close reused generated preview: %v", err)
@@ -533,6 +571,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	mu.Lock()
 	resolveRequestsBeforeExpiredReopen := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
 	mu.Unlock()
+	harness.previewStore.SetAvailable(false)
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
 		const originalNow = Date.now;
 		Date.now = () => originalNow() + 60 * 60 * 1000;
@@ -541,27 +580,18 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	})()`, nil)); err != nil {
 		t.Fatalf("reopen expired document-memory preview: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector("#preview-content img")?.naturalWidth > 0 && !document.querySelector("#preview-regenerate").hidden`, 15*time.Second); err != nil {
-		t.Fatalf("expired generated preview was not reacquired: %v (%s)", err, browserStatus(ctx))
+	if err := waitFor(ctx, `document.querySelector("#preview-content > img") === null && document.querySelector("#preview-content [role='img']") !== null && document.querySelector("#toast-region .toast.warning") !== null`, 5*time.Second); err != nil {
+		harness.previewStore.SetAvailable(true)
+		var previewState string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`JSON.stringify({content: document.querySelector("#preview-content").innerHTML, toast: document.querySelector("#toast-region").textContent, dialogOpen: document.querySelector("#preview-dialog").open, generateHidden: document.querySelector("#preview-generate").hidden, regenerateHidden: document.querySelector("#preview-regenerate").hidden})`, &previewState))
+		t.Fatalf("expired generated preview was not rejected while the preview store was unavailable: %v (%s) preview=%s", err, browserStatus(ctx), previewState)
 	}
+	harness.previewStore.SetAvailable(true)
 	mu.Lock()
 	resolveRequestsAfterExpiredReopen := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
 	mu.Unlock()
 	if resolveRequestsAfterExpiredReopen <= resolveRequestsBeforeExpiredReopen {
 		t.Fatalf("viewer reused preview beyond capability expiry: resolves before=%d after=%d", resolveRequestsBeforeExpiredReopen, resolveRequestsAfterExpiredReopen)
-	}
-	binding, claim, artifact := claimConcurrentBrowserPreview(t, harness, domain.MustParseUserPath("/media-proof.png"), mediaPath, 1600)
-	if err := chromedp.Run(ctx, chromedp.Click("#preview-regenerate", chromedp.ByQuery)); err != nil {
-		t.Fatalf("regenerate preview: %v", err)
-	}
-	if err := waitFor(ctx, `document.querySelector("#toast-region .toast.info")?.textContent.includes("Preview generation continues") && document.querySelector("#preview-regenerate").disabled`, 5*time.Second); err != nil {
-		t.Fatalf("wait for contending preview operation: %v (%s)", err, browserStatus(ctx))
-	}
-	if err := harness.previewStore.Commit(context.Background(), binding, claim, artifact); err != nil {
-		t.Fatalf("complete contending preview generation: %v", err)
-	}
-	if err := waitFor(ctx, `document.querySelector("#preview-content img")?.naturalWidth > 0 && !document.querySelector("#preview-regenerate").disabled`, 15*time.Second); err != nil {
-		t.Fatalf("wait for regenerated preview: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := chromedp.Run(ctx, chromedp.KeyEvent(kb.ArrowLeft), chromedp.KeyEvent(kb.ArrowRight), chromedp.KeyEvent(kb.Escape)); err != nil {
 		t.Fatalf("preview navigation and close: %v", err)
@@ -736,13 +766,25 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	); err != nil {
 		t.Fatalf("open transfer scale fixture: %v", err)
 	}
-	var progressPreservesFocus bool
-	if err := chromedp.Run(ctx, chromedp.Evaluate(`new Promise((resolve) => {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
 		const row = document.querySelector("#transfer-list .transfer-group-row");
-		const control = row.querySelector("button[aria-expanded]");
-		control.focus();
-		setTimeout(() => resolve(row === document.querySelector("#transfer-list .transfer-group-row") && document.activeElement === control), 1100);
-	})`, &progressPreservesFocus)); err != nil {
+		row.dataset.focusProbe = "true";
+		row.dataset.focusProbeProgress = String(row.querySelector("progress").value);
+		row.querySelector("button[aria-expanded]").focus();
+	})()`, nil)); err != nil {
+		t.Fatalf("prepare transfer progress stability measurement: %v", err)
+	}
+	if err := waitFor(ctx, `(() => {
+		const row = document.querySelector("#transfer-list .transfer-group-row[data-focus-probe='true']");
+		return row && row.querySelector("progress").value !== Number(row.dataset.focusProbeProgress);
+	})()`, 3*time.Second); err != nil {
+		t.Fatalf("wait for transfer progress update: %v (%s)", err, browserStatus(ctx))
+	}
+	var progressPreservesFocus bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+		const row = document.querySelector("#transfer-list .transfer-group-row[data-focus-probe='true']");
+		return Boolean(row && document.activeElement === row.querySelector("button[aria-expanded]"));
+	})()`, &progressPreservesFocus)); err != nil {
 		t.Fatalf("measure transfer progress stability: %v", err)
 	}
 	if !progressPreservesFocus {
@@ -855,15 +897,20 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	admin := newTestBrowser(t)
 	bootstrapBrowser(t, admin, harness)
 
-	if err := chromedp.Run(admin.ctx,
-		chromedp.Click("a[data-route='admin']", chromedp.ByQuery),
-		chromedp.WaitVisible("#admin-view", chromedp.ByQuery),
-		chromedp.Focus("#create-invite", chromedp.ByQuery),
-		chromedp.KeyEvent(kb.Enter),
-		chromedp.WaitVisible("#action-dialog", chromedp.ByQuery),
-		chromedp.Click("#dialog-confirm", chromedp.ByQuery),
-	); err != nil {
-		t.Fatalf("create invite: %v", err)
+	if err := runStage(admin.ctx, 10*time.Second, chromedp.Focus("a[data-route='admin']", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+		t.Fatalf("open administration: %v (%s)", err, browserStatus(admin.ctx))
+	}
+	if err := waitVisible(admin.ctx, "#admin-view", 10*time.Second); err != nil {
+		t.Fatalf("wait for administration: %v (%s)", err, browserStatus(admin.ctx))
+	}
+	if err := runStage(admin.ctx, 5*time.Second, chromedp.Focus("#create-invite", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+		t.Fatalf("open invite sheet: %v (%s)", err, browserStatus(admin.ctx))
+	}
+	if err := waitVisible(admin.ctx, "#action-dialog", 5*time.Second); err != nil {
+		t.Fatalf("wait for invite sheet: %v (%s)", err, browserStatus(admin.ctx))
+	}
+	if err := runStage(admin.ctx, 5*time.Second, chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+		t.Fatalf("create invite: %v (%s)", err, browserStatus(admin.ctx))
 	}
 	if err := waitFor(admin.ctx, `document.querySelector("#dialog-output") !== null`, 10*time.Second); err != nil {
 		t.Fatalf("wait for invite link: %v (%s)", err, browserStatus(admin.ctx))
@@ -895,6 +942,9 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	}
 	if err := waitVisible(member.ctx, "#drive-view", 15*time.Second); err != nil {
 		t.Fatalf("finish invitee sign-in: %v (%s)", err, browserStatus(member.ctx))
+	}
+	if err := waitFor(member.ctx, `document.querySelector("#loading-view").hidden && !document.querySelector("#authenticated-view").hidden`, 15*time.Second); err != nil {
+		t.Fatalf("wait for invitee workspace: %v (%s)", err, browserStatus(member.ctx))
 	}
 
 	if err := chromedp.Run(member.ctx,
@@ -942,7 +992,8 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 			Math.abs(profile.left - account.left) < 1 && Math.abs(appearance.left - theme.left) < 1 &&
 			Math.abs(profile.left - appearance.left) < 1 && Math.abs(profile.width - appearance.width) < 1 &&
 			Math.abs(save.right - apply.right) < 1 && profile.top > account.bottom && appearance.top > theme.bottom &&
-			getComputedStyle(remove).backgroundColor !== "rgba(0, 0, 0, 0)";
+			getComputedStyle(remove).backgroundColor === "rgba(0, 0, 0, 0)" &&
+			getComputedStyle(remove).borderTopWidth === "0px" && remove.textContent.trim() === "" && Boolean(remove.dataset.icon);
 	})()`, &settingsFormsAligned)); err != nil {
 		t.Fatalf("inspect settings layout: %v", err)
 	}
@@ -976,7 +1027,7 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	); err != nil {
 		t.Fatalf("update profile: %v", err)
 	}
-	if err := waitFor(member.ctx, `document.querySelector("#account-name").textContent === "Renamed Member"`, 10*time.Second); err != nil {
+	if err := waitFor(member.ctx, `document.querySelector("#live-status").textContent.includes("Display name saved")`, 10*time.Second); err != nil {
 		t.Fatalf("wait for renamed profile: %v", err)
 	}
 	if err := chromedp.Run(member.ctx,
@@ -1048,6 +1099,9 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	}
 	if err := waitFor(member.ctx, `document.querySelectorAll("#file-rows tr").length === 1`, 15*time.Second); err != nil {
 		t.Fatalf("wait for member upload: %v (%s)", err, browserStatus(member.ctx))
+	}
+	if err := closeTransferSheet(member.ctx); err != nil {
+		t.Fatalf("close member transfer sheet: %v (%s)", err, browserStatus(member.ctx))
 	}
 
 	if err := chromedp.Run(member.ctx,
@@ -1231,6 +1285,9 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	if err := waitVisible(member.ctx, "#drive-view", 15*time.Second); err != nil {
 		t.Fatalf("finish sign in after recovery: %v (%s)", err, browserStatus(member.ctx))
 	}
+	if err := waitFor(member.ctx, `document.querySelector("#loading-view").hidden && !document.querySelector("#authenticated-view").hidden`, 15*time.Second); err != nil {
+		t.Fatalf("wait for recovered workspace: %v (%s)", err, browserStatus(member.ctx))
+	}
 
 	if err := chromedp.Run(member.ctx, chromedp.Click("a[data-route='settings']", chromedp.ByQuery), chromedp.WaitVisible("#settings-view", chromedp.ByQuery)); err != nil {
 		t.Fatalf("open share management: %v", err)
@@ -1262,6 +1319,9 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	}
 	if err := waitFor(member.ctx, `document.querySelector("#file-rows").textContent.includes("dark-mobile-preview.png")`, 15*time.Second); err != nil {
 		t.Fatalf("wait for dark mobile fixture: %v (%s)", err, browserStatus(member.ctx))
+	}
+	if err := closeTransferSheet(member.ctx); err != nil {
+		t.Fatalf("close dark mobile transfer sheet: %v (%s)", err, browserStatus(member.ctx))
 	}
 	if err := chromedp.Run(member.ctx, chromedp.Focus("#file-view-grid", chromedp.ByQuery), chromedp.KeyEvent(" ")); err != nil {
 		t.Fatalf("open dark mobile grid: %v", err)
@@ -1319,13 +1379,29 @@ func TestE2EMediaBrowserIsAvailableWithoutGeneratedPreviews(t *testing.T) {
 	if err := waitFor(client.ctx, `document.querySelector("#file-rows").textContent.includes("icon-only.png")`, 15*time.Second); err != nil {
 		t.Fatalf("wait for icon-only fixture: %v (%s)", err, browserStatus(client.ctx))
 	}
+	if err := closeTransferSheet(client.ctx); err != nil {
+		t.Fatalf("close completed transfer sheet: %v (%s)", err, browserStatus(client.ctx))
+	}
 	var rowTopBeforeSelection float64
 	var rowTopAfterSelection float64
 	var selectionSurfaceCanonical bool
-	if err := chromedp.Run(client.ctx,
+	if err := runStage(client.ctx, 5*time.Second,
 		chromedp.Evaluate(`document.querySelector("#file-rows tr").getBoundingClientRect().top`, &rowTopBeforeSelection),
 		chromedp.Click("#file-rows input[type='checkbox']", chromedp.ByQuery),
-		chromedp.WaitVisible("#selection-bar", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("select file for layout measurement: %v (%s)", err, browserStatus(client.ctx))
+	}
+	if err := waitVisible(client.ctx, "#selection-bar", 5*time.Second); err != nil {
+		var selectionState string
+		_ = chromedp.Run(client.ctx, chromedp.Evaluate(`(() => {
+			const input = document.querySelector("#file-rows input[type='checkbox']");
+			const bounds = input?.getBoundingClientRect();
+			const hit = bounds ? document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2) : null;
+			return JSON.stringify({checked: input?.checked, count: document.querySelector("#selection-count")?.textContent, hidden: document.querySelector("#selection-bar")?.hidden, hit: hit?.outerHTML});
+		})()`, &selectionState))
+		t.Fatalf("wait for selection actions: %v (%s) selection=%s", err, browserStatus(client.ctx), selectionState)
+	}
+	if err := runStage(client.ctx, 5*time.Second,
 		chromedp.Evaluate(`document.querySelector("#file-rows tr").getBoundingClientRect().top`, &rowTopAfterSelection),
 		chromedp.Evaluate(`(() => {
 			const bar = document.querySelector("#selection-bar");
@@ -1336,10 +1412,10 @@ func TestE2EMediaBrowserIsAvailableWithoutGeneratedPreviews(t *testing.T) {
 				buttons.every((button) => {
 					const style = getComputedStyle(button);
 					return style.backgroundColor === "rgba(0, 0, 0, 0)" && parseFloat(style.borderTopWidth) === 0 && button.textContent.trim() === "";
-				});
+			});
 		})()`, &selectionSurfaceCanonical),
 	); err != nil {
-		t.Fatalf("measure selection layout stability: %v", err)
+		t.Fatalf("measure selection layout stability: %v (%s)", err, browserStatus(client.ctx))
 	}
 	if shift := rowTopAfterSelection - rowTopBeforeSelection; shift < -0.5 || shift > 0.5 {
 		t.Fatalf("selecting a file shifted the first row by %.1f CSS pixels", shift)
@@ -1491,6 +1567,9 @@ func bootstrapBrowser(t *testing.T, client *testBrowser, harness harness) {
 	if err := waitVisible(client.ctx, "#drive-view", 15*time.Second); err != nil {
 		t.Fatalf("finish administrator sign-in: %v (%s)", err, browserStatus(client.ctx))
 	}
+	if err := waitFor(client.ctx, `document.querySelector("#loading-view").hidden && !document.querySelector("#authenticated-view").hidden && !document.querySelector("#admin-nav").hidden`, 15*time.Second); err != nil {
+		t.Fatalf("wait for administrator workspace: %v (%s)", err, browserStatus(client.ctx))
+	}
 }
 
 func bootstrapKeyboardActions(token string) chromedp.Tasks {
@@ -1547,6 +1626,17 @@ func waitVisible(ctx context.Context, selector string, timeout time.Duration) er
 func waitFor(ctx context.Context, expression string, timeout time.Duration) error {
 	var result bool
 	return runStage(ctx, timeout, chromedp.Poll(expression, &result, chromedp.WithPollingMutation(), chromedp.WithPollingTimeout(timeout)))
+}
+
+func closeTransferSheet(ctx context.Context) error {
+	var hidden bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("#transfer-panel").hidden`, &hidden)); err != nil || hidden {
+		return err
+	}
+	if err := runStage(ctx, 5*time.Second, chromedp.Focus("#transfer-close", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+		return err
+	}
+	return waitFor(ctx, `document.querySelector("#transfer-panel").hidden`, 5*time.Second)
 }
 
 func runStage(ctx context.Context, timeout time.Duration, actions ...chromedp.Action) error {

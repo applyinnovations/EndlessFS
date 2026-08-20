@@ -10,11 +10,11 @@ Several replicas may share one storage set. They must use the same state/file bu
 
 If a replica disappears while it owns a mutation, the durable operation remains. The affected resource can be temporarily unavailable until the lease expires. One competing replica wins the takeover CAS, increments the fence, reconciles any ambiguous provider result, and resumes the same intent. A returning stale replica cannot commit, unlock, or replace the recovered result; its old fence and object preconditions fail.
 
-## Automatic recursive-byte upgrade
+## Automatic recursive-aggregate upgrade
 
-Starting this release against the exact preceding canonical feature set automatically adds `recursive-byte-aggregates-v1`. No operator migration command is required. Startup CAS-closes the durable write gate, drains admitted mutations and expired upload capabilities, walks every live and trash directory graph bottom-up, creates deterministic immutable pages/manifests containing the computed totals, and conditionally advances each directory root. It then verifies every parent/child aggregate, updates the writer-set and superblock feature lists, binds the gate to the new writer features, creates a closed-gate checkpoint, and reopens at the next epoch.
+Starting this release against either supported exact predecessor automatically adds the missing recursive aggregates. A bucket already upgraded by the preceding EndlessFS release retains `recursive-byte-aggregates-v1` and receives `recursive-file-count-aggregates-v1`; the older pre-aggregate format receives both. No operator migration command is required. Startup CAS-closes the durable write gate, drains admitted mutations and expired upload capabilities, walks every live and trash directory graph bottom-up, creates deterministic immutable pages/manifests containing the computed byte and file-count totals, and conditionally advances each directory root. It verifies pre-existing byte totals rather than recomputing over provider blobs. It then verifies every parent/child aggregate, updates the writer-set and superblock feature lists, binds the gate to the current writer features, creates a closed-gate checkpoint, and reopens at the next epoch.
 
-The migration is safe to retry after process loss and safe for several new replicas to attempt concurrently. A replica that loses a CAS follows the durable winner. The gate feature binding also fences an old process that was already running: its strict legacy gate decoder rejects the added field before it can admit another mutation. Until migration commits, old directory records remain authoritative and the gate stays closed once migration has begun.
+The migration is safe to retry after process loss and safe for several new replicas to attempt concurrently. A replica that loses a CAS follows the durable winner. It also resumes a partially completed earlier recursive-byte migration, including a safe mixture of old and byte-only directory roots. The gate feature binding fences an old process that was already running because its admitted writer features no longer match. Until migration commits, predecessor directory records remain authoritative and the gate stays closed once migration has begun.
 
 An unexpired upload or admitted operation can temporarily prevent startup; allow the existing operation to finish or its lease to expire and retry startup. Missing roots, cycles, multiple parents, unreachable roots, malformed canonical records, overflow, an unrelated closed-gate maintenance operation, or any feature/configuration difference other than this specifically supported addition fails closed. The migration supports both single- and split-bucket storage sets. It does not discover or import arbitrary provider objects outside the canonical `endlessfs/v1` filesystem metadata graph.
 
@@ -73,7 +73,7 @@ The verifier configuration is strict JSON. For GCS:
   "writerSetID": "BASE64URL_WRITER_SET_ID",
   "configurationDigest": "EXPECTED_CONFIGURATION_DIGEST",
   "keyringIdentifiers": ["EXPECTED_KEYRING_ID"],
-  "requiredFeatures": ["directory-manifests", "fenced-operations", "portable-checkpoints", "recursive-byte-aggregates-v1"]
+  "requiredFeatures": ["directory-manifests", "fenced-operations", "portable-checkpoints", "recursive-byte-aggregates-v1", "recursive-file-count-aggregates-v1"]
 }
 ```
 

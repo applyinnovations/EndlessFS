@@ -9,6 +9,7 @@ import (
 
 type Storage interface {
 	List(context.Context, domain.Scope, domain.ListRequest) (domain.ListPage, error)
+	LookupChildren(context.Context, domain.Scope, domain.ChildLookupRequest) (domain.ChildLookup, error)
 	Stat(context.Context, domain.Scope, domain.UserPath) (domain.Entry, error)
 	CreateDirectory(context.Context, domain.Scope, domain.CreateDirectoryRequest) (domain.Entry, error)
 

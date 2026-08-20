@@ -42,6 +42,23 @@ type legacyDirectoryManifest struct {
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
+type recursiveByteDirectoryRoot struct {
+	SchemaVersion  int    `json:"schemaVersion"`
+	DirectoryID    string `json:"directoryID"`
+	ManifestID     string `json:"manifestID"`
+	RecursiveBytes int64  `json:"recursiveBytes"`
+}
+
+type recursiveByteDirectoryManifest struct {
+	SchemaVersion  int       `json:"schemaVersion"`
+	DirectoryID    string    `json:"directoryID"`
+	ManifestID     string    `json:"manifestID"`
+	PageIDs        []string  `json:"pageIDs"`
+	EntryCount     int       `json:"entryCount"`
+	RecursiveBytes int64     `json:"recursiveBytes"`
+	CreatedAt      time.Time `json:"createdAt"`
+}
+
 func TestStartupAutomaticallyMigratesLegacyRecursiveByteAggregates(t *testing.T) {
 	clock := domain.NewFixedClock(time.Date(2042, 6, 7, 8, 9, 10, 0, time.UTC))
 	legacyObjects, user := legacyAggregateFixture(t, clock)
@@ -69,6 +86,10 @@ func TestStartupAutomaticallyMigratesLegacyRecursiveByteAggregates(t *testing.T)
 	}
 	if got := assertVisibleRecursiveAggregates(t, engine.Files(), trash, domain.MustParseUserPath("/")); got != 5 {
 		t.Fatalf("migrated trash aggregate = %d; want 5", got)
+	}
+	lookup, err := engine.Files().LookupChildren(context.Background(), trash, domain.ChildLookupRequest{Directory: domain.MustParseUserPath("/"), Names: []string{"old"}})
+	if err != nil || len(lookup.Entries) != 1 || lookup.Entries[0].Kind != domain.EntryDirectory || lookup.Entries[0].Size != 5 || lookup.Entries[0].FileCount != 1 || lookup.Current.FileCount != 1 {
+		t.Fatalf("migrated legacy trash lookup = %+v, %v; want directory size/count 5/1", lookup, err)
 	}
 	gate, err := engine.GateStatus(context.Background())
 	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 2 {
@@ -121,6 +142,71 @@ func TestStartupAutomaticallyMigratesLegacySplitBackend(t *testing.T) {
 		t.Fatalf("file backend object count changed during metadata migration: %d to %d", len(legacyFiles), len(migratedFiles.Export()))
 	}
 	assertRecursiveFeatureActivated(t, migratedState.Export())
+}
+
+func TestEightReplicasAutomaticallyMigrateRecursiveBytePredecessorFileCounts(t *testing.T) {
+	clock := domain.NewFixedClock(time.Date(2042, 6, 9, 8, 9, 10, 0, time.UTC))
+	current := objectmemory.New()
+	server := newPortableDataServer(t, current, clock, 186)
+	engine := openEngine(t, current, clock, 187, nil)
+	user, _ := domain.ParseUserID("W1tbW1tbW1tbW1tbW1tbWw")
+	live, _ := domain.NewScope(user, domain.AreaLive)
+	trash, _ := domain.NewScope(user, domain.AreaTrash)
+	for _, path := range []string{"/existing", "/existing/empty", "/existing/nested"} {
+		if _, err := engine.Files().CreateDirectory(context.Background(), live, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath("/existing/zero.bin"), nil)
+	uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath("/existing/nested/data.bin"), []byte("data"))
+	if _, err := engine.Files().CreateDirectory(context.Background(), trash, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/old")}); err != nil {
+		t.Fatal(err)
+	}
+	uploadPortableFile(t, server.Client(), engine.Files(), trash, domain.MustParseUserPath("/old/deleted.bin"), []byte("xx"))
+	predecessor := objectmemory.New()
+	if err := predecessor.Import(downgradeRecursiveFileCountFeature(t, current.Export())); err != nil {
+		t.Fatal(err)
+	}
+
+	const replicas = 8
+	barrier := newAggregateBarrier(replicas)
+	engines := make([]*portable.Engine, replicas)
+	errorsFound := make([]error, replicas)
+	var wait sync.WaitGroup
+	for index := range replicas {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			scheduler := &aggregateOneShotScheduler{step: portable.StepMigrationAfterDetection, barrier: barrier, enabled: true}
+			engines[index], errorsFound[index] = portable.Open(context.Background(), legacyMigrationOptions(predecessor, clock, byte(188+index), scheduler))
+		}()
+	}
+	wait.Wait()
+	for index, err := range errorsFound {
+		if err != nil {
+			t.Errorf("replica %d Open(byte-only predecessor) error = %v", index, err)
+		}
+	}
+	if t.Failed() {
+		t.FailNow()
+	}
+	root, err := engines[7].Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
+	if err != nil || root.Size != 4 || root.FileCount != 2 {
+		t.Fatalf("migrated byte-only root = %+v, %v; want 4 bytes/2 files", root, err)
+	}
+	empty, err := engines[0].Files().Stat(context.Background(), live, domain.MustParseUserPath("/existing/empty"))
+	if err != nil || empty.Size != 0 || empty.FileCount != 0 {
+		t.Fatalf("migrated empty directory = %+v, %v", empty, err)
+	}
+	trashRoot, err := engines[3].Files().Stat(context.Background(), trash, domain.MustParseUserPath("/"))
+	if err != nil || trashRoot.Size != 2 || trashRoot.FileCount != 1 {
+		t.Fatalf("migrated byte-only trash root = %+v, %v; want 2 bytes/1 file", trashRoot, err)
+	}
+	gate, err := engines[1].GateStatus(context.Background())
+	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 2 {
+		t.Fatalf("migrated byte-only gate = %+v, %v", gate, err)
+	}
+	assertRecursiveFeatureActivated(t, predecessor.Export())
 }
 
 func TestStartupRecursiveByteMigrationResumesAfterEveryDurableBoundary(t *testing.T) {
@@ -354,7 +440,86 @@ func downgradeRecursiveByteFeature(t *testing.T, objects map[string][]byte) map[
 					continue
 				}
 				page.Entries[index].Size = 0
+				page.Entries[index].FileCount = 0
 				page.Entries[index].LogicalVersion = entryLogicalVersion(t, page.Entries[index])
+			}
+			objects[key] = mustEnvelope(t, "directory-page-v1", parsed, envelope.Revision, page)
+		}
+	}
+	return objects
+}
+
+func downgradeRecursiveFileCountFeature(t *testing.T, objects map[string][]byte) map[string][]byte {
+	t.Helper()
+	withoutCount := func(features []string) []string {
+		result := make([]string, 0, len(features))
+		for _, feature := range features {
+			if feature != storageformat.FeatureRecursiveFileCounts {
+				result = append(result, feature)
+			}
+		}
+		return result
+	}
+	for key, body := range objects {
+		parsed := storageformatKey(t, key)
+		switch {
+		case key == storageformat.SuperblockKey().String():
+			var superblock storageformat.Superblock
+			if err := state.DecodeJSONWithLimit(body, &superblock, storageformat.MaxCanonicalBytes); err != nil {
+				t.Fatal(err)
+			}
+			superblock.RequiredFeatures = withoutCount(superblock.RequiredFeatures)
+			objects[key] = mustCanonical(t, superblock)
+		case key == storageformat.WriterSetKey().String():
+			var envelope storageformat.Envelope
+			var writer storageformat.WriterSet
+			if err := storageformat.DecodeEnvelope(body, parsed, "writer-set-v1", &envelope, &writer); err != nil {
+				t.Fatal(err)
+			}
+			writer.RequiredFeatures = withoutCount(writer.RequiredFeatures)
+			objects[key] = mustEnvelope(t, "writer-set-v1", parsed, envelope.Revision, writer)
+		case key == storageformat.WriteGateKey().String():
+			var envelope storageformat.Envelope
+			var gate storageformat.WriteGate
+			if err := storageformat.DecodeEnvelope(body, parsed, "write-gate-v1", &envelope, &gate); err != nil {
+				t.Fatal(err)
+			}
+			gate.WriterFeatures = withoutCount(gate.WriterFeatures)
+			objects[key] = mustEnvelope(t, "write-gate-v1", parsed, envelope.Revision, gate)
+		case strings.HasSuffix(key, "/directory.json") && strings.Contains(key, "/dirs/"):
+			var envelope storageformat.Envelope
+			var root storageformat.DirectoryRoot
+			if err := storageformat.DecodeEnvelope(body, parsed, "directory-root-v1", &envelope, &root); err != nil {
+				t.Fatal(err)
+			}
+			if root.Pending != nil {
+				t.Fatal("fixture directory root is unexpectedly pending")
+			}
+			legacy := recursiveByteDirectoryRoot{SchemaVersion: root.SchemaVersion, DirectoryID: root.DirectoryID, ManifestID: root.ManifestID, RecursiveBytes: root.RecursiveBytes}
+			objects[key] = mustEnvelope(t, "directory-root-v1", parsed, envelope.Revision, legacy)
+		case strings.Contains(key, "/manifests/") && strings.HasSuffix(key, ".json"):
+			var envelope storageformat.Envelope
+			var manifest storageformat.DirectoryManifest
+			if err := storageformat.DecodeEnvelope(body, parsed, "directory-manifest-v1", &envelope, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			legacy := recursiveByteDirectoryManifest{
+				SchemaVersion: manifest.SchemaVersion, DirectoryID: manifest.DirectoryID, ManifestID: manifest.ManifestID,
+				PageIDs: append([]string(nil), manifest.PageIDs...), EntryCount: manifest.EntryCount,
+				RecursiveBytes: manifest.RecursiveBytes, CreatedAt: manifest.CreatedAt,
+			}
+			objects[key] = mustEnvelope(t, "directory-manifest-v1", parsed, envelope.Revision, legacy)
+		case strings.Contains(key, "/pages/") && strings.HasSuffix(key, ".json"):
+			var envelope storageformat.Envelope
+			var page storageformat.DirectoryPage
+			if err := storageformat.DecodeEnvelope(body, parsed, "directory-page-v1", &envelope, &page); err != nil {
+				t.Fatal(err)
+			}
+			for index := range page.Entries {
+				if page.Entries[index].Kind == domain.EntryDirectory {
+					page.Entries[index].FileCount = 0
+					page.Entries[index].LogicalVersion = entryLogicalVersion(t, page.Entries[index])
+				}
 			}
 			objects[key] = mustEnvelope(t, "directory-page-v1", parsed, envelope.Revision, page)
 		}
@@ -371,6 +536,9 @@ func assertRecursiveFeatureActivated(t *testing.T, objects map[string][]byte) {
 	if !containsFeature(superblock.RequiredFeatures, storageformat.FeatureRecursiveBytes) {
 		t.Fatalf("superblock features = %v", superblock.RequiredFeatures)
 	}
+	if !containsFeature(superblock.RequiredFeatures, storageformat.FeatureRecursiveFileCounts) {
+		t.Fatalf("superblock features lack recursive file counts = %v", superblock.RequiredFeatures)
+	}
 	key := storageformat.WriterSetKey()
 	var envelope storageformat.Envelope
 	var writer storageformat.WriterSet
@@ -379,6 +547,9 @@ func assertRecursiveFeatureActivated(t *testing.T, objects map[string][]byte) {
 	}
 	if !containsFeature(writer.RequiredFeatures, storageformat.FeatureRecursiveBytes) {
 		t.Fatalf("writer features = %v", writer.RequiredFeatures)
+	}
+	if !containsFeature(writer.RequiredFeatures, storageformat.FeatureRecursiveFileCounts) {
+		t.Fatalf("writer features lack recursive file counts = %v", writer.RequiredFeatures)
 	}
 }
 
@@ -390,6 +561,9 @@ func assertRecursiveFeatureInactive(t *testing.T, objects map[string][]byte) {
 	}
 	if containsFeature(superblock.RequiredFeatures, storageformat.FeatureRecursiveBytes) {
 		t.Fatalf("recursive-byte feature activated after failed migration: %v", superblock.RequiredFeatures)
+	}
+	if containsFeature(superblock.RequiredFeatures, storageformat.FeatureRecursiveFileCounts) {
+		t.Fatalf("recursive-file-count feature activated after failed migration: %v", superblock.RequiredFeatures)
 	}
 }
 
@@ -509,7 +683,7 @@ func decodeStoredGate(t *testing.T, objects map[string][]byte) storageformat.Wri
 func withoutRecursiveFeature(features []string) []string {
 	result := make([]string, 0, len(features))
 	for _, feature := range features {
-		if feature != storageformat.FeatureRecursiveBytes {
+		if feature != storageformat.FeatureRecursiveBytes && feature != storageformat.FeatureRecursiveFileCounts {
 			result = append(result, feature)
 		}
 	}

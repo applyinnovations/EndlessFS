@@ -59,7 +59,7 @@ func TestPortableRecursiveOperationsAreDurableIdempotentAndIsolated(t *testing.T
 	}
 }
 
-func TestPortableRecursiveByteAggregatesTrackEveryFileMutation(t *testing.T) {
+func TestPortableRecursiveAggregatesTrackEveryFileMutation(t *testing.T) {
 	backend := objectmemory.New()
 	server := httptest.NewServer(backend)
 	t.Cleanup(server.Close)
@@ -77,20 +77,20 @@ func TestPortableRecursiveByteAggregatesTrackEveryFileMutation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	assertSizes := func(scope domain.Scope, expected map[string]int64) {
+	assertAggregates := func(scope domain.Scope, expected map[string][2]int64) {
 		t.Helper()
-		for path, size := range expected {
+		for path, aggregate := range expected {
 			entry, err := engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath(path))
-			if err != nil || entry.Size != size {
-				t.Fatalf("Stat(%s) = %+v, %v; want recursive size %d", path, entry, err, size)
+			if err != nil || entry.Size != aggregate[0] || entry.FileCount != aggregate[1] {
+				t.Fatalf("Stat(%s) = %+v, %v; want recursive size/count %d/%d", path, entry, err, aggregate[0], aggregate[1])
 			}
 		}
 	}
-	assertSizes(live, map[string]int64{"/": 0, "/alpha": 0, "/alpha/bravo": 0})
+	assertAggregates(live, map[string][2]int64{"/": {0, 0}, "/alpha": {0, 0}, "/alpha/bravo": {0, 0}})
 
 	uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath("/alpha/first.txt"), []byte("first"))
 	uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath("/alpha/bravo/second.txt"), []byte("second!"))
-	assertSizes(live, map[string]int64{"/": 12, "/alpha": 12, "/alpha/bravo": 7})
+	assertAggregates(live, map[string][2]int64{"/": {12, 2}, "/alpha": {12, 2}, "/alpha/bravo": {7, 1}})
 	first, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/alpha/first.txt"))
 	if err != nil {
 		t.Fatal(err)
@@ -117,13 +117,13 @@ func TestPortableRecursiveByteAggregatesTrackEveryFileMutation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	assertSizes(live, map[string]int64{"/": 16, "/alpha": 16, "/alpha/bravo": 7})
+	assertAggregates(live, map[string][2]int64{"/": {16, 2}, "/alpha": {16, 2}, "/alpha/bravo": {7, 1}})
 	page, err := engine.Files().List(context.Background(), live, domain.ListRequest{Directory: domain.MustParseUserPath("/alpha")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bravo, found := findEntry(page.Entries, "bravo"); !found || bravo.Size != 7 {
-		t.Fatalf("List(/alpha) bravo = %+v, %t; want recursive size 7", bravo, found)
+	if bravo, found := findEntry(page.Entries, "bravo"); !found || bravo.Size != 7 || bravo.FileCount != 1 || page.Current.FileCount != 2 {
+		t.Fatalf("List(/alpha) = %+v; bravo = %+v, %t; want recursive size/count 7/1 and current count 2", page.Current, bravo, found)
 	}
 
 	copyOperation, err := engine.Files().Copy(context.Background(), live, live, domain.CopyRequest{
@@ -132,7 +132,7 @@ func TestPortableRecursiveByteAggregatesTrackEveryFileMutation(t *testing.T) {
 	if err != nil || copyOperation.State != domain.OperationSucceeded {
 		t.Fatalf("Copy() = %+v, %v", copyOperation, err)
 	}
-	assertSizes(live, map[string]int64{"/": 32, "/alpha": 16, "/copy": 16, "/copy/bravo": 7})
+	assertAggregates(live, map[string][2]int64{"/": {32, 4}, "/alpha": {16, 2}, "/copy": {16, 2}, "/copy/bravo": {7, 1}})
 
 	trashOperation, err := engine.Files().Move(context.Background(), live, trash, domain.MoveRequest{
 		Source: domain.MustParseUserPath("/copy/bravo"), Destination: domain.MustParseUserPath("/trashed"), IdempotencyKey: "aggregate-trash-1",
@@ -140,8 +140,8 @@ func TestPortableRecursiveByteAggregatesTrackEveryFileMutation(t *testing.T) {
 	if err != nil || trashOperation.State != domain.OperationSucceeded {
 		t.Fatalf("trash Move() = %+v, %v", trashOperation, err)
 	}
-	assertSizes(live, map[string]int64{"/": 25, "/copy": 9})
-	assertSizes(trash, map[string]int64{"/": 7, "/trashed": 7})
+	assertAggregates(live, map[string][2]int64{"/": {25, 3}, "/copy": {9, 1}})
+	assertAggregates(trash, map[string][2]int64{"/": {7, 1}, "/trashed": {7, 1}})
 
 	restoreOperation, err := engine.Files().Move(context.Background(), trash, live, domain.MoveRequest{
 		Source: domain.MustParseUserPath("/trashed"), Destination: domain.MustParseUserPath("/restored"), IdempotencyKey: "aggregate-restore-1",
@@ -149,8 +149,8 @@ func TestPortableRecursiveByteAggregatesTrackEveryFileMutation(t *testing.T) {
 	if err != nil || restoreOperation.State != domain.OperationSucceeded {
 		t.Fatalf("restore Move() = %+v, %v", restoreOperation, err)
 	}
-	assertSizes(live, map[string]int64{"/": 32, "/restored": 7})
-	assertSizes(trash, map[string]int64{"/": 0})
+	assertAggregates(live, map[string][2]int64{"/": {32, 4}, "/restored": {7, 1}})
+	assertAggregates(trash, map[string][2]int64{"/": {0, 0}})
 
 	deleteOperation, err := engine.Files().Delete(context.Background(), live, domain.DeleteRequest{
 		Path: domain.MustParseUserPath("/restored"), IdempotencyKey: "aggregate-delete-1",
@@ -158,7 +158,7 @@ func TestPortableRecursiveByteAggregatesTrackEveryFileMutation(t *testing.T) {
 	if err != nil || deleteOperation.State != domain.OperationSucceeded {
 		t.Fatalf("Delete() = %+v, %v", deleteOperation, err)
 	}
-	assertSizes(live, map[string]int64{"/": 25, "/alpha": 16, "/copy": 9})
+	assertAggregates(live, map[string][2]int64{"/": {25, 3}, "/alpha": {16, 2}, "/copy": {9, 1}})
 }
 
 func findEntry(entries []domain.Entry, name string) (domain.Entry, bool) {
@@ -199,10 +199,10 @@ func TestReplicaDropAfterRootPrepareRecoversAtOneCommitPoint(t *testing.T) {
 	if _, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/destination/value.txt")); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("pre-commit destination became visible: %v", err)
 	}
-	if source, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/source")); err != nil || source.Size != 5 {
+	if source, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/source")); err != nil || source.Size != 5 || source.FileCount != 1 {
 		t.Fatalf("pre-commit source aggregate = %+v, %v", source, err)
 	}
-	if destination, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/destination")); err != nil || destination.Size != 0 {
+	if destination, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/destination")); err != nil || destination.Size != 0 || destination.FileCount != 0 {
 		t.Fatalf("pre-commit destination aggregate = %+v, %v", destination, err)
 	}
 	clock.Advance(2 * time.Minute)
@@ -215,10 +215,10 @@ func TestReplicaDropAfterRootPrepareRecoversAtOneCommitPoint(t *testing.T) {
 	if _, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/destination/value.txt")); err != nil {
 		t.Fatalf("recovered destination missing: %v", err)
 	}
-	if source, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/source")); err != nil || source.Size != 0 {
+	if source, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/source")); err != nil || source.Size != 0 || source.FileCount != 0 {
 		t.Fatalf("post-commit source aggregate = %+v, %v", source, err)
 	}
-	if destination, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/destination")); err != nil || destination.Size != 5 {
+	if destination, err := second.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/destination")); err != nil || destination.Size != 5 || destination.FileCount != 1 {
 		t.Fatalf("post-commit destination aggregate = %+v, %v", destination, err)
 	}
 }

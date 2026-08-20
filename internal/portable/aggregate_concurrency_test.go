@@ -18,6 +18,39 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/portable"
 )
 
+func TestReplicaFileCursorKeepsCurrentAggregateSnapshotAcrossMutation(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2041, 1, 1, 3, 4, 5, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(198, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	first := openEngine(t, backend, clock, 199, nil)
+	second := openEngine(t, backend, clock, 200, nil)
+	user, _ := domain.ParseUserID("WFhYWFhYWFhYWFhYWFhYWA")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	folder := domain.MustParseUserPath("/folder")
+	if _, err := first.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: folder}); err != nil {
+		t.Fatal(err)
+	}
+	uploadPortableFile(t, server.Client(), first.Files(), scope, domain.MustParseUserPath("/folder/a.bin"), []byte("four"))
+	uploadPortableFile(t, server.Client(), first.Files(), scope, domain.MustParseUserPath("/folder/b.bin"), []byte("sixsix"))
+	page, err := first.Files().List(context.Background(), scope, domain.ListRequest{Directory: folder, PageSize: 1})
+	if err != nil || page.Current.Size != 10 || page.Current.FileCount != 2 || len(page.Entries) != 1 || page.NextCursor == "" {
+		t.Fatalf("first replica List() = %+v, %v", page, err)
+	}
+	uploadPortableFile(t, server.Client(), second.Files(), scope, domain.MustParseUserPath("/folder/c.bin"), []byte("new"))
+	next, err := second.Files().List(context.Background(), scope, domain.ListRequest{Directory: folder, PageSize: 1, Cursor: page.NextCursor})
+	if err != nil || next.Current != page.Current || next.Current.Size != 10 || next.Current.FileCount != 2 || len(next.Entries) != 1 {
+		t.Fatalf("second replica cursor List() = %+v, %v; want current %+v", next, err, page.Current)
+	}
+	fresh, err := second.Files().List(context.Background(), scope, domain.ListRequest{Directory: folder})
+	if err != nil || fresh.Current.Size != 13 || fresh.Current.FileCount != 3 || len(fresh.Entries) != 3 {
+		t.Fatalf("fresh second replica List() = %+v, %v", fresh, err)
+	}
+}
+
 func TestEightReplicaConcurrentMultiFileCompletionConvergesRecursiveAggregates(t *testing.T) {
 	backend := objectmemory.New()
 	server := httptest.NewServer(backend)
@@ -264,7 +297,7 @@ func TestEightReplicaSameUploadCompletionIsIdempotentAndAggregatedOnce(t *testin
 			t.Errorf("replica %d CompleteUpload() error = %v", index, err)
 			continue
 		}
-		if entries[index].Size != int64(len(body)) {
+		if entries[index].Size != int64(len(body)) || entries[index].FileCount != 1 {
 			t.Errorf("replica %d completion = %+v", index, entries[index])
 		}
 	}
@@ -398,7 +431,7 @@ func TestConcurrentReplicaUploadCompletionAndAbortNeverSkewAggregate(t *testing.
 	if got == 0 && !errors.Is(statErr, domain.ErrNotFound) {
 		t.Fatalf("aborted winner left visible entry %+v, %v", entry, statErr)
 	}
-	if got == int64(len(body)) && (statErr != nil || entry.Size != got) {
+	if got == int64(len(body)) && (statErr != nil || entry.Size != got || entry.FileCount != 1) {
 		t.Fatalf("completion winner entry = %+v, %v; aggregate %d", entry, statErr, got)
 	}
 }
@@ -603,6 +636,7 @@ func assertVisibleRecursiveAggregates(t *testing.T, files interface {
 }, scope domain.Scope, directory domain.UserPath) int64 {
 	t.Helper()
 	var total int64
+	var fileCount int64
 	cursor := ""
 	for {
 		page, err := files.List(context.Background(), scope, domain.ListRequest{Directory: directory, PageSize: 2, Cursor: cursor})
@@ -611,14 +645,23 @@ func assertVisibleRecursiveAggregates(t *testing.T, files interface {
 		}
 		for _, entry := range page.Entries {
 			if entry.Kind == domain.EntryFile {
+				if entry.FileCount != 1 {
+					t.Errorf("file entry %s count = %d; want 1", entry.Path, entry.FileCount)
+				}
 				total += entry.Size
+				fileCount++
 				continue
 			}
 			childTotal := assertVisibleRecursiveAggregates(t, files, scope, entry.Path)
-			if entry.Size != childTotal {
+			child, err := files.Stat(context.Background(), scope, entry.Path)
+			if err != nil {
+				t.Fatalf("Stat(%s) error = %v", entry.Path, err)
+			}
+			if entry.Size != childTotal || entry.FileCount != child.FileCount {
 				t.Errorf("directory entry %s aggregate = %d; visible descendants = %d", entry.Path, entry.Size, childTotal)
 			}
 			total += childTotal
+			fileCount += child.FileCount
 		}
 		if page.NextCursor == "" {
 			break
@@ -629,8 +672,8 @@ func assertVisibleRecursiveAggregates(t *testing.T, files interface {
 	if err != nil {
 		t.Fatalf("Stat(%s) error = %v", directory, err)
 	}
-	if entry.Size != total {
-		t.Errorf("persisted aggregate %s = %d; visible descendants = %d", directory, entry.Size, total)
+	if entry.Size != total || entry.FileCount != fileCount {
+		t.Errorf("persisted aggregates %s = %d bytes/%d files; visible descendants = %d bytes/%d files", directory, entry.Size, entry.FileCount, total, fileCount)
 	}
 	return total
 }

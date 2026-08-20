@@ -50,9 +50,11 @@ func TestPortableDirectoryEntryValidationMatrix(t *testing.T) {
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.ModifiedAt = time.Time{} }),
 		withEntry(validDirectory, func(entry *storageformat.DirectoryEntry) { entry.DirectoryID = "" }),
 		withEntry(validDirectory, func(entry *storageformat.DirectoryEntry) { entry.BlobID = "blob" }),
+		withEntry(validDirectory, func(entry *storageformat.DirectoryEntry) { entry.FileCount = -1 }),
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.BlobID = "" }),
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.DirectoryID = "directory" }),
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.MediaType = "" }),
+		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.FileCount = 1 }),
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.Kind = "link" }),
 		withEntry(validFile, func(entry *storageformat.DirectoryEntry) { entry.LogicalVersion = "wrong" }),
 	}
@@ -69,6 +71,14 @@ func TestPortableDirectoryEntryValidationMatrix(t *testing.T) {
 	}
 	if _, err := recursiveByteSize([]storageformat.DirectoryEntry{{Size: math.MaxInt64}, {Size: 1}}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("overflowing recursive aggregate error = %v", err)
+	}
+	if _, err := recursiveFileCount([]storageformat.DirectoryEntry{{Kind: domain.EntryDirectory, FileCount: math.MaxInt64}, {Kind: domain.EntryDirectory, FileCount: 1}}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("overflowing recursive file count error = %v", err)
+	}
+	sorted := []domain.Entry{{Path: domain.MustParseUserPath("/large"), Name: "large", Size: 2}, {Path: domain.MustParseUserPath("/small"), Name: "small", Size: 1}}
+	sortDomainEntries(sorted, domain.SortSize, false)
+	if sorted[0].Name != "small" {
+		t.Fatalf("size sort = %+v", sorted)
 	}
 }
 
@@ -92,6 +102,14 @@ func TestPortableRecursiveAggregateChangeValidation(t *testing.T) {
 			trail := []directoryTrailNode{{scope: scope, path: rootPath, directoryID: storageformat.RootDirectoryID}}
 			return applyDirectoryChange(make(map[string]directoryUpdate), trail, []storageformat.DirectoryEntry{{Size: math.MaxInt64}, file})
 		},
+		"existing-file-count-invalid": func() error {
+			trail := []directoryTrailNode{{scope: scope, path: rootPath, directoryID: storageformat.RootDirectoryID, snapshot: directorySnapshot{entries: []storageformat.DirectoryEntry{{Kind: domain.EntryDirectory, FileCount: -1}}}}}
+			return applyDirectoryChange(make(map[string]directoryUpdate), trail, nil)
+		},
+		"replacement-file-count-invalid": func() error {
+			trail := []directoryTrailNode{{scope: scope, path: rootPath, directoryID: storageformat.RootDirectoryID}}
+			return applyDirectoryChange(make(map[string]directoryUpdate), trail, []storageformat.DirectoryEntry{{Kind: domain.EntryDirectory, FileCount: -1}})
+		},
 		"missing-ancestor": func() error {
 			trail := []directoryTrailNode{
 				{scope: scope, path: rootPath, directoryID: storageformat.RootDirectoryID},
@@ -108,10 +126,27 @@ func TestPortableRecursiveAggregateChangeValidation(t *testing.T) {
 			}
 			return applyDirectoryChange(make(map[string]directoryUpdate), trail, []storageformat.DirectoryEntry{file})
 		},
+		"ancestor-file-count-overflow": func() error {
+			overflowingChild := child
+			overflowingChild.FileCount = math.MaxInt64
+			trail := []directoryTrailNode{
+				{scope: scope, path: rootPath, directoryID: storageformat.RootDirectoryID, snapshot: directorySnapshot{entries: []storageformat.DirectoryEntry{overflowingChild}}},
+				{scope: scope, path: childPath, directoryID: "child"},
+			}
+			return applyDirectoryChange(make(map[string]directoryUpdate), trail, []storageformat.DirectoryEntry{file})
+		},
 		"ancestor-underflow": func() error {
 			trail := []directoryTrailNode{
 				{scope: scope, path: rootPath, directoryID: storageformat.RootDirectoryID, snapshot: directorySnapshot{entries: []storageformat.DirectoryEntry{child}}},
 				{scope: scope, path: childPath, directoryID: "child", snapshot: directorySnapshot{entries: []storageformat.DirectoryEntry{file}}},
+			}
+			return applyDirectoryChange(make(map[string]directoryUpdate), trail, nil)
+		},
+		"ancestor-file-count-underflow": func() error {
+			zeroFile := storageformat.DirectoryEntry{Kind: domain.EntryFile}
+			trail := []directoryTrailNode{
+				{scope: scope, path: rootPath, directoryID: storageformat.RootDirectoryID, snapshot: directorySnapshot{entries: []storageformat.DirectoryEntry{child}}},
+				{scope: scope, path: childPath, directoryID: "child", snapshot: directorySnapshot{entries: []storageformat.DirectoryEntry{zeroFile}}},
 			}
 			return applyDirectoryChange(make(map[string]directoryUpdate), trail, nil)
 		},
@@ -152,7 +187,7 @@ func TestPortableRecursiveAggregateChangeValidation(t *testing.T) {
 	if _, err := backend.Put(context.Background(), operationKey, encodeInternalEnvelope(t, fileOperationSchema, operationKey, 1, operation), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot, err := engine.Files().readDirectory(context.Background(), scope, storageformat.RootDirectoryID, true); err != nil || !snapshot.pending || snapshot.recursiveBytes != 0 {
+	if snapshot, err := engine.Files().readDirectory(context.Background(), scope, storageformat.RootDirectoryID, true); err != nil || !snapshot.pending || snapshot.recursiveBytes != 0 || snapshot.recursiveFileCount != 0 {
 		t.Fatalf("readDirectory(empty transition) = %+v, %v", snapshot, err)
 	}
 	corruptBackend := objectmemory.New()
@@ -196,7 +231,7 @@ func TestPortableRecursiveAggregateStatDoesNotReadManifestPages(t *testing.T) {
 	}
 	engine.backend = hooks
 	root, err := engine.Files().Stat(ctx, scope, domain.MustParseUserPath("/"))
-	if err != nil || root.Size != 7 {
+	if err != nil || root.Size != 7 || root.FileCount != 1 {
 		t.Fatalf("Stat(root) = %+v, %v", root, err)
 	}
 	if _, err := engine.Files().List(ctx, scope, domain.ListRequest{Directory: domain.MustParseUserPath("/")}); !errors.Is(err, domain.ErrUnavailable) {
@@ -240,7 +275,7 @@ func TestPortableDirectoryAndCursorHelpers(t *testing.T) {
 		t.Fatalf("long rename = %q, %v", longRename.String(), err)
 	}
 
-	cursor := listCursor{SchemaVersion: 1, UserID: "user", Area: "live", DirectoryPath: "/", DirectoryID: "root", ManifestID: "manifest", PageSize: 2, Sort: domain.SortName, Index: 1}
+	cursor := listCursor{SchemaVersion: 2, UserID: "user", Area: "live", DirectoryPath: "/", DirectoryID: "root", ManifestID: "manifest", PageSize: 2, Sort: domain.SortName, Index: 1}
 	encoded, err := encodeListCursor(cursor)
 	if err != nil {
 		t.Fatal(err)
@@ -249,7 +284,7 @@ func TestPortableDirectoryAndCursorHelpers(t *testing.T) {
 	if err != nil || decoded != cursor {
 		t.Fatalf("cursor round trip = %+v, %v", decoded, err)
 	}
-	for _, invalid := range []string{"%", base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":1} `)), base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":2}`))} {
+	for _, invalid := range []string{"%", base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":2} `)), base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":3}`))} {
 		if _, err := decodeListCursor(invalid); err == nil {
 			t.Fatalf("decodeListCursor(%q) unexpectedly succeeded", invalid)
 		}
@@ -623,6 +658,16 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 			invalid.RecursiveBytes++
 			objects[rootKey.String()] = encodeInternalEnvelope(t, directoryRootSchema, rootKey, rootEnvelope.Revision, invalid)
 		},
+		"negative-recursive-file-count": func(objects map[string][]byte) {
+			invalid := root
+			invalid.RecursiveFileCount = -1
+			objects[rootKey.String()] = encodeInternalEnvelope(t, directoryRootSchema, rootKey, rootEnvelope.Revision, invalid)
+		},
+		"recursive-file-count": func(objects map[string][]byte) {
+			invalid := root
+			invalid.RecursiveFileCount++
+			objects[rootKey.String()] = encodeInternalEnvelope(t, directoryRootSchema, rootKey, rootEnvelope.Revision, invalid)
+		},
 		"root-fields": func(objects map[string][]byte) {
 			invalid := root
 			invalid.DirectoryID = "other"
@@ -659,6 +704,19 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 			invalid := manifest
 			invalid.RecursiveBytes++
 			objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, invalid)
+		},
+		"manifest-recursive-file-count": func(objects map[string][]byte) {
+			invalid := manifest
+			invalid.RecursiveFileCount++
+			objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, invalid)
+		},
+		"entries-recursive-file-count": func(objects map[string][]byte) {
+			invalidRoot := root
+			invalidRoot.RecursiveFileCount++
+			objects[rootKey.String()] = encodeInternalEnvelope(t, directoryRootSchema, rootKey, rootEnvelope.Revision, invalidRoot)
+			invalidManifest := manifest
+			invalidManifest.RecursiveFileCount++
+			objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, invalidManifest)
 		},
 		"manifest-fields": func(objects map[string][]byte) {
 			invalid := manifest
@@ -708,24 +766,55 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 			if !errors.Is(err, domain.ErrInvalid) && !errors.Is(err, domain.ErrNotFound) {
 				t.Fatalf("corruption error = %v", err)
 			}
+			_, err = candidate.Files().LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: domain.MustParseUserPath("/"), Names: []string{"child"}})
+			if !errors.Is(err, domain.ErrInvalid) && !errors.Is(err, domain.ErrNotFound) {
+				t.Fatalf("corrupted child lookup error = %v", err)
+			}
 		})
 	}
 
-	missingManifestCursor, err := encodeListCursor(listCursor{SchemaVersion: 1, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: "missing", PageSize: 200, Sort: domain.SortName, Index: 1})
+	snapshotObjects := cloneInternalObjects(fixture)
+	invalidSnapshotManifest := manifest
+	invalidSnapshotManifest.RecursiveFileCount++
+	snapshotObjects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, invalidSnapshotManifest)
+	snapshotBackend := objectmemory.New()
+	if err := snapshotBackend.Import(snapshotObjects); err != nil {
+		t.Fatal(err)
+	}
+	snapshotEngine := openInternalTestEngine(t, snapshotBackend, clock, strings.NewReader(strings.Repeat("snapshot-file-count", 1<<16)))
+	if _, _, err := snapshotEngine.Files().readManifestSnapshot(context.Background(), scope, storageformat.RootDirectoryID, manifest.ManifestID); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("readManifestSnapshot(recursive file count mismatch) error = %v", err)
+	}
+
+	missingManifestCursor, err := encodeListCursor(listCursor{SchemaVersion: 2, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: "missing", PageSize: 200, Sort: domain.SortName, Index: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := engine.Files().List(context.Background(), scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), Cursor: missingManifestCursor}); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("missing cursor manifest error = %v", err)
 	}
-	offsetCursor, err := encodeListCursor(listCursor{SchemaVersion: 1, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 2})
+	replacedRootCursor, err := encodeListCursor(listCursor{SchemaVersion: 2, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: "replaced", ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Files().List(context.Background(), scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), Cursor: replacedRootCursor}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("replaced root cursor error = %v", err)
+	}
+	legacySchemaCursor, err := encodeListCursor(listCursor{SchemaVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeListCursor(legacySchemaCursor); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("legacy cursor schema error = %v", err)
+	}
+	offsetCursor, err := encodeListCursor(listCursor{SchemaVersion: 2, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := engine.Files().List(context.Background(), scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), Cursor: offsetCursor}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("cursor offset error = %v", err)
 	}
-	endCursor, err := encodeListCursor(listCursor{SchemaVersion: 1, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 1})
+	endCursor, err := encodeListCursor(listCursor{SchemaVersion: 2, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -737,6 +826,9 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 	}
 	if _, err := engine.Files().Stat(context.Background(), domain.Scope{}, domain.MustParseUserPath("/")); !errors.Is(err, domain.ErrUnauthorized) {
 		t.Fatalf("Stat(invalid scope) error = %v", err)
+	}
+	if _, err := engine.Files().LookupChildren(context.Background(), domain.Scope{}, domain.ChildLookupRequest{Directory: domain.MustParseUserPath("/"), Names: []string{"child"}}); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("LookupChildren(invalid scope) error = %v", err)
 	}
 
 	if _, err := engine.Get(context.Background(), state.Key{}); !errors.Is(err, domain.ErrInvalid) {
@@ -831,7 +923,7 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 	}
 	equalDigest := "same"
 	_ = replaceDirectoryEntry([]storageformat.DirectoryEntry{{Name: "b", NameDigest: equalDigest}}, nil, storageformat.DirectoryEntry{Name: "a", NameDigest: equalDigest})
-	if _, err := decodeListCursor(base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":2}`))); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := decodeListCursor(base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":1}`))); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid list cursor schema error = %v", err)
 	}
 	if err := decodeCanonicalValue([]byte("not-json"), &listCursor{}); !errors.Is(err, domain.ErrInvalid) {
@@ -891,7 +983,7 @@ func TestPortableRecursiveAggregateBoundaryFailuresAreDenied(t *testing.T) {
 	liveRootKey, liveRootEnvelope, liveRoot, livePageKey, livePageEnvelope, livePage, liveChildRootKey, liveChildEnvelope, liveChildRoot := loadDirectory("live", "child")
 	_, _, _, _, _, _, trashChildRootKey, trashChildEnvelope, trashChildRoot := loadDirectory("trash", "dest")
 	setPending := func(objects map[string][]byte, area string, key objectstore.Key, envelope storageformat.Envelope, root storageformat.DirectoryRoot, operationID string) {
-		root.Pending = &storageformat.DirectoryTransition{OperationID: operationID, Fence: 1, PreManifestID: root.ManifestID, PostManifestID: root.ManifestID, PostRecursiveBytes: root.RecursiveBytes}
+		root.Pending = &storageformat.DirectoryTransition{OperationID: operationID, Fence: 1, PreManifestID: root.ManifestID, PostManifestID: root.ManifestID, PostRecursiveBytes: root.RecursiveBytes, PostRecursiveFileCount: root.RecursiveFileCount}
 		objects[key.String()] = encodeInternalEnvelope(t, directoryRootSchema, key, envelope.Revision, root)
 		operationKey := storageformat.OperationKey(user.String(), operationID)
 		operation := storageformat.FileOperation{
@@ -923,6 +1015,27 @@ func TestPortableRecursiveAggregateBoundaryFailuresAreDenied(t *testing.T) {
 		invalidPage.Entries = replaceDirectoryEntry(invalidPage.Entries, &original, entry)
 		objects[livePageKey.String()] = encodeInternalEnvelope(t, directoryPageSchema, livePageKey, livePageEnvelope.Revision, invalidPage)
 	}
+	countMismatch := func(objects map[string][]byte) {
+		invalidRoot := liveRoot
+		invalidRoot.RecursiveFileCount = 1
+		objects[liveRootKey.String()] = encodeInternalEnvelope(t, directoryRootSchema, liveRootKey, liveRootEnvelope.Revision, invalidRoot)
+		manifestKey := storageformat.DirectoryManifestKey(user.String(), "live", storageformat.RootDirectoryID, liveRoot.ManifestID)
+		var manifestEnvelope storageformat.Envelope
+		var manifest storageformat.DirectoryManifest
+		if err := storageformat.DecodeEnvelope(objects[manifestKey.String()], manifestKey, directoryManifestSchema, &manifestEnvelope, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		manifest.RecursiveFileCount = 1
+		objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, manifest)
+		invalidPage := livePage
+		invalidPage.Entries = append([]storageformat.DirectoryEntry(nil), livePage.Entries...)
+		entry, _ := findDirectoryEntry(invalidPage.Entries, "child")
+		original := entry
+		entry.FileCount = 1
+		entry.LogicalVersion, _ = directoryEntryVersion(entry)
+		invalidPage.Entries = replaceDirectoryEntry(invalidPage.Entries, &original, entry)
+		objects[livePageKey.String()] = encodeInternalEnvelope(t, directoryPageSchema, livePageKey, livePageEnvelope.Revision, invalidPage)
+	}
 	missing := func(objects map[string][]byte) { delete(objects, liveChildRootKey.String()) }
 	pending := func(objects map[string][]byte) {
 		setPending(objects, "live", liveChildRootKey, liveChildEnvelope, liveChildRoot, "pending-source")
@@ -936,6 +1049,10 @@ func TestPortableRecursiveAggregateBoundaryFailuresAreDenied(t *testing.T) {
 		call   func(*Engine) error
 	}{
 		"stat-mismatch": {mismatch, func(candidate *Engine) error {
+			_, err := candidate.Files().Stat(ctx, live, domain.MustParseUserPath("/child"))
+			return err
+		}},
+		"stat-file-count-mismatch": {countMismatch, func(candidate *Engine) error {
 			_, err := candidate.Files().Stat(ctx, live, domain.MustParseUserPath("/child"))
 			return err
 		}},
@@ -1286,7 +1403,7 @@ func TestPortableUploadCompletionAggregateFailureAndRecoveryPaths(t *testing.T) 
 			t.Fatal(err)
 		}
 		const operationID = "pending-upload-destination"
-		snapshot.root.Pending = &storageformat.DirectoryTransition{OperationID: operationID, Fence: 1, PreManifestID: snapshot.root.ManifestID, PostManifestID: snapshot.root.ManifestID, PostRecursiveBytes: snapshot.recursiveBytes}
+		snapshot.root.Pending = &storageformat.DirectoryTransition{OperationID: operationID, Fence: 1, PreManifestID: snapshot.root.ManifestID, PostManifestID: snapshot.root.ManifestID, PostRecursiveBytes: snapshot.recursiveBytes, PostRecursiveFileCount: snapshot.recursiveFileCount}
 		rootBody := encodeInternalEnvelope(t, directoryRootSchema, snapshot.object.Key, snapshot.envelope.Revision+1, snapshot.root)
 		if _, err := backend.Put(ctx, snapshot.object.Key, rootBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: snapshot.object.Version}); err != nil {
 			t.Fatal(err)

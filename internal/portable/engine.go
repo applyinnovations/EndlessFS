@@ -125,14 +125,20 @@ func canonicalWriterConfiguration(configuration WriterConfiguration) (storagefor
 	keyrings := append([]string(nil), configuration.KeyringIdentifiers...)
 	features := append([]string(nil), configuration.RequiredFeatures...)
 	foundRecursiveBytes := false
+	foundRecursiveFileCounts := false
 	for _, feature := range features {
 		if feature == storageformat.FeatureRecursiveBytes {
 			foundRecursiveBytes = true
-			break
+		}
+		if feature == storageformat.FeatureRecursiveFileCounts {
+			foundRecursiveFileCounts = true
 		}
 	}
 	if !foundRecursiveBytes {
 		features = append(features, storageformat.FeatureRecursiveBytes)
+	}
+	if !foundRecursiveFileCounts {
+		features = append(features, storageformat.FeatureRecursiveFileCounts)
 	}
 	sort.Strings(keyrings)
 	sort.Strings(features)
@@ -204,7 +210,7 @@ func (e *Engine) initialize(ctx context.Context) error {
 	if err := validateCompatibleSuperblock(existing); err != nil {
 		return err
 	}
-	if reflect.DeepEqual(existing.RequiredFeatures, legacyRecursiveByteFeatures(e.writer.RequiredFeatures)) {
+	if isAggregatePredecessor(existing.RequiredFeatures, e.writer.RequiredFeatures) {
 		return e.migrateRecursiveByteAggregates(ctx, stored, existing)
 	}
 	if !reflect.DeepEqual(existing.RequiredFeatures, e.writer.RequiredFeatures) {
@@ -223,7 +229,7 @@ func (e *Engine) initialize(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if gate.CheckpointID == recursiveByteMigrationCheckpointID && gate.Mode != storageformat.GateOpen || len(gate.WriterFeatures) == 0 {
+	if gate.CheckpointID == recursiveByteMigrationCheckpointID && gate.Mode != storageformat.GateOpen || len(gate.WriterFeatures) == 0 || isAggregatePredecessor(gate.WriterFeatures, e.writer.RequiredFeatures) {
 		return e.migrateRecursiveByteAggregates(ctx, stored, existing)
 	}
 	if !reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {

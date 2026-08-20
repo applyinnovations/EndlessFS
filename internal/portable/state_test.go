@@ -107,7 +107,11 @@ func TestPortableStateCursorMovesAcrossReplicasAndKeepsImmutableSnapshot(t *test
 	if decodeErr != nil || bytes.Contains(decoded, []byte("endlessfs/v1/")) || bytes.Contains(decoded, []byte("cursor-owner")) {
 		t.Fatalf("state cursor exposed internal scope: %q, %v", decoded, decodeErr)
 	}
-	tampered := page.NextCursor[:len(page.NextCursor)-1] + "A"
+	tamperedByte := byte('A')
+	if page.NextCursor[0] == tamperedByte {
+		tamperedByte = 'B'
+	}
+	tampered := string(tamperedByte) + page.NextCursor[1:]
 	if _, err := second.List(context.Background(), prefix, state.PageRequest{Limit: 2, Cursor: tampered}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("tampered cursor error = %v", err)
 	}

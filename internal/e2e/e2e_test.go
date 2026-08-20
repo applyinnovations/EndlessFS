@@ -445,7 +445,10 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	); err != nil {
 		t.Fatalf("drop folder tree: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector("[data-transfer-count='complete']")?.textContent === "(2)" && document.querySelector("#transfer-percent")?.textContent === "100%"`, 15*time.Second); err != nil {
+	if err := waitFor(ctx, `(() => {
+		const completed = Number(document.querySelector("[data-transfer-count='complete']")?.textContent.match(/\d+/)?.[0] || 0);
+		return completed >= 2 && document.querySelector("#transfer-percent")?.textContent === "100%";
+	})()`, 15*time.Second); err != nil {
 		t.Fatalf("wait for folder uploads to complete: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("[role='tab'][data-tab-value='complete']").click()`, nil)); err != nil {

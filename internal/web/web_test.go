@@ -1195,6 +1195,8 @@ func TestLoadingWorkspaceOwnsTheLoadedGeometry(t *testing.T) {
 		`.loading-shell { position: fixed;`,
 		`.loading-content { min-height: calc(100vh - var(--efs-metric-toolbarHeight));`,
 		`.loading-table { height: calc(100vh - 224px);`,
+		`.compact-field { display: flex; width: 132px; flex: 0 0 132px;`,
+		`.drive-controls > button.secondary { width: 64px; flex: 0 0 64px; }`,
 	} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("loading workspace geometry is missing %q", required)

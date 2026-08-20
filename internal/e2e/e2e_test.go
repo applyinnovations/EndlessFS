@@ -545,9 +545,6 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := waitFor(ctx, `document.querySelector("#preview-content > img")?.naturalWidth > 0 && !document.querySelector("#preview-regenerate").disabled`, 15*time.Second); err != nil {
 		t.Fatalf("wait for regenerated preview: %v (%s)", err, browserStatus(ctx))
 	}
-	if err := chromedp.Run(ctx, emulation.SetDeviceMetricsOverride(800, 600, 1, false)); err != nil {
-		t.Fatalf("restore preview viewport: %v", err)
-	}
 	harness.previewStore.SetAvailable(false)
 	reopenStarted := time.Now()
 	if err := chromedp.Run(ctx,
@@ -595,6 +592,9 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 	if err := chromedp.Run(ctx, chromedp.KeyEvent(kb.ArrowLeft), chromedp.KeyEvent(kb.ArrowRight), chromedp.KeyEvent(kb.Escape)); err != nil {
 		t.Fatalf("preview navigation and close: %v", err)
+	}
+	if err := chromedp.Run(ctx, emulation.SetDeviceMetricsOverride(800, 600, 1, false)); err != nil {
+		t.Fatalf("restore preview viewport: %v", err)
 	}
 	harness.corruptPreview.Store(true)
 	if err := chromedp.Run(ctx,

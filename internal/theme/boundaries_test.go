@@ -62,6 +62,32 @@ func TestThemeAPIRegistriesSerializersAndTokenKinds(t *testing.T) {
 	}
 }
 
+func TestThemeMalformedInputBoundaryMatrix(t *testing.T) {
+	if contains([]string{"allowed"}, "missing") {
+		t.Fatal("contains reported a value outside the allowlist")
+	}
+	var reference AssetReference
+	if err := reference.UnmarshalJSON([]byte(`"`)); err == nil {
+		t.Fatal("asset reference accepted malformed string JSON")
+	}
+	if _, err := loadDirectory(filepath.Join(t.TempDir(), "missing")); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("missing theme directory = %v", err)
+	}
+	for name, svg := range map[string]string{
+		"invalid width":      `<svg width="wide" height="1"/>`,
+		"invalid height":     `<svg width="1" height="high"/>`,
+		"invalid viewbox":    `<svg viewBox="0 0 1"/>`,
+		"missing dimensions": `<svg/>`,
+		"text content":       `<svg width="1" height="1">unexpected</svg>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := sanitizeSVG([]byte(svg)); err == nil {
+				t.Fatal("unsafe SVG was accepted")
+			}
+		})
+	}
+}
+
 func TestThemeRichCompileRegistryAssets(t *testing.T) {
 	builtins, err := Builtins()
 	if err != nil {

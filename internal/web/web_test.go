@@ -64,8 +64,8 @@ func TestTransferMonitorUsesScalableSideSheet(t *testing.T) {
 	t.Parallel()
 
 	shell := string(mustRead("ui/index.html"))
-	stylesheet := string(mustRead("ui/app.css"))
-	script := string(mustRead("ui/app.js"))
+	stylesheet := string(applicationStylesheet)
+	script := string(applicationScript)
 	for _, required := range []string{
 		`class="transfer-panel transfer-sheet"`, `aria-controls="transfer-panel"`,
 		`id="transfer-close" class="icon-button"`, `setTransferSheetOpen`,
@@ -122,7 +122,7 @@ func TestTransferMonitorUsesScalableSideSheet(t *testing.T) {
 func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.T) {
 	t.Parallel()
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, forbidden := range []string{"localStorage", "sessionStorage", "innerHTML", "document.write", "serviceWorker"} {
 		if strings.Contains(script, forbidden) {
 			t.Errorf("browser source contains forbidden API %q", forbidden)
@@ -175,7 +175,7 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 func TestLocalTransferPreviewFixtureIsExplicitAndScaleOriented(t *testing.T) {
 	t.Parallel()
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`state.config.localFixture`,
 		`new URLSearchParams(location.search).get("fixture") !== "transfers"`,
@@ -212,7 +212,7 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 			t.Errorf("media browsing control is not always available: missing %q", alwaysAvailable)
 		}
 	}
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		"renderVirtualGrid", "renderVirtualList", "IntersectionObserver", "gridOverscanRows = 3", "listOverscanRows = 8", "directoryLoading", "URL.revokeObjectURL",
 		"/api/v1/previews/resolve", "/api/v1/previews/generations", "/api/v1/previews/operations/", "image/webp", "validatedPreviewBlob", "Invalid preview artifact body", "filterLoadedEntries",
@@ -249,7 +249,7 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 			t.Errorf("preview still uses a non-canonical action or inline status: %q", forbidden)
 		}
 	}
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{".media-grid", ".media-grid-spacer", "repeat(auto-fill", ".media-tile", "aspect-ratio: 1", "object-fit: contain"} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("media browser stylesheet is missing %q", required)
@@ -319,7 +319,7 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 func TestApplicationSurfacesUseBordersInsteadOfDropShadows(t *testing.T) {
 	t.Parallel()
 
-	for lineNumber, line := range strings.Split(string(mustRead("ui/app.css")), "\n") {
+	for lineNumber, line := range strings.Split(string(applicationStylesheet), "\n") {
 		if strings.Contains(line, "box-shadow:") && !strings.Contains(line, "inset") && !strings.Contains(line, "none") {
 			t.Errorf("stylesheet line %d uses an off-brand drop shadow: %s", lineNumber+1, strings.TrimSpace(line))
 		}
@@ -329,7 +329,7 @@ func TestApplicationSurfacesUseBordersInsteadOfDropShadows(t *testing.T) {
 func TestHorizontalDividersOnlySeparateRepeatedPeerItems(t *testing.T) {
 	t.Parallel()
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, forbidden := range []string{
 		".drive-controls {\n  display: flex;\n  min-height: 42px;\n  align-items: center;\n  gap: 7px;\n  border-block:",
 		".settings-section { border-top:",
@@ -381,7 +381,7 @@ func TestWorkspaceNavigationSharesTheHeaderLineWithTheBrand(t *testing.T) {
 		}
 	}
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`grid-template-columns: auto minmax(0, 1fr) auto;`,
 		`.app-tabs {`, `.app-tabs .tab {`, `.tab[aria-current="page"]`,
@@ -409,14 +409,55 @@ func TestWorkspaceNavigationSharesTheHeaderLineWithTheBrand(t *testing.T) {
 func TestDangerActionsUseTheFilledSemanticComponent(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{"ui/index.html", "ui/app.js", "ui/app.css"} {
-		if strings.Contains(string(mustRead(name)), "danger-quiet") {
+	for name, source := range map[string][]byte{
+		"ui/index.html":          mustRead("ui/index.html"),
+		"application JavaScript": applicationScript,
+		"application CSS":        applicationStylesheet,
+	} {
+		if strings.Contains(string(source), "danger-quiet") {
 			t.Errorf("%s retains an unfilled danger variant", name)
 		}
 	}
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	if !strings.Contains(stylesheet, ".danger { border-color: var(--efs-color-error); background: var(--efs-color-error);") {
 		t.Error("danger component is not filled with its semantic background")
+	}
+}
+
+func TestBrowserSourcesAreSplitIntoOrderedDomains(t *testing.T) {
+	t.Parallel()
+
+	scriptMarkers := map[string]string{
+		"ui/js/core.js":          "const state = {",
+		"ui/js/files.js":         "async function loadDirectory",
+		"ui/js/transfers.js":     "function transferFileSize",
+		"ui/js/previews.js":      "async function download",
+		"ui/js/operations.js":    "async function copyMove",
+		"ui/js/account-admin.js": "async function createShare",
+		"ui/js/bootstrap.js":     "function ask",
+	}
+	stylesheetMarkers := map[string]string{
+		"ui/css/foundation.css":     ":root {",
+		"ui/css/shell.css":          ".app-header {",
+		"ui/css/files.css":          ".surface-header {",
+		"ui/css/transfers.css":      ".transfer-panel {",
+		"ui/css/settings-admin.css": ".settings-list {",
+		"ui/css/overlays.css":       "dialog {",
+		"ui/css/responsive.css":     "@media (max-width: 900px)",
+	}
+	for _, sources := range []struct {
+		names   []string
+		markers map[string]string
+	}{
+		{names: applicationScriptSources, markers: scriptMarkers},
+		{names: applicationStylesheetSources, markers: stylesheetMarkers},
+	} {
+		for _, name := range sources.names {
+			source := string(mustRead(name))
+			if !strings.Contains(source, sources.markers[name]) {
+				t.Errorf("domain source %s is missing boundary marker %q", name, sources.markers[name])
+			}
+		}
 	}
 }
 
@@ -429,7 +470,7 @@ func TestTrashActionsUseCompactAccessibleSymbols(t *testing.T) {
 			t.Errorf("empty-trash symbol control is missing %q", required)
 		}
 	}
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{`iconButton("restore", "Restore"`, `iconButton("trash-x", "Delete Permanently"`, `node.setAttribute("aria-label", label)`, `node.dataset.tooltip = label`} {
 		if !strings.Contains(script, required) {
 			t.Errorf("trash row symbol controls are missing %q", required)
@@ -443,7 +484,7 @@ func TestTrashActionsUseCompactAccessibleSymbols(t *testing.T) {
 func TestFileRowsExposeDirectIconActionsWithoutAnActionMenu(t *testing.T) {
 	t.Parallel()
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`actions.className = "row-actions file-row-actions"`,
 		"iconButton(\"download\", `Download ${entry.name}`",
@@ -491,7 +532,7 @@ func TestSelectionActionsFloatWithoutReplacingDriveControls(t *testing.T) {
 		}
 	}
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`.drive-control-stack { display: block; }`,
 		`position: fixed;`,
@@ -507,7 +548,7 @@ func TestSelectionActionsFloatWithoutReplacingDriveControls(t *testing.T) {
 		t.Error("selection still hides the persistent drive controls")
 	}
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	if strings.Contains(script, `classList.toggle("selection-active"`) {
 		t.Error("selection still swaps the drive control surface")
 	}
@@ -516,7 +557,7 @@ func TestSelectionActionsFloatWithoutReplacingDriveControls(t *testing.T) {
 func TestTimestampsUseTheCanonicalCompactCalendarFormat(t *testing.T) {
 	t.Parallel()
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`sameCalendarDate(date, today) ? "Today"`,
 		`sameCalendarDate(date, yesterday) ? "Yesterday"`,
@@ -541,7 +582,7 @@ func TestAdminUsersUseDeterministicTableColumns(t *testing.T) {
 			t.Errorf("admin user table is missing %q", required)
 		}
 	}
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		".admin-users-section { border-top: 0;",
 		".user-actions { display: grid;",
@@ -559,7 +600,7 @@ func TestAdminUsersUseDeterministicTableColumns(t *testing.T) {
 			t.Errorf("admin user layout is missing %q", required)
 		}
 	}
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`iconButton(user.status === "enabled" ? "user-off" : "user-check"`,
 		`iconButton(user.admin ? "shield-minus" : "shield-plus"`,
@@ -580,7 +621,7 @@ func TestIconControlsUsePinnedTablerGeometryAndDeterministicTooltips(t *testing.
 	t.Parallel()
 
 	shell := string(mustRead("ui/index.html"))
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{`aria-label="Sign out" data-icon="logout"`, `aria-label="Upload folder" data-icon="folder-up"`, `id="action-tooltip" class="action-tooltip" role="tooltip" hidden`} {
 		if !strings.Contains(shell, required) {
 			t.Errorf("icon tooltip shell is missing %q", required)
@@ -606,7 +647,7 @@ func TestIconControlsUsePinnedTablerGeometryAndDeterministicTooltips(t *testing.
 			t.Errorf("static icon control is missing a tooltip source and accessible label: <%s", strings.SplitN(tag, ">", 2)[0])
 		}
 	}
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		"const iconPaths = Object.freeze({",
 		`"folder-plus":`,
@@ -626,7 +667,7 @@ func TestIconControlsUsePinnedTablerGeometryAndDeterministicTooltips(t *testing.
 			t.Errorf("deterministic icon tooltip behavior is missing %q", required)
 		}
 	}
-	stylesheet = string(mustRead("ui/app.css"))
+	stylesheet = string(applicationStylesheet)
 	for _, required := range []string{
 		".icon-button {",
 		"border: 0;",
@@ -653,12 +694,12 @@ func TestIconControlsUsePinnedTablerGeometryAndDeterministicTooltips(t *testing.
 func TestTrailingTableIconActionsDoNotRepeatEndPadding(t *testing.T) {
 	t.Parallel()
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	if !strings.Contains(stylesheet, `.table-icon-action-cell { padding-inline-end: 0; }`) {
 		t.Error("trailing transparent icon controls still repeat the table cell end padding")
 	}
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`if (columnIndex === columns - 1) cell.className = "table-icon-action-cell";`,
 		`actionCell.className = "table-icon-action-cell";`,
@@ -676,7 +717,7 @@ func TestTrailingTableIconActionsDoNotRepeatEndPadding(t *testing.T) {
 func TestDirectorySizesRemainBlankWithoutRecursiveAggregate(t *testing.T) {
 	t.Parallel()
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`text("span", entry.kind === "directory" ? "" : formatBytes(entry.size), "media-tile-meta")`,
 		`const sizeCell = text("td", entry.kind === "directory" ? "" : formatBytes(entry.size));`,
@@ -723,7 +764,7 @@ func TestSettingsAndAdminActionsUseCanonicalTransparentIcons(t *testing.T) {
 		}
 	}
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`iconButton("key-off", `, `"Remove passkey"`,
 		`iconButton("link-off", `, `"Revoke share"`, `"Revoke invite"`,
@@ -731,7 +772,7 @@ func TestSettingsAndAdminActionsUseCanonicalTransparentIcons(t *testing.T) {
 		`iconButton("copy", "Copy link"`,
 		`.icon-button.more-button { min-width: var(--efs-metric-controlHeight); }`,
 	} {
-		if !strings.Contains(script+string(mustRead("ui/app.css")), required) {
+		if !strings.Contains(script+string(applicationStylesheet), required) {
 			t.Errorf("dynamic Settings or Admin icon action is missing %q", required)
 		}
 	}
@@ -745,7 +786,7 @@ func TestSettingsAndAdminActionsUseCanonicalTransparentIcons(t *testing.T) {
 func TestDestructiveConfirmationActionsUseExplicitText(t *testing.T) {
 	t.Parallel()
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`confirmControl.className = "danger"`,
 		`confirmControl.replaceChildren(document.createTextNode(confirmLabel))`,
@@ -795,7 +836,7 @@ func TestAccountAndThemeUseTheCanonicalSettingsRow(t *testing.T) {
 			t.Errorf("settings form %q does not use the canonical heading-and-content section layout", formID)
 		}
 	}
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		".settings-form { display: block; }",
 		"margin-block-start: 8px;",
@@ -829,7 +870,7 @@ func TestSettingsAndAdminHeadingActionsShareCenterline(t *testing.T) {
 		t.Errorf("admin view does not expose two canonical action headings; got %d", count)
 	}
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`.settings-section > .panel-heading {`,
 		`min-height: var(--efs-metric-controlHeight);`,
@@ -845,7 +886,7 @@ func TestSettingsAndAdminHeadingActionsShareCenterline(t *testing.T) {
 func TestHeaderActionsAlignWithThePageContentEdge(t *testing.T) {
 	t.Parallel()
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`padding-inline: var(--efs-spacing-pageGutter);`,
 		`.app-header { padding-inline: 8px; }`,
@@ -875,7 +916,7 @@ func TestNewProjectBrandShellAndAssetManifest(t *testing.T) {
 		}
 	}
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		"--efs-color-background", "--efs-color-foreground", "--efs-color-primary", "--efs-color-primary-tint",
 		"--efs-color-success", "--efs-color-warning", "--efs-color-error", "@media (prefers-reduced-motion: reduce)",
@@ -939,7 +980,7 @@ func TestBrandMarkUsesApprovedInfiniteFolderGeometry(t *testing.T) {
 func TestOriginalFileReusesViewerWithoutCollapsingHeader(t *testing.T) {
 	t.Parallel()
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`function syncViewerNavigation(standalone = false)`,
 		`byID("preview-previous").hidden = false;`,
@@ -963,7 +1004,7 @@ func TestOriginalFileReusesViewerWithoutCollapsingHeader(t *testing.T) {
 		}
 	}
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`grid-template-columns: var(--efs-metric-controlHeight) minmax(0, 1fr) var(--efs-metric-controlHeight) var(--efs-metric-controlHeight);`,
 		`#preview-previous { grid-column: 1; }`,
@@ -984,7 +1025,7 @@ func TestRoutineTrashIsImmediateAndRecoverable(t *testing.T) {
 	if !strings.Contains(shell, `id="toast-region"`) {
 		t.Fatal("new project shell is missing the non-blocking recovery surface")
 	}
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		"showTrashUndo", `/api/v1/trash/${encodeURIComponent(item.trashID)}/restore`,
 		`body: { conflict: "rename" }`,
@@ -1001,7 +1042,7 @@ func TestRoutineTrashIsImmediateAndRecoverable(t *testing.T) {
 func TestToastsUseNeutralSurfacesWithSemanticAccents(t *testing.T) {
 	t.Parallel()
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`background: var(--efs-color-surface);`,
 		`color: var(--efs-color-foreground);`,
@@ -1024,7 +1065,7 @@ func TestToastsUseNeutralSurfacesWithSemanticAccents(t *testing.T) {
 		}
 	}
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`toast.className = "toast success";`,
 		`function showToast(message, level, duration = 8000)`,
@@ -1059,12 +1100,12 @@ func TestAllActionsUseResponsiveSheetInsteadOfCenteredModal(t *testing.T) {
 		}
 	}
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	if strings.Contains(script, `dialog.classList.toggle("action-sheet"`) {
 		t.Error("shared action dialog still conditionally falls back to a centered modal")
 	}
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`.action-sheet {`,
 		`inset: 0 0 0 auto;`,
@@ -1084,7 +1125,7 @@ func TestAllActionsUseResponsiveSheetInsteadOfCenteredModal(t *testing.T) {
 func TestActionSheetTextWrapsWithoutHorizontalOverflow(t *testing.T) {
 	t.Parallel()
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`.action-sheet .sheet-heading {`,
 		`grid-template-columns: minmax(0, 1fr) var(--efs-metric-controlHeight);`,
@@ -1124,7 +1165,7 @@ func TestLoadingWorkspaceOwnsTheLoadedGeometry(t *testing.T) {
 		}
 	}
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`.loading-shell { min-height: calc(100vh - var(--efs-metric-toolbarHeight));`,
 		`.loading-shell { position: fixed;`,
@@ -1136,7 +1177,7 @@ func TestLoadingWorkspaceOwnsTheLoadedGeometry(t *testing.T) {
 		}
 	}
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`async function enterApplication()`,
 		`const routeLoad = setRoute(routeFromPath(), false);`,
@@ -1172,7 +1213,7 @@ func TestDriveBreadcrumbsSitBetweenControlsAndFileContent(t *testing.T) {
 		}
 	}
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`.drive-breadcrumbs { min-height: 30px; padding-block: 1px; }`,
 		`.loading-table { height: calc(100vh - 224px);`,
@@ -1199,7 +1240,7 @@ func TestFileStateOccupiesContentWithoutMovingTableHeader(t *testing.T) {
 		t.Error("file state is not placed after the persistent table structure")
 	}
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`#drive-state {`,
 		`position: absolute;`,
@@ -1212,7 +1253,7 @@ func TestFileStateOccupiesContentWithoutMovingTableHeader(t *testing.T) {
 		}
 	}
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`function syncFilePresentation()`,
 		`byID("drop-target").dataset.presentation = gridEnabled ? "grid" : "list";`,
@@ -1227,7 +1268,7 @@ func TestFileStateOccupiesContentWithoutMovingTableHeader(t *testing.T) {
 func TestTablesUseOneCanonicalDivider(t *testing.T) {
 	t.Parallel()
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`--efs-border-tableDivider: 1px solid var(--efs-color-border);`,
 		`table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: fixed; }`,
@@ -1273,7 +1314,7 @@ func TestOwnerPublicAndTrashReuseOneFileBrowserSurface(t *testing.T) {
 		}
 	}
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`function syncFileBrowserAccess(access)`,
 		`host.append(surface);`,
@@ -1290,7 +1331,7 @@ func TestOwnerPublicAndTrashReuseOneFileBrowserSurface(t *testing.T) {
 		}
 	}
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`#file-browser-surface:not([data-access="owner"]) .owner-only { display: none !important; }`,
 		`#file-browser-surface[data-access="trash"] .trash-only { display: flex !important; }`,
@@ -1304,7 +1345,7 @@ func TestOwnerPublicAndTrashReuseOneFileBrowserSurface(t *testing.T) {
 func TestListLoadingOnlyReplacesPerItemContent(t *testing.T) {
 	t.Parallel()
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`renderTableLoadingRows("file-rows", "file", 6, 6)`,
 		`async function loadTrash(append = false)`,
@@ -1325,7 +1366,7 @@ func TestListLoadingOnlyReplacesPerItemContent(t *testing.T) {
 		}
 	}
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, forbidden := range []string{".loading-table-heading", ".loading-folder-control", ".loading-controls"} {
 		if strings.Contains(stylesheet, forbidden) {
 			t.Errorf("non-item component retains loading styling %q", forbidden)
@@ -1357,7 +1398,7 @@ func TestSettingsCollectionsUseBoundedVirtualTables(t *testing.T) {
 		}
 	}
 
-	script := string(mustRead("ui/app.js"))
+	script := string(applicationScript)
 	for _, required := range []string{
 		`function renderVirtualSettingsTable(`,
 		`const settingsOverscanRows = 6;`,
@@ -1374,7 +1415,7 @@ func TestSettingsCollectionsUseBoundedVirtualTables(t *testing.T) {
 		}
 	}
 
-	stylesheet := string(mustRead("ui/app.css"))
+	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
 		`.settings-table-scroll {`,
 		`grid-template-columns: minmax(0, 1fr);`,

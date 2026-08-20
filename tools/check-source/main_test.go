@@ -12,8 +12,8 @@ func TestCheckAcceptsGoAndApplicationAssets(t *testing.T) {
 
 	root := t.TempDir()
 	writeFixture(t, root, "main.go")
-	writeFixture(t, root, "internal/web/ui/app.js")
-	writeFixture(t, root, "internal/web/ui/app.css")
+	writeFixture(t, root, "internal/web/ui/js/files.js")
+	writeFixture(t, root, "internal/web/ui/css/files.css")
 
 	violations, err := check(root)
 	if err != nil {

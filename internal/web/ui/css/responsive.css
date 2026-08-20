@@ -1,0 +1,104 @@
+@media (max-width: 900px) {
+  #share-table { min-width: 0; }
+  #share-table th:nth-child(3),
+  #share-table td:nth-child(3),
+  #share-table th:nth-child(5),
+  #share-table td:nth-child(5) { display: none; }
+  #users-table { min-width: 0; }
+  #users-table th:nth-child(2),
+  #users-table td:nth-child(2) { width: 82px; }
+  #users-table th:nth-child(3),
+  #users-table td:nth-child(3) { width: 112px; }
+  #users-table th:nth-child(4),
+  #users-table td:nth-child(4) { display: none; }
+  #users-table th:last-child,
+  #users-table td:last-child { width: 120px; }
+  .user-actions { gap: 4px; }
+}
+
+@media (max-width: 760px) {
+  :root { --efs-spacing-pageGutter: 12px; }
+  .action-sheet { inset: 0; width: 100%; max-width: none; border: 0; }
+  .app-tabs .tab { padding-inline: 8px; }
+  .header-transfer-speed { display: none; }
+  .view { padding-block-start: 10px; }
+  .drive-header { align-items: center; }
+  .location-heading { min-width: 0; }
+  .location-heading h1 { display: none; }
+  .heading-actions { flex: 0 0 auto; }
+  .drive-controls { flex-wrap: wrap; }
+  .search-field { min-width: 0; flex-basis: calc(100% - 156px); }
+  .compact-field[for="file-sort"] span { display: none; }
+  .metadata-filters { position: fixed; inset: auto 8px 8px; width: auto; max-height: 60vh; overflow: auto; }
+  #file-table th:nth-child(3), #file-table td:nth-child(3),
+  #file-table th:nth-child(4), #file-table td:nth-child(4),
+  #file-table th:nth-child(5), #file-table td:nth-child(5) { display: none; }
+  #file-table th:last-child, #file-table td:last-child { width: 168px; }
+  .row-actions { gap: 2px; }
+  .row-actions button { max-width: 58px; overflow: hidden; padding-inline: 4px; text-overflow: ellipsis; }
+  .selection-bar { max-width: calc(100vw - 16px); }
+  .media-grid { height: calc(100vh - 224px); }
+  #list-presentation { height: calc(100vh - 224px); }
+  .loading-table { height: calc(100vh - 224px); }
+  .transfer-panel { inset: 0; width: 100%; height: 100vh; height: 100dvh; max-height: none; border-inline-start: 0; }
+  .record-main { align-items: flex-start; flex-direction: column; }
+  .preview-layout { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; }
+  .preview-details {
+    max-height: min(38vh, 220px);
+    max-height: min(38dvh, 220px);
+    gap: 6px;
+    padding: 8px 10px 10px;
+  }
+  .preview-actions { overflow-x: auto; }
+  .metadata-list { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 12px; }
+  .metadata-list div { min-height: 22px; grid-template-columns: auto minmax(0, 1fr); gap: 6px; padding-block: 1px; }
+  .metadata-list div:first-child { grid-column: 1 / -1; }
+}
+
+@media (max-width: 560px) {
+  .header-transfer-eta { display: none; }
+  #passkey-table { min-width: 0; }
+  #passkey-table th:nth-child(2),
+  #passkey-table td:nth-child(2),
+  #share-table th:nth-child(4),
+  #share-table td:nth-child(4) { display: none; }
+  #passkey-table th:nth-child(3),
+  #passkey-table td:nth-child(3) { width: 140px; }
+  #passkey-table th:last-child,
+  #passkey-table td:last-child,
+  #share-table th:last-child,
+  #share-table td:last-child { width: 70px; }
+  #share-table th:nth-child(2),
+  #share-table td:nth-child(2) { width: 72px; }
+  #users-table th:nth-child(3),
+  #users-table td:nth-child(3) { display: none; }
+  #users-table th:nth-child(2),
+  #users-table td:nth-child(2) { width: 76px; }
+  #users-table th:last-child,
+  #users-table td:last-child { width: 116px; }
+  .user-actions { gap: 2px; }
+}
+
+@media (max-width: 390px) {
+  .app-header { padding-inline: 8px; }
+  .view { padding-inline: 8px; }
+  .command-bar { gap: 3px; }
+  .command-bar button,
+  .command-bar .button { padding-inline: 7px; }
+  .header-transfer-count { display: none; }
+  .drive-controls { gap: 4px; }
+  .search-field { flex-basis: calc(100% - 140px); }
+  .filter-disclosure summary { padding-inline: 6px; }
+  .metadata-filters { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}

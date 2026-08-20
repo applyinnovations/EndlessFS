@@ -56,7 +56,11 @@ This document fixes the v1 JSON field casing and control-plane routes implemente
 
 `preview: true` is accepted only for provider-validated PNG, JPEG, GIF, WebP, PDF, and UTF-8 `text/plain` within `ENDLESSFS_TEXT_PREVIEW_MAX_BYTES`. HTML, JavaScript, SVG, XML, office, unknown, oversized, and media-spoofed files remain attachment-only.
 
-File-entry `size` is the file's byte length. Directory-entry `size`, including the entry returned for `/`, is the persisted recursive sum of all descendant file bytes in that live or trash tree; looking it up verifies constant-size root and manifest metadata without scanning manifest pages or the subtree.
+File-entry `size` is the file's byte length. Directory-entry `size`, including the entry returned for `/`, is the persisted recursive sum of all descendant file bytes in that live or trash tree; looking it up verifies constant-size root and manifest metadata without scanning the subtree.
+
+`GET /api/v1/files` returns `{ "current": Entry, "entries": [Entry...], "nextCursor": "..." }`. `current` is the directory represented by `path`; its `size` and every child row come from the same immutable manifest snapshot. Every subsequent page selected by `nextCursor` repeats that exact `current` entry even if the live directory changes between requests. Empty directories have `current.size: 0`.
+
+Each successful `GET /api/v1/trash` row preserves the prior trash-record fields and adds exact `size` plus file `mediaType`. File size is logical file length; directory size is recursive logical file length; empty directories and zero-byte files return `0`. Directory media type is absent. The service joins each state page to one bounded snapshot lookup in the persisted trash root, rather than issuing one `Stat` per row. Canonical trash records remain schema v1: buckets upgraded from the preceding release use the automatically migrated trash directory tree without rewriting application records.
 
 ## Generated image previews (v1.1)
 
@@ -80,4 +84,4 @@ Resolve items return `disabled`, `unsupported`, `ineligible`, `missing`, `genera
 | `GET` | `/api/v1/public/shares/{token}` | Relative `path`, `limit`, and scoped `cursor` |
 | `POST` | `/api/v1/public/shares/{token}/downloads` | Relative `path`, exact `version`, optional `preview` |
 
-Public errors deliberately do not distinguish absent, expired, revoked, disabled-owner, moved, replaced, or trashed roots. Folder output paths are relative to the recorded root, and public routes cannot upload, mutate, re-share, or escape that subtree.
+Successful public-share metadata is `{ "root": PublicEntry, "current": PublicEntry, "entries": [PublicEntry...], "nextCursor": "..." }`. `root` is always the originally shared file or directory. `current` is the relative target currently being viewed and, for a directory, carries the recursive size from the listing snapshot. A file share returns the root as `current`. Public errors deliberately do not distinguish absent, expired, revoked, disabled-owner, moved, replaced, or trashed roots. Folder output paths are relative to the recorded root, and public routes cannot upload, mutate, re-share, expose owner/provider identifiers, or escape that subtree.

@@ -18,6 +18,39 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/portable"
 )
 
+func TestReplicaFileCursorKeepsCurrentAggregateSnapshotAcrossMutation(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2041, 1, 1, 3, 4, 5, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(198, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	first := openEngine(t, backend, clock, 199, nil)
+	second := openEngine(t, backend, clock, 200, nil)
+	user, _ := domain.ParseUserID("WFhYWFhYWFhYWFhYWFhYWA")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	folder := domain.MustParseUserPath("/folder")
+	if _, err := first.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: folder}); err != nil {
+		t.Fatal(err)
+	}
+	uploadPortableFile(t, server.Client(), first.Files(), scope, domain.MustParseUserPath("/folder/a.bin"), []byte("four"))
+	uploadPortableFile(t, server.Client(), first.Files(), scope, domain.MustParseUserPath("/folder/b.bin"), []byte("sixsix"))
+	page, err := first.Files().List(context.Background(), scope, domain.ListRequest{Directory: folder, PageSize: 1})
+	if err != nil || page.Current.Size != 10 || len(page.Entries) != 1 || page.NextCursor == "" {
+		t.Fatalf("first replica List() = %+v, %v", page, err)
+	}
+	uploadPortableFile(t, server.Client(), second.Files(), scope, domain.MustParseUserPath("/folder/c.bin"), []byte("new"))
+	next, err := second.Files().List(context.Background(), scope, domain.ListRequest{Directory: folder, PageSize: 1, Cursor: page.NextCursor})
+	if err != nil || next.Current != page.Current || next.Current.Size != 10 || len(next.Entries) != 1 {
+		t.Fatalf("second replica cursor List() = %+v, %v; want current %+v", next, err, page.Current)
+	}
+	fresh, err := second.Files().List(context.Background(), scope, domain.ListRequest{Directory: folder})
+	if err != nil || fresh.Current.Size != 13 || len(fresh.Entries) != 3 {
+		t.Fatalf("fresh second replica List() = %+v, %v", fresh, err)
+	}
+}
+
 func TestEightReplicaConcurrentMultiFileCompletionConvergesRecursiveAggregates(t *testing.T) {
 	backend := objectmemory.New()
 	server := httptest.NewServer(backend)

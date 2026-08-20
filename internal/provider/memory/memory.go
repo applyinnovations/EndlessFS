@@ -24,6 +24,7 @@ import (
 
 const (
 	OperationList            = "list"
+	OperationLookupChildren  = "lookup_children"
 	OperationStat            = "stat"
 	OperationCreateDirectory = "create_directory"
 	OperationCreateUpload    = "create_upload"
@@ -109,6 +110,7 @@ type listSnapshot struct {
 	sort       domain.SortField
 	descending bool
 	entries    []domain.Entry
+	current    domain.Entry
 	index      int
 }
 
@@ -256,11 +258,12 @@ func (p *Provider) List(ctx context.Context, scope domain.Scope, request domain.
 		}
 		return p.listPageLocked(request.Cursor, snapshot), nil
 	}
-	if !request.Directory.IsRoot() {
-		item, found := p.scopeObjectsLocked(scope)[request.Directory.String()]
-		if !found || item.entry.Kind != domain.EntryDirectory {
-			return domain.ListPage{}, domain.NewError(domain.ErrorNotFound, "directory not found")
+	current, err := p.statLocked(scope, request.Directory)
+	if err != nil || current.Kind != domain.EntryDirectory {
+		if err != nil {
+			return domain.ListPage{}, err
 		}
+		return domain.ListPage{}, domain.NewError(domain.ErrorNotFound, "directory not found")
 	}
 	entries := make([]domain.Entry, 0)
 	for _, item := range p.scopeObjectsLocked(scope) {
@@ -270,7 +273,7 @@ func (p *Provider) List(ctx context.Context, scope domain.Scope, request domain.
 	}
 	sortEntries(entries, request.Sort, request.Descending)
 	if len(entries) <= pageSize {
-		return domain.ListPage{Entries: entries}, nil
+		return domain.ListPage{Current: current, Entries: entries}, nil
 	}
 	cursor, err := p.ids.OpaqueID()
 	if err != nil {
@@ -278,7 +281,7 @@ func (p *Provider) List(ctx context.Context, scope domain.Scope, request domain.
 	}
 	snapshot := &listSnapshot{
 		scope: scope, directory: request.Directory, pageSize: pageSize,
-		sort: request.Sort, descending: request.Descending, entries: entries,
+		sort: request.Sort, descending: request.Descending, entries: entries, current: current,
 	}
 	p.listSnapshots[cursor] = snapshot
 	return p.listPageLocked(cursor, snapshot), nil
@@ -292,7 +295,51 @@ func (p *Provider) listPageLocked(cursor string, snapshot *listSnapshot) domain.
 		delete(p.listSnapshots, cursor)
 		cursor = ""
 	}
-	return domain.ListPage{Entries: entries, NextCursor: cursor}
+	return domain.ListPage{Current: snapshot.current, Entries: entries, NextCursor: cursor}
+}
+
+func (p *Provider) LookupChildren(ctx context.Context, scope domain.Scope, request domain.ChildLookupRequest) (domain.ChildLookup, error) {
+	if err := validateContextScope(ctx, scope); err != nil {
+		return domain.ChildLookup{}, err
+	}
+	if !request.Directory.Valid() || len(request.Names) < 1 || len(request.Names) > 1000 {
+		return domain.ChildLookup{}, domain.NewError(domain.ErrorInvalid, "child lookup request is invalid")
+	}
+	paths := make([]domain.UserPath, 0, len(request.Names))
+	seen := make(map[string]struct{}, len(request.Names))
+	for _, name := range request.Names {
+		path, err := request.Directory.Join(name)
+		if err != nil {
+			return domain.ChildLookup{}, domain.NewError(domain.ErrorInvalid, "child lookup name is invalid")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return domain.ChildLookup{}, domain.NewError(domain.ErrorInvalid, "child lookup contains duplicate names")
+		}
+		seen[name] = struct{}{}
+		paths = append(paths, path)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.beforeLocked(OperationLookupChildren); err != nil {
+		return domain.ChildLookup{}, err
+	}
+	current, err := p.statLocked(scope, request.Directory)
+	if err != nil {
+		return domain.ChildLookup{}, err
+	}
+	if current.Kind != domain.EntryDirectory {
+		return domain.ChildLookup{}, domain.NewError(domain.ErrorNotFound, "directory not found")
+	}
+	result := domain.ChildLookup{Current: current, Entries: make([]domain.Entry, 0, len(paths))}
+	objects := p.scopeObjectsLocked(scope)
+	for _, path := range paths {
+		item, found := objects[path.String()]
+		if !found || item.entry.Path.Parent() != request.Directory {
+			return domain.ChildLookup{}, domain.NewError(domain.ErrorNotFound, "entry not found")
+		}
+		result.Entries = append(result.Entries, item.entry)
+	}
+	return result, nil
 }
 
 func (p *Provider) Stat(ctx context.Context, scope domain.Scope, path domain.UserPath) (domain.Entry, error) {

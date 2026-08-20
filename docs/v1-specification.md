@@ -441,6 +441,7 @@ Only trusted application code may create a `Scope`. Provider implementations rec
 ```go
 type StorageProvider interface {
     List(ctx context.Context, scope Scope, req ListRequest) (ListPage, error)
+    LookupChildren(ctx context.Context, scope Scope, req ChildLookupRequest) (ChildLookup, error)
     Stat(ctx context.Context, scope Scope, path UserPath) (Entry, error)
     CreateDirectory(ctx context.Context, scope Scope, req CreateDirectoryRequest) (Entry, error)
 
@@ -458,7 +459,8 @@ type StorageProvider interface {
 
 Required semantics:
 
-- `List` is one directory only, stable within a page sequence, paginated with an opaque cursor, and never leaks another scope.
+- `List` is one directory only, stable within a page sequence, paginated with an opaque cursor, and never leaks another scope. Every page returns a typed `current` directory entry whose recursive size and metadata belong to the same immutable manifest snapshot as the child rows; later cursor pages repeat that exact entry rather than resolving the current live path again.
+- `LookupChildren` accepts one validated directory and 1–1000 unique immediate-child names. It returns the current directory and every requested child, in request order, from one authoritative directory snapshot. Implementations MUST resolve the directory manifest once, MUST NOT issue one provider/application `Stat` per child, and fail closed if any requested entry is absent, negative, overflowing, malformed, or inconsistent with its directory root/manifest.
 - `Stat` returns `ErrNotFound` for missing entries without leaking whether an out-of-scope provider key exists.
 - `Entry.Size` is the immutable object length for a file and the persisted recursive sum of every descendant file byte for a directory. The root directory's size is the total logical file-byte consumption of that area.
 - `CreateDirectory` supports empty directories independent of how a provider represents them.
@@ -1076,6 +1078,7 @@ Requirements:
 - Normal delete means move to trash, not permanent deletion.
 - Trash is not addressable by normal file paths and is exposed through dedicated endpoints.
 - Trash listings include original path and trash time.
+- Every successful trash row includes exact non-negative logical `size`; file rows retain their validated media type and directory rows have no media type. Empty directories and zero-byte files return `0`, never an unavailable sentinel.
 - Restore returns to the original path by default.
 - Restore conflicts fail unless the user explicitly chooses generated-name restore.
 - Permanent deletion requires an explicit confirmation action and deletes only the selected trash ID.
@@ -1083,6 +1086,7 @@ Requirements:
 - Trashed content cannot be downloaded or shared through normal file/share APIs.
 - Existing share links to trashed content become unavailable.
 - Trash and restore transfer recursive bytes between the live and trash area roots; permanent deletion subtracts them from the trash tree. Neither transition scans descendant blobs to answer later size lookups.
+- Trash pagination joins its bounded canonical state-record page to one snapshot lookup of the corresponding immediate children in the persisted trash root. It MUST NOT perform one `Stat` or provider lookup per row. The canonical trash-record schema remains unchanged; records written by the preceding release acquire these response fields from the automatically migrated trash tree described in section 9.1. Missing or contradictory state/tree metadata fails closed.
 
 ### 11.6 Safe previews
 
@@ -1108,6 +1112,7 @@ Security rules:
 - A token authorizes read-only access to one recorded file or one recorded directory subtree.
 - The share landing page discloses the owner’s display name only if the product explicitly chooses to show it; default behavior is not to expose it.
 - Public folder listing paths are always relative to the shared root.
+- Public metadata distinguishes the immutable recorded `root` from the relative `current` target. A directory target carries the recursive size from the same listing snapshot as its child rows; a file share returns its root as the current target.
 - `..`, encoded traversal, alternate separators, and absolute paths cannot escape the root.
 - File bytes use a fresh short-lived provider capability after each public authorization.
 - Share pages and API responses use `Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
@@ -1186,7 +1191,7 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 
 | Method | Route | Behavior |
 |---|---|---|
-| GET | `/api/v1/files` | List one virtual directory using `path`, `limit`, `cursor`, and sort. |
+| GET | `/api/v1/files` | List one virtual directory using `path`, `limit`, `cursor`, and sort; return the same-snapshot typed `current` directory entry. |
 | GET | `/api/v1/files/stat` | Stat one virtual path. |
 | POST | `/api/v1/directories` | Create an empty directory. |
 | POST | `/api/v1/uploads` | Create one upload capability. |
@@ -1199,7 +1204,7 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 | POST | `/api/v1/files/move` | Start idempotent rename/move. |
 | POST | `/api/v1/files/trash` | Move one or more items to trash. |
 | GET | `/api/v1/operations/{operationID}` | Poll a user-scoped operation. |
-| GET | `/api/v1/trash` | List trash records. |
+| GET | `/api/v1/trash` | List trash records with exact file/directory size and file media type through one bounded tree lookup per page. |
 | POST | `/api/v1/trash/{trashID}/restore` | Restore with explicit conflict policy. |
 | DELETE | `/api/v1/trash/{trashID}` | Permanently delete one item. |
 | POST | `/api/v1/trash/empty` | Confirmed empty-trash operation. |
@@ -1214,7 +1219,7 @@ The browser sends virtual paths only. Any JSON field resembling a provider key, 
 | POST | `/api/v1/shares` | Create a read-only file/folder link and return the raw link once. |
 | DELETE | `/api/v1/shares/{shareID}` | Revoke an owned share. |
 | GET | `/s/{token}` | Serve the public share shell with no token-referring assets. |
-| GET | `/api/v1/public/shares/{token}` | Return safe root metadata or folder page. |
+| GET | `/api/v1/public/shares/{token}` | Return safe original-root metadata plus the relative current target and folder page. |
 | POST | `/api/v1/public/shares/{token}/downloads` | Authorize a path under the root and create a direct download capability. |
 
 ### 12.7 Security headers
@@ -2103,11 +2108,11 @@ Each criterion MUST have an automated test unless marked “inspection”.
 
 **AC-030** — For every private API family, user A cannot list, stat, upload, download, preview, copy, move, trash, restore, delete, share, poll, or reference user B’s resources using paths, IDs, versions, cursors, or idempotency keys.  
 **AC-031** — Raw, encoded, double-encoded, Unicode-normalized, slash/backslash, dot-segment, reserved-name, NUL/control, and overlong traversal attempts fail without provider access.  
-**AC-032** — Users can browse paginated root/nested folders, create empty folders, and view required metadata.  
+**AC-032** — Users can browse paginated root/nested folders, create empty folders, and view required metadata; every page repeats a typed current-directory entry from the same snapshot as its rows.
 **AC-033** — Rename, move, copy, and batch selection work for files and directory trees with deterministic conflict modes and idempotency.  
-**AC-034** — Normal delete moves content to isolated trash; restore, rename-on-conflict, permanent delete, and empty-trash behave as specified.  
+**AC-034** — Normal delete moves content to isolated trash; paginated trash rows expose exact file/directory sizes without per-row storage calls; restore, rename-on-conflict, permanent delete, and empty-trash behave as specified.
 **AC-035** — Trashed or moved share roots no longer issue share capabilities.
-**AC-036** — `Stat` and listing return an overflow-checked persisted recursive byte total for every directory, each area root returns that tree's total logical file bytes, and upload/replacement/move/copy/trash/restore/permanent-delete plus crash recovery and raw-copy cutover preserve the aggregates at the same visibility point as the file tree. Corrupt or inconsistent aggregates fail closed.
+**AC-036** — `Stat` and listing return an overflow-checked persisted recursive byte total for every directory, the listing's current-directory total is from the same snapshot on every cursor page, each area root returns that tree's total logical file bytes, and upload/replacement/move/copy/trash/restore/permanent-delete plus crash recovery and raw-copy cutover preserve the aggregates at the same visibility point as the file tree. Corrupt or inconsistent aggregates fail closed.
 
 ### 21.6 Direct transfer behavior
 
@@ -2247,6 +2252,7 @@ An implementation agent should keep this checklist current and attach test names
 ### 22.7 File and folder operations
 
 - [x] Root/nested paginated listing and stat work.
+- [x] Every owner listing page returns its current directory and recursive size from the same cursor snapshot.
 - [x] Deterministic sorting and opaque scoped cursors work.
 - [x] Empty folder creation works.
 - [x] File and tree rename/move/copy work.
@@ -2255,6 +2261,7 @@ An implementation agent should keep this checklist current and attach test names
 - [x] Idempotency keys prevent duplicate mutations.
 - [x] Normal delete moves to dedicated trash.
 - [x] Trash list, restore, restore conflict, permanent delete, and empty-trash work.
+- [x] Trash pages batch-resolve exact file/directory sizes and file media types for current and legacy schema-v1 records without per-row stats.
 - [x] Asynchronous operation polling is user scoped and fault safe.
 - [x] Complete cross-user and reserved-namespace matrices pass for every operation.
 
@@ -2277,6 +2284,7 @@ An implementation agent should keep this checklist current and attach test names
 - [x] Owners can create/list/revoke expiring file and folder shares.
 - [x] Share tokens are high entropy, hash-at-rest, no-store, and no-referrer.
 - [x] Public folder traversal cannot escape its recorded subtree.
+- [x] Public folder responses distinguish the original root from the current nested target and expose its same-snapshot recursive size.
 - [x] Shares are read-only and cannot re-share.
 - [x] Share errors avoid record-existence leakage.
 - [x] Disabled owner, moved root, trash, expiry, and revocation block new capabilities.

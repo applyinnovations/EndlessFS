@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/identity"
 	"github.com/applyinnovations/endlessfs/internal/model"
+	"github.com/applyinnovations/endlessfs/internal/provider"
 	providermemory "github.com/applyinnovations/endlessfs/internal/provider/memory"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	statememory "github.com/applyinnovations/endlessfs/internal/state"
@@ -28,6 +30,7 @@ type driveEnvironment struct {
 	client  *http.Client
 	clock   *domain.FixedClock
 	repo    *identity.Repository
+	store   *statememory.MemoryStore
 	owner   domain.UserID
 	other   domain.UserID
 }
@@ -77,7 +80,41 @@ func newDriveEnvironment(t *testing.T) driveEnvironment {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return driveEnvironment{service: service, storage: storage, client: server.Client(), clock: clock, repo: repository, owner: owner, other: other}
+	return driveEnvironment{service: service, storage: storage, client: server.Client(), clock: clock, repo: repository, store: store, owner: owner, other: other}
+}
+
+type lookupOnlyStorage struct {
+	provider.Storage
+	entries         map[string]domain.Entry
+	lookupErr       error
+	currentOverride *domain.Entry
+	lookupCalls     int
+	statCalls       int
+}
+
+func (s *lookupOnlyStorage) LookupChildren(_ context.Context, _ domain.Scope, request domain.ChildLookupRequest) (domain.ChildLookup, error) {
+	s.lookupCalls++
+	if s.lookupErr != nil {
+		return domain.ChildLookup{}, s.lookupErr
+	}
+	result := domain.ChildLookup{Current: domain.Entry{Path: request.Directory, Kind: domain.EntryDirectory, Version: "root", ModifiedAt: time.Unix(0, 0).UTC()}}
+	for _, name := range request.Names {
+		entry, ok := s.entries[name]
+		if !ok {
+			return domain.ChildLookup{}, domain.NewError(domain.ErrorNotFound, "entry not found")
+		}
+		result.Current.Size += entry.Size
+		result.Entries = append(result.Entries, entry)
+	}
+	if s.currentOverride != nil {
+		result.Current = *s.currentOverride
+	}
+	return result, nil
+}
+
+func (s *lookupOnlyStorage) Stat(context.Context, domain.Scope, domain.UserPath) (domain.Entry, error) {
+	s.statCalls++
+	return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "unexpected per-row stat")
 }
 
 func fixedUserID(t *testing.T, value byte) domain.UserID {
@@ -242,17 +279,35 @@ func TestIntegrationCopyMoveTrashRestoreAndDelete(t *testing.T) {
 func TestIntegrationSharesPreviewAndRevocation(t *testing.T) {
 	env := newDriveEnvironment(t)
 	ctx := context.Background()
-	_, _ = env.service.CreateDirectory(ctx, env.owner, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/public")})
+	for _, path := range []string{"/public", "/public/nested", "/public/nested/deeper"} {
+		if _, err := env.service.CreateDirectory(ctx, env.owner, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	text := upload(t, env, env.owner, "/public/readme.txt", []byte("safe text"), "text/plain", "upload-public-text-01")
 	html := upload(t, env, env.owner, "/public/index.html", []byte("<script>x</script>"), "text/html", "upload-public-html-01")
+	upload(t, env, env.owner, "/public/nested/deeper/child.txt", []byte("child"), "text/plain", "upload-public-child-01")
 	created, err := env.service.CreateShare(ctx, env.owner, domain.MustParseUserPath("/public"), nil, "share-folder-request-01")
 	if err != nil {
 		t.Fatal(err)
 	}
 	token := created.Link.Reveal()[len("http://127.0.0.1:8080/s/"):]
 	page, err := env.service.PublicShare(ctx, token, "/", 10, "")
-	if err != nil || len(page.Entries) != 2 || page.Entries[0].Path == "/public/readme.txt" {
+	if err != nil || page.Current.Path != "/" || page.Current.Size != int64(len("safe text")+len("<script>x</script>")+len("child")) || len(page.Entries) != 3 || page.Entries[0].Path == "/public/readme.txt" {
 		t.Fatalf("PublicShare = %+v, %v", page, err)
+	}
+	var nestedRow drive.PublicEntry
+	for _, entry := range page.Entries {
+		if entry.Path == "/nested" {
+			nestedRow = entry
+		}
+	}
+	if nestedRow.Kind != domain.EntryDirectory || nestedRow.Size != 5 {
+		t.Fatalf("public nested child row = %+v; want recursive size 5", nestedRow)
+	}
+	nested, err := env.service.PublicShare(ctx, token, "/nested", 10, "")
+	if err != nil || nested.Root.Path != "/" || nested.Current.Path != "/nested" || nested.Current.Kind != domain.EntryDirectory || nested.Current.Size != 5 || len(nested.Entries) != 1 || nested.Entries[0].Path != "/nested/deeper" || nested.Entries[0].Size != 5 {
+		t.Fatalf("nested PublicShare = %+v, %v", nested, err)
 	}
 	if _, err := env.service.PublicShare(ctx, token, "/../outside", 10, ""); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("share traversal = %v", err)
@@ -322,6 +377,128 @@ func TestIntegrationSharesPreviewAndRevocation(t *testing.T) {
 	}
 	if _, err := env.service.PublicShare(ctx, token, "/", 10, ""); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("disabled owner share = %v", err)
+	}
+}
+
+func TestTrashPageReturnsExactPersistedMetadataWithoutPerRowStats(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	for _, path := range []string{"/tree", "/tree/nested", "/empty"} {
+		if _, err := env.service.CreateDirectory(ctx, env.owner, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	upload(t, env, env.owner, "/tree/nested/child.bin", []byte("1234567"), "application/octet-stream", "trash-meta-child-01")
+	upload(t, env, env.owner, "/zero.txt", nil, "text/plain", "trash-meta-zero-001")
+	standaloneBody := []byte("\xff\xd8\xff\xe0\x00\x10JFIF\x00")
+	standalone := upload(t, env, env.owner, "/standalone.jpg", standaloneBody, "image/jpeg", "trash-meta-file-001")
+	paths := []domain.UserPath{
+		domain.MustParseUserPath("/tree"), domain.MustParseUserPath("/empty"),
+		domain.MustParseUserPath("/zero.txt"), standalone.Path,
+	}
+	if result, err := env.service.Trash(ctx, env.owner, paths, "trash-metadata-batch-001"); err != nil || len(result.Items) != len(paths) {
+		t.Fatalf("Trash() = %+v, %v", result, err)
+	}
+	before := env.storage.Instrumentation()
+	page, err := env.service.TrashPage(ctx, env.owner, 1000, "")
+	after := env.storage.Instrumentation()
+	if err != nil || len(page.Items) != len(paths) || page.NextCursor != "" {
+		t.Fatalf("TrashPage() = %+v, %v", page, err)
+	}
+	if after.ProviderCalls[providermemory.OperationLookupChildren]-before.ProviderCalls[providermemory.OperationLookupChildren] != 1 || after.ProviderCalls[providermemory.OperationStat] != before.ProviderCalls[providermemory.OperationStat] {
+		t.Fatalf("TrashPage provider calls before=%v after=%v; want one batch lookup and no Stat", before.ProviderCalls, after.ProviderCalls)
+	}
+	items := make(map[string]drive.TrashEntry, len(page.Items))
+	for _, item := range page.Items {
+		items[item.OriginalPath.String()] = item
+	}
+	for _, test := range []struct {
+		path, mediaType string
+		kind            domain.EntryKind
+		size            int64
+	}{
+		{path: "/tree", kind: domain.EntryDirectory, size: 7},
+		{path: "/empty", kind: domain.EntryDirectory, size: 0},
+		{path: "/zero.txt", kind: domain.EntryFile, size: 0, mediaType: "text/plain"},
+		{path: "/standalone.jpg", kind: domain.EntryFile, size: int64(len(standaloneBody)), mediaType: "image/jpeg"},
+	} {
+		item, ok := items[test.path]
+		if !ok || item.Kind != test.kind || item.Size != test.size || item.MediaType != test.mediaType {
+			t.Errorf("trash metadata %s = %+v, present=%t", test.path, item, ok)
+		}
+	}
+	otherPage, err := env.service.TrashPage(ctx, env.other, 1000, "")
+	if err != nil || len(otherPage.Items) != 0 {
+		t.Fatalf("cross-owner TrashPage() = %+v, %v", otherPage, err)
+	}
+}
+
+func TestTrashPageScalesToOneThousandLegacyRecordsWithOneBatchLookup(t *testing.T) {
+	env := newDriveEnvironment(t)
+	storage := &lookupOnlyStorage{entries: make(map[string]domain.Entry, 1000)}
+	for index := range 1000 {
+		sum := sha256.Sum256([]byte(fmt.Sprintf("legacy-trash-%04d", index)))
+		trashID := base64.RawURLEncoding.EncodeToString(sum[:])
+		trashedPath := domain.MustParseUserPath("/" + trashID)
+		record := model.Trash{
+			SchemaVersion: model.SchemaVersion, TrashID: trashID, OwnerUserID: env.owner,
+			OriginalPath: domain.MustParseUserPath(fmt.Sprintf("/legacy-%04d.bin", index)), TrashedPath: trashedPath,
+			Kind: domain.EntryFile, TrashedAt: env.clock.Now(), OriginalVersion: "legacy-v1",
+		}
+		data, err := statememory.EncodeJSON(&record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := env.store.Create(context.Background(), statememory.MustKey(statememory.NamespaceTrash, env.owner.String(), trashID), data); err != nil {
+			t.Fatal(err)
+		}
+		storage.entries[trashID] = domain.Entry{Path: trashedPath, Name: trashID, Kind: domain.EntryFile, Size: int64(index), MediaType: "application/octet-stream", ModifiedAt: env.clock.Now(), Version: "legacy-v1"}
+	}
+	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, 32)))
+	service, err := drive.NewService(storage, env.store, env.repo, domain.NewIDGenerator(&hashReader{}), env.clock, key, "http://127.0.0.1:8080", "http://127.0.0.1:8081", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := service.TrashPage(context.Background(), env.owner, 1000, "")
+	if err != nil || len(page.Items) != 1000 || page.NextCursor != "" {
+		t.Fatalf("TrashPage(1000) = %d items, cursor=%q, %v", len(page.Items), page.NextCursor, err)
+	}
+	if storage.lookupCalls != 1 || storage.statCalls != 0 {
+		t.Fatalf("storage calls: lookup=%d stat=%d; want 1 and 0", storage.lookupCalls, storage.statCalls)
+	}
+	for name, entry := range storage.entries {
+		entry.Size = -1
+		storage.entries[name] = entry
+		break
+	}
+	if _, err := service.TrashPage(context.Background(), env.owner, 1000, ""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("negative legacy aggregate error = %v", err)
+	}
+	for name, entry := range storage.entries {
+		entry.Size = 1
+		storage.entries[name] = entry
+	}
+	storage.lookupErr = domain.NewError(domain.ErrorNotFound, "missing tree entry")
+	if _, err := service.TrashPage(context.Background(), env.owner, 1000, ""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("missing legacy tree entry error = %v", err)
+	}
+	storage.lookupErr = domain.NewError(domain.ErrorUnavailable, "tree unavailable")
+	if _, err := service.TrashPage(context.Background(), env.owner, 1000, ""); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unavailable legacy tree error = %v", err)
+	}
+	storage.lookupErr = nil
+	storage.currentOverride = &domain.Entry{Path: domain.MustParseUserPath("/"), Kind: domain.EntryFile, Size: 1, MediaType: "text/plain", ModifiedAt: env.clock.Now(), Version: "bad-root"}
+	if _, err := service.TrashPage(context.Background(), env.owner, 1000, ""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid trash root metadata error = %v", err)
+	}
+	storage.currentOverride = nil
+	for name, entry := range storage.entries {
+		entry.Path = domain.MustParseUserPath("/wrong")
+		storage.entries[name] = entry
+		break
+	}
+	if _, err := service.TrashPage(context.Background(), env.owner, 1000, ""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("mismatched trash row error = %v", err)
 	}
 }
 
@@ -521,7 +698,7 @@ func TestShareIdempotencyFileRootAndPublicFailureMatrix(t *testing.T) {
 	}
 	token := strings.TrimPrefix(created.Link.Reveal(), "http://127.0.0.1:8080/s/")
 	page, err := env.service.PublicShare(ctx, token, "", 10, "")
-	if err != nil || page.Root.Path != "/" || page.Root.Kind != domain.EntryFile {
+	if err != nil || page.Root.Path != "/" || page.Root.Kind != domain.EntryFile || page.Current != page.Root || page.Current.Size != int64(len("public")) {
 		t.Fatalf("public file root = %+v, %v", page, err)
 	}
 	if _, err := env.service.PublicShare(ctx, token, "/child", 10, ""); !errors.Is(err, domain.ErrNotFound) {

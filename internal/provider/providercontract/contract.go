@@ -63,7 +63,7 @@ func Run(t *testing.T, factory Factory) {
 			}
 		}
 		first, err := harness.Storage.List(context.Background(), userA, domain.ListRequest{Directory: root, PageSize: 2})
-		if err != nil || len(first.Entries) != 2 || first.NextCursor == "" {
+		if err != nil || first.Current.Path != root || first.Current.Kind != domain.EntryDirectory || first.Current.Size != 0 || len(first.Entries) != 2 || first.NextCursor == "" {
 			t.Fatalf("first List() = %+v, %v", first, err)
 		}
 		_, _ = harness.Storage.CreateDirectory(context.Background(), userA, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/later")})
@@ -71,15 +71,72 @@ func Run(t *testing.T, factory Factory) {
 			t.Fatalf("cross-scope cursor error = %v", err)
 		}
 		second, err := harness.Storage.List(context.Background(), userA, domain.ListRequest{Directory: root, PageSize: 2, Cursor: first.NextCursor})
-		if err != nil || len(second.Entries) != 2 {
+		if err != nil || second.Current != first.Current || len(second.Entries) != 2 {
 			t.Fatalf("second List() = %+v, %v", second, err)
 		}
 		third, err := harness.Storage.List(context.Background(), userA, domain.ListRequest{Directory: root, PageSize: 2, Cursor: second.NextCursor})
-		if err != nil || len(third.Entries) != 1 || third.NextCursor != "" {
+		if err != nil || third.Current != first.Current || len(third.Entries) != 1 || third.NextCursor != "" {
 			t.Fatalf("third List() = %+v, %v", third, err)
 		}
 		if _, err := harness.Storage.Stat(context.Background(), userB, domain.MustParseUserPath("/folder-0")); !errors.Is(err, domain.ErrNotFound) {
 			t.Fatalf("cross-scope Stat() error = %v", err)
+		}
+	})
+
+	t.Run("snapshot-consistent current directory and batched child lookup", func(t *testing.T) {
+		harness := factory(t)
+		scope := testScope(t, 0x23, domain.AreaLive)
+		other := testScope(t, 0x24, domain.AreaLive)
+		root := domain.MustParseUserPath("/")
+		folder := domain.MustParseUserPath("/folder")
+		empty := domain.MustParseUserPath("/empty")
+		for _, path := range []domain.UserPath{folder, empty} {
+			if _, err := harness.Storage.CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: path}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		uploadFile(t, harness, scope, domain.MustParseUserPath("/folder/a.txt"), []byte("four"), false)
+		uploadFile(t, harness, scope, domain.MustParseUserPath("/folder/b.txt"), []byte("sixsix"), false)
+
+		first, err := harness.Storage.List(context.Background(), scope, domain.ListRequest{Directory: folder, PageSize: 1})
+		if err != nil || first.Current.Path != folder || first.Current.Kind != domain.EntryDirectory || first.Current.Size != 10 || len(first.Entries) != 1 || first.NextCursor == "" {
+			t.Fatalf("first folder List() = %+v, %v", first, err)
+		}
+		uploadFile(t, harness, scope, domain.MustParseUserPath("/folder/c.txt"), []byte("new"), false)
+		second, err := harness.Storage.List(context.Background(), scope, domain.ListRequest{Directory: folder, PageSize: 1, Cursor: first.NextCursor})
+		if err != nil || second.Current != first.Current || second.Current.Size != 10 || len(second.Entries) != 1 {
+			t.Fatalf("snapshot folder List() = %+v, %v; want current %+v", second, err, first.Current)
+		}
+		fresh, err := harness.Storage.List(context.Background(), scope, domain.ListRequest{Directory: folder})
+		if err != nil || fresh.Current.Size != 13 {
+			t.Fatalf("fresh folder List() = %+v, %v; want current size 13", fresh, err)
+		}
+		emptyPage, err := harness.Storage.List(context.Background(), scope, domain.ListRequest{Directory: empty})
+		if err != nil || emptyPage.Current.Path != empty || emptyPage.Current.Size != 0 || len(emptyPage.Entries) != 0 {
+			t.Fatalf("empty List() = %+v, %v", emptyPage, err)
+		}
+
+		lookup, err := harness.Storage.LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: root, Names: []string{"empty", "folder"}})
+		if err != nil || lookup.Current.Path != root || lookup.Current.Size != 13 || len(lookup.Entries) != 2 || lookup.Entries[0].Path != empty || lookup.Entries[0].Size != 0 || lookup.Entries[1].Path != folder || lookup.Entries[1].Size != 13 {
+			t.Fatalf("LookupChildren() = %+v, %v", lookup, err)
+		}
+		if _, err := harness.Storage.LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: root, Names: []string{"folder", "folder"}}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("duplicate LookupChildren() error = %v", err)
+		}
+		if _, err := harness.Storage.LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: root}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("empty LookupChildren() error = %v", err)
+		}
+		if _, err := harness.Storage.LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: root, Names: []string{"../folder"}}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid-name LookupChildren() error = %v", err)
+		}
+		if _, err := harness.Storage.LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: root, Names: make([]string, 1001)}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("oversized LookupChildren() error = %v", err)
+		}
+		if _, err := harness.Storage.LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: root, Names: []string{"missing"}}); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("missing LookupChildren() error = %v", err)
+		}
+		if _, err := harness.Storage.LookupChildren(context.Background(), other, domain.ChildLookupRequest{Directory: root, Names: []string{"folder"}}); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("cross-scope LookupChildren() error = %v", err)
 		}
 	})
 

@@ -70,6 +70,10 @@ func TestStartupAutomaticallyMigratesLegacyRecursiveByteAggregates(t *testing.T)
 	if got := assertVisibleRecursiveAggregates(t, engine.Files(), trash, domain.MustParseUserPath("/")); got != 5 {
 		t.Fatalf("migrated trash aggregate = %d; want 5", got)
 	}
+	lookup, err := engine.Files().LookupChildren(context.Background(), trash, domain.ChildLookupRequest{Directory: domain.MustParseUserPath("/"), Names: []string{"old"}})
+	if err != nil || len(lookup.Entries) != 1 || lookup.Entries[0].Kind != domain.EntryDirectory || lookup.Entries[0].Size != 5 {
+		t.Fatalf("migrated legacy trash lookup = %+v, %v; want directory size 5", lookup, err)
+	}
 	gate, err := engine.GateStatus(context.Background())
 	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 2 {
 		t.Fatalf("migrated gate = %+v, %v; want open epoch 2", gate, err)

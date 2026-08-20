@@ -68,17 +68,27 @@ type directoryUpdate struct {
 	entries     []storageformat.DirectoryEntry
 }
 
+type directoryView struct {
+	directoryID    string
+	snapshot       directorySnapshot
+	current        domain.Entry
+	parentID       string
+	parentManifest string
+}
+
 type listCursor struct {
-	SchemaVersion int              `json:"schemaVersion"`
-	UserID        string           `json:"userID"`
-	Area          string           `json:"area"`
-	DirectoryPath string           `json:"directoryPath"`
-	DirectoryID   string           `json:"directoryID"`
-	ManifestID    string           `json:"manifestID"`
-	PageSize      int              `json:"pageSize"`
-	Sort          domain.SortField `json:"sort"`
-	Descending    bool             `json:"descending"`
-	Index         int              `json:"index"`
+	SchemaVersion  int              `json:"schemaVersion"`
+	UserID         string           `json:"userID"`
+	Area           string           `json:"area"`
+	DirectoryPath  string           `json:"directoryPath"`
+	DirectoryID    string           `json:"directoryID"`
+	ManifestID     string           `json:"manifestID"`
+	ParentID       string           `json:"parentID"`
+	ParentManifest string           `json:"parentManifest"`
+	PageSize       int              `json:"pageSize"`
+	Sort           domain.SortField `json:"sort"`
+	Descending     bool             `json:"descending"`
+	Index          int              `json:"index"`
 }
 
 func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain.ListRequest) (domain.ListPage, error) {
@@ -98,27 +108,49 @@ func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain
 	if !validSort(request.Sort) {
 		return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "invalid list sort")
 	}
-	directoryID, snapshot, err := s.resolveDirectory(ctx, scope, request.Directory)
-	if err != nil {
-		return domain.ListPage{}, err
-	}
 	start := 0
-	manifestID := snapshot.manifestID
-	entries := snapshot.entries
+	var directoryID, manifestID, parentID, parentManifest string
+	var current domain.Entry
+	var entries []storageformat.DirectoryEntry
 	if request.Cursor != "" {
 		cursor, decodeErr := decodeListCursor(request.Cursor)
-		if decodeErr != nil || cursor.UserID != scope.UserID().String() || cursor.Area != areaName(scope.Area()) || cursor.DirectoryPath != request.Directory.String() || cursor.DirectoryID != directoryID || cursor.PageSize != pageSize || cursor.Sort != request.Sort || cursor.Descending != request.Descending || cursor.Index < 1 || cursor.ManifestID == "" {
+		if decodeErr != nil || cursor.UserID != scope.UserID().String() || cursor.Area != areaName(scope.Area()) || cursor.DirectoryPath != request.Directory.String() || cursor.DirectoryID == "" || cursor.PageSize != pageSize || cursor.Sort != request.Sort || cursor.Descending != request.Descending || cursor.Index < 1 || cursor.ManifestID == "" || (request.Directory.IsRoot() && (cursor.ParentID != "" || cursor.ParentManifest != "")) || (!request.Directory.IsRoot() && (cursor.ParentID == "" || cursor.ParentManifest == "")) {
 			return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "invalid or out-of-scope list cursor")
 		}
-		entries, err = s.readManifestEntries(ctx, scope, directoryID, cursor.ManifestID)
+		if request.Directory.IsRoot() {
+			if cursor.DirectoryID != storageformat.RootDirectoryID {
+				return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "list cursor directory was replaced")
+			}
+		} else {
+			liveEntry, err := s.resolveEntry(ctx, scope, request.Directory)
+			if err != nil {
+				return domain.ListPage{}, err
+			}
+			if liveEntry.Kind != domain.EntryDirectory || liveEntry.DirectoryID != cursor.DirectoryID {
+				return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "list cursor directory was replaced")
+			}
+		}
+		manifest, historicalEntries, err := s.readManifestSnapshot(ctx, scope, cursor.DirectoryID, cursor.ManifestID)
 		if err != nil {
 			return domain.ListPage{}, err
 		}
-		manifestID = cursor.ManifestID
+		directoryID, manifestID, parentID, parentManifest = cursor.DirectoryID, cursor.ManifestID, cursor.ParentID, cursor.ParentManifest
+		entries = historicalEntries
+		current, err = s.historicalCurrentDirectory(ctx, scope, request.Directory, directoryID, parentID, parentManifest, manifest.RecursiveBytes)
+		if err != nil {
+			return domain.ListPage{}, err
+		}
 		start = cursor.Index
 		if start > len(entries) {
 			return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "invalid list cursor offset")
 		}
+	} else {
+		view, err := s.resolveDirectoryView(ctx, scope, request.Directory)
+		if err != nil {
+			return domain.ListPage{}, err
+		}
+		directoryID, manifestID, parentID, parentManifest = view.directoryID, view.snapshot.manifestID, view.parentID, view.parentManifest
+		entries, current = view.snapshot.entries, view.current
 	}
 	result := make([]domain.Entry, 0, len(entries))
 	for _, entry := range entries {
@@ -130,14 +162,15 @@ func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain
 	}
 	sortDomainEntries(result, request.Sort, request.Descending)
 	if start == len(result) {
-		return domain.ListPage{}, nil
+		return domain.ListPage{Current: current, Entries: []domain.Entry{}}, nil
 	}
 	end := min(start+pageSize, len(result))
-	page := domain.ListPage{Entries: append([]domain.Entry(nil), result[start:end]...)}
+	page := domain.ListPage{Current: current, Entries: append([]domain.Entry(nil), result[start:end]...)}
 	if end < len(result) {
 		page.NextCursor, err = encodeListCursor(listCursor{
-			SchemaVersion: 1, UserID: scope.UserID().String(), Area: areaName(scope.Area()),
+			SchemaVersion: 2, UserID: scope.UserID().String(), Area: areaName(scope.Area()),
 			DirectoryPath: request.Directory.String(), DirectoryID: directoryID, ManifestID: manifestID,
+			ParentID: parentID, ParentManifest: parentManifest,
 			PageSize: pageSize, Sort: request.Sort, Descending: request.Descending, Index: end,
 		})
 		if err != nil {
@@ -145,6 +178,45 @@ func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain
 		}
 	}
 	return page, nil
+}
+
+func (s *FileStore) LookupChildren(ctx context.Context, scope domain.Scope, request domain.ChildLookupRequest) (domain.ChildLookup, error) {
+	if err := validateFileRequest(ctx, scope); err != nil {
+		return domain.ChildLookup{}, err
+	}
+	if !request.Directory.Valid() || len(request.Names) < 1 || len(request.Names) > 1000 {
+		return domain.ChildLookup{}, domain.NewError(domain.ErrorInvalid, "child lookup request is invalid")
+	}
+	paths := make([]domain.UserPath, 0, len(request.Names))
+	seen := make(map[string]struct{}, len(request.Names))
+	for _, name := range request.Names {
+		path, err := request.Directory.Join(name)
+		if err != nil {
+			return domain.ChildLookup{}, domain.NewError(domain.ErrorInvalid, "child lookup name is invalid")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return domain.ChildLookup{}, domain.NewError(domain.ErrorInvalid, "child lookup contains duplicate names")
+		}
+		seen[name] = struct{}{}
+		paths = append(paths, path)
+	}
+	view, err := s.resolveDirectoryView(ctx, scope, request.Directory)
+	if err != nil {
+		return domain.ChildLookup{}, err
+	}
+	byName := make(map[string]storageformat.DirectoryEntry, len(view.snapshot.entries))
+	for _, entry := range view.snapshot.entries {
+		byName[entry.Name] = entry
+	}
+	result := domain.ChildLookup{Current: view.current, Entries: make([]domain.Entry, 0, len(paths))}
+	for index, name := range request.Names {
+		entry, found := byName[name]
+		if !found {
+			return domain.ChildLookup{}, domain.NewError(domain.ErrorNotFound, "entry not found")
+		}
+		result.Entries = append(result.Entries, domainEntry(paths[index], entry))
+	}
+	return result, nil
 }
 
 func (s *FileStore) Stat(ctx context.Context, scope domain.Scope, path domain.UserPath) (domain.Entry, error) {
@@ -299,6 +371,48 @@ func (s *FileStore) resolveDirectory(ctx context.Context, scope domain.Scope, pa
 	return entry.DirectoryID, snapshot, err
 }
 
+func (s *FileStore) resolveDirectoryView(ctx context.Context, scope domain.Scope, path domain.UserPath) (directoryView, error) {
+	trail, err := s.resolveDirectoryTrail(ctx, scope, path)
+	if err != nil {
+		return directoryView{}, err
+	}
+	current := trail[len(trail)-1]
+	if path.IsRoot() {
+		return directoryView{
+			directoryID: current.directoryID, snapshot: current.snapshot,
+			current: rootDirectoryEntry(path, current.snapshot.recursiveBytes),
+		}, nil
+	}
+	parent := trail[len(trail)-2]
+	entry, found := findDirectoryEntry(parent.snapshot.entries, path.Name())
+	if !found || entry.Kind != domain.EntryDirectory || entry.DirectoryID != current.directoryID || entry.Size != current.snapshot.recursiveBytes {
+		return directoryView{}, domain.NewError(domain.ErrorInvalid, "directory snapshot aggregate mismatch")
+	}
+	return directoryView{
+		directoryID: current.directoryID, snapshot: current.snapshot, current: domainEntry(path, entry),
+		parentID: parent.directoryID, parentManifest: parent.snapshot.manifestID,
+	}, nil
+}
+
+func (s *FileStore) historicalCurrentDirectory(ctx context.Context, scope domain.Scope, path domain.UserPath, directoryID, parentID, parentManifest string, recursiveBytes int64) (domain.Entry, error) {
+	if path.IsRoot() {
+		return rootDirectoryEntry(path, recursiveBytes), nil
+	}
+	_, entries, err := s.readManifestSnapshot(ctx, scope, parentID, parentManifest)
+	if err != nil {
+		return domain.Entry{}, err
+	}
+	entry, found := findDirectoryEntry(entries, path.Name())
+	if !found || entry.Kind != domain.EntryDirectory || entry.DirectoryID != directoryID || entry.Size != recursiveBytes {
+		return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "list cursor directory aggregate mismatch")
+	}
+	return domainEntry(path, entry), nil
+}
+
+func rootDirectoryEntry(path domain.UserPath, recursiveBytes int64) domain.Entry {
+	return domain.Entry{Path: path, Kind: domain.EntryDirectory, Size: recursiveBytes, ModifiedAt: time.Unix(0, 0).UTC(), Version: "root"}
+}
+
 func (s *FileStore) resolveDirectoryTrail(ctx context.Context, scope domain.Scope, path domain.UserPath) ([]directoryTrailNode, error) {
 	root, err := s.readDirectory(ctx, scope, storageformat.RootDirectoryID, true)
 	if err != nil {
@@ -435,12 +549,20 @@ func (s *FileStore) readDirectoryMetadata(ctx context.Context, scope domain.Scop
 	return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, manifestID: manifestID, manifest: manifest, recursiveBytes: recursiveBytes, pending: pending, transitionState: transitionState, transitionFence: transitionFence}, nil
 }
 
-func (s *FileStore) readManifestEntries(ctx context.Context, scope domain.Scope, directoryID, manifestID string) ([]storageformat.DirectoryEntry, error) {
+func (s *FileStore) readManifestSnapshot(ctx context.Context, scope domain.Scope, directoryID, manifestID string) (storageformat.DirectoryManifest, []storageformat.DirectoryEntry, error) {
 	manifest, err := s.readDirectoryManifest(ctx, scope, directoryID, manifestID)
 	if err != nil {
-		return nil, err
+		return storageformat.DirectoryManifest{}, nil, err
 	}
-	return s.readManifestPageEntries(ctx, scope, directoryID, manifest)
+	entries, err := s.readManifestPageEntries(ctx, scope, directoryID, manifest)
+	if err != nil {
+		return storageformat.DirectoryManifest{}, nil, err
+	}
+	computed, err := recursiveByteSize(entries)
+	if err != nil || computed != manifest.RecursiveBytes {
+		return storageformat.DirectoryManifest{}, nil, domain.NewError(domain.ErrorInvalid, "directory manifest entries recursive byte aggregate mismatch")
+	}
+	return manifest, entries, nil
 }
 
 func (s *FileStore) readDirectoryManifest(ctx context.Context, scope domain.Scope, directoryID, manifestID string) (storageformat.DirectoryManifest, error) {
@@ -820,7 +942,7 @@ func decodeListCursor(value string) (listCursor, error) {
 	if err := decodeCanonicalValue(body, &cursor); err != nil {
 		return listCursor{}, err
 	}
-	if cursor.SchemaVersion != 1 {
+	if cursor.SchemaVersion != 2 {
 		return listCursor{}, domain.NewError(domain.ErrorInvalid, "invalid list cursor schema")
 	}
 	return cursor, nil

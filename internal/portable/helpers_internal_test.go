@@ -240,7 +240,7 @@ func TestPortableDirectoryAndCursorHelpers(t *testing.T) {
 		t.Fatalf("long rename = %q, %v", longRename.String(), err)
 	}
 
-	cursor := listCursor{SchemaVersion: 1, UserID: "user", Area: "live", DirectoryPath: "/", DirectoryID: "root", ManifestID: "manifest", PageSize: 2, Sort: domain.SortName, Index: 1}
+	cursor := listCursor{SchemaVersion: 2, UserID: "user", Area: "live", DirectoryPath: "/", DirectoryID: "root", ManifestID: "manifest", PageSize: 2, Sort: domain.SortName, Index: 1}
 	encoded, err := encodeListCursor(cursor)
 	if err != nil {
 		t.Fatal(err)
@@ -249,7 +249,7 @@ func TestPortableDirectoryAndCursorHelpers(t *testing.T) {
 	if err != nil || decoded != cursor {
 		t.Fatalf("cursor round trip = %+v, %v", decoded, err)
 	}
-	for _, invalid := range []string{"%", base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":1} `)), base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":2}`))} {
+	for _, invalid := range []string{"%", base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":2} `)), base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":3}`))} {
 		if _, err := decodeListCursor(invalid); err == nil {
 			t.Fatalf("decodeListCursor(%q) unexpectedly succeeded", invalid)
 		}
@@ -708,24 +708,28 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 			if !errors.Is(err, domain.ErrInvalid) && !errors.Is(err, domain.ErrNotFound) {
 				t.Fatalf("corruption error = %v", err)
 			}
+			_, err = candidate.Files().LookupChildren(context.Background(), scope, domain.ChildLookupRequest{Directory: domain.MustParseUserPath("/"), Names: []string{"child"}})
+			if !errors.Is(err, domain.ErrInvalid) && !errors.Is(err, domain.ErrNotFound) {
+				t.Fatalf("corrupted child lookup error = %v", err)
+			}
 		})
 	}
 
-	missingManifestCursor, err := encodeListCursor(listCursor{SchemaVersion: 1, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: "missing", PageSize: 200, Sort: domain.SortName, Index: 1})
+	missingManifestCursor, err := encodeListCursor(listCursor{SchemaVersion: 2, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: "missing", PageSize: 200, Sort: domain.SortName, Index: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := engine.Files().List(context.Background(), scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), Cursor: missingManifestCursor}); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("missing cursor manifest error = %v", err)
 	}
-	offsetCursor, err := encodeListCursor(listCursor{SchemaVersion: 1, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 2})
+	offsetCursor, err := encodeListCursor(listCursor{SchemaVersion: 2, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := engine.Files().List(context.Background(), scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), Cursor: offsetCursor}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("cursor offset error = %v", err)
 	}
-	endCursor, err := encodeListCursor(listCursor{SchemaVersion: 1, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 1})
+	endCursor, err := encodeListCursor(listCursor{SchemaVersion: 2, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -737,6 +741,9 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 	}
 	if _, err := engine.Files().Stat(context.Background(), domain.Scope{}, domain.MustParseUserPath("/")); !errors.Is(err, domain.ErrUnauthorized) {
 		t.Fatalf("Stat(invalid scope) error = %v", err)
+	}
+	if _, err := engine.Files().LookupChildren(context.Background(), domain.Scope{}, domain.ChildLookupRequest{Directory: domain.MustParseUserPath("/"), Names: []string{"child"}}); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("LookupChildren(invalid scope) error = %v", err)
 	}
 
 	if _, err := engine.Get(context.Background(), state.Key{}); !errors.Is(err, domain.ErrInvalid) {
@@ -831,7 +838,7 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 	}
 	equalDigest := "same"
 	_ = replaceDirectoryEntry([]storageformat.DirectoryEntry{{Name: "b", NameDigest: equalDigest}}, nil, storageformat.DirectoryEntry{Name: "a", NameDigest: equalDigest})
-	if _, err := decodeListCursor(base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":2}`))); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := decodeListCursor(base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":1}`))); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid list cursor schema error = %v", err)
 	}
 	if err := decodeCanonicalValue([]byte("not-json"), &listCursor{}); !errors.Is(err, domain.ErrInvalid) {

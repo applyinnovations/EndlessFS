@@ -751,7 +751,14 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		t.Fatalf("inspect mobile action sheet: %v", err)
 	}
 	if !mobileActionSheet {
-		t.Fatal("substantial action did not fill the 320-pixel viewport")
+		var sheetGeometry string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`(() => {
+			const dialog = document.querySelector("#action-dialog");
+			const rect = dialog.getBoundingClientRect();
+			const style = getComputedStyle(dialog);
+			return JSON.stringify({innerWidth, innerHeight, rect: rect.toJSON(), position: style.position, inset: [style.top, style.right, style.bottom, style.left], width: style.width, height: style.height, maxHeight: style.maxHeight});
+		})()`, &sheetGeometry))
+		t.Fatalf("substantial action did not fill the 320-pixel viewport: %s", sheetGeometry)
 	}
 	if err := chromedp.Run(ctx,
 		chromedp.KeyEvent(kb.Escape),

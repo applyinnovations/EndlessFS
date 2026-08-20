@@ -18,7 +18,7 @@
 
 @media (max-width: 760px) {
   :root { --efs-spacing-pageGutter: 12px; }
-  .action-sheet { inset: 0; width: 100%; max-width: none; border: 0; }
+  .action-sheet { position: fixed; inset: 0; width: 100%; max-width: none; height: 100vh; height: 100dvh; max-height: none; margin: 0; border: 0; }
   .app-tabs .tab { padding-inline: 8px; }
   .header-transfer-speed { display: none; }
   .view { padding-block-start: 10px; }

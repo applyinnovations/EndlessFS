@@ -1135,7 +1135,7 @@ func TestAllActionsUseResponsiveSheetInsteadOfCenteredModal(t *testing.T) {
 		`animation: action-sheet-enter var(--efs-motion-duration-normal) var(--efs-motion-easing);`,
 		`from { opacity: 0; }`,
 		`to { opacity: 1; }`,
-		`.action-sheet { inset: 0; width: 100%;`,
+		`.action-sheet { position: fixed; inset: 0; width: 100%; max-width: none; height: 100vh; height: 100dvh; max-height: none; margin: 0; border: 0; }`,
 	} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("responsive action sheet is missing %q", required)

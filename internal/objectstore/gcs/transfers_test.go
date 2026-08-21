@@ -149,6 +149,36 @@ func TestGCSUploadCleanupDistinguishesFinalizedAndIncompleteSessions(t *testing.
 			t.Fatalf("incomplete cancellation = session deletes %d, active sessions %d", deleteAttempts, activeSessions)
 		}
 	})
+
+	t.Run("incomplete-session-with-http2-client", func(t *testing.T) {
+		server, fake := newGCSHTTP2ServerWithFake(t)
+		backend, err := gcstransport.NewWithTransfers(protocolClient(t, server), "endlessfs-test", gcstransport.TransferOptions{
+			HTTPClient: server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
+			SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x5a}, 256), nil },
+			Hostname:  strings.TrimPrefix(server.URL, "https://"),
+			LeaseKey:  bytes.Repeat([]byte{0x42}, 32), Random: bytes.NewReader(bytes.Repeat([]byte{0x29}, 4096)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err := backend.BeginUpload(context.Background(), objectstore.UploadRequest{
+			UploadID: "incomplete-http2-1", Key: objectstore.MustKey("endlessfs/v1/staging/user/incomplete-http2/data"),
+			Size: 4, MediaType: "application/octet-stream", Resumable: true, ExpiresAt: time.Now().UTC().Add(time.Minute),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := backend.AbortUpload(context.Background(), handle.Lease); err != nil {
+			t.Fatalf("cancel incomplete HTTP/2 upload: %v", err)
+		}
+		fake.mu.Lock()
+		deleteProtocol := fake.sessionDeleteProtocol
+		activeSessions := len(fake.sessions)
+		fake.mu.Unlock()
+		if deleteProtocol != "HTTP/1.1" || activeSessions != 0 {
+			t.Fatalf("HTTP/2-client cancellation = protocol %q, active sessions %d", deleteProtocol, activeSessions)
+		}
+	})
 }
 
 func TestWorkloadIdentityTransferConstructionRequiresNoPrivateKeyOrNetwork(t *testing.T) {

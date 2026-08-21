@@ -231,6 +231,22 @@ func TestMutationCopyConvergesWhenConcurrentWinnerRemovesSource(t *testing.T) {
 			t.Fatalf("ensureMutationCopies() error = %v", err)
 		}
 	})
+	t.Run("source-removed-after-read-without-winner", func(t *testing.T) {
+		memory := objectmemory.New()
+		if _, err := memory.Put(ctx, source, []byte("x"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+		hooks := &hookedBackend{Backend: memory}
+		hooks.copy = func(ctx context.Context, from, _ objectstore.Key, condition objectstore.CopyCondition) (objectstore.CopyResult, error) {
+			if err := memory.Delete(ctx, from, objectstore.DeleteCondition{Version: condition.SourceVersion}); err != nil {
+				return objectstore.CopyResult{}, err
+			}
+			return objectstore.CopyResult{}, domain.NewError(domain.ErrorNotFound, "source removed before copy")
+		}
+		if err := (&Engine{fileBackend: hooks}).ensureMutationCopies(ctx, []storageformat.MutationCopy{intent}); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("ensureMutationCopies() error = %v; want source not found", err)
+		}
+	})
 	t.Run("copy-response-lost-after-winner", func(t *testing.T) {
 		memory := objectmemory.New()
 		if _, err := memory.Put(ctx, source, []byte("x"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {

@@ -175,6 +175,7 @@
         for task in verify release; do
           yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-release.yaml >/dev/null
         done
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release") | .retries >= 2' .tekton/endlessfs-release.yaml >/dev/null
 
         check_packages_binding() {
           pipeline="$1"

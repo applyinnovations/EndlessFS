@@ -139,6 +139,7 @@ spec:
 
       - name: release
         runAfter: [verify]
+        retries: 2
         taskRef:
           resolver: cluster
           params:

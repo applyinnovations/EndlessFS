@@ -902,6 +902,10 @@ The theme preference is presentation state, not identity. It MUST remain separat
 - Backend adapters store canonical bytes unchanged and never decode/re-encode them into a provider-specific schema.
 - A future format version requires an explicit reviewed compatibility/migration design; silent in-place reinterpretation is forbidden. The automatic recursive-aggregate migration in section 9.1 is such an explicit design and recognizes only its two declared exact predecessor feature sets.
 
+Released durable state is governed by a forward-migration law. Every supported release tag MUST remain explicitly represented in an append-only migration matrix backed by immutable raw state/file-backend fixtures produced by that release's own code and bound to the source tag, commit, and SHA-256 digest. Multiple tags MAY share a fixture only when their durable writers and applicable canonical schemas are proven byte-identical and that equivalence is recorded. A current binary MUST open each exact historical fixture in fresh single- and split-backend stores, complete or resume every intervening migration, verify the full authoritative result, and successfully perform a post-upgrade mutation. Current-code reconstructions of historical schemas, hand-edited approximations, decoder-only tests, and already-migrated fixtures are not migration evidence.
+
+Every pull-request gate MUST execute the complete historical matrix. Release CI MUST additionally reject a candidate tag that has not been registered in the matrix before building or publishing release artifacts. A durable format change MUST add failing-before-green historical fixtures plus deterministic restart-at-every-boundary, two-to-eight-replica convergence, and corrupt/mixed/newer fail-closed tests in the same change. Migrations are forward-only, gate-quiesced, fenced, deterministic, idempotent, crash-resumable, and provider-independent; ordinary runtime decoders remain strict. Removing support for a released durable format requires an explicit major-version compatibility policy and reviewed specification change.
+
 ### 9.14 Crash-safe multi-record changes
 
 The state store deliberately offers conditional single-record operations, not database transactions. Any use case that changes multiple records MUST therefore use a durable, crash-safe state machine:
@@ -2062,6 +2066,7 @@ Each criterion MUST have an automated test unless marked “inspection”.
 **AC-087** — A crashed admitted operation delays gate closure until fenced recovery completes; checkpoint creation never forces lock deletion or sacrifices consistency for availability.
 **AC-088** — Every object backend proves atomic single-object mutation plus strong read-after-success and complete-prefix listing visibility; an eventually consistent backend fails the contract suite.
 **AC-089** — Opening the exact pre-recursive-aggregate canonical feature set automatically quiesces and migrates every live/trash directory graph, fences old writers, checkpoints, and reopens; crashes and two-to-eight concurrent starters converge, while corruption, overflow, undrained work, or unrelated compatibility drift fail closed.
+**AC-090** — Every pull request opens, verifies, and mutates exact immutable fixtures covering every supported released durable format; release CI refuses an unregistered candidate tag, and interruption, concurrent migrators, corrupt/mixed/newer state, and the complete composed migration path are proven locally through the pinned Nix gate.
 
 ### 21.5 Isolation and files
 
@@ -2382,6 +2387,7 @@ A change is complete only when:
 14. No provider-native identifier, metadata dependency, capability, endpoint, or continuation token has entered authoritative canonical state.
 15. Any mutation or recovery change preserves write-gate admission, immutable-preparation visibility, fencing, stale-worker denial, deterministic takeover, and checkpoint quiescence under independently constructed replicas.
 16. No lock is process-local, released solely by elapsed time, or recoverable only by the node that acquired it.
+17. The mandatory migration matrix covers every supported release tag with immutable release-produced fixtures, passes after the change, and registers the candidate before release publication.
 
 The project’s engineering principle is:
 

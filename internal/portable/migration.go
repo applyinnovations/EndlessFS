@@ -22,6 +22,7 @@ const (
 
 	StepMigrationAfterDetection              = "migration:recursive-bytes:after-detection"
 	StepMigrationAfterGateClosed             = "migration:recursive-bytes:after-gate-closed"
+	StepMigrationAfterUploadRecord           = "migration:recursive-bytes:after-upload-record"
 	StepMigrationAfterDirectoryPrerequisites = "migration:recursive-bytes:after-directory-prerequisites"
 	StepMigrationAfterDirectoryRoot          = "migration:recursive-bytes:after-directory-root"
 	StepMigrationAfterDirectories            = "migration:recursive-bytes:after-directories"
@@ -36,6 +37,30 @@ type legacyDirectoryRoot struct {
 	DirectoryID   string                     `json:"directoryID"`
 	ManifestID    string                     `json:"manifestID"`
 	Pending       *legacyDirectoryTransition `json:"pending,omitempty"`
+}
+
+// legacyUploadRecord is the exact upload payload written by v0.1.0 through
+// v0.1.4. Keep this migration-only type frozen: normal runtime reads must
+// continue to require the current schema.
+type legacyUploadRecord struct {
+	SchemaVersion   int                       `json:"schemaVersion"`
+	UploadID        string                    `json:"uploadID"`
+	UserID          string                    `json:"userID"`
+	Area            string                    `json:"area"`
+	RequestedPath   string                    `json:"requestedPath"`
+	ResolvedPath    string                    `json:"resolvedPath"`
+	StagingKey      string                    `json:"stagingKey"`
+	BackendKind     string                    `json:"backendKind,omitempty"`
+	LeaseKey        string                    `json:"leaseKey,omitempty"`
+	Size            int64                     `json:"size"`
+	MediaType       string                    `json:"mediaType"`
+	Conflict        domain.ConflictMode       `json:"conflict"`
+	ExpectedVersion domain.Version            `json:"expectedVersion,omitempty"`
+	TargetExisted   bool                      `json:"targetExisted"`
+	Resumable       bool                      `json:"resumable"`
+	State           storageformat.UploadState `json:"state"`
+	CreatedAt       time.Time                 `json:"createdAt"`
+	ExpiresAt       time.Time                 `json:"expiresAt"`
 }
 
 type legacyDirectoryTransition struct {
@@ -130,11 +155,26 @@ func predecessorAggregateFeatureSets(features []string) [][]string {
 
 func isAggregatePredecessor(features, current []string) bool {
 	for _, predecessor := range predecessorAggregateFeatureSets(current) {
-		if reflect.DeepEqual(features, predecessor) {
+		if equalStrings(features, predecessor) {
 			return true
 		}
 	}
 	return false
+}
+
+// Canonical v0.1.0-v0.1.4 records represented an empty feature set as null.
+// Feature-set equality is value equality, so nil and an allocated empty slice
+// must not split one format family into incompatible representations.
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func sameWriterExceptFeatures(stored, current storageformat.WriterSet) bool {
@@ -214,6 +254,106 @@ func (e *Engine) migrateRecursiveByteAggregates(ctx context.Context, superblockO
 	return nil
 }
 
+func (e *Engine) migrateLegacyUploadRecords(ctx context.Context) error {
+	objects, err := e.listAll(ctx, storageformat.OperationPrefix())
+	if err != nil {
+		return err
+	}
+	for _, info := range objects {
+		migrated := false
+		for range 16 {
+			object, getErr := e.backend.Get(ctx, info.Key)
+			if errors.Is(getErr, domain.ErrNotFound) {
+				migrated = true
+				break
+			}
+			if getErr != nil {
+				return getErr
+			}
+			var generic storageformat.Envelope
+			if err := state.DecodeJSONWithLimit(object.Body, &generic, storageformat.MaxCanonicalBytes); err != nil {
+				return err
+			}
+			if generic.Schema != uploadRecordSchema {
+				migrated = true
+				break
+			}
+			var currentEnvelope storageformat.Envelope
+			var current storageformat.UploadRecord
+			if err := storageformat.DecodeEnvelope(object.Body, info.Key, uploadRecordSchema, &currentEnvelope, &current); err == nil {
+				migrated = true
+				break
+			}
+			var legacyEnvelope storageformat.Envelope
+			var legacy legacyUploadRecord
+			if err := storageformat.DecodeEnvelope(object.Body, info.Key, uploadRecordSchema, &legacyEnvelope, &legacy); err != nil {
+				return err
+			}
+			if err := validateLegacyUploadRecord(info.Key, legacy); err != nil {
+				return err
+			}
+			current = storageformat.UploadRecord{
+				SchemaVersion: legacy.SchemaVersion, UploadID: legacy.UploadID,
+				CompletionOperationID: legacy.UploadID + "-complete", UserID: legacy.UserID,
+				Area: legacy.Area, RequestedPath: legacy.RequestedPath, ResolvedPath: legacy.ResolvedPath,
+				StagingKey: legacy.StagingKey, BackendKind: legacy.BackendKind, LeaseKey: legacy.LeaseKey,
+				Size: legacy.Size, MediaType: legacy.MediaType, Conflict: legacy.Conflict,
+				ExpectedVersion: legacy.ExpectedVersion, TargetExisted: legacy.TargetExisted,
+				Resumable: legacy.Resumable, State: legacy.State, CreatedAt: legacy.CreatedAt, ExpiresAt: legacy.ExpiresAt,
+			}
+			body, encodeErr := storageformat.EncodeEnvelope(uploadRecordSchema, info.Key, legacyEnvelope.Revision+1, current)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			if _, putErr := e.backend.Put(ctx, info.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); putErr == nil {
+				if err := e.step(ctx, StepMigrationAfterUploadRecord); err != nil {
+					return err
+				}
+				migrated = true
+				break
+			} else if !errors.Is(putErr, domain.ErrPreconditionFailed) && !errors.Is(putErr, domain.ErrConflict) {
+				return putErr
+			}
+		}
+		if !migrated {
+			return domain.NewError(domain.ErrorUnavailable, "upload-record migration remained contended")
+		}
+	}
+	return nil
+}
+
+func validateLegacyUploadRecord(key objectstore.Key, record legacyUploadRecord) error {
+	userID, err := domain.ParseUserID(record.UserID)
+	if err != nil || record.SchemaVersion != 1 || record.UploadID == "" || storageformat.OperationKey(record.UserID, record.UploadID) != key || record.Size < 0 || record.CreatedAt.IsZero() || record.ExpiresAt.IsZero() {
+		return domain.NewError(domain.ErrorInvalid, "invalid legacy upload record")
+	}
+	if record.Area != areaName(domain.AreaLive) && record.Area != areaName(domain.AreaTrash) {
+		return domain.NewError(domain.ErrorInvalid, "invalid legacy upload area")
+	}
+	requested, requestedErr := domain.ParseUserPath(record.RequestedPath)
+	resolved, resolvedErr := domain.ParseUserPath(record.ResolvedPath)
+	if requestedErr != nil || resolvedErr != nil || requested.IsRoot() || resolved.IsRoot() {
+		return domain.NewError(domain.ErrorInvalid, "invalid legacy upload path")
+	}
+	mediaType, mediaErr := domain.NormalizeMediaType(record.MediaType)
+	conflict, conflictErr := domain.NormalizeConflictMode(record.Conflict)
+	if mediaErr != nil || mediaType != record.MediaType || conflictErr != nil || conflict != record.Conflict {
+		return domain.NewError(domain.ErrorInvalid, "invalid legacy upload constraints")
+	}
+	if err := storageformat.ValidateNamespace(record.BackendKind); err != nil {
+		return domain.NewError(domain.ErrorInvalid, "invalid legacy upload backend")
+	}
+	stagingKey, stagingErr := objectstore.ParseKey(record.StagingKey)
+	leaseKey, leaseErr := objectstore.ParseKey(record.LeaseKey)
+	if stagingErr != nil || leaseErr != nil || stagingKey != storageformat.StagingKey(userID.String(), record.UploadID, "upload") || leaseKey != storageformat.LeaseKey(record.BackendKind, record.UploadID) {
+		return domain.NewError(domain.ErrorInvalid, "invalid legacy upload storage keys")
+	}
+	if record.State != storageformat.UploadActive && record.State != storageformat.UploadCompleted && record.State != storageformat.UploadAborted {
+		return domain.NewError(domain.ErrorInvalid, "invalid legacy upload state")
+	}
+	return nil
+}
+
 func (e *Engine) verifyMigrationWriterSet(ctx context.Context) error {
 	_, _, writer, err := e.readStoredWriterSet(ctx)
 	if err != nil {
@@ -277,6 +417,9 @@ func (e *Engine) closeRecursiveByteMigrationGate(ctx context.Context) (bool, err
 			}
 			return false, err
 		case storageformat.GateClosing:
+			if err := e.migrateLegacyUploadRecords(ctx); err != nil {
+				return false, err
+			}
 			err = e.finishClosingWrites(ctx, recursiveByteMigrationCheckpointID)
 			if err == nil {
 				return true, nil

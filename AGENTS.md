@@ -24,6 +24,22 @@ Bug fixes start with a regression test. Security fixes need both an exploit/deni
 
 Do not delete, skip, relax, or rename a gate simply to turn CI green. A reserved Nix command may fail closed while its milestone is unimplemented, but it must be implemented before its corresponding checklist item can be claimed.
 
+## Release migration law
+
+Safe upgrade is a release invariant, not an operator recovery task. Every pull request and every release MUST prove that the proposed binary can open and safely advance every previously released durable format in the supported release lineage. A release is forbidden when any historical migration case is absent, skipped, synthetic-only, or failing.
+
+The migration law is:
+
+1. Preserve immutable, release-produced state/file-backend fixtures under `internal/portable/testdata/migrations`. Generate a fixture using the tagged release's own code; never regenerate, normalize, or repair a historical fixture with current code. Bind every fixture to its source tag, commit, and hard-coded SHA-256 digest.
+2. Register every released `vMAJOR.MINOR.PATCH` tag in the migration matrix. Tags may share one fixture only when repository evidence proves that all durable writers and canonical schemas relevant to that fixture are byte-identical; the mapping and evidence remain explicit. Fixtures and release mappings are append-only.
+3. For every registered release, the current binary MUST import the exact raw key/body sets into fresh deterministic single- and split-backend stores, run every required migration, verify all authoritative state and aggregates, and then complete a new mutation using the upgraded state. Merely decoding a record or reaching readiness is insufficient proof.
+4. Migration tests MUST cover idempotent restart after every durable boundary, two-to-eight simultaneous migrators, valid zero/empty values, and fail-closed malformed, truncated, mixed, newer, and semantically corrupt state. No test may depend on an already-mutated fixture, wall-clock sleep, provider metadata, or network service.
+5. A durable-format or required-feature change starts by adding the previous current release to the immutable fixture registry and demonstrating a failing current-binary test. The same pull request adds the explicit version/feature detector, gated and fenced migration, crash/concurrency coverage, specification change, and release evidence. Silent reinterpretation, decode fallbacks in ordinary runtime paths, destructive repair, and operator-authored bucket edits are forbidden.
+6. Migrations are forward-only, deterministic, idempotent, crash-resumable, and safe under mixed-version replicas. They quiesce through the canonical write gate, use portable records plus native CAS only for the immediate conditional operation, fail closed on ambiguity or corruption, and do not publish partial logical state.
+7. `nix run .#test-migration` and the `migration` flake check are mandatory pull-request gates. Release CI additionally runs `nix run .#test-migration -- "$release_tag"`; it MUST refuse to build or publish a tag that is not registered in the matrix.
+
+Removing support for any released durable format requires an explicit major-version compatibility policy and a reviewed specification change. It is never an incidental cleanup, fixture deletion, or test-list edit.
+
 ## Toolchain contract
 
 Nix is the only public task interface. Do not add a Makefile, Taskfile, Justfile, bespoke host setup, or duplicated shell test pipeline.
@@ -45,6 +61,7 @@ nix run .#test
 nix run .#test-unit
 nix run .#test-integration
 nix run .#test-contract
+nix run .#test-migration
 nix run .#test-preview
 nix run .#test-replica
 nix run .#test-portability

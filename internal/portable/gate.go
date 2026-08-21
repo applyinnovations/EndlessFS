@@ -202,6 +202,10 @@ func (e *Engine) OpenWrites(ctx context.Context, checkpointID string) error {
 	if err := e.VerifyCheckpoint(ctx, checkpointID); err != nil {
 		return err
 	}
+	return e.openClosedWriteGate(ctx, checkpointID)
+}
+
+func (e *Engine) openClosedWriteGate(ctx context.Context, checkpointID string) error {
 	gateObject, gateEnvelope, gate, err := e.readGate(ctx)
 	if err != nil {
 		return err

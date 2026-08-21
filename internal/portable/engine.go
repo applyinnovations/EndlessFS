@@ -34,17 +34,41 @@ type WriterConfiguration struct {
 }
 
 type Options struct {
-	Backend     objectstore.Backend
-	FileBackend objectstore.Backend
-	Clock       domain.Clock
-	IDs         *domain.IDGenerator
-	Writer      WriterConfiguration
-	LeaseTTL    time.Duration
-	UploadTTL   time.Duration
-	DownloadTTL time.Duration
-	CursorKey   []byte
-	CursorTTL   time.Duration
-	Scheduler   Scheduler
+	Backend           objectstore.Backend
+	FileBackend       objectstore.Backend
+	Clock             domain.Clock
+	IDs               *domain.IDGenerator
+	Writer            WriterConfiguration
+	LeaseTTL          time.Duration
+	UploadTTL         time.Duration
+	DownloadTTL       time.Duration
+	CursorKey         []byte
+	CursorTTL         time.Duration
+	Scheduler         Scheduler
+	MigrationObserver func(MigrationProgress)
+}
+
+const (
+	MigrationStageStarted             = "started"
+	MigrationStageGateClosed          = "gate-closed"
+	MigrationStageDirectoriesVerified = "directories-verified"
+	MigrationStageCheckpointInventory = "checkpoint-inventory"
+	MigrationStageCheckpointCreated   = "checkpoint-created"
+	MigrationStageComplete            = "complete"
+)
+
+// MigrationProgress intentionally contains no object key, virtual path,
+// provider identifier, or backend-native version. It is safe to forward to
+// structured operational logs.
+type MigrationProgress struct {
+	MigrationID      string
+	Stage            string
+	Role             string
+	CompletedObjects int
+	TotalObjects     int
+	CompletedBytes   int64
+	TotalBytes       int64
+	ResumedObjects   int
 }
 
 type Scheduler interface {
@@ -74,6 +98,8 @@ type Engine struct {
 	cursorAEAD          cipher.AEAD
 	cursorTTL           time.Duration
 	scheduler           Scheduler
+	migrationObserver   func(MigrationProgress)
+	checkpointWorkKey   []byte
 
 	admissionSequence atomic.Uint64
 }
@@ -111,7 +137,7 @@ func Open(ctx context.Context, options Options) (*Engine, error) {
 	if fileBackend == nil {
 		fileBackend = options.Backend
 	}
-	engine := &Engine{backend: options.Backend, fileBackend: fileBackend, separateFileBackend: separateFileBackend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, uploadTTL: options.UploadTTL, downloadTTL: options.DownloadTTL, cursorAEAD: cursorAEAD, cursorTTL: options.CursorTTL, scheduler: options.Scheduler}
+	engine := &Engine{backend: options.Backend, fileBackend: fileBackend, separateFileBackend: separateFileBackend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, uploadTTL: options.UploadTTL, downloadTTL: options.DownloadTTL, cursorAEAD: cursorAEAD, cursorTTL: options.CursorTTL, scheduler: options.Scheduler, migrationObserver: options.MigrationObserver, checkpointWorkKey: append([]byte(nil), options.CursorKey...)}
 	if err := engine.initialize(ctx); err != nil {
 		return nil, err
 	}
@@ -167,6 +193,12 @@ func (e *Engine) step(ctx context.Context, name string) error {
 		return nil
 	}
 	return e.scheduler.Step(ctx, name)
+}
+
+func (e *Engine) observeMigration(progress MigrationProgress) {
+	if e.migrationObserver != nil {
+		e.migrationObserver(progress)
+	}
 }
 
 func (e *Engine) initialize(ctx context.Context) error {

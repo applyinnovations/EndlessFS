@@ -57,7 +57,9 @@ func main() {
 		os.Exit(1)
 	}
 	logger := endlesslogging.NewJSON(os.Stdout, cfg.LogLevel)
-	if err := run(context.Background(), logger, cfg); err != nil {
+	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(shutdownCtx, logger, cfg); err != nil {
 		logger.Error("process_stopped", "result", "error", "error", err.Error())
 		os.Exit(1)
 	}
@@ -80,6 +82,13 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
+	writeTimeout := controlWriteTimeout(previewEnabled, cfg.PreviewOperationTimeout)
+	server, controlListener, startupHandler, controlErrors, err := startControlServer(cfg.ListenAddr, writeTimeout, logger)
+	if err != nil {
+		return err
+	}
+	defer server.Close()
+	defer controlListener.Close()
 
 	var backend objectstore.Backend
 	var fileBackend objectstore.Backend
@@ -147,6 +156,14 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 		Writer:   writerConfiguration,
 		LeaseTTL: 2 * time.Minute, UploadTTL: cfg.UploadInitTTL, DownloadTTL: cfg.DownloadCapabilityTTL,
 		CursorKey: deriveKey("endlessfs-state-cursor-key-v1", secretBytes),
+		MigrationObserver: func(progress portable.MigrationProgress) {
+			logger.Info("storage_migration_progress",
+				"migrationID", progress.MigrationID, "stage", progress.Stage, "role", progress.Role,
+				"completedObjects", progress.CompletedObjects, "totalObjects", progress.TotalObjects,
+				"completedBytes", progress.CompletedBytes, "totalBytes", progress.TotalBytes,
+				"resumedObjects", progress.ResumedObjects,
+			)
+		},
 	})
 	if err != nil {
 		return err
@@ -298,42 +315,31 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if cfg.LocalFixture {
 		applicationHandler = devfixture.LoginHandler(applicationHandler, sessions, fixtureSession)
 	}
-	writeTimeout := controlWriteTimeout(previewEnabled, cfg.PreviewOperationTimeout)
-	server := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           applicationHandler,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      writeTimeout,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    32 << 10,
+	startupHandler.Activate(applicationHandler)
+	logger.Info("server_ready", "listenAddress", controlListener.Addr().String(), "version", version)
+	if cfg.LocalFixture {
+		logger.Info("local_fixture_ready", "url", cfg.BaseURL+devfixture.LoginPath)
 	}
 
-	shutdownCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 2)
 	if dataServer != nil {
 		go func() { errCh <- dataServer.Serve(dataListener) }()
 	}
 	if previewDataServer != nil {
 		go func() { errCh <- previewDataServer.Serve(previewListener) }()
 	}
-	go func() {
-		logger.Info("server_started", "listenAddress", cfg.ListenAddr, "version", version)
-		if cfg.LocalFixture {
-			logger.Info("local_fixture_ready", "url", cfg.BaseURL+devfixture.LoginPath)
-		}
-		errCh <- server.ListenAndServe()
-	}()
-
 	select {
+	case err := <-controlErrors:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return err
-	case <-shutdownCtx.Done():
+	case <-ctx.Done():
 		graceCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := server.Shutdown(graceCtx); err != nil {

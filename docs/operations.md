@@ -89,8 +89,9 @@ The command performs no `Put`, `Copy`, or `Delete`. Its local `memory` mode acce
 
 ## Health and observation
 
-- `GET /healthz` reports process liveness.
-- `GET /readyz` reports successful assembly, including writer-set compatibility checked during startup.
+- `GET /healthz` reports process liveness. The listener binds before storage migration begins, so Kubernetes startup and liveness probes MUST use this route and allow the migrator to continue for as long as the closed-gate work requires.
+- `GET /readyz` reports successful assembly, including completed storage migration and writer-set compatibility. Readiness probes use this route; startup probes MUST NOT use it because an intentionally unready migrator may run longer than a fixed probe window.
+- Storage migrations emit `storage_migration_progress` JSON records with only the ledger edge, stage, backend role, provider-independent object/byte totals, and resumed count. They never include object keys, virtual paths, bucket names, provider versions, or secrets.
 - Logs are structured JSON. `ENDLESSFS_LOG_LEVEL` accepts exactly `debug`, `info`, `warn`, or `error`.
 - Central redaction remains active at every level. Logs are not a file/account audit trail.
 

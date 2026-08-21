@@ -13,6 +13,7 @@ import (
 
 func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/files", api.listFiles)
+	mux.HandleFunc("GET /api/v1/files/storage-map", api.storageMap)
 	mux.HandleFunc("GET /api/v1/files/stat", api.statFile)
 	mux.HandleFunc("POST /api/v1/directories", api.createDirectory)
 	mux.HandleFunc("POST /api/v1/uploads", api.createUpload)
@@ -33,6 +34,7 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/shares", api.createShare)
 	mux.HandleFunc("DELETE /api/v1/shares/{shareID}", api.revokeShare)
 	mux.HandleFunc("GET /api/v1/public/shares/{token}", api.publicShare)
+	mux.HandleFunc("GET /api/v1/public/shares/{token}/stat", api.publicShareStat)
 	mux.HandleFunc("POST /api/v1/public/shares/{token}/downloads", api.publicShareDownload)
 	mux.HandleFunc("GET /s/{token}", api.publicShareShell)
 }
@@ -81,6 +83,27 @@ func (api *identityAPI) listFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
+}
+
+func (api *identityAPI) storageMap(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.authenticated(w, r)
+	if !ok {
+		return
+	}
+	pathValue := r.URL.Query().Get("path")
+	if pathValue == "" {
+		pathValue = "/"
+	}
+	path, err := parsePath(pathValue)
+	if err == nil {
+		var page drive.StorageMapPage
+		page, err = api.drive.StorageMap(r.Context(), current.Record.UserID, path)
+		if err == nil {
+			writeJSON(w, http.StatusOK, page)
+			return
+		}
+	}
+	writeProblem(w, r, err)
 }
 
 func (api *identityAPI) statFile(w http.ResponseWriter, r *http.Request) {
@@ -538,6 +561,16 @@ func (api *identityAPI) publicShare(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, page)
 }
+
+func (api *identityAPI) publicShareStat(w http.ResponseWriter, r *http.Request) {
+	entry, err := api.drive.PublicStat(r.Context(), r.PathValue("token"), r.URL.Query().Get("path"))
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, entry)
+}
+
 func (api *identityAPI) publicShareDownload(w http.ResponseWriter, r *http.Request) {
 	if !api.requireOrigin(w, r) {
 		return

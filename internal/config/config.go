@@ -44,6 +44,7 @@ type Config struct {
 	GCSPreviewBucket          string
 	GCSSigningAccount         string
 	WriterSetID               string
+	LocalFixture              bool
 	AllowRegistration         bool
 	InviteRegistration        bool
 	BootstrapToken            secret.Value
@@ -71,6 +72,7 @@ type Config struct {
 
 // PublicConfig contains the non-secret settings safe to expose to browsers.
 type PublicConfig struct {
+	LocalFixture                 bool     `json:"localFixture"`
 	AllowRegistration            bool     `json:"allowRegistration"`
 	InviteRegistration           bool     `json:"inviteRegistration"`
 	PasskeysAvailable            bool     `json:"passkeysAvailable"`
@@ -128,6 +130,10 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	localFixture, err := parseBool(lookup, "ENDLESSFS_LOCAL_FIXTURE", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	storageProvider := "mock"
 	if value, ok := lookup("ENDLESSFS_STORAGE_PROVIDER"); ok {
@@ -182,6 +188,9 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		}
 	} else if gcsFileBucket != "" || gcsStateBucket != "" || gcsPreviewBucket != "" || gcsSigningAccount != "" {
 		return Config{}, fmt.Errorf("GCS configuration is unavailable with mock storage")
+	}
+	if localFixture && (storageProvider != "mock" || secure || !listenLoopback || !isLoopbackHost(baseURL.Hostname())) {
+		return Config{}, fmt.Errorf("ENDLESSFS_LOCAL_FIXTURE: available only with mock storage on an HTTP loopback origin and listener")
 	}
 	if !validRandomIdentifier(writerSetID) {
 		return Config{}, fmt.Errorf("ENDLESSFS_WRITER_SET_ID: expected canonical base64url encoding of at least 16 bytes")
@@ -322,6 +331,7 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		GCSPreviewBucket:          gcsPreviewBucket,
 		GCSSigningAccount:         gcsSigningAccount,
 		WriterSetID:               writerSetID,
+		LocalFixture:              localFixture,
 		AllowRegistration:         allowRegistration,
 		InviteRegistration:        inviteRegistration,
 		BootstrapToken:            bootstrapToken,
@@ -374,6 +384,7 @@ func (c Config) Public() PublicConfig {
 		previewAutoMaxAgeSeconds = &seconds
 	}
 	return PublicConfig{
+		LocalFixture:                 c.LocalFixture,
 		AllowRegistration:            c.AllowRegistration,
 		InviteRegistration:           c.InviteRegistration,
 		PasskeysAvailable:            true,

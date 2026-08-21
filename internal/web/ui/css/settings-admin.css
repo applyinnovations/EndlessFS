@@ -1,0 +1,82 @@
+.settings-list { display: grid; width: min(100%, 960px); min-width: 0; grid-template-columns: minmax(0, 1fr); justify-items: stretch; gap: 8px; }
+.settings-section { min-width: 0; max-width: 100%; padding-block: 16px; }
+.settings-section > .panel-heading {
+  min-height: var(--efs-metric-controlHeight);
+  align-items: center;
+}
+.settings-section > .panel-heading h2 { margin-block: 0; }
+.settings-form { display: block; }
+.settings-form-body { display: grid; min-width: 0; gap: 10px; margin-block-start: 8px; justify-items: start; }
+.settings-field { display: grid; width: min(100%, 360px); gap: 4px; color: var(--efs-color-text-muted); font-size: var(--efs-type-size-xs); }
+.settings-field > input,
+.settings-field > select { width: 100%; color: var(--efs-color-foreground); }
+.checkbox-label { display: flex; align-items: center; gap: 6px; }
+.settings-form-body > .field-help { margin: 0; }
+.settings-wide { display: block; width: 100%; min-width: 0; justify-self: stretch; }
+.settings-table-scroll {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  max-height: min(42vh, 360px);
+  margin-block-start: 8px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.settings-table-scroll > table { width: max(100%, var(--efs-tableMinimumWidth, 100%)); min-width: 100%; }
+#passkey-table { --efs-tableMinimumWidth: 600px; }
+#passkey-table th:first-child,
+#passkey-table td:first-child { width: auto; }
+#passkey-table th:nth-child(2),
+#passkey-table td:nth-child(2),
+#passkey-table th:nth-child(3),
+#passkey-table td:nth-child(3) { width: 190px; text-align: left; font-variant-numeric: tabular-nums; }
+#passkey-table th:last-child,
+#passkey-table td:last-child { width: 84px; }
+#share-table { --efs-tableMinimumWidth: 820px; }
+#share-table th:first-child,
+#share-table td:first-child { width: auto; }
+#share-table th:nth-child(2),
+#share-table td:nth-child(2) { width: 82px; text-align: left; }
+#share-table th:nth-child(3),
+#share-table td:nth-child(3) { width: 82px; text-align: left; }
+#share-table th:nth-child(4),
+#share-table td:nth-child(4),
+#share-table th:nth-child(5),
+#share-table td:nth-child(5) { width: 190px; text-align: left; font-variant-numeric: tabular-nums; }
+#share-table th:last-child,
+#share-table td:last-child { width: 84px; }
+#invite-table { --efs-tableMinimumWidth: 650px; }
+#invite-table th:first-child,
+#invite-table td:first-child { width: 110px; }
+#invite-table th:nth-child(2),
+#invite-table td:nth-child(2),
+#invite-table th:nth-child(3),
+#invite-table td:nth-child(3) { width: 190px; text-align: left; font-variant-numeric: tabular-nums; }
+#invite-table th:last-child,
+#invite-table td:last-child { width: 84px; }
+.settings-table-scroll .row-actions { flex-wrap: nowrap; }
+.settings-table-scroll .empty-table-row:hover { background: transparent; }
+.settings-table-scroll .empty-table-row td { color: var(--efs-color-text-muted); }
+.loading-passkey-row td:nth-child(2) span,
+.loading-passkey-row td:nth-child(3) span,
+.loading-share-row td:nth-child(4) span,
+.loading-share-row td:nth-child(5) span { width: 112px; }
+.loading-passkey-row td:last-child span,
+.loading-share-row td:last-child span { width: 64px; margin-inline-start: auto; }
+#admin-view .settings-list { width: min(100%, 1080px); }
+.admin-users-section { border-top: 0; padding-block-start: 0; }
+#users-table { --efs-tableMinimumWidth: 920px; }
+#users-table th:first-child,
+#users-table td:first-child { width: auto; }
+#users-table th:nth-child(2),
+#users-table td:nth-child(2) { width: 90px; text-align: left; }
+#users-table th:nth-child(3),
+#users-table td:nth-child(3) { width: 120px; text-align: left; }
+#users-table th:nth-child(4),
+#users-table td:nth-child(4) { width: 205px; text-align: left; }
+#users-table th:last-child,
+#users-table td:last-child { width: 124px; }
+.user-actions { display: grid; grid-template-columns: repeat(3, var(--efs-metric-controlHeight)); justify-content: end; gap: 6px; }
+.secret-result { display: flex; align-items: center; gap: 8px; border-block: 1px solid var(--efs-color-warning); padding-block: 8px; }
+.secret-result output { min-width: 0; overflow: hidden; font-family: var(--efs-font-monospace); text-overflow: ellipsis; white-space: nowrap; }

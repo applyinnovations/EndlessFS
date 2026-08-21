@@ -14,7 +14,7 @@ func TestIntegrationThemeHTTPMetadataPreferenceAssetsAndSafeFallback(t *testing.
 	origin := "https://drive.example.test"
 	cookies := []*http.Cookie{env.session, env.csrf}
 	listed := performRequest(t, env.handler, http.MethodGet, "/api/v1/themes", "", "", nil, nil)
-	if listed.Code != http.StatusOK || !bytes.Contains(listed.Body.Bytes(), []byte("endlessfs-light")) || !bytes.Contains(listed.Body.Bytes(), []byte("color.accent")) {
+	if listed.Code != http.StatusOK || !bytes.Contains(listed.Body.Bytes(), []byte("endlessfs-light")) || !bytes.Contains(listed.Body.Bytes(), []byte("color.primary")) || !bytes.Contains(listed.Body.Bytes(), []byte(`"themeAPI":{"major":2,"minor":0}`)) || bytes.Contains(listed.Body.Bytes(), []byte("color.accent")) {
 		t.Fatalf("themes = %d %s", listed.Code, listed.Body.String())
 	}
 	selected := performRequest(t, env.handler, http.MethodPut, "/api/v1/me/preferences/theme", origin, `{"themeID":"endlessfs-dark"}`, cookies, driveMutationHeaders(env.csrf.Value, ""))
@@ -43,7 +43,7 @@ func TestIntegrationThemeHTTPMetadataPreferenceAssetsAndSafeFallback(t *testing.
 		t.Fatal(err)
 	}
 	css := performRequest(t, env.handler, http.MethodGet, selection.CSSURL, "", "", nil, nil)
-	if css.Code != http.StatusOK || css.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" || css.Header().Get("X-Content-Type-Options") != "nosniff" || !bytes.Contains(css.Body.Bytes(), []byte("--efs-color-accent")) {
+	if css.Code != http.StatusOK || css.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" || css.Header().Get("X-Content-Type-Options") != "nosniff" || !bytes.Contains(css.Body.Bytes(), []byte("--efs-color-primary")) {
 		t.Fatalf("theme CSS = %d %v %s", css.Code, css.Header(), css.Body.String())
 	}
 	for _, asset := range selection.Assets {

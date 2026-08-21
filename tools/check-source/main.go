@@ -132,7 +132,7 @@ func check(root string) ([]string, error) {
 func identitySurface(path string) bool {
 	return strings.HasPrefix(path, "internal/model/") ||
 		strings.HasPrefix(path, "internal/httpapi/") ||
-		strings.HasPrefix(path, "internal/web/static/")
+		strings.HasPrefix(path, "internal/web/ui/")
 }
 
 func contains(values []string, target string) bool {

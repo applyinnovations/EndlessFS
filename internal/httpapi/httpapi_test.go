@@ -30,8 +30,9 @@ func TestIntegrationPublicEndpoints(t *testing.T) {
 		{path: "/trash", contentType: "text/html; charset=utf-8", body: "EndlessFS"},
 		{path: "/settings", contentType: "text/html; charset=utf-8", body: "EndlessFS"},
 		{path: "/admin", contentType: "text/html; charset=utf-8", body: "EndlessFS"},
-		{path: "/assets/app.css", contentType: "text/css; charset=utf-8", body: "color-scheme"},
-		{path: "/assets/app.js", contentType: "text/javascript; charset=utf-8", body: "addEventListener"},
+		{path: "/assets/ui.css", contentType: "text/css; charset=utf-8", body: "color-scheme"},
+		{path: "/assets/ui.js", contentType: "text/javascript; charset=utf-8", body: "addEventListener"},
+		{path: "/assets/brand/endlessfs-mark.svg", contentType: "image/svg+xml", body: "<svg"},
 	}
 
 	for _, test := range tests {
@@ -51,7 +52,13 @@ func TestIntegrationPublicEndpoints(t *testing.T) {
 			if !strings.Contains(response.Body.String(), test.body) {
 				t.Fatalf("body %q does not contain %q", response.Body.String(), test.body)
 			}
-			assertSecurityHeaders(t, response.Header())
+			if test.path == "/assets/brand/endlessfs-mark.svg" {
+				if got := response.Header().Get("Content-Security-Policy"); got != "default-src 'none'; style-src 'none'; sandbox" {
+					t.Fatalf("isolated SVG CSP = %q", got)
+				}
+			} else {
+				assertSecurityHeaders(t, response.Header())
+			}
 		})
 	}
 }

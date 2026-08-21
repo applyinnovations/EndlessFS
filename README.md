@@ -59,6 +59,14 @@ nix run .#dev
 
 The development control server listens on `http://127.0.0.1:8080` by default. It also opens a separate ephemeral loopback data-plane listener; upload/download bytes use only that listener. Set `ENDLESSFS_MOCK_PROVIDER_URL=http://127.0.0.1:9090` to select a stable loopback data-plane port for browser testing.
 
+For UI evaluation without a passkey bootstrap, start the explicit ephemeral fixture:
+
+```console
+nix run .#dev-fixture
+```
+
+Then open `http://127.0.0.1:8080/__endlessfs/local-fixture`. The loopback-only route installs a pre-issued local session and opens a seeded workspace with mixed file types, previewable images, nested directories, a paged collection, Trash items, a public share, and admin account states. All fixture state disappears when the process stops.
+
 Build the binary, OCI archive, or complete release record without Docker:
 
 ```console
@@ -77,7 +85,7 @@ endlessfs.packages.${system}.default.override {
 }
 ```
 
-Every supplied archive/directory is validated before generated data is compiled into the binary. See [Theme API 1.1](./docs/theme-api.md).
+Every supplied archive/directory is validated before generated data is compiled into the binary. See [Theme API 2.0](./docs/theme-api.md). Theme API 1.x bundles are intentionally unsupported.
 
 All required builds and checks are Nix sandbox derivations, so project code cannot quietly depend on tools installed on the host. The required test gates are designed to run without cloud credentials, GCP, databases, persistent services, a container daemon, or non-loopback network access.
 
@@ -92,6 +100,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix build .#container` | Build a minimal, shell-free OCI archive. |
 | `nix flake check` | Run the authoritative current build, format, lint, test, fuzz, race, security, policy, offline-sandbox, and OCI hardening gates. |
 | `nix run .#dev` | Run the loopback-only development control plane. |
+| `nix run .#dev-fixture` | Run the loopback-only ephemeral UI fixture with mock previews and one-click local access. |
 | `nix run .#generate-secret` | Generate one canonical 256-bit base64url environment secret. |
 | `nix run .#fmt` / `.#fmt-check` | Apply or verify Go and Nix formatting. |
 | `nix run .#lint` | Run Tekton policy validation, `go vet`, and `staticcheck`. |
@@ -103,6 +112,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#provider-verify -- check CONFIG` | Strictly read and verify a closed checkpoint on configured single- or split-backend memory fixtures/GCS buckets. |
 | `nix run .#test-preview` | Run focused preview policy, generator, store-contract, and HTTP tests. |
 | `nix run .#test-e2e` | Run Go-controlled Chromium passkey and core Drive workflows. Nix supplies Chromium on Linux. |
+| `nix run .#test-ui-benchmark` | Run the versioned Chromium UI scale benchmark and write JSON-line evidence to `ui-benchmark-v1.json` (override with `ENDLESSFS_UI_BENCHMARK_OUTPUT`). |
 | `nix run .#test-coverage` | Run the complete suite and enforce 85% repository plus 95% security-boundary statement coverage. |
 | `nix run .#test-race` | Run the suite with Go's race detector. |
 | `nix run .#test-fuzz` | Run fixed-iteration path, encoding, JSON, cursor, share, capability, WebAuthn, logging, theme, and image-preview decoder fuzz smoke targets. |
@@ -134,6 +144,7 @@ Only settings that have validation and tests are parsed by the current binary:
 | `ENDLESSFS_GCS_PREVIEW_BUCKET` | Unset | Required when `ENDLESSFS_PREVIEW_PROVIDER=gcs`; distinct private bucket for disposable generated-preview artifacts and manifests. |
 | `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` | ADC discovery | Optional lowercase service-account email used by the official client for keyless IAM `signBlob` signed URLs. |
 | `ENDLESSFS_WRITER_SET_ID` | Local mock identifier | Stable canonical base64url identifier of at least 128 bits; required with `gcs` and identical across all replicas and provider cutovers. |
+| `ENDLESSFS_LOCAL_FIXTURE` | `false` | Explicit local UI fixture; accepted only with mock storage on an HTTP loopback origin and listener. Prefer `nix run .#dev-fixture`. |
 | `ALLOW_REGISTRATION` | `false` | Exact `true` or `false`; exposed as non-secret public policy. |
 | `INVITE_REGISTRATION` | `true` | Exact `true` or `false`; exposed as non-secret public policy. |
 | `ENDLESSFS_BOOTSTRAP_TOKEN` | Unset | Optional canonical 256-bit base64url token; enables only the unused first-admin bootstrap. |
@@ -195,6 +206,8 @@ AGENTS.md                repository instructions for implementation agents
 ```
 
 Direct dependency rationale is recorded in [docs/dependencies.md](./docs/dependencies.md). The implemented boundary review is [docs/threat-model.md](./docs/threat-model.md), operational guidance is [docs/operations.md](./docs/operations.md), and the acceptance record is [docs/v1-evidence.md](./docs/v1-evidence.md).
+
+The imported [EndlessFS brand guidelines](./docs/brand/README.md), their visual reference boards, and the [new browser UI project plan](./docs/ui-rebuild-plan.md) define the inputs and staged proof required for the planned clean-slate interface. They do not override the normative v1 or applicable extension specifications.
 
 ## CI, containers, releases, and branch protection
 

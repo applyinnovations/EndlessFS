@@ -39,11 +39,6 @@ type APIVersion struct {
 	Minor int `json:"minor"`
 }
 
-type FontDeclaration struct {
-	Regular string `json:"regular,omitempty"`
-	Bold    string `json:"bold,omitempty"`
-}
-
 type AssetReference struct {
 	Path       string  `json:"path"`
 	X          int     `json:"x,omitempty"`
@@ -92,7 +87,6 @@ type Manifest struct {
 	Author        string                     `json:"author,omitempty"`
 	License       string                     `json:"license"`
 	Tokens        map[string]json.RawMessage `json:"tokens"`
-	Fonts         map[string]FontDeclaration `json:"fonts"`
 	Assets        map[string]AssetReference  `json:"assets"`
 }
 
@@ -291,7 +285,7 @@ func normalizeBundlePath(value string) (string, error) {
 }
 
 func validateManifestMetadata(manifest Manifest, builtIn bool) error {
-	if manifest.SchemaVersion != 1 || manifest.ThemeAPI.Major != APIMajor || manifest.ThemeAPI.Minor < 0 || manifest.ThemeAPI.Minor > APIMinor {
+	if manifest.SchemaVersion != 2 || manifest.ThemeAPI.Major != APIMajor || manifest.ThemeAPI.Minor != APIMinor {
 		return domain.NewError(domain.ErrorInvalid, "incompatible theme schema or Theme API")
 	}
 	if len(manifest.ID) > 128 || !themeIDPattern.MatchString(manifest.ID) {

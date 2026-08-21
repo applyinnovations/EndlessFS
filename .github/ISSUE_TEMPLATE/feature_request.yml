@@ -1,0 +1,57 @@
+name: Feature request
+description: Propose a user problem or workflow that EndlessFS should address.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the user problem, not a preferred implementation. Proposals must preserve EndlessFS security, provider portability, deterministic behavior, and the design-for-thousands principle.
+
+        Suspected security vulnerabilities must follow the [security policy](https://github.com/applyinnovations/EndlessFS/security/policy) instead of this public form.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem needs to be solved?
+      description: Describe who encounters the problem, when it occurs, and why the current workflow is insufficient.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What outcome would be useful?
+      description: Describe the observable result without prescribing an architecture.
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Example workflow
+      description: Walk through a representative use case from start to finish.
+    validations:
+      required: true
+  - type: textarea
+    id: scale
+    attributes:
+      label: How should this behave at scale?
+      description: Explain how the workflow should remain navigable and predictable with large collections, queues, or teams.
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Security, privacy, or portability constraints
+      description: Identify affected trust boundaries, sensitive data, provider assumptions, or offline behavior.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Note existing workflows or simpler approaches that were considered.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for a similar request.
+          required: true
+        - label: I described the problem and outcome rather than only a preferred implementation.
+          required: true
+        - label: I removed secrets, personal data, private file content, tokens, and provider identifiers.
+          required: true

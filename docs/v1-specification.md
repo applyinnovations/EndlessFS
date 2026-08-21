@@ -460,6 +460,7 @@ type StorageProvider interface {
 Required semantics:
 
 - `List` is one directory only, stable within a page sequence, paginated with an opaque cursor, and never leaks another scope. Every page returns a typed `current` directory entry whose recursive size, recursive file count, and metadata belong to the same immutable manifest snapshot as the child rows; later cursor pages repeat that exact entry rather than resolving the current live path again.
+- The owner storage-map read returns one bounded two-level hierarchy: at most 180 largest immediate entries, children for at most eight largest non-empty directories, at most 60 children per expanded directory, and at most 420 entries in the response. Each child listing is accepted only when its current directory version, recursive size, and recursive file count match the parent entry; a concurrent mismatch leaves that directory unexpanded. Exact recursive aggregates represent omitted entries without a client-side directory crawl. A one-entry lookahead may expose only the non-negative maximum size of an omitted immediate child so the browser can drill into a **Remaining items** tile with an exact inclusive size cutoff; the lookahead entry itself is not returned.
 - `LookupChildren` accepts one validated directory and 1–1000 unique immediate-child names. It returns the current directory and every requested child, in request order, from one authoritative directory snapshot. Implementations MUST resolve the directory manifest once, MUST NOT issue one provider/application `Stat` per child, and fail closed if any requested entry is absent, negative, overflowing, malformed, or inconsistent with its directory root/manifest.
 - `Stat` returns `ErrNotFound` for missing entries without leaking whether an out-of-scope provider key exists.
 - `Entry.Size` is the immutable object length for a file and the persisted recursive sum of every descendant file byte for a directory. The root directory's size is the total logical file-byte consumption of that area.
@@ -1034,7 +1035,7 @@ Requirements:
 
 - The control API MUST reject file bodies and request bodies over its documented limit.
 - A single upload and a batch of up to 100 upload initializations are supported.
-- The UI defaults to four concurrent transfers and allows a bounded setting from one to eight.
+- The UI automatically derives concurrency within the configured one-to-eight bound from connection, device, file-size, queue-depth, and recent-recovery signals. Concurrency is not a user-controlled input.
 - Resumable upload state tracks the confirmed provider offset, never merely bytes attempted by the browser.
 - Retry uses bounded exponential backoff with jitter and distinguishes retryable from terminal errors.
 - Resume after an interrupted request starts at the provider-confirmed offset.
@@ -1044,9 +1045,10 @@ Requirements:
 - A failed or expired upload does not create a visible complete file.
 - Durable upload intent, scope, destination, size, integrity expectations, and logical progress use canonical records. Provider-native resumable session URLs, multipart IDs, block IDs, and confirmed-native offsets are encrypted transient leases and cannot be required after a portability checkpoint.
 - Completed bytes are committed as an immutable canonical blob before the portable file-entry record becomes visible. A completion race or failed descriptor commit leaves an unreferenced blob for bounded idempotent cleanup, never a visible corrupt entry.
+- A closed-schema client ledger persists safe transfer intent, confirmed offset, retry schedule, and terminal state in IndexedDB on the originating device, partitioned by authenticated owner to prevent exposure between accounts using one browser profile. It MUST NOT persist file bytes, capability URLs or headers, session/CSRF material, provider-native identifiers, or absolute local paths. Browser file handles MAY be persisted when supported; otherwise the user reconnects the source after reload. Closing the browser pauses transfers, and cross-device/account-synchronized queue persistence is not required in v1.
+- The owner-scoped upload-status response identifies `active`, `completed`, `aborted`, or `expired` state and returns the safe confirmed offset without returning capability or provider-native material. This bounded per-upload lookup is the reconciliation boundary; it is not an account-wide transfer-list API.
 - A completion that loses an ancestor directory-root CAS to an unrelated file mutation advances its canonical upload record to a fresh durable completion-operation attempt and retries from authoritative directory state. A true same-target create or replacement race still has exactly one version-precondition winner.
 - Upload publication and replacement update the destination directory and every changed ancestor recursive-byte and recursive-file-count aggregate at the same durable operation commit point.
-- Upload status survives page navigation only if the provider/session supports it; cross-browser persistence is not required in v1.
 - Large-object tests simulate offsets above 1 TiB without allocating equivalent storage.
 
 ### 11.3 Downloads
@@ -1077,8 +1079,7 @@ Requirements:
 
 - Normal delete means move to trash, not permanent deletion.
 - Trash is not addressable by normal file paths and is exposed through dedicated endpoints.
-- Trash listings include original path and trash time.
-- Every successful trash row includes exact non-negative logical `size` and `fileCount`; file rows retain their validated media type and directory rows have no media type. Empty directories return zero for both, while zero-byte files return `size: 0` and `fileCount: 1`; zero never means unavailable.
+- Trash listings include original path, trash time, kind, exact non-negative logical `size`, and exact non-negative logical `fileCount`. File rows retain their provider-validated media type and directory rows have no media type. Empty directories return zero for both, while zero-byte files return `size: 0` and `fileCount: 1`; zero never means unavailable. Display metadata is read from the isolated trashed entry and is not duplicated into the canonical trash record.
 - Restore returns to the original path by default.
 - Restore conflicts fail unless the user explicitly chooses generated-name restore.
 - Permanent deletion requires an explicit confirmation action and deletes only the selected trash ID.
@@ -1146,7 +1147,7 @@ The exact JSON field casing may be finalized once and then documented in an Open
 | GET | `/healthz` | Process liveness only; no provider details or secrets. |
 | GET | `/readyz` | Valid configuration and reachable configured local provider for v1. |
 | GET | `/api/v1/config` | Public product name, registration modes, passkey availability, upload limits; no secrets. |
-| GET | `/api/v1/themes` | List safe metadata for installed compatible themes and the configured defaults. |
+| GET | `/api/v1/themes` | List safe metadata for installed Theme API 2.0 themes and the configured defaults. |
 | GET | `/assets/themes/{digest}/{path}` | Serve immutable validated theme media with exact content type; no arbitrary filesystem lookup. |
 
 ### 12.3 Bootstrap, registration, and authentication
@@ -1163,7 +1164,7 @@ The exact JSON field casing may be finalized once and then documented in an Open
 | GET | `/api/v1/me` | Return `userID`, `displayName`, separate roles, and CSRF delivery mechanism. |
 | PATCH | `/api/v1/me` | Update the display name only; `userID` and roles are immutable here. |
 | GET | `/api/v1/me/preferences/theme` | Return the current explicit or `system` theme preference and resolved theme. |
-| PUT | `/api/v1/me/preferences/theme` | Select an installed compatible theme or `system`. |
+| PUT | `/api/v1/me/preferences/theme` | Select an installed Theme API 2.0 theme or `system`. |
 | GET | `/api/v1/me/passkeys` | List credential IDs in safe display form, labels, and dates. |
 | POST | `/api/v1/me/passkeys/options` | Begin add-passkey ceremony after recent authentication. |
 | POST | `/api/v1/me/passkeys/verify` | Add a credential to the current user. |
@@ -1192,6 +1193,7 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 | Method | Route | Behavior |
 |---|---|---|
 | GET | `/api/v1/files` | List one virtual directory using `path`, `limit`, `cursor`, and sort; return the same-snapshot typed `current` directory entry. |
+| GET | `/api/v1/files/storage-map` | Return the bounded, snapshot-checked two-level hierarchy for the authenticated owner's storage map. |
 | GET | `/api/v1/files/stat` | Stat one virtual path. |
 | POST | `/api/v1/directories` | Create an empty directory. |
 | POST | `/api/v1/uploads` | Create one upload capability. |
@@ -1259,6 +1261,7 @@ The embedded UI MUST include:
 ### 13.2 Drive interaction
 
 - Breadcrumbs always represent a validated virtual path.
+- The active file-browser path, open file preview, filename search, metadata filters and disclosure, sort, and presentation mode are canonically represented in URL query parameters so refresh, browser history, and copied links restore the same view. Infinite-scroll batch depth is transient rendering state and MUST NOT be represented in the URL. Duplicate, malformed, oversized, or inapplicable values fall back to deterministic allowlisted defaults and never enter API requests unchecked.
 - List and grid modes MAY be offered; at least one polished mode is required.
 - Selection supports pointer and keyboard interaction, select all for the loaded page, and clear selection.
 - Drag-and-drop has a visible target and does not prevent ordinary page interaction outside the target.
@@ -1297,17 +1300,18 @@ The embedded UI MUST include:
 
 ## 14. Data-only theme system
 
+Theme API 2.0 replaces Theme API 1.x after the clean-slate browser rebuild. It is not compatible with the old contract: schema/API 1.x bundles, token aliases, font declarations, compatibility adapters, and partial legacy interpretation are prohibited. The finished application UI defines the complete 2.0 surface below.
+
 ### 14.1 Theme boundary
 
 EndlessFS owns all semantic HTML, application CSS rules, responsive behavior, JavaScript behavior, accessibility relationships, labels, interaction states, and security-sensitive presentation. A theme supplies data consumed by that implementation.
 
 A theme bundle MAY supply:
 
-- typed design-token overrides;
+- typed purpose-based color overrides;
 - sanitized SVG images;
 - PNG, WebP, and supported AVIF images;
-- WOFF2 fonts;
-- logos, favicons, illustrations, individual icons, and structured raster sprite atlases; and
+- logos, favicons, individual file icons, and structured raster sprite atlases; and
 - safe descriptive metadata such as theme name, author, version, and license.
 
 A theme bundle MUST NOT contain or cause EndlessFS to interpret:
@@ -1317,6 +1321,7 @@ A theme bundle MUST NOT contain or cause EndlessFS to interpret:
 - JavaScript, WebAssembly, Web Components, event handlers, or executable expressions;
 - remote URLs, `@import`, data URLs, or dynamic asset discovery;
 - raw CSS selectors, property names, property values, or arbitrary custom properties; or
+- fonts, type scales, layout metrics, spacing, radii, motion, elevation, or other application-owned geometry; or
 - application wording, accessible names, authorization rules, routes, or behavior.
 
 Themes cannot configure `display`, `visibility`, `position`, `z-index`, `pointer-events`, DOM order, responsive breakpoints, overflow behavior, focus management, or security-dialog behavior. “Unopinionated look and feel” means that EndlessFS exposes a broad visual token and asset contract; it does not surrender functional control to the theme.
@@ -1338,8 +1343,7 @@ The Go theme compiler:
 2. resolves the complete parent-plus-override theme;
 3. serializes typed values into application-owned CSS custom properties;
 4. maps semantic asset slots to immutable content-addressed URLs;
-5. generates any required `@font-face` rules from validated WOFF2 declarations; and
-6. embeds the resolved registry and media in the Go binary.
+5. embeds the resolved registry and media in the Go binary.
 
 No raw manifest string is concatenated into HTML or CSS. Values are parsed into typed Go values and serialized by type-specific encoders.
 
@@ -1351,60 +1355,38 @@ The distributable format is a deterministic ZIP archive with the extension `.efs
 example-theme.efstheme
 ├── theme.json
 └── assets/
-    ├── logo.svg
-    ├── favicon.svg
+    ├── mark.svg
     ├── icons/
     │   ├── file.svg
     │   ├── folder.svg
-    │   ├── upload.svg
-    │   └── trash.svg
-    ├── illustrations/
-    │   └── empty-folder.webp
-    └── fonts/
-        ├── interface-regular.woff2
-        └── interface-bold.woff2
+    │   ├── image.svg
+    │   └── document.svg
 ```
 
 Example manifest:
 
 ```json
 {
-  "schemaVersion": 1,
-  "themeAPI": { "major": 1, "minor": 0 },
+  "schemaVersion": 2,
+  "themeAPI": { "major": 2, "minor": 0 },
   "id": "com.example.endlessfs",
   "name": "Example Theme",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "extends": "endlessfs-light",
   "appearance": "light",
   "author": "Example",
   "license": "CC-BY-4.0",
   "tokens": {
-    "color.canvas": "#f7f8fa",
-    "color.surface": "#ffffff",
-    "color.text.primary": "#172033",
-    "color.text.muted": "#647084",
-    "color.accent": "#356ae6",
-    "color.danger": "#c53030",
-    "radius.control": 8,
-    "radius.panel": 14,
-    "spacing.density": "comfortable",
-    "control.height": 40,
-    "motion.duration.normal": 160
-  },
-  "fonts": {
-    "interface": {
-      "regular": "assets/fonts/interface-regular.woff2",
-      "bold": "assets/fonts/interface-bold.woff2"
-    }
+    "color.primary": "#315bd6",
+    "color.primary.tint": "#eef3ff"
   },
   "assets": {
-    "brand.logo": "assets/logo.svg",
-    "brand.favicon": "assets/favicon.svg",
+    "brand.mark": "assets/mark.svg",
+    "brand.favicon": "assets/mark.svg",
     "icon.file": "assets/icons/file.svg",
     "icon.folder": "assets/icons/folder.svg",
-    "icon.upload": "assets/icons/upload.svg",
-    "icon.trash": "assets/icons/trash.svg",
-    "illustration.emptyFolder": "assets/illustrations/empty-folder.webp"
+    "icon.file.image": "assets/icons/image.svg",
+    "icon.file.document": "assets/icons/document.svg"
   }
 }
 ```
@@ -1415,8 +1397,8 @@ Manifest rules:
 - Theme IDs use a lowercase reverse-domain-style syntax, are at most 128 bytes, and cannot begin with `endlessfs-` unless built into the upstream project.
 - Names, author values, and versions are presentation metadata and are rendered as text.
 - `license` is required and contains a syntactically valid SPDX expression or documented `LicenseRef-*` identifier covering the distributed bundle; the build inventory preserves it without attempting online license resolution.
-- `version` is semantic-version shaped. Theme API compatibility, not the theme version, controls loading.
-- Every custom v1 theme directly extends exactly one of `endlessfs-light` or `endlessfs-dark`.
+- `version` is semantic-version shaped. Theme API acceptance, not the theme version, controls loading.
+- Every custom Theme API 2.0 theme directly extends exactly one of `endlessfs-light` or `endlessfs-dark`.
 - `appearance` must match the built-in parent.
 - Bundle paths are normalized relative paths beneath `assets/`; absolute paths, traversal, empty segments, backslashes, symlinks, hard links, and duplicate normalized names are rejected.
 - A custom theme ID cannot shadow a built-in or another embedded theme ID.
@@ -1426,51 +1408,43 @@ Manifest rules:
 The Theme API is a versioned public contract containing:
 
 - the closed registry of token names;
-- the type, unit, range, and default for each token;
+- the strict color type and light/dark default for each token;
 - semantic asset-slot names and accepted media for each;
-- font slots and supported weights/styles;
 - accessibility relationships and contrast pairs; and
-- the compatibility rules for additions and removals.
+- exact schema and API version acceptance.
 
-The initial registry MUST be broad enough that themes can establish a distinct visual identity without raw CSS:
+Theme API 2.0 exposes only color roles that the completed UI consumes:
 
-| Category | Required token families |
-|---|---|
-| Palette | Canvas, surfaces, elevated surfaces, primary/muted/inverse text, borders, accent, success, warning, danger, selection, overlay |
-| Typography | Interface/monospace font slots, type scale, weights, line heights, letter spacing within bounded ranges |
-| Shape | Controls, fields, panels, dialogs, menus, badges, thumbnails, and avatar radii |
-| Spacing | Compact/comfortable density, page gutters, control padding, component and section gaps |
-| Metrics | Toolbar/sidebar dimensions, row height, control height, thumbnail sizes, icon scale within safe ranges |
-| Elevation | Structured shadow levels and overlay opacity |
-| Motion | Bounded durations and allowlisted easing presets; reduced-motion always overrides them |
-| Interaction | Hover, active, selected, disabled, drop-target, focus-ring, and validation-state colors |
-| File state | Uploading, complete, failed, shared, offline, and trashed presentation tokens |
-| Branding | Logo/mark dimensions, login illustration dimensions, and safe image fitting modes |
+```text
+color.background
+color.foreground
+color.text.muted
+color.border
+color.surface
+color.primary
+color.primary.tint
+color.success
+color.warning
+color.error
+```
 
-Token values use closed types rather than CSS strings:
+Every value uses exactly `#RRGGBB`, is parsed as data, and is normalized to lowercase. Names describe purpose and never a particular hue. Background, foreground, muted text, primary interaction, and error relationships are contrast checked against the documented minimums.
 
-- colors are parsed from a documented strict hexadecimal grammar or structured color object;
-- dimensions are numbers interpreted in a contract-defined unit and range;
-- opacity is a number from 0 through 1;
-- font choices reference declared logical font slots;
-- font weights and styles are enumerated or range checked;
-- density, fitting mode, and easing are enums;
-- shadows are structured numeric objects with typed colors; and
-- durations are bounded integer milliseconds.
+Typography, Inter font files, density, shape, spacing, metrics, elevation, motion, focus geometry, responsive behavior, and hit targets are application-owned. A theme cannot alter them, because doing so would make layout and interaction nondeterministic.
 
-Unknown tokens are rejected. An application accepts a bundle only when it supports the declared Theme API major and at least the declared minor. A newer application accepts an older compatible bundle and supplies any newly added tokens from its built-in parent. Removing or changing the meaning/type of a token requires a new Theme API major.
+Unknown tokens are rejected. Theme API 2.0 accepts exactly `schemaVersion: 2` and `themeAPI: {"major":2,"minor":0}`. Every other version fails closed; there is no alias, adapter, migration, minor-version inheritance, or partial interpretation. A future contract change requires an explicit reviewed specification and version decision.
 
 The compiler maps token IDs one-to-one to internal CSS custom properties, for example:
 
 ```text
-color.accent             -> --efs-color-accent
-radius.control           -> --efs-radius-control
-motion.duration.normal   -> --efs-motion-duration-normal
+color.primary            -> --efs-color-primary
+color.primary.tint       -> --efs-color-primary-tint
+color.error              -> --efs-color-error
 ```
 
 This mapping is generated and documented from the Go token registry. Theme authors cannot name arbitrary CSS properties or variables.
 
-### 14.5 Semantic media and font slots
+### 14.5 Semantic media slots
 
 Application code requests media by a stable semantic slot, never by a bundle path. The Theme API MUST include complete registries for at least:
 
@@ -1481,37 +1455,22 @@ brand.favicon
 
 icon.file
 icon.folder
-icon.upload
-icon.download
-icon.copy
-icon.move
-icon.share
-icon.trash
-icon.restore
-icon.settings
-icon.passkey
-icon.warning
-icon.error
-
-illustration.emptyDrive
-illustration.emptyFolder
-illustration.emptyTrash
-illustration.uploadFailed
+icon.file.image
+icon.file.video
+icon.file.pdf
+icon.file.audio
+icon.file.document
+icon.file.archive
+icon.file.unknown
 ```
 
-The full registry belongs in generated theme-author documentation and expands as UI features are added.
+The full registry belongs in generated theme-author documentation. Changing it requires a new Theme API version decision; it does not expand through implicit compatibility behavior.
 
 For every slot, the contract defines accepted formats, maximum decoded dimensions/bytes, aspect-ratio behavior, and whether it is rendered as an image, mask, favicon, or bounded background. The application owns the element, size bounds, loading behavior, alternative text, accessible name, and fallback. Bundle media is always decorative from the authorization and accessibility perspective.
 
 Individual media files are preferred. A raster sprite atlas MAY be declared through a structured object containing a validated image path, integer crop rectangle, pixel ratio, and target slot. Coordinates must fit within the decoded image. SVG symbol sheets, inline SVG fragments, and theme-controlled DOM injection are prohibited.
 
-Fonts:
-
-- v1 accepts WOFF2 only;
-- each file must have a valid signature, bounded size, and declared logical weight/style;
-- font-family names used by application CSS are compiler-generated and cannot inject CSS;
-- fonts are served locally with immutable URLs and exact media types; and
-- a failed custom font falls back to the corresponding built-in parent font and then to the application-owned system stack.
+Fonts are outside the theme boundary. The browser asset manifest embeds the approved Inter 4.0 WOFF2 files at Regular 400, Medium 500, and Semibold 600 from the pinned upstream release; the exact file and release digests plus the SIL Open Font License 1.1 are recorded in `docs/dependencies.md`. Runtime font origins and theme font declarations are prohibited.
 
 ### 14.6 Validation and media safety
 
@@ -1542,24 +1501,23 @@ EndlessFS MUST ship:
 - `endlessfs-light`; and
 - `endlessfs-dark`.
 
-They are normal theme bundles processed by the same compiler, registry, and tests as custom bundles. Each is immutable and complete for every required token, font slot, and semantic asset slot in the supported Theme API. Neither can be removed, shadowed, or replaced by configuration.
+They are normal Theme API 2.0 bundles processed by the same compiler, registry, and tests as custom bundles. Each is immutable and complete for every required purpose token and semantic asset slot. Neither can be removed, shadowed, or replaced by configuration.
 
 Custom themes are partial overlays. Resolution is deterministic:
 
 1. Load the complete declared built-in parent.
 2. Apply valid custom token overrides.
-3. Apply valid custom font and media-slot overrides.
+3. Apply valid custom media-slot overrides.
 4. Produce a resolved immutable theme with no missing required value.
 5. Content-address the resolved theme and all media.
 
 Fallback rules:
 
-- An omitted custom token, font, or asset inherits from the parent.
-- A new token or slot introduced by a compatible EndlessFS release is inherited automatically by older custom themes.
+- An omitted custom token or asset inherits from the same-version parent.
 - A custom media load failure in the browser triggers the already-resolved parent URL for that slot.
-- If a selected custom theme is unavailable or incompatible, the corresponding built-in parent is used.
+- If a selected custom theme is unavailable, the corresponding built-in parent is used.
 - If its parent cannot be determined, `endlessfs-light` is used.
-- Minimal application-owned emergency colors, system fonts, focus indicators, and reset controls remain embedded outside the bundle system so even an internal built-in asset failure cannot block sign-in or theme reset.
+- Minimal application-owned emergency colors, pinned Inter assets, focus indicators, and reset controls remain embedded outside the bundle system so even an internal built-in asset failure cannot block sign-in or theme reset.
 
 Fallback never changes application data or authorization. After authentication, the UI reports a custom-theme fallback non-disruptively and permits the user to select another installed theme.
 
@@ -1578,7 +1536,7 @@ Runtime admin import, ordinary-user upload, filesystem theme directories, remote
 
 At runtime:
 
-- `GET /api/v1/themes` lists only installed compatible theme metadata.
+- `GET /api/v1/themes` lists only installed Theme API 2.0 metadata.
 - A signed-in user selects an installed ID or `system`.
 - The preference is stored in the separate record described in section 9.12.
 - `system` maps `prefers-color-scheme` to the configured default light and dark IDs.
@@ -1749,7 +1707,7 @@ Security events may contain a stable keyed pseudonymous user reference and coars
 | XSS/content execution | Embedded assets, strict CSP, escaping, no `innerHTML`, safe preview allowlist, `nosniff` | Browser PDF/image decoder vulnerabilities remain browser risk. |
 | Theme code/injection | Data-only closed manifest; no CSS/HTML/JS; typed serialization; sanitized SVG; exact MIME; no remote references; build-time validation | Fonts and image decoders remain browser attack surface, so formats and sizes are deliberately restricted. |
 | Theme hides or spoofs functionality | Application-owned layout/behavior, bounded token registry, immutable built-in parents, contrast tests, conformance fixture, safe-theme override | A trusted operator may still choose misleading branding or imagery; themes are not an authenticity boundary. |
-| Missing/stale theme assets | Complete immutable parents, compatible Theme API, inheritance for new slots, content-addressed embedding, per-slot and whole-theme fallback | Fallback may temporarily produce mixed custom/default visuals but cannot block functionality. |
+| Missing/stale theme assets | Complete immutable 2.0 parents, same-version inheritance, content-addressed embedding, per-slot and whole-theme fallback | Fallback may temporarily produce mixed custom/default visuals but cannot block functionality. |
 | WebAuthn phishing/misconfiguration | Exact RP ID/origin validation, user verification, established library, startup checks | RP/domain migration and lost credentials require deliberate operator/user action. |
 | Passkey loss | Multiple passkeys encouraged; admin recovery link | No automated recovery; loss of all passkeys plus no available admin can make an account inaccessible. |
 | Disabled account retaining access | Revoke sessions, block capability issuance, block owner shares | A previously issued provider capability remains usable until its short expiry. |
@@ -1834,10 +1792,10 @@ Use Nix-provided headless Chromium controlled by Go. No Node test runner is allo
 
 #### Theme contract and conformance tests
 
-- The Go theme registry tests every token’s type, unit, bounds, serialization, contrast relationships, and built-in default.
+- The Go theme registry tests every purpose token’s strict color type, serialization, contrast relationships, and built-in default.
 - The light and dark bundles must resolve completely without emergency fallback.
-- A minimal custom bundle overriding one token must inherit every other token, font, and asset.
-- An older compatible bundle must inherit tokens and media slots added by a simulated newer application minor version.
+- A minimal 2.0 custom bundle overriding one token must inherit every other token and asset from its 2.0 parent.
+- Every Theme API 1.x or otherwise mismatched schema/API bundle must fail closed; no alias or compatibility path is tested or implemented.
 - Archive traversal, duplicate paths, symlinks, compression bombs, oversized media, invalid signatures, active SVG, unknown tokens, raw code files, external references, ID collisions, and incompatible APIs must fail validation.
 - Media-load failure, missing selected theme, and incompatible preference tests must reach a usable built-in fallback.
 - The conformance fixture checks every component/state at desktop and 320-pixel widths, required contrast pairs, focus visibility, target geometry, reduced motion, clipping, and external network requests.
@@ -1936,6 +1894,7 @@ nix run .#test-contract
 nix run .#test-replica
 nix run .#test-portability
 nix run .#test-e2e
+nix run .#test-ui-benchmark
 nix run .#test-race
 nix run .#test-fuzz
 nix run .#test-theme
@@ -2138,7 +2097,7 @@ Each criterion MUST have an automated test unless marked “inspection”.
 ### 21.8 Themes
 
 **AC-056** — `endlessfs-light` and `endlessfs-dark` pass the same schema, compiler, completeness, contrast, media-safety, conformance, and workflow tests as custom themes.  
-**AC-057** — A minimal custom theme overriding one typed token inherits every other value from its built-in parent; missing/incompatible selections, media failures, and simulated new feature slots reach the specified fallback without blocking sign-in, navigation, or reset.  
+**AC-057** — A minimal Theme API 2.0 custom theme overriding one purpose token inherits every other value from its 2.0 built-in parent; Theme API 1.x fails closed; missing selections and media failures reach the specified fallback without blocking sign-in, navigation, or reset.
 **AC-058** — Malformed archives, traversal, duplicate paths, symlinks, compression bombs, oversized/invalid media, active SVG, raw code files, arbitrary CSS values, external references, ID collisions, and incompatible Theme APIs fail the Nix build safely; runtime capture shows no added origin.  
 **AC-059** — A user can select light, dark, `system`, or an installed custom theme; the preference follows the user from separate state, and all embedded themes pass the required responsive, contrast, focus, reduced-motion, component-state, and functional tests.
 
@@ -2190,7 +2149,7 @@ An implementation agent should keep this checklist current and attach test names
 - [x] Mock expiry, scope, versions, resumability, range, faults, and byte instrumentation work.
 - [x] Large logical objects are tested without equivalent allocation.
 - [x] Application metadata is inaccessible through user file APIs.
-- [x] Theme preference is separate from the two-field user profile and accepts only `system` or an installed compatible theme ID.
+- [x] Theme preference is separate from the two-field user profile and accepts only `system` or an installed Theme API 2.0 theme ID.
 
 ### 22.3 Canonical storage-set format and portability
 
@@ -2294,16 +2253,16 @@ An implementation agent should keep this checklist current and attach test names
 
 ### 22.10 Data-only themes
 
-- [x] Closed versioned Theme API documents every typed token, unit, bound, fallback, contrast pair, font slot, and media slot.
+- [x] Closed Theme API 2.0 documents every purpose-based color token, exact default, fallback, contrast pair, and semantic media slot.
 - [x] Go parsing/serialization never concatenates raw manifest values into CSS or HTML.
 - [x] `endlessfs-light` and `endlessfs-dark` are complete immutable bundles processed by the ordinary theme pipeline.
 - [x] Custom themes directly inherit one built-in parent and cannot shadow built-in IDs.
-- [x] Minimal custom bundles inherit all omitted tokens, fonts, and assets.
-- [x] Older compatible themes inherit tokens/assets added by new features.
+- [x] Minimal Theme API 2.0 custom bundles inherit all omitted tokens and assets from the same-version parent.
+- [x] Theme API 1.x and every mismatched schema/API fail closed without aliases or adapters.
 - [x] Missing/incompatible selected themes and failed custom media loads fall back without blocking functionality.
 - [x] Emergency built-in-light rendering and permanent theme reset remain available.
 - [x] ZIP traversal, duplicate/symlink/bomb/size rules and canonical digests are enforced.
-- [x] Raster dimensions/signatures, WOFF2 declarations, sprite rectangles, and manifest references are validated.
+- [x] Raster dimensions/signatures, sprite rectangles, and manifest references are validated; fonts are not accepted as theme input.
 - [x] SVG sanitization rejects scripts, handlers, external/data references, embedded HTML, and active content; SVG is never inserted inline.
 - [x] Theme assets use exact media types, `nosniff`, restrictive CSP, same-origin content-addressed URLs, and immutable caching.
 - [x] Application-owned accessible names, semantics, layout behavior, breakpoints, focus, visibility, and interaction cannot be overridden by a bundle.
@@ -2342,7 +2301,7 @@ An implementation agent should keep this checklist current and attach test names
 - [x] Static, dependency, configuration, and OCI security checks are green.
 - [x] Clean `nix flake check` includes the portability gate and is green with no cloud, database, external IdP, container runtime, or network.
 - [ ] Release evidence includes source/input/artifact hashes and all test, canonical-format, and portability summaries.
-- [x] Release evidence inventories embedded themes, Theme API compatibility, licenses, and content digests.
+- [x] Release evidence inventories embedded themes, the exact Theme API version, licenses, and content digests.
 - [x] Release notes explicitly distinguish the locally qualified GCS adapter from untested live GCS interoperability and deployment.
 - [x] README, release notes, operations guidance, threat model, and evidence no longer claim v1 feature completeness until sections 22.3 and 22.4 are complete.
 
@@ -2416,7 +2375,7 @@ A change is complete only when:
 7. All relevant checks run through Nix locally.
 8. No forbidden runtime, language, framework, infrastructure, or cloud dependency was added.
 9. Logs and errors reveal no new sensitive data.
-10. Any UI addition defines its typed visual tokens and semantic media slots, updates both complete built-in themes, and proves fallback for older compatible themes.
+10. Any UI addition first updates the application-owned design contract; any resulting theme-surface change requires an explicit Theme API version decision, complete built-in themes, and same-version fallback proof.
 11. Any custom theme input remains data-only and passes the shared theme validation/conformance suite.
 12. User-facing and implementation documentation is current.
 13. Any durable-storage change preserves the canonical key/body format, logical-version rules, and raw-copy portability or introduces an explicit reviewed format-version compatibility design with failing-before-green fixtures.

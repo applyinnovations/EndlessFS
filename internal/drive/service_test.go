@@ -310,6 +310,13 @@ func TestIntegrationSharesPreviewAndRevocation(t *testing.T) {
 	if err != nil || nested.Root.Path != "/" || nested.Current.Path != "/nested" || nested.Current.Kind != domain.EntryDirectory || nested.Current.Size != 5 || nested.Current.FileCount != 1 || len(nested.Entries) != 1 || nested.Entries[0].Path != "/nested/deeper" || nested.Entries[0].Size != 5 || nested.Entries[0].FileCount != 1 {
 		t.Fatalf("nested PublicShare = %+v, %v", nested, err)
 	}
+	stat, err := env.service.PublicStat(ctx, token, "/readme.txt")
+	if err != nil || stat.Path != "/readme.txt" || stat.Kind != domain.EntryFile || stat.Version != text.Version || stat.Size != int64(len("safe text")) {
+		t.Fatalf("public file stat = %+v, %v", stat, err)
+	}
+	if _, err := env.service.PublicStat(ctx, token, "/../outside"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("public stat traversal = %v", err)
+	}
 	if _, err := env.service.PublicShare(ctx, token, "/../outside", 10, ""); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("share traversal = %v", err)
 	}
@@ -331,6 +338,9 @@ func TestIntegrationSharesPreviewAndRevocation(t *testing.T) {
 	}
 	if _, err := env.service.PublicShare(ctx, token, "/", 10, ""); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("revoked share = %v", err)
+	}
+	if _, err := env.service.PublicStat(ctx, token, "/readme.txt"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("revoked public stat = %v", err)
 	}
 	created, err = env.service.CreateShare(ctx, env.owner, domain.MustParseUserPath("/public"), nil, "share-folder-request-02")
 	if err != nil {
@@ -624,8 +634,9 @@ func TestUploadAbortBatchMoveTrashPagingAndEmptyTrash(t *testing.T) {
 	if err := env.service.AbortUpload(ctx, env.owner, capability.UploadID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := env.service.UploadStatus(ctx, env.owner, capability.UploadID); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("aborted upload status = %v", err)
+	status, err := env.service.UploadStatus(ctx, env.owner, capability.UploadID)
+	if err != nil || status.State != domain.UploadStateAborted {
+		t.Fatalf("aborted upload status = %+v, %v", status, err)
 	}
 	source := upload(t, env, env.owner, "/source.txt", []byte("source"), "text/plain", "boundary-source-upload-1")
 	if _, _, err := env.service.Download(ctx, env.owner, domain.CreateDownloadRequest{Path: source.Path, Version: "stale"}, false); !errors.Is(err, domain.ErrPreconditionFailed) {
@@ -664,7 +675,7 @@ func TestUploadAbortBatchMoveTrashPagingAndEmptyTrash(t *testing.T) {
 		t.Fatalf("trash batch = %+v, %v", trashed, err)
 	}
 	page, err := env.service.TrashPage(ctx, env.owner, 1, "")
-	if err != nil || len(page.Items) != 1 || page.NextCursor == "" {
+	if err != nil || len(page.Items) != 1 || page.Items[0].MediaType != "text/plain" || page.Items[0].Size != 3 || page.NextCursor == "" {
 		t.Fatalf("trash page = %+v, %v", page, err)
 	}
 	page, err = env.service.TrashPage(ctx, env.owner, 1, page.NextCursor)

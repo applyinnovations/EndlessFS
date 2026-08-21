@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/applyinnovations/EndlessFS/security/policy
+    about: Report suspected vulnerabilities privately according to the security policy.
+  - name: Contribution guide
+    url: https://github.com/applyinnovations/EndlessFS/blob/main/CONTRIBUTING.md
+    about: Read the development workflow before proposing or implementing a change.

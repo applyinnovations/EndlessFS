@@ -91,7 +91,7 @@ type upload struct {
 	data            []byte
 	materialized    bool
 	hasher          hash.Hash
-	aborted         bool
+	state           domain.UploadState
 	capabilityHash  [sha256.Size]byte
 }
 

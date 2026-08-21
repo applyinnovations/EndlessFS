@@ -42,7 +42,7 @@ This document fixes the v1 JSON field casing and control-plane routes implemente
 | `POST` | `/api/v1/directories` | `path`, optional `conflict`, `expectedVersion` |
 | `POST` | `/api/v1/uploads` | `path` or directory `path` plus `name`, `size`, `mediaType`, `resumable`, optional conflict/version |
 | `POST` | `/api/v1/uploads/batch` | `uploads` with 1–100 upload initialization objects |
-| `GET` | `/api/v1/uploads/{uploadID}` | Safe provider-confirmed offset/status; no capability token |
+| `GET` | `/api/v1/uploads/{uploadID}` | Owner-scoped `active`, `completed`, `aborted`, or `expired` state with the safe provider-confirmed offset; no capability or provider-native material |
 | `POST` | `/api/v1/uploads/{uploadID}/complete` | `path`, `size`, `mediaType`, optional `checksumSHA256` |
 | `DELETE` | `/api/v1/uploads/{uploadID}` | Abort and invalidate the upload capability |
 | `POST` | `/api/v1/downloads` | `path`, exact `version`, optional `preview` |
@@ -63,6 +63,8 @@ Every entry returns `fileCount`. A file has `fileCount: 1`. A directory has the 
 Each successful `GET /api/v1/trash` row preserves the prior trash-record fields and adds exact `size`, `fileCount`, and file `mediaType`. Directory media type is absent. The service joins each state page to one bounded snapshot lookup in the persisted trash root, rather than issuing one `Stat` per row. Canonical trash records remain schema v1: buckets upgraded from either supported predecessor use the automatically migrated trash directory tree without rewriting application records.
 
 `GET /api/v1/public/shares/{token}` returns safe `root`, `current`, and child entries with the same `size` and `fileCount` contract. A nested directory's `current` aggregates describe that nested target, while `root` continues to describe the original shared root. Neither response exposes an owner path or provider identity.
+
+`GET /api/v1/public/shares/{token}/stat?path=...` returns the same safe share-relative entry metadata for one exact item inside the shared root. It exists so a copied public-preview URL can restore one file without walking paginated directory listings. Invalid, escaped, stale, revoked, expired, disabled-owner, or changed-root requests all return the same not-found boundary.
 
 ## Generated image previews (v1.1)
 

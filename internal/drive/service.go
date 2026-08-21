@@ -633,6 +633,26 @@ func (s *Service) PublicShare(ctx context.Context, token, relative string, limit
 	return result, nil
 }
 
+func (s *Service) PublicStat(ctx context.Context, token, relative string) (PublicEntry, error) {
+	record, root, scope, err := s.authorizeShare(ctx, token)
+	if err != nil {
+		return PublicEntry{}, publicShareError()
+	}
+	path, err := sharedPath(record, relative)
+	if err != nil {
+		return PublicEntry{}, publicShareError()
+	}
+	entry, err := s.storage.Stat(ctx, scope, path)
+	if err != nil {
+		return PublicEntry{}, publicShareError()
+	}
+	rootAgain, err := s.storage.Stat(ctx, scope, record.RootPath)
+	if err != nil || rootAgain.Version != root.Version || rootAgain.Kind != root.Kind {
+		return PublicEntry{}, publicShareError()
+	}
+	return publicEntry(record.RootPath, entry, root), nil
+}
+
 func (s *Service) PublicDownload(ctx context.Context, token, relative string, version domain.Version, preview bool) (domain.DownloadCapability, string, error) {
 	record, _, scope, err := s.authorizeShare(ctx, token)
 	if err != nil {

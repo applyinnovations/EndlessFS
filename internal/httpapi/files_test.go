@@ -287,6 +287,16 @@ func TestIntegrationFileHTTPDirectDataPathTrashAndShare(t *testing.T) {
 	if publicPage.Root.Path != "/" || publicPage.Current.Path != "/" || publicPage.Current.Size != 5 || publicPage.Current.FileCount != 1 {
 		t.Fatalf("public current target = %+v; root=%+v", publicPage.Current, publicPage.Root)
 	}
+	publicStat := performRequest(t, env.handler, http.MethodGet, "/api/v1/public/shares/"+token+"/stat?path=/file.txt", "", "", nil, nil)
+	var publicEntry drive.PublicEntry
+	decodeResponse(t, publicStat, &publicEntry)
+	if publicStat.Code != http.StatusOK || publicEntry.Path != "/file.txt" || publicEntry.Kind != domain.EntryFile || publicEntry.Version != entry.Version || publicEntry.Size != 5 {
+		t.Fatalf("public stat = %d %+v %s", publicStat.Code, publicEntry, publicStat.Body.String())
+	}
+	publicStatTraversal := performRequest(t, env.handler, http.MethodGet, "/api/v1/public/shares/"+token+"/stat?path=/../outside", "", "", nil, nil)
+	if publicStatTraversal.Code != http.StatusNotFound {
+		t.Fatalf("public stat traversal = %d %s", publicStatTraversal.Code, publicStatTraversal.Body.String())
+	}
 	trashed := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"paths":["/docs"]}`, cookies, driveMutationHeaders(env.csrf.Value, "http-trash-request-00001"))
 	if trashed.Code != http.StatusAccepted {
 		t.Fatalf("trash = %d %s", trashed.Code, trashed.Body.String())
@@ -307,6 +317,43 @@ func TestIntegrationFileHTTPDirectDataPathTrashAndShare(t *testing.T) {
 	}
 	if csp := createdDirectory.Header().Get("Content-Security-Policy"); csp == "" || !bytes.Contains([]byte(csp), []byte(env.data.URL)) {
 		t.Fatalf("CSP = %q", csp)
+	}
+}
+
+func TestIntegrationStorageMapHierarchyIsAuthenticatedAndOwnerScoped(t *testing.T) {
+	env := newDriveHTTPEnvironment(t)
+	ctx := context.Background()
+	scope, err := domain.NewScope(env.user, domain.AreaLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/Projects", "/Projects/Assets"} {
+		if _, err := env.storage.CreateDirectory(ctx, scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uploadHTTPPreviewImage(t, env, "/Projects/Assets/Hero.png")
+
+	unauthenticated := performRequest(t, env.handler, http.MethodGet, "/api/v1/files/storage-map?path=/", "", "", nil, nil)
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated storage map = %d", unauthenticated.Code)
+	}
+	response := performRequest(t, env.handler, http.MethodGet, "/api/v1/files/storage-map?path=/", "", "", []*http.Cookie{env.session}, nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("storage map = %d %s", response.Code, response.Body.String())
+	}
+	var page drive.StorageMapPage
+	decodeResponse(t, response, &page)
+	if len(page.Entries) != 1 || page.Entries[0].Path != domain.MustParseUserPath("/Projects") || len(page.Entries[0].Children) != 1 || page.Entries[0].Children[0].Path != domain.MustParseUserPath("/Projects/Assets") {
+		t.Fatalf("storage map hierarchy = %+v", page)
+	}
+	other := performRequest(t, env.handler, http.MethodGet, "/api/v1/files/storage-map?path=/", "", "", []*http.Cookie{env.otherSession}, nil)
+	if other.Code != http.StatusOK || bytes.Contains(other.Body.Bytes(), []byte("Projects")) {
+		t.Fatalf("cross-owner storage map = %d %s", other.Code, other.Body.String())
+	}
+	invalid := performRequest(t, env.handler, http.MethodGet, "/api/v1/files/storage-map?path=relative", "", "", []*http.Cookie{env.session}, nil)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid storage map path = %d", invalid.Code)
 	}
 }
 
@@ -484,7 +531,7 @@ func TestIntegrationBatchUploadEmptyTrashAndPublicDownloadRoutes(t *testing.T) {
 		t.Fatalf("trash = %d %s", trashed.Code, trashed.Body.String())
 	}
 	listing := performRequest(t, env.handler, http.MethodGet, "/api/v1/trash", "", "", []*http.Cookie{env.session}, nil)
-	if listing.Code != http.StatusOK || !bytes.Contains(listing.Body.Bytes(), []byte("public.txt")) {
+	if listing.Code != http.StatusOK || !bytes.Contains(listing.Body.Bytes(), []byte("public.txt")) || !bytes.Contains(listing.Body.Bytes(), []byte(`"mediaType":"text/plain"`)) || !bytes.Contains(listing.Body.Bytes(), []byte(`"size":6`)) {
 		t.Fatalf("trash listing = %d %s", listing.Code, listing.Body.String())
 	}
 	unconfirmed := performRequest(t, env.handler, http.MethodPost, "/api/v1/trash/empty", origin, `{"confirm":false}`, cookies, driveMutationHeaders(env.csrf.Value, "empty-trash-route-00002"))
@@ -540,9 +587,23 @@ func TestIntegrationBatchCopyMoveAndUploadLifecycleRoutes(t *testing.T) {
 	if status.Code != http.StatusOK {
 		t.Fatalf("upload status = %d %s", status.Code, status.Body.String())
 	}
+	var activeStatus domain.UploadStatus
+	decodeResponse(t, status, &activeStatus)
+	if activeStatus.State != domain.UploadStateActive {
+		t.Fatalf("active upload status = %+v", activeStatus)
+	}
 	aborted := performRequest(t, env.handler, http.MethodDelete, "/api/v1/uploads/"+string(capability.UploadID), origin, `{}`, cookies, driveMutationHeaders(env.csrf.Value, ""))
 	if aborted.Code != http.StatusNoContent {
 		t.Fatalf("upload abort = %d %s", aborted.Code, aborted.Body.String())
+	}
+	abortedStatusResponse := performRequest(t, env.handler, http.MethodGet, "/api/v1/uploads/"+string(capability.UploadID), "", "", []*http.Cookie{env.session}, nil)
+	if abortedStatusResponse.Code != http.StatusOK {
+		t.Fatalf("aborted upload status = %d %s", abortedStatusResponse.Code, abortedStatusResponse.Body.String())
+	}
+	var abortedStatus domain.UploadStatus
+	decodeResponse(t, abortedStatusResponse, &abortedStatus)
+	if abortedStatus.State != domain.UploadStateAborted {
+		t.Fatalf("aborted upload status = %+v", abortedStatus)
 	}
 
 	for _, target := range []string{"/api/v1/files?limit=invalid", "/api/v1/files?order=sideways", "/api/v1/trash?limit=1001", "/api/v1/public/shares/missing?limit=0"} {

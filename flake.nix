@@ -622,6 +622,15 @@
             exec go run ./cmd/endlessfs "$@"
           '';
 
+          dev-fixture = goTask "endlessfs-dev-fixture" ''
+            export ENDLESSFS_LOCAL_FIXTURE=true
+            export ENDLESSFS_PREVIEW_PROVIDER=mock
+            export ENDLESSFS_PREVIEW_AUTOMATIC=true
+            ENDLESSFS_SESSION_SECRET="$(go run ./tools/generate-secret)"
+            export ENDLESSFS_SESSION_SECRET
+            exec go run ./cmd/endlessfs "$@"
+          '';
+
           generate-secret = goTask "endlessfs-generate-secret" ''
             exec go run ./tools/generate-secret
           '';
@@ -699,6 +708,20 @@
                   export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
                 ''}
                 exec go test ./internal/e2e -run '^TestE2E' -count=1 "$@"
+              '';
+
+          test-ui-benchmark =
+            mkTask "endlessfs-test-ui-benchmark"
+              (goTools ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
+              ''
+                export ENDLESSFS_RUN_E2E=1
+                ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                  export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
+                  export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
+                ''}
+                benchmark_output="''${ENDLESSFS_UI_BENCHMARK_OUTPUT:-ui-benchmark-v1.json}"
+                go test ./internal/e2e -run '^TestE2EBrowserBootstrapLoginDriveShareAndTrash$' -count=1 -json "$@" | tee "$benchmark_output"
+                echo "UI benchmark evidence: $benchmark_output"
               '';
 
           test-coverage =

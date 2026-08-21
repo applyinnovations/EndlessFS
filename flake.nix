@@ -519,6 +519,7 @@
                   printf 'coverage-command=%s\n' 'nix run .#test-coverage'
                   printf 'repository-coverage-minimum=%s\n' '85%'
                   printf 'security-boundary-coverage-minimum=%s\n' '95%'
+                  printf 'migration-coverage-minimum=%s\n' '98%'
                   printf 'storage-providers=%s\n' 'deterministic-memory,locally-qualified-gcs-adapter'
                   printf 'canonical-format=%s\n' 'endlessfs-portable-bucket-v1'
                   printf 'writer-protocol-version=%s\n' '1'
@@ -691,12 +692,20 @@
           test-contract = goTask "endlessfs-test-contract" ''
             go test ./... -run '^TestContract'
           '';
-          test-migration = goTask "endlessfs-test-migration" ''
+          test-migration = mkTask "endlessfs-test-migration" (goTools ++ [ pkgs.gawk ]) ''
+            export CGO_ENABLED=0
+            export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
+            export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
             candidate="''${1:-}"
             if [ -n "$candidate" ]; then
               export ENDLESSFS_MIGRATION_CANDIDATE_RELEASE="$candidate"
             fi
-            exec go test ./internal/portable ./cmd/endlessfs -run '(Migrat|StorageSchema|HistoricalRelease)' -count=1
+            profile="$(mktemp "''${TMPDIR:-/tmp}/endlessfs-migration-coverage.XXXXXX")"
+            trap 'rm -f "$profile"' EXIT
+            go test ./internal/portable ./cmd/endlessfs \
+              -run '(Migrat|StorageSchema|HistoricalRelease)' -count=1 \
+              -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
+            gawk -v only_group=migration -f tools/coverage.awk "$profile"
           '';
           test-replica = goTask "endlessfs-test-replica" ''
             exec go test ./internal/portable ./internal/objectstore/gcs \
@@ -1015,10 +1024,13 @@
             name: command: tools:
             goCheckWithSource name testSource command tools;
           testSuite = goCheck "tests" "go test ./..." [ ];
-          migrationCheck =
-            goCheck "migration"
-              "go test ./internal/portable ./cmd/endlessfs -run '(Migrat|StorageSchema|HistoricalRelease)' -count=1"
-              [ ];
+          migrationCheck = goCheck "migration" ''
+            profile="$TMPDIR/migration-coverage.out"
+            go test ./internal/portable ./cmd/endlessfs \
+              -run '(Migrat|StorageSchema|HistoricalRelease)' -count=1 \
+              -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
+            gawk -v only_group=migration -f tools/coverage.awk "$profile"
+          '' [ pkgs.gawk ];
           e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
           coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
           publishContainerPolicy =

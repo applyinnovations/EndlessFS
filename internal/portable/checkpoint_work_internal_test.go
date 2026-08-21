@@ -115,6 +115,28 @@ func TestCheckpointWorkRestartRejectsMissingAndMisplacedObjects(t *testing.T) {
 		}
 	})
 
+	t.Run("duplicate-work-list-entry", func(t *testing.T) {
+		memory := objectmemory.New()
+		engine := &Engine{backend: memory, checkpointWorkKey: workKey}
+		writeCheckpointWorkForTest(t, engine, newWork(false))
+		key := storageformat.CheckpointWorkKey(checkpointID, objectKey.String())
+		object, err := memory.Get(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		backend := &hookedBackend{
+			Backend: memory,
+			list: func(context.Context, objectstore.ListRequest) (objectstore.ListPage, error) {
+				info := objectstore.ObjectInfo{Key: key, Size: int64(len(object.Body)), Version: object.Version}
+				return objectstore.ListPage{Objects: []objectstore.ObjectInfo{info, info}}, nil
+			},
+		}
+		engine.backend = backend
+		if _, err := engine.readCheckpointWork(ctx, checkpointID, gateEpoch); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("readCheckpointWork() error = %v; want precondition failed", err)
+		}
+	})
+
 	t.Run("work-list-interruption", func(t *testing.T) {
 		backend := &hookedBackend{
 			Backend: objectmemory.New(),
@@ -162,6 +184,39 @@ func TestCheckpointWorkRestartRejectsMissingAndMisplacedObjects(t *testing.T) {
 		}
 	})
 
+	t.Run("resume-metadata-mismatch", func(t *testing.T) {
+		backend := objectmemory.New()
+		if _, err := backend.Put(ctx, objectKey, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+		work := newWork(false)
+		work.Object.Size++
+		entries := map[string]checkpointWorkEntry{
+			objectKey.String(): {object: work.Object, crc32c: work.CRC32C},
+		}
+		engine := &Engine{backend: backend, fileBackend: backend, checkpointWorkKey: workKey}
+		if _, _, err := engine.authoritativeInventoryFromWork(ctx, backend, false, checkpointID, gateEpoch, entries); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("authoritativeInventoryFromWork() error = %v; want precondition failed", err)
+		}
+	})
+
+	t.Run("authoritative-size-changed", func(t *testing.T) {
+		memory := objectmemory.New()
+		if _, err := memory.Put(ctx, objectKey, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+		backend := &hookedBackend{
+			Backend: memory,
+			list: func(context.Context, objectstore.ListRequest) (objectstore.ListPage, error) {
+				return objectstore.ListPage{Objects: []objectstore.ObjectInfo{{Key: objectKey, Size: int64(len(body) + 1)}}}, nil
+			},
+		}
+		engine := &Engine{backend: backend, fileBackend: backend, checkpointWorkKey: workKey}
+		if _, _, err := engine.authoritativeInventoryFromWork(ctx, backend, false, checkpointID, gateEpoch, nil); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("authoritativeInventoryFromWork() error = %v; want precondition failed", err)
+		}
+	})
+
 	t.Run("file-backend-inventory-interruption", func(t *testing.T) {
 		stateBackend := objectmemory.New()
 		fileBackend := &hookedBackend{
@@ -204,6 +259,11 @@ func TestMigrationCheckpointReopenRejectsDifferentStoredCheckpoint(t *testing.T)
 	checkpoint.InventoryDigest = storageformat.Digest([]byte("different inventory"))
 	if err := engine.openWritesAfterCreatedCheckpoint(context.Background(), checkpoint); !errors.Is(err, domain.ErrPreconditionFailed) {
 		t.Fatalf("openWritesAfterCreatedCheckpoint() error = %v; want precondition failed", err)
+	}
+	missing := checkpoint
+	missing.CheckpointID = "missing-checkpoint"
+	if err := engine.openWritesAfterCreatedCheckpoint(context.Background(), missing); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("openWritesAfterCreatedCheckpoint(missing) error = %v; want not found", err)
 	}
 }
 

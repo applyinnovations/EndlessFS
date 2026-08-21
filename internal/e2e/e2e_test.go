@@ -80,7 +80,11 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	t.Cleanup(cancelAllocator)
 	ctx, cancelBrowser := chromedp.NewContext(allocator)
 	t.Cleanup(cancelBrowser)
-	ctx, cancelTimeout := context.WithTimeout(ctx, 60*time.Second)
+	// Coverage instrumentation and constrained CI runners make the complete
+	// browser workflow slower than the ordinary E2E derivation. Keep a bounded
+	// workflow deadline while leaving enough headroom for the same assertions to
+	// finish under instrumentation; individual waits retain their tighter caps.
+	ctx, cancelTimeout := context.WithTimeout(ctx, 90*time.Second)
 	t.Cleanup(cancelTimeout)
 	t.Cleanup(func() {
 		// Wait for Chrome to stop writing its temporary profile before the

@@ -763,6 +763,9 @@
                 export GOFLAGS=-mod=vendor
                 profile="$coverage_root/endlessfs-coverage.out"
                 go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
+                if [ -n "''${ENDLESSFS_COVERAGE_PROFILE:-}" ]; then
+                  install -m 0644 "$profile" "$ENDLESSFS_COVERAGE_PROFILE"
+                fi
                 gawk -f tools/coverage.awk "$profile"
               '';
 

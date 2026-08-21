@@ -995,6 +995,15 @@ func TestFileOperationValidationAndRecoveryMatrix(t *testing.T) {
 				t.Fatalf("finalizeOperationRoot() error = %v", err)
 			}
 		})
+		t.Run("prepare-create-race-without-winner", func(t *testing.T) {
+			_, hooks, engine := newEngine(t)
+			hooks.put = func(context.Context, objectstore.Key, []byte, objectstore.PutCondition) (objectstore.NativeVersion, error) {
+				return "", domain.NewError(domain.ErrorConflict, "lost create race")
+			}
+			if err := engine.Files().prepareOperationRoot(ctx, root); !errors.Is(err, domain.ErrConflict) {
+				t.Fatalf("prepareOperationRoot() error = %v", err)
+			}
+		})
 	})
 
 	t.Run("recovery-fencing", func(t *testing.T) {
@@ -1082,6 +1091,12 @@ func TestFileOperationValidationAndRecoveryMatrix(t *testing.T) {
 		if _, _, err := engine.Files().buildFileOperation(ctx, user, "operation", "owner", operationDelete, nil, []storageformat.MutationObject{{Key: "a"}}, nil); !errors.Is(err, domain.ErrInvalid) {
 			t.Fatalf("buildFileOperation(invalid prerequisite) error = %v", err)
 		}
+		invalidEntries := map[string]directoryUpdate{rootKey: {
+			scope: scope, directoryID: storageformat.RootDirectoryID, entries: []storageformat.DirectoryEntry{{}},
+		}}
+		if _, _, err := engine.Files().buildFileOperation(ctx, user, "operation", "owner", operationDelete, invalidEntries, nil, nil); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("buildFileOperation(invalid directory entry) error = %v", err)
+		}
 		if _, err := engine.Files().startFileOperation(ctx, storageformat.FileOperation{UserID: "invalid"}, nil, "", ""); !errors.Is(err, domain.ErrInvalid) {
 			t.Fatalf("startFileOperation(invalid user) error = %v", err)
 		}
@@ -1099,6 +1114,11 @@ func TestFileOperationValidationAndRecoveryMatrix(t *testing.T) {
 		source, found := findDirectoryEntry(root.entries, "source")
 		if !found {
 			t.Fatal("source directory missing")
+		}
+		mismatched := source
+		mismatched.Size++
+		if _, err := engine.Files().cloneTree(ctx, scope, scope, mismatched, false); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("cloneTree(aggregate mismatch) error = %v", err)
 		}
 		engine.ids = domain.NewIDGenerator(strings.NewReader(""))
 		if _, err := engine.Files().cloneTree(ctx, scope, scope, source, false); !errors.Is(err, domain.ErrInternal) {

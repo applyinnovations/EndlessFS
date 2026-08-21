@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -59,6 +60,46 @@ func TestRunStartsAndGracefullyStopsCompleteApplication(t *testing.T) {
 	logger := endlesslogging.NewJSON(io.Discard, slog.LevelDebug)
 	if err := run(ctx, logger, cfg); err != nil {
 		t.Fatalf("run = %v", err)
+	}
+}
+
+func TestStartupControlServerReportsLivenessWithoutClaimingReadiness(t *testing.T) {
+	logger := endlesslogging.NewJSON(io.Discard, slog.LevelDebug)
+	server, listener, handler, serveErrors, err := startControlServer("127.0.0.1:0", 30*time.Second, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = listener.Close()
+	})
+	baseURL := "http://" + listener.Addr().String()
+	assertStatus := func(path string, want int) {
+		t.Helper()
+		response, requestErr := http.Get(baseURL + path)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != want {
+			t.Fatalf("GET %s status = %d; want %d", path, response.StatusCode, want)
+		}
+	}
+	for range 30 {
+		assertStatus("/healthz", http.StatusOK)
+		assertStatus("/readyz", http.StatusServiceUnavailable)
+	}
+	assertStatus("/", http.StatusServiceUnavailable)
+
+	ready := http.NewServeMux()
+	ready.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	ready.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	handler.Activate(ready)
+	assertStatus("/readyz", http.StatusOK)
+	select {
+	case serveErr := <-serveErrors:
+		t.Fatalf("control server stopped during handler activation: %v", serveErr)
+	default:
 	}
 }
 

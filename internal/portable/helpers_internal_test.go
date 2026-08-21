@@ -1724,6 +1724,8 @@ func TestPortableTransferDurableRecordAndCapabilityMatrix(t *testing.T) {
 	for name, mutate := range map[string]func(*storageformat.UploadRecord){
 		"status-area":            func(value *storageformat.UploadRecord) { value.Area = "trash" },
 		"status-path":            func(value *storageformat.UploadRecord) { value.RequestedPath = "INVALID" },
+		"status-aborted":         func(value *storageformat.UploadRecord) { value.State = storageformat.UploadAborted },
+		"status-invalid-state":   func(value *storageformat.UploadRecord) { value.State = storageformat.UploadState("invalid") },
 		"completion-destination": func(value *storageformat.UploadRecord) { value.ResolvedPath = "INVALID" },
 		"completion-state":       func(value *storageformat.UploadRecord) { value.State = storageformat.UploadCompleted },
 	} {
@@ -1744,6 +1746,15 @@ func TestPortableTransferDurableRecordAndCapabilityMatrix(t *testing.T) {
 		case "status-path":
 			if _, err := engine.Files().UploadStatus(context.Background(), scope, capability.UploadID); !errors.Is(err, domain.ErrInvalid) {
 				t.Fatalf("UploadStatus(invalid stored path) error = %v", err)
+			}
+		case "status-aborted":
+			status, err := engine.Files().UploadStatus(context.Background(), scope, capability.UploadID)
+			if err != nil || status.State != domain.UploadStateAborted {
+				t.Fatalf("UploadStatus(aborted) = %+v, %v", status, err)
+			}
+		case "status-invalid-state":
+			if _, err := engine.Files().UploadStatus(context.Background(), scope, capability.UploadID); !errors.Is(err, domain.ErrInvalid) {
+				t.Fatalf("UploadStatus(invalid stored state) error = %v", err)
 			}
 		case "completion-destination":
 			if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size, MediaType: request.MediaType}); !errors.Is(err, domain.ErrInvalid) {

@@ -202,6 +202,10 @@ func (e *Engine) OpenWrites(ctx context.Context, checkpointID string) error {
 	if err := e.VerifyCheckpoint(ctx, checkpointID); err != nil {
 		return err
 	}
+	return e.openClosedWriteGate(ctx, checkpointID)
+}
+
+func (e *Engine) openClosedWriteGate(ctx context.Context, checkpointID string) error {
 	gateObject, gateEnvelope, gate, err := e.readGate(ctx)
 	if err != nil {
 		return err
@@ -522,9 +526,17 @@ func (e *Engine) ensureMutationCopies(ctx context.Context, copies []storageforma
 				return err
 			}
 			winner, headErr := e.fileBackend.Head(ctx, destination)
-			if headErr != nil || winner.Size != copyIntent.Size {
-				return domain.NewError(domain.ErrorInvalid, "mutation copy destination collision")
+			if headErr == nil && winner.Size == copyIntent.Size {
+				previous = copyIntent.DestinationKey
+				continue
 			}
+			if headErr != nil && !errors.Is(headErr, domain.ErrNotFound) {
+				return headErr
+			}
+			if errors.Is(headErr, domain.ErrNotFound) && (errors.Is(err, domain.ErrNotFound) || errors.Is(err, domain.ErrPreconditionFailed)) {
+				return err
+			}
+			return domain.NewError(domain.ErrorInvalid, "mutation copy destination collision")
 		}
 		previous = copyIntent.DestinationKey
 	}

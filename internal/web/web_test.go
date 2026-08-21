@@ -92,8 +92,15 @@ func TestTransferMonitorUsesScalableSideSheet(t *testing.T) {
 		`byID("header-transfer-speed").textContent =`,
 		`byID("header-transfer-eta").textContent =`,
 		`byID("header-transfer-count").textContent =`,
+		`.header-transfer-summary > span { overflow: hidden; text-align: end; text-overflow: ellipsis; }`,
+		`#header-transfer-percent { width: 4ch; }`,
+		`#header-transfer-speed { width: 11ch; }`,
+		`#header-transfer-eta { width: 10ch; }`,
+		`#header-transfer-count { width: 10ch; }`,
+		`.account-actions:not([hidden]) > .header-transfer-status[hidden]`,
+		`#app[data-state="loading"] .header-transfer-status[hidden] { display: flex !important; visibility: hidden; }`,
 	} {
-		if !strings.Contains(shell+script, required) {
+		if !strings.Contains(shell+stylesheet+script, required) {
 			t.Errorf("deterministic transfer header summary is missing %q", required)
 		}
 	}

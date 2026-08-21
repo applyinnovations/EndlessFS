@@ -50,6 +50,11 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.header-transfer-summary > span { overflow: hidden; text-align: end; text-overflow: ellipsis; }
+#header-transfer-percent { width: 4ch; }
+#header-transfer-speed { width: 11ch; }
+#header-transfer-eta { width: 10ch; }
+#header-transfer-count { width: 10ch; }
 .header-transfer-summary > span + span::before { margin-inline-end: 5px; color: var(--efs-color-border-strong); content: "·"; }
 .transfer-launcher-icon {
   display: grid;
@@ -70,6 +75,8 @@
 .header-report { flex: 0 0 var(--efs-metric-controlHeight); align-self: center; }
 .transfer-launcher[aria-expanded="true"] { color: var(--efs-color-foreground); }
 #app[data-state="loading"] #account-actions[hidden] { display: flex !important; visibility: hidden; }
+.account-actions:not([hidden]) > .header-transfer-status[hidden],
+#app[data-state="loading"] .header-transfer-status[hidden] { display: flex !important; visibility: hidden; }
 
 .entry-view {
   display: grid;

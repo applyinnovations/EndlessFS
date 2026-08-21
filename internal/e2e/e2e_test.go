@@ -80,7 +80,12 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	t.Cleanup(cancelAllocator)
 	ctx, cancelBrowser := chromedp.NewContext(allocator)
 	t.Cleanup(cancelBrowser)
-	ctx, cancelTimeout := context.WithTimeout(ctx, 60*time.Second)
+	// Coverage instrumentation and constrained CI runners make the complete
+	// browser workflow slower than the ordinary E2E derivation. Keep a bounded
+	// workflow deadline while leaving enough headroom for the same assertions to
+	// finish under instrumentation and shared-runner contention; individual waits
+	// retain their tighter caps, so a stuck interaction still fails promptly.
+	ctx, cancelTimeout := context.WithTimeout(ctx, 3*time.Minute)
 	t.Cleanup(cancelTimeout)
 	t.Cleanup(func() {
 		// Wait for Chrome to stop writing its temporary profile before the
@@ -1009,9 +1014,9 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	); err != nil {
 		t.Fatalf("dismiss mobile action sheet: %v", err)
 	}
-	if err := chromedp.Run(ctx,
+	if err := runStage(ctx, 15*time.Second,
 		emulation.SetDeviceMetricsOverride(1440, 900, 1, false),
-		chromedp.Navigate(harness.origin+"/"),
+		chromedp.WaitVisible("#header-transfer-summary", chromedp.ByQuery),
 		chromedp.Click("#header-transfer-summary", chromedp.ByQuery),
 		chromedp.WaitVisible("#transfer-panel", chromedp.ByQuery),
 		chromedp.WaitVisible("#transfer-scrim", chromedp.ByQuery),
@@ -1022,7 +1027,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := waitFor(ctx, `document.querySelector("#transfer-panel").hidden && document.querySelector("#transfer-scrim").hidden`, 3*time.Second); err != nil {
 		t.Fatalf("transfer sheet scrim did not dismiss the sheet: %v (%s)", err, browserStatus(ctx))
 	}
-	if err := chromedp.Run(ctx,
+	if err := runStage(ctx, 10*time.Second,
 		chromedp.Click("#header-transfer-summary", chromedp.ByQuery),
 		chromedp.WaitVisible("#transfer-panel", chromedp.ByQuery),
 		chromedp.Click("#transfer-list .transfer-group-row button[aria-expanded]", chromedp.ByQuery),

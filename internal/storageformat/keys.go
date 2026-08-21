@@ -144,6 +144,14 @@ func CheckpointKey(checkpointID string) objectstore.Key {
 	return fixedKey("checkpoints/" + encodedPart(checkpointID) + ".json")
 }
 
+func CheckpointWorkKey(checkpointID, objectKey string) objectstore.Key {
+	return fixedKey("checkpoints/" + encodedPart(checkpointID) + "/work/" + digestPart(objectKey) + ".json")
+}
+
+func CheckpointWorkPrefix(checkpointID string) string {
+	return root + "checkpoints/" + encodedPart(checkpointID) + "/work/"
+}
+
 func LeaseKey(backendKind, leaseID string) objectstore.Key {
 	if err := ValidateNamespace(backendKind); err != nil {
 		panic(err)

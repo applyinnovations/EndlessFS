@@ -375,6 +375,19 @@ type Checkpoint struct {
 	InventoryDigest       string             `json:"inventoryDigest"`
 }
 
+// CheckpointWork records one completed provider-independent inventory digest.
+// It is durable only while a closed-gate checkpoint is being constructed and
+// is excluded from the checkpoint's authoritative inventory.
+type CheckpointWork struct {
+	SchemaVersion int              `json:"schemaVersion"`
+	CheckpointID  string           `json:"checkpointID"`
+	GateEpoch     uint64           `json:"gateEpoch"`
+	FileData      bool             `json:"fileData"`
+	Object        CheckpointObject `json:"object"`
+	CRC32C        string           `json:"crc32c"`
+	Proof         string           `json:"proof"`
+}
+
 func Digest(data []byte) string {
 	sum := sha256.Sum256(data)
 	return base64.RawURLEncoding.EncodeToString(sum[:])

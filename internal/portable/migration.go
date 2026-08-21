@@ -176,11 +176,13 @@ func (e *Engine) runStorageMigration002To003(ctx context.Context, transition sto
 }
 
 func (e *Engine) runAggregateSchemaMigration(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock, plan aggregateMigrationPlan) error {
+	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageStarted})
 	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterDetection)); err != nil {
 		return err
 	}
 	complete, err := e.storageMigrationComplete(ctx, transition)
 	if err == nil && complete {
+		e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageComplete})
 		return nil
 	}
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
@@ -196,12 +198,14 @@ func (e *Engine) runAggregateSchemaMigration(ctx context.Context, transition sto
 	if !closed {
 		return nil
 	}
+	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageGateClosed})
 	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterGateClosed)); err != nil {
 		return err
 	}
 	if err := e.migrateAllDirectoryAggregates(ctx, transition, plan); err != nil {
 		return err
 	}
+	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageDirectoriesVerified})
 	if err := e.migrateAllDirectoryAggregates(ctx, transition, plan); err != nil {
 		return err
 	}
@@ -229,21 +233,24 @@ func (e *Engine) runAggregateSchemaMigration(ctx context.Context, transition sto
 	if complete, completeErr := e.storageMigrationComplete(ctx, transition); completeErr == nil && complete {
 		return nil
 	}
-	if _, err := e.createCheckpointWhileClosed(ctx, transition.checkpointID); err != nil {
+	checkpoint, err := e.createCheckpointWhileClosed(ctx, transition.checkpointID)
+	if err != nil {
 		if complete, completeErr := e.storageMigrationComplete(ctx, transition); completeErr == nil && complete {
 			return nil
 		}
 		return err
 	}
+	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageCheckpointCreated})
 	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterCheckpoint)); err != nil {
 		return err
 	}
-	if err := e.OpenWrites(ctx, transition.checkpointID); err != nil {
+	if err := e.openWritesAfterCreatedCheckpoint(ctx, checkpoint); err != nil {
 		if complete, completeErr := e.storageMigrationComplete(ctx, transition); completeErr == nil && complete {
 			return nil
 		}
 		return err
 	}
+	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageComplete})
 	return nil
 }
 

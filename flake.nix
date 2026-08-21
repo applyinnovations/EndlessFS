@@ -696,7 +696,7 @@
             if [ -n "$candidate" ]; then
               export ENDLESSFS_MIGRATION_CANDIDATE_RELEASE="$candidate"
             fi
-            exec go test ./internal/portable -run '(Migrat|ReleasedStorage)' -count=1
+            exec go test ./internal/portable -run '(Migrat|StorageSchema|HistoricalRelease)' -count=1
           '';
           test-replica = goTask "endlessfs-test-replica" ''
             exec go test ./internal/portable ./internal/objectstore/gcs \
@@ -1013,7 +1013,8 @@
             goCheckWithSource name testSource command tools;
           testSuite = goCheck "tests" "go test ./..." [ ];
           migrationCheck =
-            goCheck "migration" "go test ./internal/portable -run '(Migrat|ReleasedStorage)' -count=1"
+            goCheck "migration"
+              "go test ./internal/portable -run '(Migrat|StorageSchema|HistoricalRelease)' -count=1"
               [ ];
           e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
           coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];

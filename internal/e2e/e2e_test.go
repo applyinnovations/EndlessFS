@@ -1014,9 +1014,9 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	); err != nil {
 		t.Fatalf("dismiss mobile action sheet: %v", err)
 	}
-	if err := chromedp.Run(ctx,
+	if err := runStage(ctx, 15*time.Second,
 		emulation.SetDeviceMetricsOverride(1440, 900, 1, false),
-		chromedp.Navigate(harness.origin+"/"),
+		chromedp.WaitVisible("#header-transfer-summary", chromedp.ByQuery),
 		chromedp.Click("#header-transfer-summary", chromedp.ByQuery),
 		chromedp.WaitVisible("#transfer-panel", chromedp.ByQuery),
 		chromedp.WaitVisible("#transfer-scrim", chromedp.ByQuery),
@@ -1027,7 +1027,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := waitFor(ctx, `document.querySelector("#transfer-panel").hidden && document.querySelector("#transfer-scrim").hidden`, 3*time.Second); err != nil {
 		t.Fatalf("transfer sheet scrim did not dismiss the sheet: %v (%s)", err, browserStatus(ctx))
 	}
-	if err := chromedp.Run(ctx,
+	if err := runStage(ctx, 10*time.Second,
 		chromedp.Click("#header-transfer-summary", chromedp.ByQuery),
 		chromedp.WaitVisible("#transfer-panel", chromedp.ByQuery),
 		chromedp.Click("#transfer-list .transfer-group-row button[aria-expanded]", chromedp.ByQuery),

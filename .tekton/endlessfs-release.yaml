@@ -170,11 +170,11 @@ spec:
               nix run .#publish-container -- \
                 "ghcr.io/applyinnovations/endlessfs:$release_tag" \
                 "ghcr.io/applyinnovations/endlessfs:latest"
-              if nix develop --command gh release view "$release_tag" >/dev/null 2>&1; then
-                nix develop --command gh release upload "$release_tag" \
+              if nix develop --command gh release view "$release_tag" --repo "applyinnovations/EndlessFS" >/dev/null 2>&1; then
+                nix develop --command gh release upload "$release_tag" --repo "applyinnovations/EndlessFS" \
                   result-release/* --clobber
               else
-                nix develop --command gh release create "$release_tag" \
+                nix develop --command gh release create "$release_tag" --repo "applyinnovations/EndlessFS" \
                   result-release/* \
                   --verify-tag \
                   --generate-notes \

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -13,7 +16,10 @@ import (
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/config"
+	"github.com/applyinnovations/endlessfs/internal/domain"
 	endlesslogging "github.com/applyinnovations/endlessfs/internal/logging"
+	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
+	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
@@ -188,6 +194,106 @@ func TestWriterCompatibilityIncludesDurablePreviewConfiguration(t *testing.T) {
 			t.Fatalf("variation %d did not change replica compatibility", index)
 		}
 	}
+}
+
+type applicationMigrationFixture struct {
+	SchemaVersion int               `json:"schemaVersion"`
+	SourceRelease string            `json:"sourceRelease"`
+	SourceCommit  string            `json:"sourceCommit"`
+	CreatedAt     time.Time         `json:"createdAt"`
+	UserID        string            `json:"userID"`
+	StateObjects  map[string][]byte `json:"stateObjects"`
+	FileObjects   map[string][]byte `json:"fileObjects"`
+}
+
+func TestApplicationWriterProfilesMigrateV014FixturesBeforeStartup(t *testing.T) {
+	profiles := []struct {
+		name      string
+		fixture   string
+		configure func(*config.Config)
+	}{
+		{name: "preview-disabled", fixture: "pre-aggregate-v0.1.4-application-disabled.json", configure: func(*config.Config) {}},
+		{
+			name: "preview-gcs", fixture: "pre-aggregate-v0.1.4-application-gcs.json",
+			configure: func(cfg *config.Config) {
+				cfg.PreviewProvider = "gcs"
+				cfg.GCSPreviewBucket = "migration-preview-bucket"
+				cfg.PreviewFormats = []string{"image"}
+				cfg.PreviewResolutions = []int{256, 512, 1600}
+				cfg.PreviewKeySecret = secret.Value(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("p", 32))))
+			},
+		},
+	}
+	for _, profile := range profiles {
+		t.Run(profile.name, func(t *testing.T) {
+			testApplicationWriterProfileMigration(t, profile.fixture, profile.configure)
+		})
+	}
+}
+
+func testApplicationWriterProfileMigration(t *testing.T, fixtureName string, configure func(*config.Config)) {
+	t.Helper()
+	body, err := os.ReadFile("../../internal/portable/testdata/migrations/" + fixtureName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var fixture applicationMigrationFixture
+	if err := decoder.Decode(&fixture); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		t.Fatalf("fixture trailing JSON error = %v; want EOF", err)
+	}
+	if fixture.SourceRelease != "v0.1.4" || fixture.SourceCommit != "edb67f8e345694001b9614604c5baded9bde5d86" {
+		t.Fatalf("unexpected production-profile fixture provenance: %s %s", fixture.SourceRelease, fixture.SourceCommit)
+	}
+	stateBackend := objectmemory.New()
+	fileBackend := objectmemory.New()
+	if err := stateBackend.Import(fixture.StateObjects); err != nil {
+		t.Fatal(err)
+	}
+	if err := fileBackend.Import(fixture.FileObjects); err != nil {
+		t.Fatal(err)
+	}
+	cfg := runtimeTestConfig(t)
+	configure(&cfg)
+	writer, err := buildWriterConfiguration(cfg, "session-keyring-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, err := portable.Open(context.Background(), portable.Options{
+		Backend: stateBackend, FileBackend: fileBackend,
+		Clock: domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour)),
+		IDs:   domain.NewIDGenerator(bytes.NewReader(applicationMigrationBytes(0x61, 1<<20))), Writer: writer,
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	})
+	if err != nil {
+		t.Fatalf("application startup migration from deployed v0.1.4 profile: %v", err)
+	}
+	user, err := domain.ParseUserID(fixture.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, _ := domain.NewScope(user, domain.AreaLive)
+	root, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
+	if err != nil || root.Size != 22 || root.FileCount != 2 {
+		t.Fatalf("migrated application root = %+v, %v; want 22 bytes/2 files", root, err)
+	}
+	if _, err := engine.Files().CreateDirectory(context.Background(), live, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/after-upgrade")}); err != nil {
+		t.Fatalf("post-migration application mutation: %v", err)
+	}
+}
+
+func applicationMigrationBytes(seed byte, size int) []byte {
+	body := make([]byte, size)
+	value := uint32(seed) + 1
+	for index := range body {
+		value = value*1664525 + 1013904223
+		body[index] = byte(value >> 24)
+	}
+	return body
 }
 
 func contains(values []string, target string) bool {

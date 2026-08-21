@@ -35,6 +35,7 @@ type storageSchemaFixture struct {
 
 type storageSchemaFixtureEntry struct {
 	schemaID  string
+	profile   string
 	file      string
 	digest    string
 	producer  string
@@ -47,21 +48,45 @@ type storageSchemaFixtureEntry struct {
 var storageSchemaFixtures = []storageSchemaFixtureEntry{
 	{
 		schemaID: "endlessfs-portable-v1/schema-001",
+		profile:  "portable-minimal",
 		file:     "pre-aggregate-v0.1.4.json", digest: "24111f7739207b53fad5c4e1cf0ca106982b40fce33850f045d7430150260258",
 		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86",
 		wantEpoch: 3, wantSize: 26, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-002",
+		profile:  "portable-minimal",
 		file:     "schema-002-recursive-bytes.json", digest: "c7fc6a6924e62f99e9fdd99a35343385c17088d36bcac5f47b6abfe8776ee854",
 		producer: "schema-002", commit: "b70f6361497d45f20049279bb5381a4fbb1005f1",
 		wantEpoch: 2, wantSize: 10, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-003",
+		profile:  "portable-minimal",
 		file:     "recursive-aggregates-v0.1.7.json", digest: "0e2ce0a0853cba6e29730346b69e3c829240f617b1f277949f394b9a54786a51",
 		producer: "v0.1.7", commit: "1548dafa30ea3fbf0340b3b32381e885a110ef5e",
 		wantEpoch: 1, wantSize: 26, wantFiles: 2,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-001",
+		profile:  "application-preview-disabled",
+		file:     "pre-aggregate-v0.1.4-application-disabled.json", digest: "b6932210f53e927bf0543153290674579e50f0004bdad1e1e474256fbea8e15a",
+		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86",
+		wantEpoch: 3, wantSize: 22, wantFiles: 2,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-001",
+		profile:  "application-preview-gcs",
+		file:     "pre-aggregate-v0.1.4-application-gcs.json", digest: "8e508619ffb77850403f2e83de9d1ce98dabfe330334ffee9c2e87f6c250cab8",
+		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86",
+		wantEpoch: 3, wantSize: 22, wantFiles: 2,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-001",
+		profile:  "application-preview-gcs-v0.1.7-interrupted",
+		file:     "schema-001-v0.1.7-interrupted-application-gcs.json", digest: "998cbd744dce60cdf59400903c0de950a0f96915cdb0e7f0225b5260882e28e9",
+		producer: "v0.1.7-interrupted", commit: "1548dafa30ea3fbf0340b3b32381e885a110ef5e",
+		wantEpoch: 3, wantSize: 22, wantFiles: 2,
 	},
 }
 
@@ -69,19 +94,20 @@ var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.
 
 func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *testing.T) {
 	history := portable.StorageSchemaHistory()
-	if len(storageSchemaFixtures) != len(history) {
-		t.Fatalf("storage-schema fixture count = %d; ledger entries = %d", len(storageSchemaFixtures), len(history))
-	}
 	fixtureSchemas := make(map[string]struct{}, len(storageSchemaFixtures))
 	for familyIndex, family := range storageSchemaFixtures {
-		if _, duplicate := fixtureSchemas[family.schemaID]; duplicate {
-			t.Fatalf("storage schema %s has more than one canonical fixture", family.schemaID)
-		}
 		fixtureSchemas[family.schemaID] = struct{}{}
-		if family.schemaID != history[familyIndex].ID {
-			t.Fatalf("fixture[%d] schema = %s; ledger schema = %s", familyIndex, family.schemaID, history[familyIndex].ID)
+		registered := false
+		for _, entry := range history {
+			if family.schemaID == entry.ID {
+				registered = true
+				break
+			}
 		}
-		t.Run(family.schemaID, func(t *testing.T) {
+		if !registered {
+			t.Fatalf("fixture[%d] schema %s is absent from the production ledger", familyIndex, family.schemaID)
+		}
+		t.Run(family.schemaID+"/"+family.profile, func(t *testing.T) {
 			for topologyIndex, split := range []bool{false, true} {
 				topology := "single"
 				if split {
@@ -107,6 +133,7 @@ func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *
 					if split {
 						options = schemaSplitMigrationOptions(stateBackend, fileBackend, clock, seed+20, nil)
 					}
+					options.Writer = currentWriterForSchemaFixture(t, fixture)
 					engine, err := portable.Open(context.Background(), options)
 					if err != nil {
 						t.Fatalf("Open(%s %s-backend schema fixture produced by %s) error = %v", family.schemaID, topology, family.producer, err)
@@ -180,44 +207,60 @@ func TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary(t *testing.T) 
 	}
 	history := portable.StorageSchemaHistory()
 	for edgeIndex, entry := range history[:len(history)-1] {
-		family := storageSchemaFixtures[edgeIndex]
-		for boundaryIndex, boundary := range boundaries {
-			t.Run(entry.MigrationID+"/"+boundary, func(t *testing.T) {
-				fixture := loadStorageSchemaFixture(t, family)
-				stateBackend := objectmemory.New()
-				fileBackend := objectmemory.New()
-				if err := stateBackend.Import(fixture.StateObjects); err != nil {
-					t.Fatal(err)
-				}
-				if err := fileBackend.Import(fixture.FileObjects); err != nil {
-					t.Fatal(err)
-				}
-				clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
-				crasher := &stepFailure{step: portable.MigrationStepName(entry.MigrationID, boundary)}
-				seed := byte(100 + edgeIndex*32 + boundaryIndex)
-				if _, err := portable.Open(context.Background(), schemaSplitMigrationOptions(stateBackend, fileBackend, clock, seed, crasher)); !errors.Is(err, domain.ErrUnavailable) {
-					t.Fatalf("interrupted %s at %s error = %v; want unavailable", entry.MigrationID, boundary, err)
-				}
-				engine, err := portable.Open(context.Background(), schemaSplitMigrationOptions(stateBackend, fileBackend, clock, seed+64, nil))
-				if err != nil {
-					t.Fatalf("resume %s after %s error = %v", entry.MigrationID, boundary, err)
-				}
-				user, err := domain.ParseUserID(fixture.UserID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				live, _ := domain.NewScope(user, domain.AreaLive)
-				root, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
-				if err != nil || root.Size != family.wantSize || root.FileCount != family.wantFiles {
-					t.Fatalf("resumed %s root = %+v, %v; want %d bytes/%d files", entry.MigrationID, root, err, family.wantSize, family.wantFiles)
-				}
-				gate, err := engine.GateStatus(context.Background())
-				if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != family.wantEpoch {
-					t.Fatalf("resumed %s gate = %+v, %v; want open epoch %d", entry.MigrationID, gate, err, family.wantEpoch)
-				}
-			})
+		families := storageSchemaFixturesFor(entry.ID)
+		for familyIndex, family := range families {
+			for boundaryIndex, boundary := range boundaries {
+				t.Run(entry.MigrationID+"/"+family.profile+"/"+boundary, func(t *testing.T) {
+					fixture := loadStorageSchemaFixture(t, family)
+					stateBackend := objectmemory.New()
+					fileBackend := objectmemory.New()
+					if err := stateBackend.Import(fixture.StateObjects); err != nil {
+						t.Fatal(err)
+					}
+					if err := fileBackend.Import(fixture.FileObjects); err != nil {
+						t.Fatal(err)
+					}
+					clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
+					crasher := &stepFailure{step: portable.MigrationStepName(entry.MigrationID, boundary)}
+					seed := byte(100 + edgeIndex*48 + familyIndex*12 + boundaryIndex)
+					options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, seed, crasher)
+					options.Writer = currentWriterForSchemaFixture(t, fixture)
+					if _, err := portable.Open(context.Background(), options); !errors.Is(err, domain.ErrUnavailable) {
+						t.Fatalf("interrupted %s at %s error = %v; want unavailable", entry.MigrationID, boundary, err)
+					}
+					options = schemaSplitMigrationOptions(stateBackend, fileBackend, clock, seed+64, nil)
+					options.Writer = currentWriterForSchemaFixture(t, fixture)
+					engine, err := portable.Open(context.Background(), options)
+					if err != nil {
+						t.Fatalf("resume %s after %s error = %v", entry.MigrationID, boundary, err)
+					}
+					user, err := domain.ParseUserID(fixture.UserID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					live, _ := domain.NewScope(user, domain.AreaLive)
+					root, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
+					if err != nil || root.Size != family.wantSize || root.FileCount != family.wantFiles {
+						t.Fatalf("resumed %s root = %+v, %v; want %d bytes/%d files", entry.MigrationID, root, err, family.wantSize, family.wantFiles)
+					}
+					gate, err := engine.GateStatus(context.Background())
+					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != family.wantEpoch {
+						t.Fatalf("resumed %s gate = %+v, %v; want open epoch %d", entry.MigrationID, gate, err, family.wantEpoch)
+					}
+				})
+			}
 		}
 	}
+}
+
+func storageSchemaFixturesFor(schemaID string) []storageSchemaFixtureEntry {
+	fixtures := make([]storageSchemaFixtureEntry, 0)
+	for _, fixture := range storageSchemaFixtures {
+		if fixture.schemaID == schemaID {
+			fixtures = append(fixtures, fixture)
+		}
+	}
+	return fixtures
 }
 
 func TestMigrationOldestSchemaTraversesLedgerEdgesInOrder(t *testing.T) {
@@ -348,45 +391,51 @@ func TestSchema001MigrationResumesAfterUploadRecordUpgrade(t *testing.T) {
 }
 
 func TestEightReplicasConcurrentlyMigrateSchema001Fixture(t *testing.T) {
-	family := storageSchemaFixtures[0]
-	fixture := loadStorageSchemaFixture(t, family)
-	stateBackend := objectmemory.New()
-	fileBackend := objectmemory.New()
-	if err := stateBackend.Import(fixture.StateObjects); err != nil {
-		t.Fatal(err)
-	}
-	if err := fileBackend.Import(fixture.FileObjects); err != nil {
-		t.Fatal(err)
-	}
-	clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
-	const replicas = 8
-	barrier := newAggregateBarrier(replicas)
-	engines := make([]*portable.Engine, replicas)
-	errorsFound := make([]error, replicas)
-	var wait sync.WaitGroup
-	for index := range replicas {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			scheduler := &aggregateOneShotScheduler{step: portable.MigrationStepName("schema-001-to-002", portable.StepMigrationAfterDetection), barrier: barrier, enabled: true}
-			engines[index], errorsFound[index] = portable.Open(context.Background(), schemaSplitMigrationOptions(stateBackend, fileBackend, clock, byte(80+index), scheduler))
-		}()
-	}
-	wait.Wait()
-	for index, err := range errorsFound {
-		if err != nil {
-			t.Errorf("schema-001 migration replica %d error = %v", index, err)
-		}
-	}
-	if t.Failed() {
-		t.FailNow()
-	}
-	assertAllUploadRecordsUseCurrentSchema(t, stateBackend.Export())
-	user, _ := domain.ParseUserID(fixture.UserID)
-	live, _ := domain.NewScope(user, domain.AreaLive)
-	root, err := engines[replicas-1].Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
-	if err != nil || root.Size != family.wantSize || root.FileCount != family.wantFiles {
-		t.Fatalf("concurrently migrated release root = %+v, %v", root, err)
+	for familyIndex, family := range storageSchemaFixturesFor("endlessfs-portable-v1/schema-001") {
+		t.Run(family.profile, func(t *testing.T) {
+			fixture := loadStorageSchemaFixture(t, family)
+			stateBackend := objectmemory.New()
+			fileBackend := objectmemory.New()
+			if err := stateBackend.Import(fixture.StateObjects); err != nil {
+				t.Fatal(err)
+			}
+			if err := fileBackend.Import(fixture.FileObjects); err != nil {
+				t.Fatal(err)
+			}
+			clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
+			writer := currentWriterForSchemaFixture(t, fixture)
+			const replicas = 8
+			barrier := newAggregateBarrier(replicas)
+			engines := make([]*portable.Engine, replicas)
+			errorsFound := make([]error, replicas)
+			var wait sync.WaitGroup
+			for index := range replicas {
+				wait.Add(1)
+				go func() {
+					defer wait.Done()
+					scheduler := &aggregateOneShotScheduler{step: portable.MigrationStepName("schema-001-to-002", portable.StepMigrationAfterDetection), barrier: barrier, enabled: true}
+					options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, byte(80+familyIndex*16+index), scheduler)
+					options.Writer = writer
+					engines[index], errorsFound[index] = portable.Open(context.Background(), options)
+				}()
+			}
+			wait.Wait()
+			for index, err := range errorsFound {
+				if err != nil {
+					t.Errorf("schema-001 migration replica %d error = %v", index, err)
+				}
+			}
+			if t.Failed() {
+				t.FailNow()
+			}
+			assertAllUploadRecordsUseCurrentSchema(t, stateBackend.Export())
+			user, _ := domain.ParseUserID(fixture.UserID)
+			live, _ := domain.NewScope(user, domain.AreaLive)
+			root, err := engines[replicas-1].Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
+			if err != nil || root.Size != family.wantSize || root.FileCount != family.wantFiles {
+				t.Fatalf("concurrently migrated release root = %+v, %v", root, err)
+			}
+		})
 	}
 }
 
@@ -460,6 +509,21 @@ func loadStorageSchemaFixture(t *testing.T, family storageSchemaFixtureEntry) st
 		t.Fatalf("historical fixture metadata is invalid: %+v", fixture)
 	}
 	return fixture
+}
+
+func currentWriterForSchemaFixture(t *testing.T, fixture storageSchemaFixture) portable.WriterConfiguration {
+	t.Helper()
+	writerKey := storageformat.WriterSetKey()
+	var envelope storageformat.Envelope
+	var writer storageformat.WriterSet
+	if err := storageformat.DecodeEnvelope(fixture.StateObjects[writerKey.String()], writerKey, "writer-set-v1", &envelope, &writer); err != nil {
+		t.Fatal(err)
+	}
+	return portable.WriterConfiguration{
+		WriterSetID: writer.WriterSetID, ConfigurationDigest: writer.ConfigurationDigest,
+		KeyringIdentifiers: append([]string(nil), writer.KeyringIdentifiers...),
+		RequiredFeatures:   append([]string(nil), writer.RequiredFeatures...),
+	}
 }
 
 type schema001FixtureUploadRecord struct {

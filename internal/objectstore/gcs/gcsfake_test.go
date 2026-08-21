@@ -284,6 +284,10 @@ func (f *fakeGCS) resumable(writer http.ResponseWriter, request *http.Request, i
 	defer f.mu.Unlock()
 	if request.Method == http.MethodDelete {
 		f.sessionDeleteAttempts++
+		if request.Header.Get("Content-Length") != "0" {
+			f.problem(writer, http.StatusLengthRequired, "lengthRequired")
+			return
+		}
 	}
 	session, exists := f.sessions[id]
 	if !exists {

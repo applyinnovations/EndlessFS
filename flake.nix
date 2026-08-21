@@ -159,6 +159,8 @@
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-event" == "[push]"' .tekton/endlessfs-release.yaml >/dev/null
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[refs/tags/v*.*.*]"' .tekton/endlessfs-release.yaml >/dev/null
         yq -e '.spec.params[] | select(.name == "release_tag") | .value == "{{ git_tag }}"' .tekton/endlessfs-release.yaml >/dev/null
+        release_verify_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "verify") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
+        printf '%s\n' "$release_verify_script" | rg -F 'nix run .#test-migration -- "$release_tag"' >/dev/null
         release_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "release") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
         for command in view upload create; do
           printf '%s\n' "$release_script" | rg -F "gh release $command \"\$release_tag\" --repo \"applyinnovations/EndlessFS\"" >/dev/null
@@ -689,6 +691,13 @@
           test-contract = goTask "endlessfs-test-contract" ''
             go test ./... -run '^TestContract'
           '';
+          test-migration = goTask "endlessfs-test-migration" ''
+            candidate="''${1:-}"
+            if [ -n "$candidate" ]; then
+              export ENDLESSFS_MIGRATION_CANDIDATE_RELEASE="$candidate"
+            fi
+            exec go test ./internal/portable -run '(Migrat|StorageSchema|HistoricalRelease)' -count=1
+          '';
           test-replica = goTask "endlessfs-test-replica" ''
             exec go test ./internal/portable ./internal/objectstore/gcs \
               -run '(Replica|CandidateCannot|Superseded|GenerationConditionsFence|LostMutation)' -count=1 "$@"
@@ -1003,6 +1012,10 @@
             name: command: tools:
             goCheckWithSource name testSource command tools;
           testSuite = goCheck "tests" "go test ./..." [ ];
+          migrationCheck =
+            goCheck "migration"
+              "go test ./internal/portable -run '(Migrat|StorageSchema|HistoricalRelease)' -count=1"
+              [ ];
           e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
           coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
           publishContainerPolicy =
@@ -1116,6 +1129,7 @@
           tests = testSuite;
           integration = testSuite;
           contract = testSuite;
+          migration = migrationCheck;
           replica = testSuite;
           portability = testSuite;
           provider-verify = testSuite;

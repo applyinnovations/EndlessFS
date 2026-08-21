@@ -135,7 +135,14 @@ spec:
             workspace: nix-store
         params:
           - name: SCRIPT
-            value: nix flake check --print-build-logs --max-jobs 6 --cores 2
+            value: |
+              release_tag="$(params.release_tag)"
+              printf '%s\n' "$release_tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
+                echo "release checkout is not a vMAJOR.MINOR.PATCH tag" >&2
+                exit 2
+              }
+              nix run .#test-migration -- "$release_tag"
+              nix flake check --print-build-logs --max-jobs 6 --cores 2
 
       - name: release
         runAfter: [verify]

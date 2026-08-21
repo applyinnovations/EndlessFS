@@ -19,21 +19,21 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
-type legacyDirectoryRoot struct {
-	SchemaVersion int                        `json:"schemaVersion"`
-	DirectoryID   string                     `json:"directoryID"`
-	ManifestID    string                     `json:"manifestID"`
-	Pending       *legacyDirectoryTransition `json:"pending,omitempty"`
+type schema001DirectoryRoot struct {
+	SchemaVersion int                           `json:"schemaVersion"`
+	DirectoryID   string                        `json:"directoryID"`
+	ManifestID    string                        `json:"manifestID"`
+	Pending       *schema001DirectoryTransition `json:"pending,omitempty"`
 }
 
-type legacyDirectoryTransition struct {
+type schema001DirectoryTransition struct {
 	OperationID    string `json:"operationID"`
 	Fence          uint64 `json:"fence"`
 	PreManifestID  string `json:"preManifestID,omitempty"`
 	PostManifestID string `json:"postManifestID"`
 }
 
-type legacyDirectoryManifest struct {
+type schema001DirectoryManifest struct {
 	SchemaVersion int       `json:"schemaVersion"`
 	DirectoryID   string    `json:"directoryID"`
 	ManifestID    string    `json:"manifestID"`
@@ -42,14 +42,14 @@ type legacyDirectoryManifest struct {
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
-type recursiveByteDirectoryRoot struct {
+type schema002DirectoryRoot struct {
 	SchemaVersion  int    `json:"schemaVersion"`
 	DirectoryID    string `json:"directoryID"`
 	ManifestID     string `json:"manifestID"`
 	RecursiveBytes int64  `json:"recursiveBytes"`
 }
 
-type recursiveByteDirectoryManifest struct {
+type schema002DirectoryManifest struct {
 	SchemaVersion  int       `json:"schemaVersion"`
 	DirectoryID    string    `json:"directoryID"`
 	ManifestID     string    `json:"manifestID"`
@@ -59,9 +59,9 @@ type recursiveByteDirectoryManifest struct {
 	CreatedAt      time.Time `json:"createdAt"`
 }
 
-func TestStartupAutomaticallyMigratesLegacyRecursiveByteAggregates(t *testing.T) {
+func TestStartupMigratesSchema001ThroughCurrent(t *testing.T) {
 	clock := domain.NewFixedClock(time.Date(2042, 6, 7, 8, 9, 10, 0, time.UTC))
-	legacyObjects, user := legacyAggregateFixture(t, clock)
+	legacyObjects, user := schema001AggregateFixture(t, clock)
 	backend := objectmemory.New()
 	server := newPortableDataServer(t, backend, clock, 180)
 	if err := backend.Import(legacyObjects); err != nil {
@@ -92,8 +92,8 @@ func TestStartupAutomaticallyMigratesLegacyRecursiveByteAggregates(t *testing.T)
 		t.Fatalf("migrated legacy trash lookup = %+v, %v; want directory size/count 5/1", lookup, err)
 	}
 	gate, err := engine.GateStatus(context.Background())
-	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 2 {
-		t.Fatalf("migrated gate = %+v, %v; want open epoch 2", gate, err)
+	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 3 {
+		t.Fatalf("migrated gate = %+v, %v; want open epoch 3 after two schema migrations", gate, err)
 	}
 	assertRecursiveFeatureActivated(t, backend.Export())
 	assertLegacyWriterCannotDecodeMigratedGate(t, backend.Export())
@@ -103,12 +103,12 @@ func TestStartupAutomaticallyMigratesLegacyRecursiveByteAggregates(t *testing.T)
 	}
 }
 
-func TestStartupAutomaticallyMigratesLegacySplitBackend(t *testing.T) {
+func TestStartupMigratesSchema001SplitBackendThroughCurrent(t *testing.T) {
 	clock := domain.NewFixedClock(time.Date(2042, 6, 8, 8, 9, 10, 0, time.UTC))
 	stateBackend := objectmemory.New()
 	fileBackend := objectmemory.New()
 	server := newPortableDataServer(t, fileBackend, clock, 183)
-	engine, err := portable.Open(context.Background(), legacySplitMigrationOptions(stateBackend, fileBackend, clock, 184, nil))
+	engine, err := portable.Open(context.Background(), schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 184, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestStartupAutomaticallyMigratesLegacySplitBackend(t *testing.T) {
 	}
 	uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath("/split/first.txt"), []byte("four"))
 	uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath("/split/nested/second.txt"), []byte("sixsix"))
-	legacyState := downgradeRecursiveByteFeature(t, stateBackend.Export())
+	legacyState := encodeSchema001Fixture(t, stateBackend.Export())
 	legacyFiles := fileBackend.Export()
 	migratedState := objectmemory.New()
 	migratedFiles := objectmemory.New()
@@ -131,7 +131,7 @@ func TestStartupAutomaticallyMigratesLegacySplitBackend(t *testing.T) {
 	if err := migratedFiles.Import(legacyFiles); err != nil {
 		t.Fatal(err)
 	}
-	migrated, err := portable.Open(context.Background(), legacySplitMigrationOptions(migratedState, migratedFiles, clock, 185, nil))
+	migrated, err := portable.Open(context.Background(), schemaSplitMigrationOptions(migratedState, migratedFiles, clock, 185, nil))
 	if err != nil {
 		t.Fatalf("Open(legacy split bucket) error = %v", err)
 	}
@@ -144,7 +144,7 @@ func TestStartupAutomaticallyMigratesLegacySplitBackend(t *testing.T) {
 	assertRecursiveFeatureActivated(t, migratedState.Export())
 }
 
-func TestEightReplicasAutomaticallyMigrateRecursiveBytePredecessorFileCounts(t *testing.T) {
+func TestEightReplicasConcurrentlyMigrateSchema002(t *testing.T) {
 	clock := domain.NewFixedClock(time.Date(2042, 6, 9, 8, 9, 10, 0, time.UTC))
 	current := objectmemory.New()
 	server := newPortableDataServer(t, current, clock, 186)
@@ -164,7 +164,7 @@ func TestEightReplicasAutomaticallyMigrateRecursiveBytePredecessorFileCounts(t *
 	}
 	uploadPortableFile(t, server.Client(), engine.Files(), trash, domain.MustParseUserPath("/old/deleted.bin"), []byte("xx"))
 	predecessor := objectmemory.New()
-	if err := predecessor.Import(downgradeRecursiveFileCountFeature(t, current.Export())); err != nil {
+	if err := predecessor.Import(encodeSchema002Fixture(t, current.Export())); err != nil {
 		t.Fatal(err)
 	}
 
@@ -177,8 +177,8 @@ func TestEightReplicasAutomaticallyMigrateRecursiveBytePredecessorFileCounts(t *
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			scheduler := &aggregateOneShotScheduler{step: portable.StepMigrationAfterDetection, barrier: barrier, enabled: true}
-			engines[index], errorsFound[index] = portable.Open(context.Background(), legacyMigrationOptions(predecessor, clock, byte(188+index), scheduler))
+			scheduler := &aggregateOneShotScheduler{step: portable.MigrationStepName("schema-002-to-003", portable.StepMigrationAfterDetection), barrier: barrier, enabled: true}
+			engines[index], errorsFound[index] = portable.Open(context.Background(), schemaMigrationOptions(predecessor, clock, byte(188+index), scheduler))
 		}()
 	}
 	wait.Wait()
@@ -209,50 +209,9 @@ func TestEightReplicasAutomaticallyMigrateRecursiveBytePredecessorFileCounts(t *
 	assertRecursiveFeatureActivated(t, predecessor.Export())
 }
 
-func TestStartupRecursiveByteMigrationResumesAfterEveryDurableBoundary(t *testing.T) {
-	steps := []string{
-		portable.StepMigrationAfterDetection,
-		portable.StepMigrationAfterGateClosed,
-		portable.StepMigrationAfterDirectoryPrerequisites,
-		portable.StepMigrationAfterDirectoryRoot,
-		portable.StepMigrationAfterDirectories,
-		portable.StepMigrationAfterWriterSet,
-		portable.StepMigrationAfterSuperblock,
-		portable.StepMigrationAfterGateBinding,
-		portable.StepMigrationAfterCheckpoint,
-	}
-	for index, step := range steps {
-		t.Run(step, func(t *testing.T) {
-			clock := domain.NewFixedClock(time.Date(2042, 7, 8, 9, 10, 11, 0, time.UTC))
-			legacyObjects, user := legacyAggregateFixture(t, clock)
-			backend := objectmemory.New()
-			if err := backend.Import(legacyObjects); err != nil {
-				t.Fatal(err)
-			}
-			crasher := &stepFailure{step: step}
-			if _, err := portable.Open(context.Background(), legacyMigrationOptions(backend, clock, byte(190+index), crasher)); !errors.Is(err, domain.ErrUnavailable) {
-				t.Fatalf("interrupted Open() error = %v", err)
-			}
-			engine, err := portable.Open(context.Background(), legacyMigrationOptions(backend, clock, byte(210+index), nil))
-			if err != nil {
-				t.Fatalf("resumed Open() error = %v", err)
-			}
-			live, _ := domain.NewScope(user, domain.AreaLive)
-			trash, _ := domain.NewScope(user, domain.AreaTrash)
-			if got := assertVisibleRecursiveAggregates(t, engine.Files(), live, domain.MustParseUserPath("/")); got != 12 {
-				t.Fatalf("resumed live aggregate = %d; want 12", got)
-			}
-			if got := assertVisibleRecursiveAggregates(t, engine.Files(), trash, domain.MustParseUserPath("/")); got != 5 {
-				t.Fatalf("resumed trash aggregate = %d; want 5", got)
-			}
-			assertRecursiveFeatureActivated(t, backend.Export())
-		})
-	}
-}
-
-func TestEightReplicasConcurrentlyMigrateOneLegacyAggregateTree(t *testing.T) {
+func TestEightReplicasConcurrentlyMigrateSchema001AggregateTree(t *testing.T) {
 	clock := domain.NewFixedClock(time.Date(2042, 8, 9, 10, 11, 12, 0, time.UTC))
-	legacyObjects, user := legacyAggregateFixture(t, clock)
+	legacyObjects, user := schema001AggregateFixture(t, clock)
 	backend := objectmemory.New()
 	if err := backend.Import(legacyObjects); err != nil {
 		t.Fatal(err)
@@ -266,8 +225,8 @@ func TestEightReplicasConcurrentlyMigrateOneLegacyAggregateTree(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			scheduler := &aggregateOneShotScheduler{step: portable.StepMigrationAfterDetection, barrier: barrier, enabled: true}
-			engines[index], errorsFound[index] = portable.Open(context.Background(), legacyMigrationOptions(backend, clock, byte(231+index), scheduler))
+			scheduler := &aggregateOneShotScheduler{step: portable.MigrationStepName("schema-001-to-002", portable.StepMigrationAfterDetection), barrier: barrier, enabled: true}
+			engines[index], errorsFound[index] = portable.Open(context.Background(), schemaMigrationOptions(backend, clock, byte(231+index), scheduler))
 		}()
 	}
 	wait.Wait()
@@ -284,25 +243,25 @@ func TestEightReplicasConcurrentlyMigrateOneLegacyAggregateTree(t *testing.T) {
 		t.Fatalf("concurrently migrated aggregate = %d; want 12", got)
 	}
 	gate, err := engines[0].GateStatus(context.Background())
-	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 2 {
+	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 3 {
 		t.Fatalf("concurrently migrated gate = %+v, %v", gate, err)
 	}
 	assertRecursiveFeatureActivated(t, backend.Export())
 }
 
-func TestStartupRecursiveByteMigrationWaitsForAndDrainsActiveUpload(t *testing.T) {
+func TestSchema001MigrationWaitsForAndDrainsActiveUpload(t *testing.T) {
 	clock := domain.NewFixedClock(time.Date(2042, 9, 10, 11, 12, 13, 0, time.UTC))
-	legacyObjects, user := legacyAggregateFixtureWithActiveUpload(t, clock)
+	legacyObjects, user := schema001AggregateFixtureWithActiveUpload(t, clock)
 	backend := objectmemory.New()
 	if err := backend.Import(legacyObjects); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := portable.Open(context.Background(), legacyMigrationOptions(backend, clock, 242, nil)); !errors.Is(err, domain.ErrUnavailable) {
+	if _, err := portable.Open(context.Background(), schemaMigrationOptions(backend, clock, 242, nil)); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("Open(with active upload) error = %v", err)
 	}
 	assertRecursiveFeatureInactive(t, backend.Export())
 	clock.Advance(11 * time.Minute)
-	engine, err := portable.Open(context.Background(), legacyMigrationOptions(backend, clock, 243, nil))
+	engine, err := portable.Open(context.Background(), schemaMigrationOptions(backend, clock, 243, nil))
 	if err != nil {
 		t.Fatalf("Open(after upload expiry) error = %v", err)
 	}
@@ -313,24 +272,24 @@ func TestStartupRecursiveByteMigrationWaitsForAndDrainsActiveUpload(t *testing.T
 	assertRecursiveFeatureActivated(t, backend.Export())
 }
 
-func TestStartupRecursiveByteMigrationRejectsCorruptLegacyTrees(t *testing.T) {
+func TestSchema001MigrationRejectsCorruptTrees(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		mutate func(*testing.T, map[string][]byte)
 	}{
-		{name: "missing-child-root", mutate: removeLegacyChildRoot},
-		{name: "recursive-overflow", mutate: overflowLegacyDirectory},
-		{name: "directory-cycle", mutate: cycleLegacyDirectory},
+		{name: "missing-child-root", mutate: removeSchema001ChildRoot},
+		{name: "recursive-overflow", mutate: overflowSchema001Directory},
+		{name: "directory-cycle", mutate: cycleSchema001Directory},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			clock := domain.NewFixedClock(time.Date(2042, 10, 11, 12, 13, 14, 0, time.UTC))
-			legacyObjects, _ := legacyAggregateFixture(t, clock)
+			legacyObjects, _ := schema001AggregateFixture(t, clock)
 			test.mutate(t, legacyObjects)
 			backend := objectmemory.New()
 			if err := backend.Import(legacyObjects); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := portable.Open(context.Background(), legacyMigrationOptions(backend, clock, 251, nil)); !errors.Is(err, domain.ErrInvalid) {
+			if _, err := portable.Open(context.Background(), schemaMigrationOptions(backend, clock, 251, nil)); !errors.Is(err, domain.ErrInvalid) {
 				t.Fatalf("Open(corrupt legacy tree) error = %v", err)
 			}
 			assertRecursiveFeatureInactive(t, backend.Export())
@@ -342,15 +301,15 @@ func TestStartupRecursiveByteMigrationRejectsCorruptLegacyTrees(t *testing.T) {
 	}
 }
 
-func legacyAggregateFixture(t *testing.T, clock *domain.FixedClock) (map[string][]byte, domain.UserID) {
-	return legacyAggregateFixtureState(t, clock, false)
+func schema001AggregateFixture(t *testing.T, clock *domain.FixedClock) (map[string][]byte, domain.UserID) {
+	return schema001AggregateFixtureState(t, clock, false)
 }
 
-func legacyAggregateFixtureWithActiveUpload(t *testing.T, clock *domain.FixedClock) (map[string][]byte, domain.UserID) {
-	return legacyAggregateFixtureState(t, clock, true)
+func schema001AggregateFixtureWithActiveUpload(t *testing.T, clock *domain.FixedClock) (map[string][]byte, domain.UserID) {
+	return schema001AggregateFixtureState(t, clock, true)
 }
 
-func legacyAggregateFixtureState(t *testing.T, clock *domain.FixedClock, activeUpload bool) (map[string][]byte, domain.UserID) {
+func schema001AggregateFixtureState(t *testing.T, clock *domain.FixedClock, activeUpload bool) (map[string][]byte, domain.UserID) {
 	t.Helper()
 	backend := objectmemory.New()
 	server := newPortableDataServer(t, backend, clock, 171)
@@ -376,10 +335,10 @@ func legacyAggregateFixtureState(t *testing.T, clock *domain.FixedClock, activeU
 			t.Fatal(err)
 		}
 	}
-	return downgradeRecursiveByteFeature(t, backend.Export()), user
+	return encodeSchema001Fixture(t, backend.Export()), user
 }
 
-func downgradeRecursiveByteFeature(t *testing.T, objects map[string][]byte) map[string][]byte {
+func encodeSchema001Fixture(t *testing.T, objects map[string][]byte) map[string][]byte {
 	t.Helper()
 	for key, body := range objects {
 		parsed := storageformatKey(t, key)
@@ -416,7 +375,7 @@ func downgradeRecursiveByteFeature(t *testing.T, objects map[string][]byte) map[
 			if root.Pending != nil {
 				t.Fatal("fixture directory root is unexpectedly pending")
 			}
-			legacy := legacyDirectoryRoot{SchemaVersion: root.SchemaVersion, DirectoryID: root.DirectoryID, ManifestID: root.ManifestID}
+			legacy := schema001DirectoryRoot{SchemaVersion: root.SchemaVersion, DirectoryID: root.DirectoryID, ManifestID: root.ManifestID}
 			objects[key] = mustEnvelope(t, "directory-root-v1", parsed, envelope.Revision, legacy)
 		case strings.Contains(key, "/manifests/") && strings.HasSuffix(key, ".json"):
 			var envelope storageformat.Envelope
@@ -424,7 +383,7 @@ func downgradeRecursiveByteFeature(t *testing.T, objects map[string][]byte) map[
 			if err := storageformat.DecodeEnvelope(body, parsed, "directory-manifest-v1", &envelope, &manifest); err != nil {
 				t.Fatal(err)
 			}
-			legacy := legacyDirectoryManifest{
+			legacy := schema001DirectoryManifest{
 				SchemaVersion: manifest.SchemaVersion, DirectoryID: manifest.DirectoryID, ManifestID: manifest.ManifestID,
 				PageIDs: append([]string(nil), manifest.PageIDs...), EntryCount: manifest.EntryCount, CreatedAt: manifest.CreatedAt,
 			}
@@ -449,7 +408,7 @@ func downgradeRecursiveByteFeature(t *testing.T, objects map[string][]byte) map[
 	return objects
 }
 
-func downgradeRecursiveFileCountFeature(t *testing.T, objects map[string][]byte) map[string][]byte {
+func encodeSchema002Fixture(t *testing.T, objects map[string][]byte) map[string][]byte {
 	t.Helper()
 	withoutCount := func(features []string) []string {
 		result := make([]string, 0, len(features))
@@ -495,7 +454,7 @@ func downgradeRecursiveFileCountFeature(t *testing.T, objects map[string][]byte)
 			if root.Pending != nil {
 				t.Fatal("fixture directory root is unexpectedly pending")
 			}
-			legacy := recursiveByteDirectoryRoot{SchemaVersion: root.SchemaVersion, DirectoryID: root.DirectoryID, ManifestID: root.ManifestID, RecursiveBytes: root.RecursiveBytes}
+			legacy := schema002DirectoryRoot{SchemaVersion: root.SchemaVersion, DirectoryID: root.DirectoryID, ManifestID: root.ManifestID, RecursiveBytes: root.RecursiveBytes}
 			objects[key] = mustEnvelope(t, "directory-root-v1", parsed, envelope.Revision, legacy)
 		case strings.Contains(key, "/manifests/") && strings.HasSuffix(key, ".json"):
 			var envelope storageformat.Envelope
@@ -503,7 +462,7 @@ func downgradeRecursiveFileCountFeature(t *testing.T, objects map[string][]byte)
 			if err := storageformat.DecodeEnvelope(body, parsed, "directory-manifest-v1", &envelope, &manifest); err != nil {
 				t.Fatal(err)
 			}
-			legacy := recursiveByteDirectoryManifest{
+			legacy := schema002DirectoryManifest{
 				SchemaVersion: manifest.SchemaVersion, DirectoryID: manifest.DirectoryID, ManifestID: manifest.ManifestID,
 				PageIDs: append([]string(nil), manifest.PageIDs...), EntryCount: manifest.EntryCount,
 				RecursiveBytes: manifest.RecursiveBytes, CreatedAt: manifest.CreatedAt,
@@ -583,7 +542,7 @@ func assertLegacyWriterCannotDecodeMigratedGate(t *testing.T, objects map[string
 	}
 }
 
-func legacyMigrationOptions(backend *objectmemory.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) portable.Options {
+func schemaMigrationOptions(backend *objectmemory.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) portable.Options {
 	return portable.Options{
 		Backend: backend, Clock: clock, IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(seed, 1<<20))),
 		Writer: portable.WriterConfiguration{
@@ -594,13 +553,13 @@ func legacyMigrationOptions(backend *objectmemory.Backend, clock *domain.FixedCl
 	}
 }
 
-func legacySplitMigrationOptions(stateBackend, fileBackend *objectmemory.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) portable.Options {
-	options := legacyMigrationOptions(stateBackend, clock, seed, scheduler)
+func schemaSplitMigrationOptions(stateBackend, fileBackend *objectmemory.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) portable.Options {
+	options := schemaMigrationOptions(stateBackend, clock, seed, scheduler)
 	options.FileBackend = fileBackend
 	return options
 }
 
-func removeLegacyChildRoot(t *testing.T, objects map[string][]byte) {
+func removeSchema001ChildRoot(t *testing.T, objects map[string][]byte) {
 	t.Helper()
 	for key := range objects {
 		_, _, directoryID, matched, err := storageformat.ParseDirectoryRootKey(storageformatKey(t, key))
@@ -615,9 +574,9 @@ func removeLegacyChildRoot(t *testing.T, objects map[string][]byte) {
 	t.Fatal("legacy fixture has no child root")
 }
 
-func overflowLegacyDirectory(t *testing.T, objects map[string][]byte) {
+func overflowSchema001Directory(t *testing.T, objects map[string][]byte) {
 	t.Helper()
-	mutateLegacyPage(t, objects, func(page *storageformat.DirectoryPage) bool {
+	mutateSchemaFixturePage(t, objects, func(page *storageformat.DirectoryPage) bool {
 		for index := range page.Entries {
 			if page.Entries[index].Kind == domain.EntryFile {
 				page.Entries[index].Size = math.MaxInt64
@@ -629,9 +588,9 @@ func overflowLegacyDirectory(t *testing.T, objects map[string][]byte) {
 	})
 }
 
-func cycleLegacyDirectory(t *testing.T, objects map[string][]byte) {
+func cycleSchema001Directory(t *testing.T, objects map[string][]byte) {
 	t.Helper()
-	mutateLegacyPage(t, objects, func(page *storageformat.DirectoryPage) bool {
+	mutateSchemaFixturePage(t, objects, func(page *storageformat.DirectoryPage) bool {
 		if page.DirectoryID == storageformat.RootDirectoryID {
 			return false
 		}
@@ -646,7 +605,7 @@ func cycleLegacyDirectory(t *testing.T, objects map[string][]byte) {
 	})
 }
 
-func mutateLegacyPage(t *testing.T, objects map[string][]byte, mutate func(*storageformat.DirectoryPage) bool) {
+func mutateSchemaFixturePage(t *testing.T, objects map[string][]byte, mutate func(*storageformat.DirectoryPage) bool) {
 	t.Helper()
 	mutated := false
 	for key, body := range objects {

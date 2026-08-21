@@ -210,11 +210,16 @@ func (e *Engine) initialize(ctx context.Context) error {
 	if err := validateCompatibleSuperblock(existing); err != nil {
 		return err
 	}
-	if isAggregatePredecessor(existing.RequiredFeatures, e.writer.RequiredFeatures) {
-		return e.migrateRecursiveByteAggregates(ctx, stored, existing)
-	}
-	if !reflect.DeepEqual(existing.RequiredFeatures, e.writer.RequiredFeatures) {
+	schema, found := detectStorageSchema(existing.RequiredFeatures, e.writer.RequiredFeatures)
+	if !found {
 		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable superblock")
+	}
+	pendingMigration, err := e.storageMigrationPending(ctx)
+	if err != nil {
+		return err
+	}
+	if schema.id != currentStorageSchema().id || pendingMigration {
+		return e.migrateStorageSchemaChain(ctx)
 	}
 	if err := e.createOrVerifyEnvelope(ctx, storageformat.WriterSetKey(), writerSetSchema, e.writer); err != nil {
 		return err
@@ -228,9 +233,6 @@ func (e *Engine) initialize(ctx context.Context) error {
 	_, _, gate, err := e.readGate(ctx)
 	if err != nil {
 		return err
-	}
-	if gate.CheckpointID == recursiveByteMigrationCheckpointID && gate.Mode != storageformat.GateOpen || len(gate.WriterFeatures) == 0 || isAggregatePredecessor(gate.WriterFeatures, e.writer.RequiredFeatures) {
-		return e.migrateRecursiveByteAggregates(ctx, stored, existing)
 	}
 	if !reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
 		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")

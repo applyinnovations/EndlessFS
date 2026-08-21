@@ -18,34 +18,60 @@ import (
 )
 
 const (
-	recursiveByteMigrationCheckpointID = "automatic-recursive-byte-aggregates-v1"
+	// The persisted value cannot change because interrupted schema-001-to-002
+	// migrations use it to resume after a newer binary starts.
+	schema001To002CheckpointID = "automatic-recursive-byte-aggregates-v1"
 
-	StepMigrationAfterDetection              = "migration:recursive-bytes:after-detection"
-	StepMigrationAfterGateClosed             = "migration:recursive-bytes:after-gate-closed"
-	StepMigrationAfterDirectoryPrerequisites = "migration:recursive-bytes:after-directory-prerequisites"
-	StepMigrationAfterDirectoryRoot          = "migration:recursive-bytes:after-directory-root"
-	StepMigrationAfterDirectories            = "migration:recursive-bytes:after-directories"
-	StepMigrationAfterWriterSet              = "migration:recursive-bytes:after-writer-set"
-	StepMigrationAfterSuperblock             = "migration:recursive-bytes:after-superblock"
-	StepMigrationAfterGateBinding            = "migration:recursive-bytes:after-gate-binding"
-	StepMigrationAfterCheckpoint             = "migration:recursive-bytes:after-checkpoint"
+	StepMigrationAfterDetection              = "after-detection"
+	StepMigrationAfterGateClosed             = "after-gate-closed"
+	StepMigrationAfterUploadRecord           = "after-upload-record"
+	StepMigrationAfterDirectoryPrerequisites = "after-directory-prerequisites"
+	StepMigrationAfterDirectoryRoot          = "after-directory-root"
+	StepMigrationAfterDirectories            = "after-directories"
+	StepMigrationAfterWriterSet              = "after-writer-set"
+	StepMigrationAfterSuperblock             = "after-superblock"
+	StepMigrationAfterGateBinding            = "after-gate-binding"
+	StepMigrationAfterCheckpoint             = "after-checkpoint"
 )
 
-type legacyDirectoryRoot struct {
-	SchemaVersion int                        `json:"schemaVersion"`
-	DirectoryID   string                     `json:"directoryID"`
-	ManifestID    string                     `json:"manifestID"`
-	Pending       *legacyDirectoryTransition `json:"pending,omitempty"`
+type schema001DirectoryRoot struct {
+	SchemaVersion int                           `json:"schemaVersion"`
+	DirectoryID   string                        `json:"directoryID"`
+	ManifestID    string                        `json:"manifestID"`
+	Pending       *schema001DirectoryTransition `json:"pending,omitempty"`
 }
 
-type legacyDirectoryTransition struct {
+// schema001UploadRecord is frozen to the exact upload payload for storage
+// schema 001. Normal runtime reads continue to require the current schema.
+type schema001UploadRecord struct {
+	SchemaVersion   int                       `json:"schemaVersion"`
+	UploadID        string                    `json:"uploadID"`
+	UserID          string                    `json:"userID"`
+	Area            string                    `json:"area"`
+	RequestedPath   string                    `json:"requestedPath"`
+	ResolvedPath    string                    `json:"resolvedPath"`
+	StagingKey      string                    `json:"stagingKey"`
+	BackendKind     string                    `json:"backendKind,omitempty"`
+	LeaseKey        string                    `json:"leaseKey,omitempty"`
+	Size            int64                     `json:"size"`
+	MediaType       string                    `json:"mediaType"`
+	Conflict        domain.ConflictMode       `json:"conflict"`
+	ExpectedVersion domain.Version            `json:"expectedVersion,omitempty"`
+	TargetExisted   bool                      `json:"targetExisted"`
+	Resumable       bool                      `json:"resumable"`
+	State           storageformat.UploadState `json:"state"`
+	CreatedAt       time.Time                 `json:"createdAt"`
+	ExpiresAt       time.Time                 `json:"expiresAt"`
+}
+
+type schema001DirectoryTransition struct {
 	OperationID    string `json:"operationID"`
 	Fence          uint64 `json:"fence"`
 	PreManifestID  string `json:"preManifestID,omitempty"`
 	PostManifestID string `json:"postManifestID"`
 }
 
-type legacyDirectoryManifest struct {
+type schema001DirectoryManifest struct {
 	SchemaVersion int       `json:"schemaVersion"`
 	DirectoryID   string    `json:"directoryID"`
 	ManifestID    string    `json:"manifestID"`
@@ -54,15 +80,15 @@ type legacyDirectoryManifest struct {
 	CreatedAt     time.Time `json:"createdAt"`
 }
 
-type recursiveByteDirectoryRoot struct {
-	SchemaVersion  int                               `json:"schemaVersion"`
-	DirectoryID    string                            `json:"directoryID"`
-	ManifestID     string                            `json:"manifestID"`
-	RecursiveBytes int64                             `json:"recursiveBytes"`
-	Pending        *recursiveByteDirectoryTransition `json:"pending,omitempty"`
+type schema002DirectoryRoot struct {
+	SchemaVersion  int                           `json:"schemaVersion"`
+	DirectoryID    string                        `json:"directoryID"`
+	ManifestID     string                        `json:"manifestID"`
+	RecursiveBytes int64                         `json:"recursiveBytes"`
+	Pending        *schema002DirectoryTransition `json:"pending,omitempty"`
 }
 
-type recursiveByteDirectoryTransition struct {
+type schema002DirectoryTransition struct {
 	OperationID        string `json:"operationID"`
 	Fence              uint64 `json:"fence"`
 	PreManifestID      string `json:"preManifestID,omitempty"`
@@ -70,7 +96,7 @@ type recursiveByteDirectoryTransition struct {
 	PostRecursiveBytes int64  `json:"postRecursiveBytes"`
 }
 
-type recursiveByteDirectoryManifest struct {
+type schema002DirectoryManifest struct {
 	SchemaVersion  int       `json:"schemaVersion"`
 	DirectoryID    string    `json:"directoryID"`
 	ManifestID     string    `json:"manifestID"`
@@ -107,34 +133,33 @@ type migrationScope struct {
 }
 
 type migrationWalk struct {
-	engine  *Engine
-	group   migrationScope
-	state   map[string]uint8
-	totals  map[string]migrationAggregate
-	parents map[string]string
+	engine     *Engine
+	group      migrationScope
+	transition storageMigration
+	plan       aggregateMigrationPlan
+	state      map[string]uint8
+	totals     map[string]migrationAggregate
+	parents    map[string]string
 }
 
-func predecessorAggregateFeatureSets(features []string) [][]string {
-	byteOnly := make([]string, 0, len(features))
-	preAggregate := make([]string, 0, len(features))
-	for _, feature := range features {
-		if feature != storageformat.FeatureRecursiveFileCounts {
-			byteOnly = append(byteOnly, feature)
-		}
-		if feature != storageformat.FeatureRecursiveBytes && feature != storageformat.FeatureRecursiveFileCounts {
-			preAggregate = append(preAggregate, feature)
-		}
-	}
-	return [][]string{byteOnly, preAggregate}
+type aggregateMigrationPlan struct {
+	migrateSchema001Uploads bool
+	writeFileCounts         bool
 }
 
-func isAggregatePredecessor(features, current []string) bool {
-	for _, predecessor := range predecessorAggregateFeatureSets(current) {
-		if reflect.DeepEqual(features, predecessor) {
-			return true
+// Canonical v0.1.0-v0.1.4 records represented an empty feature set as null.
+// Feature-set equality is value equality, so nil and an allocated empty slice
+// must not split one format family into incompatible representations.
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func sameWriterExceptFeatures(stored, current storageformat.WriterSet) bool {
@@ -142,71 +167,79 @@ func sameWriterExceptFeatures(stored, current storageformat.WriterSet) bool {
 	return reflect.DeepEqual(stored, current)
 }
 
-func (e *Engine) migrateRecursiveByteAggregates(ctx context.Context, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
-	if err := e.step(ctx, StepMigrationAfterDetection); err != nil {
+func (e *Engine) runStorageMigration001To002(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
+	return e.runAggregateSchemaMigration(ctx, transition, superblockObject, superblock, aggregateMigrationPlan{migrateSchema001Uploads: true})
+}
+
+func (e *Engine) runStorageMigration002To003(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
+	return e.runAggregateSchemaMigration(ctx, transition, superblockObject, superblock, aggregateMigrationPlan{writeFileCounts: true})
+}
+
+func (e *Engine) runAggregateSchemaMigration(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock, plan aggregateMigrationPlan) error {
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterDetection)); err != nil {
 		return err
 	}
-	complete, err := e.recursiveByteMigrationComplete(ctx)
+	complete, err := e.storageMigrationComplete(ctx, transition)
 	if err == nil && complete {
 		return nil
 	}
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		return err
 	}
-	if err := e.verifyMigrationWriterSet(ctx); err != nil {
+	if err := e.verifyMigrationWriterSet(ctx, transition); err != nil {
 		return err
 	}
-	closed, err := e.closeRecursiveByteMigrationGate(ctx)
+	closed, err := e.closeStorageMigrationGate(ctx, transition, plan)
 	if err != nil {
 		return err
 	}
 	if !closed {
 		return nil
 	}
-	if err := e.step(ctx, StepMigrationAfterGateClosed); err != nil {
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterGateClosed)); err != nil {
 		return err
 	}
-	if err := e.migrateAllDirectoryAggregates(ctx); err != nil {
+	if err := e.migrateAllDirectoryAggregates(ctx, transition, plan); err != nil {
 		return err
 	}
-	if err := e.migrateAllDirectoryAggregates(ctx); err != nil {
+	if err := e.migrateAllDirectoryAggregates(ctx, transition, plan); err != nil {
 		return err
 	}
-	if err := e.step(ctx, StepMigrationAfterDirectories); err != nil {
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterDirectories)); err != nil {
 		return err
 	}
-	if err := e.activateRecursiveByteWriterSet(ctx); err != nil {
+	if err := e.activateMigrationWriterSet(ctx, transition); err != nil {
 		return err
 	}
-	if err := e.step(ctx, StepMigrationAfterWriterSet); err != nil {
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterWriterSet)); err != nil {
 		return err
 	}
-	if err := e.activateRecursiveByteSuperblock(ctx, superblockObject, superblock); err != nil {
+	if err := e.activateMigrationSuperblock(ctx, transition, superblockObject, superblock); err != nil {
 		return err
 	}
-	if err := e.step(ctx, StepMigrationAfterSuperblock); err != nil {
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterSuperblock)); err != nil {
 		return err
 	}
-	if err := e.bindMigrationGateToWriterFeatures(ctx); err != nil {
+	if err := e.bindMigrationGateToTarget(ctx, transition); err != nil {
 		return err
 	}
-	if err := e.step(ctx, StepMigrationAfterGateBinding); err != nil {
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterGateBinding)); err != nil {
 		return err
 	}
-	if complete, completeErr := e.recursiveByteMigrationComplete(ctx); completeErr == nil && complete {
+	if complete, completeErr := e.storageMigrationComplete(ctx, transition); completeErr == nil && complete {
 		return nil
 	}
-	if _, err := e.createCheckpointWhileClosed(ctx, recursiveByteMigrationCheckpointID); err != nil {
-		if complete, completeErr := e.recursiveByteMigrationComplete(ctx); completeErr == nil && complete {
+	if _, err := e.createCheckpointWhileClosed(ctx, transition.checkpointID); err != nil {
+		if complete, completeErr := e.storageMigrationComplete(ctx, transition); completeErr == nil && complete {
 			return nil
 		}
 		return err
 	}
-	if err := e.step(ctx, StepMigrationAfterCheckpoint); err != nil {
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterCheckpoint)); err != nil {
 		return err
 	}
-	if err := e.OpenWrites(ctx, recursiveByteMigrationCheckpointID); err != nil {
-		if complete, completeErr := e.recursiveByteMigrationComplete(ctx); completeErr == nil && complete {
+	if err := e.OpenWrites(ctx, transition.checkpointID); err != nil {
+		if complete, completeErr := e.storageMigrationComplete(ctx, transition); completeErr == nil && complete {
 			return nil
 		}
 		return err
@@ -214,15 +247,118 @@ func (e *Engine) migrateRecursiveByteAggregates(ctx context.Context, superblockO
 	return nil
 }
 
-func (e *Engine) verifyMigrationWriterSet(ctx context.Context) error {
+func (e *Engine) migrateSchema001UploadRecords(ctx context.Context) error {
+	objects, err := e.listAll(ctx, storageformat.OperationPrefix())
+	if err != nil {
+		return err
+	}
+	for _, info := range objects {
+		migrated := false
+		for range 16 {
+			object, getErr := e.backend.Get(ctx, info.Key)
+			if errors.Is(getErr, domain.ErrNotFound) {
+				migrated = true
+				break
+			}
+			if getErr != nil {
+				return getErr
+			}
+			var generic storageformat.Envelope
+			if err := state.DecodeJSONWithLimit(object.Body, &generic, storageformat.MaxCanonicalBytes); err != nil {
+				return err
+			}
+			if generic.Schema != uploadRecordSchema {
+				migrated = true
+				break
+			}
+			var currentEnvelope storageformat.Envelope
+			var current storageformat.UploadRecord
+			if err := storageformat.DecodeEnvelope(object.Body, info.Key, uploadRecordSchema, &currentEnvelope, &current); err == nil {
+				migrated = true
+				break
+			}
+			var schema001Envelope storageformat.Envelope
+			var schema001 schema001UploadRecord
+			if err := storageformat.DecodeEnvelope(object.Body, info.Key, uploadRecordSchema, &schema001Envelope, &schema001); err != nil {
+				return err
+			}
+			if err := validateSchema001UploadRecord(info.Key, schema001); err != nil {
+				return err
+			}
+			current = storageformat.UploadRecord{
+				SchemaVersion: schema001.SchemaVersion, UploadID: schema001.UploadID,
+				CompletionOperationID: schema001.UploadID + "-complete", UserID: schema001.UserID,
+				Area: schema001.Area, RequestedPath: schema001.RequestedPath, ResolvedPath: schema001.ResolvedPath,
+				StagingKey: schema001.StagingKey, BackendKind: schema001.BackendKind, LeaseKey: schema001.LeaseKey,
+				Size: schema001.Size, MediaType: schema001.MediaType, Conflict: schema001.Conflict,
+				ExpectedVersion: schema001.ExpectedVersion, TargetExisted: schema001.TargetExisted,
+				Resumable: schema001.Resumable, State: schema001.State, CreatedAt: schema001.CreatedAt, ExpiresAt: schema001.ExpiresAt,
+			}
+			body, encodeErr := storageformat.EncodeEnvelope(uploadRecordSchema, info.Key, schema001Envelope.Revision+1, current)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			if _, putErr := e.backend.Put(ctx, info.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); putErr == nil {
+				if err := e.step(ctx, MigrationStepName(string(storageMigration001To002), StepMigrationAfterUploadRecord)); err != nil {
+					return err
+				}
+				migrated = true
+				break
+			} else if !errors.Is(putErr, domain.ErrPreconditionFailed) && !errors.Is(putErr, domain.ErrConflict) {
+				return putErr
+			}
+		}
+		if !migrated {
+			return domain.NewError(domain.ErrorUnavailable, "upload-record migration remained contended")
+		}
+	}
+	return nil
+}
+
+func validateSchema001UploadRecord(key objectstore.Key, record schema001UploadRecord) error {
+	userID, err := domain.ParseUserID(record.UserID)
+	if err != nil || record.SchemaVersion != 1 || record.UploadID == "" || storageformat.OperationKey(record.UserID, record.UploadID) != key || record.Size < 0 || record.CreatedAt.IsZero() || record.ExpiresAt.IsZero() {
+		return domain.NewError(domain.ErrorInvalid, "invalid schema-001 upload record")
+	}
+	if record.Area != areaName(domain.AreaLive) && record.Area != areaName(domain.AreaTrash) {
+		return domain.NewError(domain.ErrorInvalid, "invalid schema-001 upload area")
+	}
+	requested, requestedErr := domain.ParseUserPath(record.RequestedPath)
+	resolved, resolvedErr := domain.ParseUserPath(record.ResolvedPath)
+	if requestedErr != nil || resolvedErr != nil || requested.IsRoot() || resolved.IsRoot() {
+		return domain.NewError(domain.ErrorInvalid, "invalid schema-001 upload path")
+	}
+	mediaType, mediaErr := domain.NormalizeMediaType(record.MediaType)
+	conflict, conflictErr := domain.NormalizeConflictMode(record.Conflict)
+	if mediaErr != nil || mediaType != record.MediaType || conflictErr != nil || conflict != record.Conflict {
+		return domain.NewError(domain.ErrorInvalid, "invalid schema-001 upload constraints")
+	}
+	if err := storageformat.ValidateNamespace(record.BackendKind); err != nil {
+		return domain.NewError(domain.ErrorInvalid, "invalid schema-001 upload backend")
+	}
+	stagingKey, stagingErr := objectstore.ParseKey(record.StagingKey)
+	leaseKey, leaseErr := objectstore.ParseKey(record.LeaseKey)
+	if stagingErr != nil || leaseErr != nil || stagingKey != storageformat.StagingKey(userID.String(), record.UploadID, "upload") || leaseKey != storageformat.LeaseKey(record.BackendKind, record.UploadID) {
+		return domain.NewError(domain.ErrorInvalid, "invalid schema-001 upload storage keys")
+	}
+	if record.State != storageformat.UploadActive && record.State != storageformat.UploadCompleted && record.State != storageformat.UploadAborted {
+		return domain.NewError(domain.ErrorInvalid, "invalid schema-001 upload state")
+	}
+	return nil
+}
+
+func (e *Engine) verifyMigrationWriterSet(ctx context.Context, transition storageMigration) error {
 	_, _, writer, err := e.readStoredWriterSet(ctx)
 	if err != nil {
 		return err
 	}
-	if !isAggregatePredecessor(writer.RequiredFeatures, e.writer.RequiredFeatures) && !reflect.DeepEqual(writer, e.writer) {
+	if !sameWriterExceptFeatures(writer, e.writer) {
 		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable writer set")
 	}
-	if !sameWriterExceptFeatures(writer, e.writer) {
+	detected, found := detectStorageSchema(writer.RequiredFeatures, e.writer.RequiredFeatures)
+	detectedIndex, _ := schemaIndex(detected.id)
+	fromIndex, _ := schemaIndex(transition.from)
+	if !found || detectedIndex < fromIndex {
 		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable writer set")
 	}
 	return nil
@@ -241,14 +377,14 @@ func (e *Engine) readStoredWriterSet(ctx context.Context) (objectstore.Object, s
 	return object, envelope, writer, nil
 }
 
-func (e *Engine) closeRecursiveByteMigrationGate(ctx context.Context) (bool, error) {
+func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition storageMigration, plan aggregateMigrationPlan) (bool, error) {
 	for range 16 {
 		object, envelope, gate, err := e.readGate(ctx)
 		if err != nil {
 			return false, err
 		}
-		if gate.Mode == storageformat.GateOpen && reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
-			complete, completeErr := e.recursiveByteMigrationComplete(ctx)
+		if gate.Mode == storageformat.GateOpen && schemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
+			complete, completeErr := e.storageMigrationComplete(ctx, transition)
 			if completeErr != nil {
 				return false, completeErr
 			}
@@ -257,16 +393,26 @@ func (e *Engine) closeRecursiveByteMigrationGate(ctx context.Context) (bool, err
 			}
 			return false, domain.NewError(domain.ErrorPreconditionFailed, "migration gate opened before feature activation completed")
 		}
-		if gate.Mode != storageformat.GateOpen && gate.CheckpointID != recursiveByteMigrationCheckpointID {
+		if gate.Mode != storageformat.GateOpen && gate.CheckpointID != transition.checkpointID {
+			if other, found := migrationForCheckpoint(gate.CheckpointID); found {
+				otherIndex, _ := schemaIndex(other.from)
+				transitionIndex, _ := schemaIndex(transition.from)
+				if otherIndex > transitionIndex {
+					return false, nil
+				}
+			}
 			return false, domain.NewError(domain.ErrorConflict, "write gate is reserved by another maintenance operation")
 		}
-		if len(gate.WriterFeatures) > 0 && !isAggregatePredecessor(gate.WriterFeatures, e.writer.RequiredFeatures) && !reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
+		gateSchema, knownGateSchema := detectStorageSchema(gate.WriterFeatures, e.writer.RequiredFeatures)
+		gateIndex, _ := schemaIndex(gateSchema.id)
+		fromIndex, _ := schemaIndex(transition.from)
+		if !knownGateSchema || gateIndex < fromIndex {
 			return false, domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
 		}
 		switch gate.Mode {
 		case storageformat.GateOpen:
 			gate.Mode = storageformat.GateClosing
-			gate.CheckpointID = recursiveByteMigrationCheckpointID
+			gate.CheckpointID = transition.checkpointID
 			body, encodeErr := storageformat.EncodeEnvelope(writeGateSchema, object.Key, envelope.Revision+1, gate)
 			if encodeErr != nil {
 				return false, encodeErr
@@ -277,7 +423,12 @@ func (e *Engine) closeRecursiveByteMigrationGate(ctx context.Context) (bool, err
 			}
 			return false, err
 		case storageformat.GateClosing:
-			err = e.finishClosingWrites(ctx, recursiveByteMigrationCheckpointID)
+			if plan.migrateSchema001Uploads {
+				if err := e.migrateSchema001UploadRecords(ctx); err != nil {
+					return false, err
+				}
+			}
+			err = e.finishClosingWrites(ctx, transition.checkpointID)
 			if err == nil {
 				return true, nil
 			}
@@ -289,10 +440,10 @@ func (e *Engine) closeRecursiveByteMigrationGate(ctx context.Context) (bool, err
 			return true, nil
 		}
 	}
-	return false, domain.NewError(domain.ErrorUnavailable, "recursive-byte migration gate remained contended")
+	return false, domain.NewError(domain.ErrorUnavailable, "storage-schema migration gate remained contended")
 }
 
-func (e *Engine) migrateAllDirectoryAggregates(ctx context.Context) error {
+func (e *Engine) migrateAllDirectoryAggregates(ctx context.Context, transition storageMigration, plan aggregateMigrationPlan) error {
 	infos, err := e.listAll(ctx, storageformat.FilesystemPrefix())
 	if err != nil {
 		return err
@@ -337,7 +488,7 @@ func (e *Engine) migrateAllDirectoryAggregates(ctx context.Context) error {
 			return domain.NewError(domain.ErrorInvalid, "directory scope has no canonical root")
 		}
 		walk := migrationWalk{
-			engine: e, group: group, state: make(map[string]uint8, len(group.roots)),
+			engine: e, group: group, transition: transition, plan: plan, state: make(map[string]uint8, len(group.roots)),
 			totals: make(map[string]migrationAggregate, len(group.roots)), parents: make(map[string]string, len(group.roots)),
 		}
 		if _, err := walk.directory(ctx, storageformat.RootDirectoryID, ""); err != nil {
@@ -399,9 +550,16 @@ func (walk *migrationWalk) directory(ctx context.Context, directoryID, parentID 
 		if root.current && entries[index].FileCount != childTotal.files {
 			return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "migrated directory file count mismatch")
 		}
-		if !root.current {
+		changed := false
+		if !root.hasRecursiveBytes {
 			entries[index].Size = childTotal.bytes
+			changed = true
+		}
+		if walk.plan.writeFileCounts && !root.current {
 			entries[index].FileCount = childTotal.files
+			changed = true
+		}
+		if changed {
 			entries[index].LogicalVersion, err = directoryEntryVersion(entries[index])
 			if err != nil {
 				return migrationAggregate{}, err
@@ -425,41 +583,77 @@ func (walk *migrationWalk) directory(ctx context.Context, directoryID, parentID 
 		walk.totals[directoryID] = total
 		return total, nil
 	}
-	if root.hasRecursiveBytes && (root.recursiveBytes != total.bytes || manifest.manifest.RecursiveBytes != total.bytes) {
-		return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "recursive-byte predecessor aggregate mismatch")
+	if root.hasRecursiveBytes && !walk.plan.writeFileCounts {
+		if root.recursiveBytes != total.bytes || manifest.manifest.RecursiveBytes != total.bytes {
+			return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "schema-002 directory byte aggregate mismatch")
+		}
+		walk.state[directoryID] = 2
+		walk.totals[directoryID] = total
+		return total, nil
 	}
-	prepared, err := walk.engine.prepareMigratedDirectory(walk.group.scope, directoryID, entries, root, manifest.manifest.CreatedAt)
+	if walk.transition.from == storageSchema002 && !root.hasRecursiveBytes {
+		return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "schema-002 migration encountered a schema-001 directory")
+	}
+	if root.hasRecursiveBytes && (root.recursiveBytes != total.bytes || manifest.manifest.RecursiveBytes != total.bytes) {
+		return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "source schema directory byte aggregate mismatch")
+	}
+	prepared, err := walk.engine.prepareMigratedDirectory(walk.group.scope, directoryID, entries, root, manifest.manifest.CreatedAt, walk.transition, walk.plan)
 	if err != nil {
 		return migrationAggregate{}, err
 	}
 	if err := walk.engine.ensureMutationPrerequisites(ctx, prepared.prerequisites); err != nil {
 		return migrationAggregate{}, err
 	}
-	if err := walk.engine.step(ctx, StepMigrationAfterDirectoryPrerequisites); err != nil {
+	if err := walk.engine.step(ctx, MigrationStepName(string(walk.transition.id), StepMigrationAfterDirectoryPrerequisites)); err != nil {
 		return migrationAggregate{}, err
 	}
 	_, err = walk.engine.backend.Put(ctx, root.object.Key, prepared.rootBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: root.object.Version})
 	if err != nil {
 		if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
-			winner, getErr := walk.engine.backend.Get(ctx, root.object.Key)
-			if getErr == nil && bytes.Equal(winner.Body, prepared.rootBody) {
+			matched, matchErr := walk.engine.migrationWinnerMatchesTarget(ctx, walk.group.scope, directoryID, total, walk.transition)
+			if matchErr == nil && matched {
 				walk.state[directoryID] = 2
 				walk.totals[directoryID] = total
 				return total, nil
 			}
-			if getErr != nil {
-				return migrationAggregate{}, getErr
+			if matchErr != nil {
+				return migrationAggregate{}, matchErr
 			}
 			return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "directory root changed unexpectedly during migration")
 		}
 		return migrationAggregate{}, err
 	}
-	if err := walk.engine.step(ctx, StepMigrationAfterDirectoryRoot); err != nil {
+	if err := walk.engine.step(ctx, MigrationStepName(string(walk.transition.id), StepMigrationAfterDirectoryRoot)); err != nil {
 		return migrationAggregate{}, err
 	}
 	walk.state[directoryID] = 2
 	walk.totals[directoryID] = total
 	return total, nil
+}
+
+func (e *Engine) migrationWinnerMatchesTarget(ctx context.Context, scope domain.Scope, directoryID string, want migrationAggregate, transition storageMigration) (bool, error) {
+	root, err := e.readMigrationDirectoryRoot(ctx, scope, directoryID)
+	if err != nil {
+		return false, err
+	}
+	manifest, err := e.readMigrationDirectoryManifest(ctx, scope, directoryID, root.manifestID)
+	if err != nil {
+		return false, err
+	}
+	if root.current != manifest.current || root.hasRecursiveBytes != manifest.hasRecursiveBytes {
+		return false, domain.NewError(domain.ErrorInvalid, "winning directory root and manifest migration states differ")
+	}
+	if !root.hasRecursiveBytes || root.recursiveBytes != want.bytes || manifest.manifest.RecursiveBytes != want.bytes {
+		return false, nil
+	}
+	switch transition.to {
+	case storageSchema002:
+		return true, nil
+	case storageSchema003:
+		return root.current && manifest.current && root.recursiveFileCount == want.files && manifest.manifest.RecursiveFileCount == want.files, nil
+	default:
+		return false, domain.NewError(domain.ErrorPreconditionFailed, "aggregate migration has no target-schema reconciliation rule")
+	}
 }
 
 func (e *Engine) readMigrationDirectoryRoot(ctx context.Context, scope domain.Scope, directoryID string) (migrationDirectoryRoot, error) {
@@ -477,22 +671,22 @@ func (e *Engine) readMigrationDirectoryRoot(ctx context.Context, scope domain.Sc
 		return migrationDirectoryRoot{object: object, envelope: envelope, manifestID: current.ManifestID, recursiveBytes: current.RecursiveBytes, recursiveFileCount: current.RecursiveFileCount, hasRecursiveBytes: true, current: true}, nil
 	}
 	var byteEnvelope storageformat.Envelope
-	var byteRoot recursiveByteDirectoryRoot
+	var byteRoot schema002DirectoryRoot
 	if err := storageformat.DecodeEnvelope(object.Body, key, directoryRootSchema, &byteEnvelope, &byteRoot); err == nil {
 		if byteRoot.SchemaVersion != 1 || byteRoot.DirectoryID != directoryID || byteRoot.ManifestID == "" || byteRoot.RecursiveBytes < 0 || byteRoot.Pending != nil {
 			return migrationDirectoryRoot{}, domain.NewError(domain.ErrorInvalid, "invalid recursive-byte directory root")
 		}
 		return migrationDirectoryRoot{object: object, envelope: byteEnvelope, manifestID: byteRoot.ManifestID, recursiveBytes: byteRoot.RecursiveBytes, hasRecursiveBytes: true}, nil
 	}
-	var legacyEnvelope storageformat.Envelope
-	var legacy legacyDirectoryRoot
-	if err := storageformat.DecodeEnvelope(object.Body, key, directoryRootSchema, &legacyEnvelope, &legacy); err != nil {
+	var schema001Envelope storageformat.Envelope
+	var schema001 schema001DirectoryRoot
+	if err := storageformat.DecodeEnvelope(object.Body, key, directoryRootSchema, &schema001Envelope, &schema001); err != nil {
 		return migrationDirectoryRoot{}, err
 	}
-	if legacy.SchemaVersion != 1 || legacy.DirectoryID != directoryID || legacy.ManifestID == "" || legacy.Pending != nil {
-		return migrationDirectoryRoot{}, domain.NewError(domain.ErrorInvalid, "invalid legacy directory root")
+	if schema001.SchemaVersion != 1 || schema001.DirectoryID != directoryID || schema001.ManifestID == "" || schema001.Pending != nil {
+		return migrationDirectoryRoot{}, domain.NewError(domain.ErrorInvalid, "invalid schema-001 directory root")
 	}
-	return migrationDirectoryRoot{object: object, envelope: legacyEnvelope, manifestID: legacy.ManifestID}, nil
+	return migrationDirectoryRoot{object: object, envelope: schema001Envelope, manifestID: schema001.ManifestID}, nil
 }
 
 func (e *Engine) readMigrationDirectoryManifest(ctx context.Context, scope domain.Scope, directoryID, manifestID string) (migrationDirectoryManifest, error) {
@@ -510,7 +704,7 @@ func (e *Engine) readMigrationDirectoryManifest(ctx context.Context, scope domai
 		return migrationDirectoryManifest{manifest: current, hasRecursiveBytes: true, current: true}, nil
 	}
 	var byteEnvelope storageformat.Envelope
-	var byteManifest recursiveByteDirectoryManifest
+	var byteManifest schema002DirectoryManifest
 	if err := storageformat.DecodeEnvelope(object.Body, key, directoryManifestSchema, &byteEnvelope, &byteManifest); err == nil {
 		current = storageformat.DirectoryManifest{
 			SchemaVersion: byteManifest.SchemaVersion, DirectoryID: byteManifest.DirectoryID, ManifestID: byteManifest.ManifestID,
@@ -522,14 +716,14 @@ func (e *Engine) readMigrationDirectoryManifest(ctx context.Context, scope domai
 		}
 		return migrationDirectoryManifest{manifest: current, hasRecursiveBytes: true}, nil
 	}
-	var legacyEnvelope storageformat.Envelope
-	var legacy legacyDirectoryManifest
-	if err := storageformat.DecodeEnvelope(object.Body, key, directoryManifestSchema, &legacyEnvelope, &legacy); err != nil {
+	var schema001Envelope storageformat.Envelope
+	var schema001 schema001DirectoryManifest
+	if err := storageformat.DecodeEnvelope(object.Body, key, directoryManifestSchema, &schema001Envelope, &schema001); err != nil {
 		return migrationDirectoryManifest{}, err
 	}
 	current = storageformat.DirectoryManifest{
-		SchemaVersion: legacy.SchemaVersion, DirectoryID: legacy.DirectoryID, ManifestID: legacy.ManifestID,
-		PageIDs: append([]string(nil), legacy.PageIDs...), EntryCount: legacy.EntryCount, CreatedAt: legacy.CreatedAt,
+		SchemaVersion: schema001.SchemaVersion, DirectoryID: schema001.DirectoryID, ManifestID: schema001.ManifestID,
+		PageIDs: append([]string(nil), schema001.PageIDs...), EntryCount: schema001.EntryCount, CreatedAt: schema001.CreatedAt,
 	}
 	if err := validateMigrationManifest(current, directoryID, manifestID); err != nil {
 		return migrationDirectoryManifest{}, err
@@ -544,7 +738,7 @@ func validateMigrationManifest(manifest storageformat.DirectoryManifest, directo
 	return nil
 }
 
-func (e *Engine) prepareMigratedDirectory(scope domain.Scope, directoryID string, entries []storageformat.DirectoryEntry, root migrationDirectoryRoot, createdAt time.Time) (preparedDirectory, error) {
+func (e *Engine) prepareMigratedDirectory(scope domain.Scope, directoryID string, entries []storageformat.DirectoryEntry, root migrationDirectoryRoot, createdAt time.Time, transition storageMigration, plan aggregateMigrationPlan) (preparedDirectory, error) {
 	if err := validateDirectoryEntries(entries); err != nil {
 		return preparedDirectory{}, err
 	}
@@ -558,12 +752,12 @@ func (e *Engine) prepareMigratedDirectory(scope domain.Scope, directoryID string
 	}
 	rootKey := storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), directoryID)
 	identity := rootKey.String() + "\x00" + root.envelope.LogicalVersion
-	manifestID := deterministicMigrationID(identity + "\x00manifest")
+	manifestID := deterministicMigrationID(transition.to, identity+"\x00manifest")
 	pages := make([]storageformat.MutationObject, 0, max(1, (len(entries)+maxEntriesPerPage-1)/maxEntriesPerPage))
 	pageIDs := make([]string, 0, cap(pages))
 	for start := 0; start < max(1, len(entries)); start += maxEntriesPerPage {
 		end := min(start+maxEntriesPerPage, len(entries))
-		pageID := deterministicMigrationID(identity + "\x00page\x00" + strconv.Itoa(start/maxEntriesPerPage))
+		pageID := deterministicMigrationID(transition.to, identity+"\x00page\x00"+strconv.Itoa(start/maxEntriesPerPage))
 		pageKey := storageformat.DirectoryPageKey(scope.UserID().String(), areaName(scope.Area()), directoryID, pageID)
 		body, encodeErr := storageformat.EncodeEnvelope(directoryPageSchema, pageKey, 1, storageformat.DirectoryPage{
 			SchemaVersion: 1, DirectoryID: directoryID, PageID: pageID, Entries: append([]storageformat.DirectoryEntry(nil), entries[start:end]...),
@@ -578,45 +772,62 @@ func (e *Engine) prepareMigratedDirectory(scope domain.Scope, directoryID string
 		}
 	}
 	manifestKey := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifestID)
-	manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, storageformat.DirectoryManifest{
+	var manifestPayload any = schema002DirectoryManifest{
 		SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID, PageIDs: pageIDs,
-		EntryCount: len(entries), RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount, CreatedAt: createdAt,
-	})
+		EntryCount: len(entries), RecursiveBytes: recursiveBytes, CreatedAt: createdAt,
+	}
+	if plan.writeFileCounts {
+		manifestPayload = storageformat.DirectoryManifest{
+			SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID, PageIDs: pageIDs,
+			EntryCount: len(entries), RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount, CreatedAt: createdAt,
+		}
+	}
+	manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, manifestPayload)
 	if err != nil {
 		return preparedDirectory{}, err
 	}
 	prerequisites := append(pages, storageformat.MutationObject{Key: manifestKey.String(), Body: manifestBody})
 	sort.Slice(prerequisites, func(i, j int) bool { return prerequisites[i].Key < prerequisites[j].Key })
-	rootBody, err := storageformat.EncodeEnvelope(directoryRootSchema, rootKey, root.envelope.Revision+1, storageformat.DirectoryRoot{
-		SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID, RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount,
-	})
+	var rootPayload any = schema002DirectoryRoot{
+		SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID, RecursiveBytes: recursiveBytes,
+	}
+	if plan.writeFileCounts {
+		rootPayload = storageformat.DirectoryRoot{
+			SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID,
+			RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount,
+		}
+	}
+	rootBody, err := storageformat.EncodeEnvelope(directoryRootSchema, rootKey, root.envelope.Revision+1, rootPayload)
 	if err != nil {
 		return preparedDirectory{}, err
 	}
 	return preparedDirectory{manifestID: manifestID, recursiveBytes: recursiveBytes, recursiveFileCount: fileCount, rootBody: rootBody, prerequisites: prerequisites}, nil
 }
 
-func deterministicMigrationID(value string) string {
-	sum := sha256.Sum256([]byte("endlessfs-recursive-byte-migration-v1\x00" + value))
+func deterministicMigrationID(schema storageSchemaID, value string) string {
+	sum := sha256.Sum256([]byte("endlessfs-storage-schema-migration-v1\x00" + string(schema) + "\x00" + value))
 	return base64.RawURLEncoding.EncodeToString(sum[:16])
 }
 
-func (e *Engine) activateRecursiveByteWriterSet(ctx context.Context) error {
+func (e *Engine) activateMigrationWriterSet(ctx context.Context, transition storageMigration) error {
+	targetFeatures, _ := schemaFeatures(transition.to, e.writer.RequiredFeatures)
 	for range 8 {
 		object, envelope, writer, err := e.readStoredWriterSet(ctx)
 		if err != nil {
 			return err
 		}
-		if reflect.DeepEqual(writer, e.writer) {
-			return nil
-		}
-		if !isAggregatePredecessor(writer.RequiredFeatures, e.writer.RequiredFeatures) {
-			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable writer set during migration")
-		}
 		if !sameWriterExceptFeatures(writer, e.writer) {
 			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable writer set during migration")
 		}
-		body, err := storageformat.EncodeEnvelope(writerSetSchema, object.Key, envelope.Revision+1, e.writer)
+		if schemaAtLeast(writer.RequiredFeatures, transition.to, e.writer.RequiredFeatures) {
+			return nil
+		}
+		detected, found := detectStorageSchema(writer.RequiredFeatures, e.writer.RequiredFeatures)
+		if !found || detected.id != transition.from {
+			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable writer set during migration")
+		}
+		writer.RequiredFeatures = append([]string(nil), targetFeatures...)
+		body, err := storageformat.EncodeEnvelope(writerSetSchema, object.Key, envelope.Revision+1, writer)
 		if err != nil {
 			return err
 		}
@@ -629,19 +840,21 @@ func (e *Engine) activateRecursiveByteWriterSet(ctx context.Context) error {
 	return domain.NewError(domain.ErrorUnavailable, "writer-set migration remained contended")
 }
 
-func (e *Engine) activateRecursiveByteSuperblock(ctx context.Context, initial objectstore.Object, decoded storageformat.Superblock) error {
+func (e *Engine) activateMigrationSuperblock(ctx context.Context, transition storageMigration, initial objectstore.Object, decoded storageformat.Superblock) error {
+	targetFeatures, _ := schemaFeatures(transition.to, e.writer.RequiredFeatures)
 	object, superblock := initial, decoded
 	for range 8 {
 		if err := validateCompatibleSuperblock(superblock); err != nil {
 			return err
 		}
-		if reflect.DeepEqual(superblock.RequiredFeatures, e.writer.RequiredFeatures) {
+		if schemaAtLeast(superblock.RequiredFeatures, transition.to, e.writer.RequiredFeatures) {
 			return nil
 		}
-		if !isAggregatePredecessor(superblock.RequiredFeatures, e.writer.RequiredFeatures) {
+		detected, found := detectStorageSchema(superblock.RequiredFeatures, e.writer.RequiredFeatures)
+		if !found || detected.id != transition.from {
 			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable superblock during migration")
 		}
-		superblock.RequiredFeatures = append([]string(nil), e.writer.RequiredFeatures...)
+		superblock.RequiredFeatures = append([]string(nil), targetFeatures...)
 		body, err := storageformat.EncodeCanonical(superblock)
 		if err != nil {
 			return err
@@ -673,25 +886,34 @@ func decodeCanonicalSuperblock(body []byte, destination *storageformat.Superbloc
 	return nil
 }
 
-func (e *Engine) bindMigrationGateToWriterFeatures(ctx context.Context) error {
+func (e *Engine) bindMigrationGateToTarget(ctx context.Context, transition storageMigration) error {
+	targetFeatures, _ := schemaFeatures(transition.to, e.writer.RequiredFeatures)
 	for range 8 {
 		object, envelope, gate, err := e.readGate(ctx)
 		if err != nil {
 			return err
 		}
-		if gate.Mode == storageformat.GateOpen && reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
+		if gate.Mode == storageformat.GateOpen && schemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
 			return nil
 		}
-		if gate.Mode != storageformat.GateClosed || gate.CheckpointID != recursiveByteMigrationCheckpointID {
+		if gate.Mode != storageformat.GateClosed || gate.CheckpointID != transition.checkpointID {
+			if other, found := migrationForCheckpoint(gate.CheckpointID); found {
+				otherFrom, _ := schemaIndex(other.from)
+				transitionTo, _ := schemaIndex(transition.to)
+				if otherFrom >= transitionTo && schemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
+					return nil
+				}
+			}
 			return domain.NewError(domain.ErrorPreconditionFailed, "migration write gate is not closed")
 		}
-		if len(gate.WriterFeatures) > 0 && !isAggregatePredecessor(gate.WriterFeatures, e.writer.RequiredFeatures) && !reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
-			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
-		}
-		if reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
+		if schemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
 			return nil
 		}
-		gate.WriterFeatures = append([]string(nil), e.writer.RequiredFeatures...)
+		detected, found := detectStorageSchema(gate.WriterFeatures, e.writer.RequiredFeatures)
+		if !found || detected.id != transition.from {
+			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
+		}
+		gate.WriterFeatures = append([]string(nil), targetFeatures...)
 		body, err := storageformat.EncodeEnvelope(writeGateSchema, object.Key, envelope.Revision+1, gate)
 		if err != nil {
 			return err
@@ -705,7 +927,7 @@ func (e *Engine) bindMigrationGateToWriterFeatures(ctx context.Context) error {
 	return domain.NewError(domain.ErrorUnavailable, "migration gate binding remained contended")
 }
 
-func (e *Engine) recursiveByteMigrationComplete(ctx context.Context) (bool, error) {
+func (e *Engine) storageMigrationComplete(ctx context.Context, transition storageMigration) (bool, error) {
 	superblockObject, err := e.backend.Get(ctx, storageformat.SuperblockKey())
 	if err != nil {
 		return false, err
@@ -714,21 +936,31 @@ func (e *Engine) recursiveByteMigrationComplete(ctx context.Context) (bool, erro
 	if err := decodeCanonicalSuperblock(superblockObject.Body, &superblock); err != nil {
 		return false, err
 	}
-	if !reflect.DeepEqual(superblock.RequiredFeatures, e.writer.RequiredFeatures) {
+	if !schemaAtLeast(superblock.RequiredFeatures, transition.to, e.writer.RequiredFeatures) {
 		return false, nil
 	}
 	_, _, writer, err := e.readStoredWriterSet(ctx)
 	if err != nil {
 		return false, err
 	}
-	if !reflect.DeepEqual(writer, e.writer) {
+	if !sameWriterExceptFeatures(writer, e.writer) || !schemaAtLeast(writer.RequiredFeatures, transition.to, e.writer.RequiredFeatures) {
 		return false, nil
 	}
 	_, _, gate, err := e.readGate(ctx)
 	if err != nil {
 		return false, err
 	}
-	return gate.Mode == storageformat.GateOpen && gate.CheckpointID == "" && reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures), nil
+	if gate.Mode == storageformat.GateOpen && gate.CheckpointID == "" && schemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
+		return true, nil
+	}
+	if other, found := migrationForCheckpoint(gate.CheckpointID); found {
+		otherFrom, _ := schemaIndex(other.from)
+		transitionTo, _ := schemaIndex(transition.to)
+		if otherFrom >= transitionTo && schemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func decodeCanonicalRecord(body []byte, destination any) error {

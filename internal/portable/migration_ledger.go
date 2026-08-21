@@ -1,0 +1,397 @@
+package portable
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
+)
+
+// storageSchemaID identifies one complete canonical storage-set schema epoch.
+// It is deliberately independent of application release numbers: releases map
+// to an epoch, while migrations connect adjacent epochs.
+type storageSchemaID string
+
+type storageMigrationID string
+
+const (
+	storageSchema001 storageSchemaID = "endlessfs-portable-v1/schema-001"
+	storageSchema002 storageSchemaID = "endlessfs-portable-v1/schema-002"
+	storageSchema003 storageSchemaID = "endlessfs-portable-v1/schema-003"
+
+	storageMigration001To002 storageMigrationID = "schema-001-to-002"
+	storageMigration002To003 storageMigrationID = "schema-002-to-003"
+)
+
+type storageSchemaReleaseBoundary struct {
+	first  string
+	schema storageSchemaID
+}
+
+// StorageSchemaReleaseRange is a release interval that wrote one storage
+// schema. Before is exclusive and empty for the current interval. The interval
+// is derived from consecutive entries in the append-only release ledger.
+type StorageSchemaReleaseRange struct {
+	First  string
+	Before string
+}
+
+// StorageSchemaHistoryEntry is a read-only snapshot of one append-only ledger
+// entry. It is exposed from this internal package so release qualification can
+// derive its fixture matrix from the production ledger instead of duplicating
+// migration knowledge in test code.
+type StorageSchemaHistoryEntry struct {
+	ID          string
+	Features    []string
+	Releases    []StorageSchemaReleaseRange
+	Successor   string
+	MigrationID string
+}
+
+type releaseVersion struct {
+	major int
+	minor int
+	patch int
+}
+
+type storageMigrationRun func(*Engine, context.Context, storageMigration, objectstore.Object, storageformat.Superblock) error
+
+type storageMigration struct {
+	id           storageMigrationID
+	from         storageSchemaID
+	to           storageSchemaID
+	checkpointID string
+	run          storageMigrationRun
+}
+
+type storageSchemaDefinition struct {
+	id                    storageSchemaID
+	features              []string
+	migrationFromPrevious *storageMigration
+}
+
+var schemaMigration001To002 = storageMigration{
+	id: storageMigration001To002, from: storageSchema001, to: storageSchema002,
+	checkpointID: schema001To002CheckpointID,
+}
+
+var schemaMigration002To003 = storageMigration{
+	id: storageMigration002To003, from: storageSchema002, to: storageSchema003,
+	checkpointID: "automatic-storage-schema-002-to-003",
+}
+
+// storageSchemaLedger is append-only. Extend it by adding one definition whose
+// migrationFromPrevious connects the prior terminal epoch to the new epoch;
+// never insert, reorder, or rewrite an existing entry.
+var storageSchemaLedger = []storageSchemaDefinition{
+	{id: storageSchema001},
+	{
+		id: storageSchema002, features: []string{storageformat.FeatureRecursiveBytes},
+		migrationFromPrevious: &schemaMigration001To002,
+	},
+	{
+		id:                    storageSchema003,
+		features:              []string{storageformat.FeatureRecursiveBytes, storageformat.FeatureRecursiveFileCounts},
+		migrationFromPrevious: &schemaMigration002To003,
+	},
+}
+
+// storageSchemaReleaseLedger is also append-only. A boundary is the first
+// release written with its schema and remains valid until the next boundary.
+// Schema epochs that were never tagged still remain in storageSchemaLedger.
+var storageSchemaReleaseLedger = []storageSchemaReleaseBoundary{
+	{first: "v0.1.0", schema: storageSchema001},
+	{first: "v0.1.5", schema: storageSchema003},
+}
+
+func init() {
+	// Go's initialization dependency analysis follows method bodies back to the
+	// ledger. Assigning runners after the immutable definitions are built keeps
+	// the registered edge implementation explicit without an initialization
+	// cycle.
+	schemaMigration001To002.run = (*Engine).runStorageMigration001To002
+	schemaMigration002To003.run = (*Engine).runStorageMigration002To003
+}
+
+func currentStorageSchema() storageSchemaDefinition {
+	return storageSchemaLedger[len(storageSchemaLedger)-1]
+}
+
+// StorageSchemaHistory returns a defensive snapshot in migration order.
+func StorageSchemaHistory() []StorageSchemaHistoryEntry {
+	history := make([]StorageSchemaHistoryEntry, 0, len(storageSchemaLedger))
+	for index, schema := range storageSchemaLedger {
+		entry := StorageSchemaHistoryEntry{
+			ID: schema.id.String(), Features: append([]string(nil), schema.features...),
+			Releases: releaseRangesForSchema(schema.id),
+		}
+		if index+1 < len(storageSchemaLedger) {
+			migration := storageSchemaLedger[index+1].migrationFromPrevious
+			if migration != nil {
+				entry.Successor = migration.to.String()
+				entry.MigrationID = migration.id.String()
+			}
+		}
+		history = append(history, entry)
+	}
+	return history
+}
+
+// StorageSchemaForRelease resolves a release through the ledger's declared
+// validity intervals. It never infers a schema from a fixture filename.
+func StorageSchemaForRelease(release string) (string, bool) {
+	version, err := parseReleaseVersion(release)
+	if err != nil {
+		return "", false
+	}
+	for index := len(storageSchemaReleaseLedger) - 1; index >= 0; index-- {
+		boundary := storageSchemaReleaseLedger[index]
+		first, parseErr := parseReleaseVersion(boundary.first)
+		if parseErr == nil && !version.less(first) {
+			return boundary.schema.String(), true
+		}
+	}
+	return "", false
+}
+
+func (id storageSchemaID) String() string    { return string(id) }
+func (id storageMigrationID) String() string { return string(id) }
+
+func releaseRangesForSchema(id storageSchemaID) []StorageSchemaReleaseRange {
+	var ranges []StorageSchemaReleaseRange
+	for index, boundary := range storageSchemaReleaseLedger {
+		if boundary.schema != id {
+			continue
+		}
+		interval := StorageSchemaReleaseRange{First: boundary.first}
+		if index+1 < len(storageSchemaReleaseLedger) {
+			interval.Before = storageSchemaReleaseLedger[index+1].first
+		}
+		ranges = append(ranges, interval)
+	}
+	return ranges
+}
+
+func parseReleaseVersion(value string) (releaseVersion, error) {
+	if !strings.HasPrefix(value, "v") {
+		return releaseVersion{}, fmt.Errorf("release %q has no v prefix", value)
+	}
+	parts := strings.Split(strings.TrimPrefix(value, "v"), ".")
+	if len(parts) != 3 {
+		return releaseVersion{}, fmt.Errorf("release %q is not vMAJOR.MINOR.PATCH", value)
+	}
+	values := make([]int, len(parts))
+	for index, part := range parts {
+		if part == "" || len(part) > 1 && part[0] == '0' {
+			return releaseVersion{}, fmt.Errorf("release %q is not canonical", value)
+		}
+		parsed, err := strconv.Atoi(part)
+		if err != nil || parsed < 0 {
+			return releaseVersion{}, fmt.Errorf("release %q is not canonical", value)
+		}
+		values[index] = parsed
+	}
+	return releaseVersion{major: values[0], minor: values[1], patch: values[2]}, nil
+}
+
+func (version releaseVersion) less(other releaseVersion) bool {
+	if version.major != other.major {
+		return version.major < other.major
+	}
+	if version.minor != other.minor {
+		return version.minor < other.minor
+	}
+	return version.patch < other.patch
+}
+
+// MigrationStepName scopes a deterministic scheduler boundary to one ledger
+// edge so crash and concurrency tests can target every step independently.
+func MigrationStepName(migrationID, boundary string) string {
+	return "storage-migration:" + migrationID + ":" + boundary
+}
+
+func storageMigrationPath(from storageSchemaID) ([]storageMigration, error) {
+	for index, schema := range storageSchemaLedger {
+		if schema.id != from {
+			continue
+		}
+		if index == len(storageSchemaLedger)-1 {
+			return nil, nil
+		}
+		path := make([]storageMigration, 0, len(storageSchemaLedger)-index-1)
+		for position := index + 1; position < len(storageSchemaLedger); position++ {
+			migration := storageSchemaLedger[position].migrationFromPrevious
+			if migration == nil || migration.from != storageSchemaLedger[position-1].id || migration.to != storageSchemaLedger[position].id {
+				return nil, fmt.Errorf("invalid storage schema ledger edge into %q", storageSchemaLedger[position].id)
+			}
+			path = append(path, *migration)
+		}
+		return path, nil
+	}
+	return nil, fmt.Errorf("unknown storage schema %q", from)
+}
+
+func schemaDefinition(id storageSchemaID) (storageSchemaDefinition, bool) {
+	for _, schema := range storageSchemaLedger {
+		if schema.id == id {
+			return schema, true
+		}
+	}
+	return storageSchemaDefinition{}, false
+}
+
+func schemaIndex(id storageSchemaID) (int, bool) {
+	for index, schema := range storageSchemaLedger {
+		if schema.id == id {
+			return index, true
+		}
+	}
+	return 0, false
+}
+
+func schemaFeatures(id storageSchemaID, current []string) ([]string, bool) {
+	schema, found := schemaDefinition(id)
+	if !found {
+		return nil, false
+	}
+	features := make([]string, 0, len(current))
+	for _, feature := range current {
+		if !ledgerManagesFeature(feature) {
+			features = append(features, feature)
+		}
+	}
+	features = append(features, schema.features...)
+	sort.Strings(features)
+	return features, true
+}
+
+func ledgerManagesFeature(feature string) bool {
+	for _, schema := range storageSchemaLedger {
+		for _, managed := range schema.features {
+			if feature == managed {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func detectStorageSchema(features, current []string) (storageSchemaDefinition, bool) {
+	for _, schema := range storageSchemaLedger {
+		expected, _ := schemaFeatures(schema.id, current)
+		if equalStrings(features, expected) {
+			return schema, true
+		}
+	}
+	return storageSchemaDefinition{}, false
+}
+
+func schemaAtLeast(features []string, minimum storageSchemaID, current []string) bool {
+	detected, found := detectStorageSchema(features, current)
+	if !found {
+		return false
+	}
+	detectedIndex, _ := schemaIndex(detected.id)
+	minimumIndex, found := schemaIndex(minimum)
+	return found && detectedIndex >= minimumIndex
+}
+
+func migrationForCheckpoint(checkpointID string) (storageMigration, bool) {
+	if checkpointID == "" {
+		return storageMigration{}, false
+	}
+	for _, schema := range storageSchemaLedger {
+		if schema.migrationFromPrevious != nil && schema.migrationFromPrevious.checkpointID == checkpointID {
+			return *schema.migrationFromPrevious, true
+		}
+	}
+	return storageMigration{}, false
+}
+
+func (e *Engine) storageMigrationPending(ctx context.Context) (bool, error) {
+	if object, err := e.backend.Get(ctx, storageformat.WriterSetKey()); err == nil {
+		var envelope storageformat.Envelope
+		var writer storageformat.WriterSet
+		if err := storageformat.DecodeEnvelope(object.Body, object.Key, writerSetSchema, &envelope, &writer); err != nil {
+			return false, err
+		}
+		if schema, found := detectStorageSchema(writer.RequiredFeatures, e.writer.RequiredFeatures); found && schema.id != currentStorageSchema().id {
+			return true, nil
+		}
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return false, err
+	}
+	if object, err := e.backend.Get(ctx, storageformat.WriteGateKey()); err == nil {
+		var envelope storageformat.Envelope
+		var gate storageformat.WriteGate
+		if err := storageformat.DecodeEnvelope(object.Body, object.Key, writeGateSchema, &envelope, &gate); err != nil {
+			return false, err
+		}
+		if _, found := migrationForCheckpoint(gate.CheckpointID); found {
+			return true, nil
+		}
+		if schema, found := detectStorageSchema(gate.WriterFeatures, e.writer.RequiredFeatures); found && schema.id != currentStorageSchema().id {
+			return true, nil
+		}
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return false, err
+	}
+	return false, nil
+}
+
+func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
+	for range len(storageSchemaLedger) * 8 {
+		superblockObject, err := e.backend.Get(ctx, storageformat.SuperblockKey())
+		if err != nil {
+			return err
+		}
+		var superblock storageformat.Superblock
+		if err := decodeCanonicalSuperblock(superblockObject.Body, &superblock); err != nil {
+			return err
+		}
+		if err := validateCompatibleSuperblock(superblock); err != nil {
+			return err
+		}
+
+		_, _, gate, err := e.readGate(ctx)
+		if err != nil {
+			return err
+		}
+		if migration, found := migrationForCheckpoint(gate.CheckpointID); found {
+			if err := migration.run(e, ctx, migration, superblockObject, superblock); err != nil {
+				return err
+			}
+			continue
+		}
+
+		schema, found := detectStorageSchema(superblock.RequiredFeatures, e.writer.RequiredFeatures)
+		if !found {
+			return domain.NewError(domain.ErrorPreconditionFailed, "unregistered portable storage schema")
+		}
+		path, err := storageMigrationPath(schema.id)
+		if err != nil {
+			return domain.WrapError(domain.ErrorPreconditionFailed, "resolve storage migration path", err)
+		}
+		if len(path) == 0 {
+			pending, pendingErr := e.storageMigrationPending(ctx)
+			if pendingErr != nil {
+				return pendingErr
+			}
+			if !pending {
+				return nil
+			}
+			return domain.NewError(domain.ErrorPreconditionFailed, "storage schema markers disagree without a resumable migration checkpoint")
+		}
+		migration := path[0]
+		if err := migration.run(e, ctx, migration, superblockObject, superblock); err != nil {
+			return err
+		}
+	}
+	return domain.NewError(domain.ErrorUnavailable, "storage schema migration chain did not converge")
+}

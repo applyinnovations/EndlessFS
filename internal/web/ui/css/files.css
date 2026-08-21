@@ -115,6 +115,7 @@ input[type="radio"] { accent-color: var(--efs-color-primary); }
   background: var(--efs-color-background);
 }
 .metadata-filters label { display: grid; gap: 3px; color: var(--efs-color-text-muted); font-size: var(--efs-type-size-xs); }
+.metadata-filter-clear { grid-column: 1 / -1; justify-self: end; }
 
 .selection-bar {
   position: fixed;

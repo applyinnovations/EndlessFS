@@ -161,6 +161,7 @@
       else if (list.scrollTop + list.clientHeight >= list.scrollHeight - transferVirtualRowHeight && state.transferVirtualStart + transferVirtualWindowSize < state.transferProjection.length) scheduleTransferWindow(1);
     });
     byID("open-transfers").addEventListener("click", () => { setMobileNavigationOpen(false); setTransferSheetOpen(byID("transfer-panel").hidden, true); });
+    byID("transfer-scrim").addEventListener("click", () => setTransferSheetOpen(false, true));
     byID("transfer-close").addEventListener("click", () => setTransferSheetOpen(false, true));
     byID("transfer-panel").addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
@@ -183,6 +184,7 @@
       else renderFiles();
     });
     for (const id of ["filter-kind", "filter-media", "filter-min-size", "filter-max-size", "filter-modified-after", "filter-modified-before", "filter-preview"]) byID(id).addEventListener("input", () => { renderFiles(); scheduleBrowserURLSync(); });
+    byID("clear-metadata-filters").addEventListener("click", clearMetadataFilters);
     byID("metadata-filters").closest("details").addEventListener("toggle", scheduleBrowserURLSync);
     for (const id of ["file-view-list", "file-view-grid", "file-view-storage"]) byID(id).addEventListener("change", (event) => { if (event.target.checked) setFileViewMode(event.target.value); });
     byID("media-grid").addEventListener("scroll", () => { if (!state.gridRenderFrame) state.gridRenderFrame = requestAnimationFrame(() => { state.gridRenderFrame = 0; if (state.viewMode === "grid") renderVirtualGrid(state.filteredEntries); }); maybeLoadNextBrowserPage(byID("media-grid")); });

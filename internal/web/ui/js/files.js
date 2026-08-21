@@ -367,6 +367,14 @@
     summary.setAttribute("aria-label", active ? `Filter, ${active} active` : "Filter");
   }
 
+  function clearMetadataFilters() {
+    for (const id of ["filter-kind", "filter-media", "filter-min-size", "filter-max-size", "filter-modified-after", "filter-modified-before", "filter-preview"]) byID(id).value = "";
+    const disclosure = byID("metadata-filters").closest("details");
+    if (disclosure) disclosure.open = false;
+    renderFiles();
+    syncBrowserURLState("replace");
+  }
+
   function compareEntrySizes(left, right, direction) {
     const leftSize = knownEntrySize(left);
     const rightSize = knownEntrySize(right);

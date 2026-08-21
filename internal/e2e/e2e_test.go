@@ -893,13 +893,24 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := waitFor(ctx, `document.querySelector("#file-view-list").checked && Number(document.querySelector("#filter-max-size").value) > 0 && document.querySelector("#file-sort").value === "size:desc" && !document.querySelector("#metadata-filters").closest("details").open && document.querySelector("#breadcrumbs").textContent.trim() === "Files"`, 10*time.Second); err != nil {
 		t.Fatalf("remaining-items URL state did not survive reload: %v (%s)", err, browserStatus(ctx))
 	}
-	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
-		const maximum = document.querySelector("#filter-max-size");
-		maximum.value = "";
-		maximum.dispatchEvent(new Event("input", {bubbles: true}));
-		document.querySelector("#metadata-filters").closest("details").open = false;
-	})()`, nil)); err != nil {
-		t.Fatalf("clear remaining-items filter: %v", err)
+	if err := chromedp.Run(ctx,
+		chromedp.Evaluate(`document.querySelector("#metadata-filters").closest("details").open = true`, nil),
+		chromedp.Click("#clear-metadata-filters", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("clear remaining-items filters: %v", err)
+	}
+	if err := waitFor(ctx, `(() => {
+		const url = new URL(location.href);
+		const fields = ["filter-kind", "filter-media", "filter-min-size", "filter-max-size", "filter-modified-after", "filter-modified-before", "filter-preview"];
+		return fields.every((id) => document.getElementById(id).value === "") &&
+			!document.querySelector("#metadata-filters").closest("details").open &&
+			document.querySelector("#active-filter-count").hidden &&
+			!url.searchParams.has("kind") && !url.searchParams.has("media") &&
+			!url.searchParams.has("min") && !url.searchParams.has("max") &&
+			!url.searchParams.has("after") && !url.searchParams.has("before") &&
+			!url.searchParams.has("preview") && !url.searchParams.has("filters");
+	})()`, 5*time.Second); err != nil {
+		t.Fatalf("clear filters did not reset metadata state and dismiss the filter dialog: %v (%s)", err, browserStatus(ctx))
 	}
 	t.Logf(`ui-benchmark-v1 {"directory":{"logical":%d,"listRendered":%d,"gridRendered":%d,"filterMillis":%.2f,"storageRendered":%d,"storageRequests":%d},"previewRequests":%d}`,
 		loaded, listBenchmark.Rendered, renderedTiles, listBenchmark.FilterMillis, storageBenchmark.Rendered, storageRequests, resolveRequestsAfterScale-resolveRequestsBeforeScale)
@@ -1001,11 +1012,22 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := chromedp.Run(ctx,
 		emulation.SetDeviceMetricsOverride(1440, 900, 1, false),
 		chromedp.Navigate(harness.origin+"/"),
-		chromedp.Click("#open-transfers", chromedp.ByQuery),
+		chromedp.Click("#header-transfer-summary", chromedp.ByQuery),
+		chromedp.WaitVisible("#transfer-panel", chromedp.ByQuery),
+		chromedp.WaitVisible("#transfer-scrim", chromedp.ByQuery),
+		chromedp.Click("#transfer-scrim", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("open and dismiss transfer scale fixture from the status label: %v", err)
+	}
+	if err := waitFor(ctx, `document.querySelector("#transfer-panel").hidden && document.querySelector("#transfer-scrim").hidden`, 3*time.Second); err != nil {
+		t.Fatalf("transfer sheet scrim did not dismiss the sheet: %v (%s)", err, browserStatus(ctx))
+	}
+	if err := chromedp.Run(ctx,
+		chromedp.Click("#header-transfer-summary", chromedp.ByQuery),
 		chromedp.WaitVisible("#transfer-panel", chromedp.ByQuery),
 		chromedp.Click("#transfer-list .transfer-group-row button[aria-expanded]", chromedp.ByQuery),
 	); err != nil {
-		t.Fatalf("open transfer scale fixture: %v", err)
+		t.Fatalf("reopen transfer scale fixture: %v", err)
 	}
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
 		const row = document.querySelector("#transfer-list .transfer-group-row");

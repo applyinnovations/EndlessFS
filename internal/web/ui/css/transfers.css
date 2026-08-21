@@ -1,3 +1,9 @@
+.transfer-scrim {
+  position: fixed;
+  z-index: 55;
+  inset: var(--efs-metric-headerHeight) 0 0;
+  background: color-mix(in srgb, var(--efs-color-foreground) 18%, transparent);
+}
 .transfer-panel {
   position: fixed;
   z-index: 60;
@@ -69,7 +75,8 @@
   text-decoration: none;
 }
 .tab-count { color: var(--efs-color-text-muted); font-variant-numeric: tabular-nums; }
-.transfer-tabs { display: grid; flex: 0 0 auto; grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 4px; margin-block: 12px 0; }
+.transfer-tabs { display: flex; flex: 0 0 auto; justify-content: flex-start; gap: 4px; margin-block: 12px 0; }
+.transfer-tabs .tab { flex: 0 0 auto; justify-content: flex-start; }
 .transfer-tools { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px; margin-block-start: 6px; }
 .transfer-search { min-width: 0; }
 .transfer-search input { width: 100%; height: 32px; }

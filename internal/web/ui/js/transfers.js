@@ -271,15 +271,15 @@
   function setTransferSheetOpen(open, focus = false) {
     const panel = byID("transfer-panel");
     const launcher = byID("open-transfers");
-    const headerStatus = byID("header-transfer-status");
     const available = state.transfers.length > 0 || state.transferGroups.size > 0;
     const shouldOpen = available && open;
     if (shouldOpen && focus) state.transferSheetOpener = document.activeElement;
     panel.hidden = !shouldOpen;
-    headerStatus.hidden = !available;
+    byID("transfer-scrim").hidden = !shouldOpen;
+    launcher.hidden = !available;
     launcher.setAttribute("aria-expanded", String(shouldOpen));
     const modal = shouldOpen && matchMedia("(max-width: 760px)").matches;
-    for (const view of byID("authenticated-view").querySelectorAll(".view")) view.inert = modal;
+    for (const view of byID("authenticated-view").querySelectorAll(".view")) view.inert = shouldOpen;
     document.querySelector(".app-header").inert = modal;
     if (focus && shouldOpen) byID("transfer-close").focus();
     if (focus && !shouldOpen && state.transferSheetOpener && state.transferSheetOpener.focus) state.transferSheetOpener.focus();
@@ -1310,7 +1310,9 @@
     byID("header-transfer-speed").textContent = formatRate(summary.speedBps);
     byID("header-transfer-eta").textContent = summary.eta.replace(" remaining", "").replace("Calculating ETA", "ETA…").replace("Needs attention", "Attention");
     byID("header-transfer-count").textContent = `${summary.active.toLocaleString()}/${summary.totalCount.toLocaleString()}`;
-    setIconControl(byID("open-transfers"), "transfer", `View transfers, ${summary.percent}% complete, ${formatRate(summary.speedBps)}, ${summary.eta}, ${summary.active} active of ${summary.totalCount} files`);
+    const launcherLabel = `View transfers, ${summary.percent}% complete, ${formatRate(summary.speedBps)}, ${summary.eta}, ${summary.active} active of ${summary.totalCount} files`;
+    byID("open-transfers").setAttribute("aria-label", launcherLabel);
+    byID("open-transfers").dataset.tooltip = launcherLabel;
     byID("clear-transfers").disabled = summary.counts.complete + summary.counts.cancelled === 0;
     byID("retry-failed-transfers").disabled = summary.retryableFailed === 0;
   }

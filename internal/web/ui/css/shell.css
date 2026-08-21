@@ -26,7 +26,20 @@
 .mobile-navigation-toggle,
 .mobile-navigation { display: none; }
 .account-actions { display: flex; width: auto; align-items: stretch; justify-content: flex-end; gap: 4px; }
-.header-transfer-status { display: flex; min-width: 0; align-items: center; gap: 5px; }
+.header-transfer-status {
+  display: flex;
+  min-width: 0;
+  min-height: var(--efs-metric-controlHeight);
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: var(--efs-type-weight-regular);
+}
+.header-transfer-status:hover { background: transparent; }
+.header-transfer-status:active { transform: none; }
 .header-transfer-summary {
   display: flex;
   min-width: 0;
@@ -38,6 +51,14 @@
   white-space: nowrap;
 }
 .header-transfer-summary > span + span::before { margin-inline-end: 5px; color: var(--efs-color-border-strong); content: "·"; }
+.transfer-launcher-icon {
+  display: grid;
+  width: var(--efs-metric-controlHeight);
+  height: var(--efs-metric-controlHeight);
+  flex: 0 0 var(--efs-metric-controlHeight);
+  place-items: center;
+  color: var(--efs-color-text-muted);
+}
 .header-signout {
   min-height: 100%;
   border: 0;

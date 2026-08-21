@@ -68,6 +68,7 @@ func TestTransferMonitorUsesScalableSideSheet(t *testing.T) {
 	script := string(applicationScript)
 	for _, required := range []string{
 		`class="transfer-panel transfer-sheet"`, `aria-controls="transfer-panel"`,
+		`id="transfer-scrim" class="transfer-scrim" hidden`,
 		`id="transfer-close" class="icon-button"`, `setTransferSheetOpen`,
 		`id="header-transfer-summary" class="header-transfer-summary"`,
 		`id="header-transfer-percent"`, `id="header-transfer-speed"`,
@@ -75,16 +76,18 @@ func TestTransferMonitorUsesScalableSideSheet(t *testing.T) {
 		`inset: var(--efs-metric-headerHeight) 0 0 auto;`,
 		`width: clamp(400px, 36vw, 560px);`, `flex: 1; overflow-y: auto;`,
 		`.transfer-panel { inset: 0; width: 100%;`,
-		`for (const view of byID("authenticated-view").querySelectorAll(".view")) view.inert = modal;`,
+		`for (const view of byID("authenticated-view").querySelectorAll(".view")) view.inert = shouldOpen;`,
+		`byID("transfer-scrim").hidden = !shouldOpen;`,
+		`byID("transfer-scrim").addEventListener("click", () => setTransferSheetOpen(false, true));`,
 	} {
 		if !strings.Contains(shell+stylesheet+script, required) {
 			t.Errorf("transfer side sheet is missing %q", required)
 		}
 	}
 	for _, required := range []string{
+		`<button id="open-transfers" class="header-transfer-status transfer-launcher"`,
 		`<span id="header-transfer-summary" class="header-transfer-summary" aria-hidden="true">`,
-		`</span>
-            <button id="open-transfers"`,
+		`<span id="header-transfer-icon" class="transfer-launcher-icon"`,
 		`byID("header-transfer-percent").textContent =`,
 		`byID("header-transfer-speed").textContent =`,
 		`byID("header-transfer-eta").textContent =`,
@@ -625,7 +628,7 @@ func TestWorkspaceNavigationSharesTheHeaderLineWithTheBrand(t *testing.T) {
 		`grid-template-columns: auto minmax(0, 1fr) auto;`,
 		`.app-tabs {`, `.app-tabs .tab {`, `.tab[aria-current="page"]`,
 		`font-weight: var(--efs-type-weight-regular);`, `cursor: default;`,
-		`.transfer-tabs { display: grid;`, `color: var(--efs-color-foreground);`,
+		`.transfer-tabs { display: flex;`, `justify-content: flex-start;`, `color: var(--efs-color-foreground);`,
 	} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("top workspace tab layout is missing %q", required)
@@ -1957,6 +1960,7 @@ func TestMetadataFilterControlReportsTheActiveFilterCount(t *testing.T) {
 	shell := string(mustRead("ui/index.html"))
 	for _, required := range []string{
 		`<summary><span>Filter</span><span id="active-filter-count" class="filter-count" hidden></span></summary>`,
+		`id="clear-metadata-filters"`, `aria-label="Clear filters"`,
 	} {
 		if !strings.Contains(shell, required) {
 			t.Errorf("metadata filter control is missing %q", required)
@@ -1967,6 +1971,8 @@ func TestMetadataFilterControlReportsTheActiveFilterCount(t *testing.T) {
 	for _, required := range []string{
 		`function activeMetadataFilterCount()`,
 		`function syncFilterIndicator()`,
+		`function clearMetadataFilters()`,
+		`byID("clear-metadata-filters").addEventListener("click", clearMetadataFilters);`,
 		`count.textContent = String(active);`,
 		`summary.setAttribute("aria-label", active ?`,
 	} {

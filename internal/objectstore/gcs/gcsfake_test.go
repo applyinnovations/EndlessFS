@@ -53,6 +53,7 @@ type fakeGCS struct {
 	completedSessions         map[string]struct{}
 	nextSession               int64
 	sessionDeleteAttempts     int
+	sessionDeleteProtocol     string
 	rejectCompletedDelete     bool
 	clock                     domain.Clock
 	uploadBytes               int64
@@ -74,6 +75,20 @@ func newGCSServerWithFake(t *testing.T) (*httptest.Server, *fakeGCS) {
 		completedSessions: make(map[string]struct{}), nextGeneration: 100, clock: domain.SystemClock{},
 	}
 	server := httptest.NewServer(fake)
+	fake.baseURL = server.URL
+	t.Cleanup(server.Close)
+	return server, fake
+}
+
+func newGCSHTTP2ServerWithFake(t *testing.T) (*httptest.Server, *fakeGCS) {
+	t.Helper()
+	fake := &fakeGCS{
+		t: t, objects: make(map[string]fakeObject), sessions: make(map[string]*fakeResumableSession),
+		completedSessions: make(map[string]struct{}), nextGeneration: 100, clock: domain.SystemClock{},
+	}
+	server := httptest.NewUnstartedServer(fake)
+	server.EnableHTTP2 = true
+	server.StartTLS()
 	fake.baseURL = server.URL
 	t.Cleanup(server.Close)
 	return server, fake
@@ -284,6 +299,7 @@ func (f *fakeGCS) resumable(writer http.ResponseWriter, request *http.Request, i
 	defer f.mu.Unlock()
 	if request.Method == http.MethodDelete {
 		f.sessionDeleteAttempts++
+		f.sessionDeleteProtocol = request.Proto
 		if request.Header.Get("Content-Length") != "0" {
 			f.problem(writer, http.StatusLengthRequired, "lengthRequired")
 			return

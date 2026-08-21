@@ -246,9 +246,13 @@ func (b *Backend) AbortUpload(ctx context.Context, sealed []byte) error {
 		if requestErr != nil {
 			return domain.NewError(domain.ErrorInternal, "create GCS resumable cancellation request")
 		}
-		// Go otherwise omits Content-Length for a bodyless DELETE, but GCS requires an explicit zero.
+		// Go omits Content-Length for a bodyless DELETE over HTTP/2 even when
+		// TransferEncoding requests identity framing. Use an isolated HTTP/1.1
+		// transport so GCS receives the explicit zero it requires.
 		request.TransferEncoding = []string{"identity"}
-		response, requestErr := b.transfer.httpClient.Do(request)
+		cancellationClient, closeCancellationConnections := clientForExplicitZeroLengthDelete(b.transfer.httpClient)
+		defer closeCancellationConnections()
+		response, requestErr := cancellationClient.Do(request)
 		if requestErr != nil {
 			return domain.WrapError(domain.ErrorUnavailable, "GCS resumable cancellation failed", requestErr)
 		}
@@ -264,6 +268,29 @@ func (b *Backend) AbortUpload(ctx context.Context, sealed []byte) error {
 	}
 	_, err = b.deleteMaterializedUpload(ctx, key, lease.Size)
 	return err
+}
+
+func clientForExplicitZeroLengthDelete(client *http.Client) (*http.Client, func()) {
+	transport := client.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	base, ok := transport.(*http.Transport)
+	if !ok {
+		return client, func() {}
+	}
+	http1Transport := base.Clone()
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	http1Transport.Protocols = protocols
+	http1Transport.ForceAttemptHTTP2 = false
+	if http1Transport.TLSClientConfig != nil {
+		http1Transport.TLSClientConfig = http1Transport.TLSClientConfig.Clone()
+		http1Transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	}
+	http1Client := *client
+	http1Client.Transport = http1Transport
+	return &http1Client, http1Transport.CloseIdleConnections
 }
 
 func (b *Backend) deleteMaterializedUpload(ctx context.Context, key objectstore.Key, size int64) (bool, error) {

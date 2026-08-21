@@ -107,13 +107,14 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#test` / `.#test-unit` | Run the current Go suite. |
 | `nix run .#test-integration` | Run tests named as integration tests. |
 | `nix run .#test-contract` | Run reusable provider and state-store contract suites. |
+| `nix run .#test-migration` | Run the complete historical migration matrix and enforce 98% migration-ledger/implementation statement coverage. Pass a candidate release tag to verify its ledger mapping. |
 | `nix run .#test-replica` | Run deterministic multi-replica admission, fencing, takeover, and recovery tests. |
 | `nix run .#test-portability` | Run canonical-format, checkpoint, raw-copy/reopen, and continued-mutation tests. |
 | `nix run .#provider-verify -- check CONFIG` | Strictly read and verify a closed checkpoint on configured single- or split-backend memory fixtures/GCS buckets. |
 | `nix run .#test-preview` | Run focused preview policy, generator, store-contract, and HTTP tests. |
 | `nix run .#test-e2e` | Run Go-controlled Chromium passkey and core Drive workflows. Nix supplies Chromium on Linux. |
 | `nix run .#test-ui-benchmark` | Run the versioned Chromium UI scale benchmark and write JSON-line evidence to `ui-benchmark-v1.json` (override with `ENDLESSFS_UI_BENCHMARK_OUTPUT`). |
-| `nix run .#test-coverage` | Run the complete suite and enforce 85% repository plus 95% security-boundary statement coverage. |
+| `nix run .#test-coverage` | Run the complete suite and enforce 85% repository, 95% security-boundary, and 98% migration statement coverage. |
 | `nix run .#test-race` | Run the suite with Go's race detector. |
 | `nix run .#test-fuzz` | Run fixed-iteration path, encoding, JSON, cursor, share, capability, WebAuthn, logging, theme, and image-preview decoder fuzz smoke targets. |
 | `nix run .#security` | Run pinned static, vulnerability, configuration, dependency, source-policy, and OCI checks. |

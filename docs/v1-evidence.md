@@ -187,28 +187,29 @@ Browser network diagnostics retain only request methods and paths: credential ce
 
 ### Coverage result
 
-The release coverage command is `nix run .#test-coverage`. CI first runs the cacheable `nix flake check` umbrella, whose overlapping named test-layer checks resolve to one derivation, then executes the real Chromium E2E and all-package coverage gate through a Nix app outside the build sandbox. The app consumes the fixed-output vendored module closure, performs no module downloads, and fails below any threshold.
+The release coverage commands are `nix run .#test-coverage` and the migration-specific `nix run .#test-migration`. CI first runs the cacheable `nix flake check` umbrella, whose migration derivation executes the focused matrix and 98% migration threshold, then executes the real Chromium E2E and all-package coverage gate through a Nix app outside the build sandbox. The apps consume the fixed-output vendored module closure, perform no module downloads, and fail below any threshold.
 
 | Boundary | Statements | Result | Required |
 |---|---:|---:|---:|
-| Repository | 9,958 / 11,101 | 89.704% | 85% |
+| Repository | 11,343 / 12,570 | 90.239% | 85% |
 | Authentication | 154 / 161 | 95.652% | 95% |
-| Authorization | 419 / 438 | 95.662% | 95% |
+| Authorization | 509 / 533 | 95.497% | 95% |
 | Canonical path | 207 / 212 | 97.642% | 95% |
 | Bearer token | 20 / 21 | 95.238% | 95% |
-| Provider capability | 930 / 975 | 95.385% | 95% |
+| Provider capability | 992 / 1,036 | 95.753% | 95% |
 | State CAS | 420 / 438 | 95.890% | 95% |
-| Scope mapping | 2,260 / 2,374 | 95.198% | 95% |
-| Canonical format/key/version/checkpoint | 309 / 319 | 96.865% | 95% |
-| Write gate/admission | 421 / 443 | 95.034% | 95% |
-| Operation fencing/recovery | 787 / 828 | 95.048% | 95% |
-| Directory manifest | 438 / 457 | 95.842% | 95% |
+| Scope mapping | 2,502 / 2,623 | 95.387% | 95% |
+| Canonical format/key/version/checkpoint | 497 / 518 | 95.946% | 95% |
+| Write gate/admission | 451 / 473 | 95.349% | 95% |
+| Operation fencing/recovery | 842 / 880 | 95.682% | 95% |
+| Directory manifest | 552 / 577 | 95.667% | 95% |
 | GCS transport | 384 / 404 | 95.050% | 95% |
-| Theme validation/sanitization | 650 / 684 | 95.029% | 95% |
-| Configuration | 290 / 294 | 98.639% | 95% |
+| Theme validation/sanitization | 567 / 595 | 95.294% | 95% |
+| Configuration | 294 / 299 | 98.328% | 95% |
 | Preview core | 573 / 602 | 95.183% | 95% |
 | Preview image generator | 467 / 490 | 95.306% | 95% |
-| Preview store | 616 / 643 | 95.801% | 95% |
+| Preview store | 615 / 643 | 95.645% | 95% |
+| Migration ledger and implementation | 702 / 715 | 98.182% | 98% |
 
 ### Acceptance-criterion index
 

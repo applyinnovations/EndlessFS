@@ -28,6 +28,8 @@ Use red → green → refactor:
 
 Security changes require both exploit or denial coverage and a valid-path test. Race-sensitive changes require explicit concurrent tests. Provider behavior begins in the shared contract suite.
 
+Any change to durable keys, bodies, semantics, required features, schema or release ledgers, migration code, or startup compatibility must follow the migration law in `AGENTS.md`. Start from immutable predecessor-produced fixtures, test the complete remaining ledger suffix and every durable restart/concurrency boundary, and run `nix run .#test-migration`. That focused gate also enforces 98% statement coverage over the production migration ledger and implementation; the threshold does not replace behavioral proof.
+
 ## Use the supported toolchain
 
 Nix is the public task interface:

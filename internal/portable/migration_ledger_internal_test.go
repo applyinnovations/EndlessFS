@@ -194,3 +194,81 @@ func TestStorageSchemaLedgerRejectsUnknownEntryPoint(t *testing.T) {
 		t.Fatal("unknown storage schema unexpectedly has a migration path")
 	}
 }
+
+func TestStorageSchemaLedgerRejectsEveryMalformedReleaseShape(t *testing.T) {
+	for _, release := range []string{
+		"1.2.3",
+		"v1.2",
+		"v1..3",
+		"v1.02.3",
+		"v1.x.3",
+		"v1.-2.3",
+	} {
+		if _, err := parseReleaseVersion(release); err == nil {
+			t.Errorf("parseReleaseVersion(%q) succeeded", release)
+		}
+	}
+}
+
+func TestStorageSchemaReleaseOrderingComparesEveryVersionComponent(t *testing.T) {
+	tests := []struct {
+		left, right releaseVersion
+		want        bool
+	}{
+		{left: releaseVersion{major: 1}, right: releaseVersion{major: 2}, want: true},
+		{left: releaseVersion{major: 2}, right: releaseVersion{major: 1}},
+		{left: releaseVersion{major: 1, minor: 1}, right: releaseVersion{major: 1, minor: 2}, want: true},
+		{left: releaseVersion{major: 1, minor: 2}, right: releaseVersion{major: 1, minor: 1}},
+		{left: releaseVersion{major: 1, minor: 2, patch: 3}, right: releaseVersion{major: 1, minor: 2, patch: 4}, want: true},
+	}
+	for _, test := range tests {
+		if got := test.left.less(test.right); got != test.want {
+			t.Errorf("%+v.less(%+v) = %t; want %t", test.left, test.right, got, test.want)
+		}
+	}
+}
+
+func TestStorageSchemaHelpersFailClosedForUnknownOrBrokenLedgerState(t *testing.T) {
+	unknown := storageSchemaID("endlessfs-portable-v1/schema-999")
+	if _, found := schemaDefinition(unknown); found {
+		t.Fatal("unknown schema has a definition")
+	}
+	if _, found := schemaIndex(unknown); found {
+		t.Fatal("unknown schema has an index")
+	}
+	if _, found := schemaFeatures(unknown, nil); found {
+		t.Fatal("unknown schema has features")
+	}
+	if _, found := detectStorageSchema([]string{"unknown-feature"}, nil); found {
+		t.Fatal("unknown storage feature signature was accepted")
+	}
+	if _, found := detectWriteGateSchema([]string{"unknown-feature"}, nil); found {
+		t.Fatal("unknown gate feature signature was accepted")
+	}
+	if schemaAtLeast([]string{"unknown-feature"}, storageSchema001, nil) {
+		t.Fatal("unknown storage feature signature satisfied a minimum")
+	}
+	currentFeatures, found := schemaFeatures(storageSchema003, nil)
+	if !found {
+		t.Fatal("current schema has no features")
+	}
+	if schemaAtLeast(currentFeatures, unknown, nil) {
+		t.Fatal("unknown storage minimum was accepted")
+	}
+	if writeGateSchemaAtLeast([]string{"unknown-feature"}, storageSchema001, nil) {
+		t.Fatal("unknown gate feature signature satisfied a minimum")
+	}
+	if writeGateSchemaAtLeast(currentFeatures, unknown, nil) {
+		t.Fatal("unknown gate minimum was accepted")
+	}
+	if _, found := migrationForCheckpoint("unknown-checkpoint"); found {
+		t.Fatal("unknown migration checkpoint was accepted")
+	}
+
+	original := storageSchemaLedger[1].migrationFromPrevious
+	t.Cleanup(func() { storageSchemaLedger[1].migrationFromPrevious = original })
+	storageSchemaLedger[1].migrationFromPrevious = nil
+	if _, err := storageMigrationPath(storageSchema001); err == nil {
+		t.Fatal("broken adjacent migration edge was accepted")
+	}
+}

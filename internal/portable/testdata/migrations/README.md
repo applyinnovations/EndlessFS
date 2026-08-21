@@ -5,19 +5,23 @@ These files are immutable raw state/file-backend exports produced by code that a
 | Ledger epoch | Fixture | Producer | Source commit | SHA-256 | Release validity |
 | --- | --- | --- | --- | --- | --- |
 | `endlessfs-portable-v1/schema-001` | `pre-aggregate-v0.1.4.json` | v0.1.4 | `edb67f8e345694001b9614604c5baded9bde5d86` | `24111f7739207b53fad5c4e1cf0ca106982b40fce33850f045d7430150260258` | v0.1.0–v0.1.4 |
+| `endlessfs-portable-v1/schema-001` | `pre-aggregate-v0.1.4-application-disabled.json` | v0.1.4 application, previews disabled | `edb67f8e345694001b9614604c5baded9bde5d86` | `b6932210f53e927bf0543153290674579e50f0004bdad1e1e474256fbea8e15a` | v0.1.0–v0.1.4 |
+| `endlessfs-portable-v1/schema-001` | `pre-aggregate-v0.1.4-application-gcs.json` | v0.1.4 application, GCS previews enabled | `edb67f8e345694001b9614604c5baded9bde5d86` | `8e508619ffb77850403f2e83de9d1ce98dabfe330334ffee9c2e87f6c250cab8` | v0.1.0–v0.1.4 |
+| `endlessfs-portable-v1/schema-001` | `schema-001-v0.1.7-interrupted-application-gcs.json` | v0.1.7 interrupted upgrade of the v0.1.4 GCS-preview profile | `1548dafa30ea3fbf0340b3b32381e885a110ef5e` | `998cbd744dce60cdf59400903c0de950a0f96915cdb0e7f0225b5260882e28e9` | predecessor-produced intermediate state |
 | `endlessfs-portable-v1/schema-002` | `schema-002-recursive-bytes.json` | historical schema-002 writer | `b70f6361497d45f20049279bb5381a4fbb1005f1` | `c7fc6a6924e62f99e9fdd99a35343385c17088d36bcac5f47b6abfe8776ee854` | untagged intermediate epoch |
 | `endlessfs-portable-v1/schema-003` | `recursive-aggregates-v0.1.7.json` | v0.1.7 | `1548dafa30ea3fbf0340b3b32381e885a110ef5e` | `0e2ce0a0853cba6e29730346b69e3c829240f617b1f277949f394b9a54786a51` | v0.1.5–current |
 
-The releases in a validity range have identical durable writer and canonical-format source blobs for the represented epoch. For v0.1.0–v0.1.4, `format.go`, `transfers.go`, and `engine.go` are respectively Git blobs `422e0df8c13fb4e041d7d9065ad9826079d7b541`, `c95e7035d2b72b896e09101e38268a4b1c7d2805`, and `0eea6130ec29c918c22c0f14e83f4c8f28bf9770`. For schema 003 they are `423ae18d348a78181eb250214e90bea17d0ce532`, `f3165e5b04a8b5cf44c3778f9b734e5f3e1ea409`, and `0d023e455d51ec0050c90354ef9a44ad6654faab`. The production release ranges and linear edges live in `migration_ledger.go`; the executable fixture registry and immutable digests live in `schema_migration_test.go`.
+The releases in a validity range have identical durable writer and canonical-format source blobs for the represented epoch. For v0.1.0–v0.1.4, `format.go`, `transfers.go`, and `engine.go` are respectively Git blobs `422e0df8c13fb4e041d7d9065ad9826079d7b541`, `c95e7035d2b72b896e09101e38268a4b1c7d2805`, and `0eea6130ec29c918c22c0f14e83f4c8f28bf9770`. For schema 003 they are `423ae18d348a78181eb250214e90bea17d0ce532`, `f3165e5b04a8b5cf44c3778f9b734e5f3e1ea409`, and `0d023e455d51ec0050c90354ef9a44ad6654faab`. Schema 001's gate has no `writerFeatures` field; this unbound representation is part of the historical epoch even when the writer set records application capabilities. The v0.1.7 interrupted fixture captures that predecessor closing the unbound gate under `automatic-recursive-byte-aggregates-v1` and then failing on the historical upload encoding. The production release ranges and linear edges live in `migration_ledger.go`; the executable fixture/profile registry and immutable digests live in `schema_migration_test.go`.
 
 Do not edit or regenerate an existing fixture. When a change creates a new durable schema:
 
 1. demonstrate the current binary fails against the preceding epoch fixture;
 2. append exactly one schema definition carrying its adjacent transformation from the preceding epoch, then append the new epoch's first-release boundary when applicable;
-3. generate representative live, trash, zero-byte, empty-directory, completed-upload, and aborted-upload state using code that writes the new epoch;
+3. enumerate every durable application writer profile for that release and generate representative live, trash, zero-byte, empty-directory, completed-upload, and aborted-upload state for each profile using code that writes the new epoch;
 4. export raw backend key/body maps without current-code decoding or rewriting;
 5. record the source tag or commit and SHA-256 digest here and in the executable registry;
-6. prove every epoch fixture traverses the complete remaining ledger suffix in single- and split-backend modes, including restart at every durable edge boundary;
-7. run `nix run .#test-migration -- vMAJOR.MINOR.PATCH` and `nix flake check`.
+6. run each predecessor binary through every durable boundary it can publish, preserve exact interrupted/failed residue as additional immutable fixtures, and prove every epoch/profile/interruption fixture traverses the complete remaining ledger suffix in single- and split-backend modes;
+7. construct every profile through the real application startup writer builder and prove restart at every durable edge boundary plus concurrent multi-replica convergence;
+8. run `nix run .#test-migration -- vMAJOR.MINOR.PATCH` and `nix flake check`.
 
 Epoch definitions, adjacent transformations, release ranges, fixture associations, and fixture bytes are append-only. Removing or rewriting one requires the major-version compatibility process in `AGENTS.md` and the normative specification.

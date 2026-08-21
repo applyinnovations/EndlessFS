@@ -383,7 +383,7 @@ func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition stora
 		if err != nil {
 			return false, err
 		}
-		if gate.Mode == storageformat.GateOpen && schemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
+		if gate.Mode == storageformat.GateOpen && writeGateSchemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
 			complete, completeErr := e.storageMigrationComplete(ctx, transition)
 			if completeErr != nil {
 				return false, completeErr
@@ -403,7 +403,7 @@ func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition stora
 			}
 			return false, domain.NewError(domain.ErrorConflict, "write gate is reserved by another maintenance operation")
 		}
-		gateSchema, knownGateSchema := detectStorageSchema(gate.WriterFeatures, e.writer.RequiredFeatures)
+		gateSchema, knownGateSchema := detectWriteGateSchema(gate.WriterFeatures, e.writer.RequiredFeatures)
 		gateIndex, _ := schemaIndex(gateSchema.id)
 		fromIndex, _ := schemaIndex(transition.from)
 		if !knownGateSchema || gateIndex < fromIndex {
@@ -893,23 +893,23 @@ func (e *Engine) bindMigrationGateToTarget(ctx context.Context, transition stora
 		if err != nil {
 			return err
 		}
-		if gate.Mode == storageformat.GateOpen && schemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
+		if gate.Mode == storageformat.GateOpen && writeGateSchemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
 			return nil
 		}
 		if gate.Mode != storageformat.GateClosed || gate.CheckpointID != transition.checkpointID {
 			if other, found := migrationForCheckpoint(gate.CheckpointID); found {
 				otherFrom, _ := schemaIndex(other.from)
 				transitionTo, _ := schemaIndex(transition.to)
-				if otherFrom >= transitionTo && schemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
+				if otherFrom >= transitionTo && writeGateSchemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
 					return nil
 				}
 			}
 			return domain.NewError(domain.ErrorPreconditionFailed, "migration write gate is not closed")
 		}
-		if schemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
+		if writeGateSchemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
 			return nil
 		}
-		detected, found := detectStorageSchema(gate.WriterFeatures, e.writer.RequiredFeatures)
+		detected, found := detectWriteGateSchema(gate.WriterFeatures, e.writer.RequiredFeatures)
 		if !found || detected.id != transition.from {
 			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
 		}
@@ -950,13 +950,13 @@ func (e *Engine) storageMigrationComplete(ctx context.Context, transition storag
 	if err != nil {
 		return false, err
 	}
-	if gate.Mode == storageformat.GateOpen && gate.CheckpointID == "" && schemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
+	if gate.Mode == storageformat.GateOpen && gate.CheckpointID == "" && writeGateSchemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
 		return true, nil
 	}
 	if other, found := migrationForCheckpoint(gate.CheckpointID); found {
 		otherFrom, _ := schemaIndex(other.from)
 		transitionTo, _ := schemaIndex(transition.to)
-		if otherFrom >= transitionTo && schemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
+		if otherFrom >= transitionTo && writeGateSchemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
 			return true, nil
 		}
 	}

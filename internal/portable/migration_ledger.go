@@ -49,6 +49,7 @@ type StorageSchemaReleaseRange struct {
 type StorageSchemaHistoryEntry struct {
 	ID          string
 	Features    []string
+	GateBinding string
 	Releases    []StorageSchemaReleaseRange
 	Successor   string
 	MigrationID string
@@ -70,9 +71,17 @@ type storageMigration struct {
 	run          storageMigrationRun
 }
 
+type storageGateBinding string
+
+const (
+	storageGateLegacyUnbound storageGateBinding = "legacy-unbound"
+	storageGateFeatureBound  storageGateBinding = "writer-features"
+)
+
 type storageSchemaDefinition struct {
 	id                    storageSchemaID
 	features              []string
+	gateBinding           storageGateBinding
 	migrationFromPrevious *storageMigration
 }
 
@@ -90,14 +99,15 @@ var schemaMigration002To003 = storageMigration{
 // migrationFromPrevious connects the prior terminal epoch to the new epoch;
 // never insert, reorder, or rewrite an existing entry.
 var storageSchemaLedger = []storageSchemaDefinition{
-	{id: storageSchema001},
+	{id: storageSchema001, gateBinding: storageGateLegacyUnbound},
 	{
-		id: storageSchema002, features: []string{storageformat.FeatureRecursiveBytes},
+		id: storageSchema002, features: []string{storageformat.FeatureRecursiveBytes}, gateBinding: storageGateFeatureBound,
 		migrationFromPrevious: &schemaMigration001To002,
 	},
 	{
 		id:                    storageSchema003,
 		features:              []string{storageformat.FeatureRecursiveBytes, storageformat.FeatureRecursiveFileCounts},
+		gateBinding:           storageGateFeatureBound,
 		migrationFromPrevious: &schemaMigration002To003,
 	},
 }
@@ -128,7 +138,7 @@ func StorageSchemaHistory() []StorageSchemaHistoryEntry {
 	history := make([]StorageSchemaHistoryEntry, 0, len(storageSchemaLedger))
 	for index, schema := range storageSchemaLedger {
 		entry := StorageSchemaHistoryEntry{
-			ID: schema.id.String(), Features: append([]string(nil), schema.features...),
+			ID: schema.id.String(), Features: append([]string(nil), schema.features...), GateBinding: string(schema.gateBinding),
 			Releases: releaseRangesForSchema(schema.id),
 		}
 		if index+1 < len(storageSchemaLedger) {
@@ -292,8 +302,40 @@ func detectStorageSchema(features, current []string) (storageSchemaDefinition, b
 	return storageSchemaDefinition{}, false
 }
 
+// detectWriteGateSchema interprets the gate using the binding representation
+// declared by the complete historical schema epoch. Schema 001 predates the
+// WriterFeatures field, so its gate is intentionally unbound even when its
+// writer set carries non-ledger application features. Later epochs require an
+// exact feature-bound signature and never accept an empty legacy gate.
+func detectWriteGateSchema(features, current []string) (storageSchemaDefinition, bool) {
+	for _, schema := range storageSchemaLedger {
+		switch schema.gateBinding {
+		case storageGateLegacyUnbound:
+			if len(features) == 0 {
+				return schema, true
+			}
+		case storageGateFeatureBound:
+			expected, _ := schemaFeatures(schema.id, current)
+			if equalStrings(features, expected) {
+				return schema, true
+			}
+		}
+	}
+	return storageSchemaDefinition{}, false
+}
+
 func schemaAtLeast(features []string, minimum storageSchemaID, current []string) bool {
 	detected, found := detectStorageSchema(features, current)
+	if !found {
+		return false
+	}
+	detectedIndex, _ := schemaIndex(detected.id)
+	minimumIndex, found := schemaIndex(minimum)
+	return found && detectedIndex >= minimumIndex
+}
+
+func writeGateSchemaAtLeast(features []string, minimum storageSchemaID, current []string) bool {
+	detected, found := detectWriteGateSchema(features, current)
 	if !found {
 		return false
 	}
@@ -336,7 +378,7 @@ func (e *Engine) storageMigrationPending(ctx context.Context) (bool, error) {
 		if _, found := migrationForCheckpoint(gate.CheckpointID); found {
 			return true, nil
 		}
-		if schema, found := detectStorageSchema(gate.WriterFeatures, e.writer.RequiredFeatures); found && schema.id != currentStorageSchema().id {
+		if schema, found := detectWriteGateSchema(gate.WriterFeatures, e.writer.RequiredFeatures); found && schema.id != currentStorageSchema().id {
 			return true, nil
 		}
 	} else if !errors.Is(err, domain.ErrNotFound) {

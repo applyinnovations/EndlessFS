@@ -21,6 +21,13 @@ func TestStorageSchemaLedgerIsLinearAndAppendOnly(t *testing.T) {
 		if schema.id != wantIDs[index] {
 			t.Fatalf("storage schema ledger[%d] = %q; want %q", index, schema.id, wantIDs[index])
 		}
+		wantBinding := storageGateFeatureBound
+		if index == 0 {
+			wantBinding = storageGateLegacyUnbound
+		}
+		if schema.gateBinding != wantBinding {
+			t.Fatalf("storage schema %q gate binding = %q; want %q", schema.id, schema.gateBinding, wantBinding)
+		}
 		signature := fmt.Sprint(schema.features)
 		if _, duplicate := featureSignatures[signature]; duplicate {
 			t.Fatalf("storage schema %q reuses feature signature %s", schema.id, signature)
@@ -51,6 +58,32 @@ func TestStorageSchemaLedgerIsLinearAndAppendOnly(t *testing.T) {
 			t.Fatalf("migration checkpoint %q is reused", migration.checkpointID)
 		}
 		checkpoints[migration.checkpointID] = struct{}{}
+	}
+}
+
+func TestStorageSchemaGateDetectionUsesEpochBindingRepresentation(t *testing.T) {
+	current := []string{
+		"directory-manifests",
+		"fenced-operations",
+		"generated-previews-v1",
+		"portable-checkpoints",
+		"preview-integrity-crc32c-v1",
+		"recursive-byte-aggregates-v1",
+		"recursive-file-count-aggregates-v1",
+	}
+	legacy, found := detectWriteGateSchema(nil, current)
+	if !found || legacy.id != storageSchema001 {
+		t.Fatalf("legacy unbound gate detected as %+v, %t; want schema 001", legacy, found)
+	}
+	if _, found := detectWriteGateSchema([]string{"directory-manifests"}, current); found {
+		t.Fatal("partially feature-bound legacy gate was accepted")
+	}
+	for _, schemaID := range []storageSchemaID{storageSchema002, storageSchema003} {
+		features, _ := schemaFeatures(schemaID, current)
+		detected, found := detectWriteGateSchema(features, current)
+		if !found || detected.id != schemaID {
+			t.Fatalf("feature-bound gate %q detected as %+v, %t", schemaID, detected, found)
+		}
 	}
 }
 

@@ -137,6 +137,42 @@ func TestAdmissionRejectsWriteGateFeatureBindingDrift(t *testing.T) {
 	}
 }
 
+func TestMigrationCurrentSchemaStartupRejectsLegacyUnboundGate(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2036, 2, 6, 4, 5, 6, 0, time.UTC))
+	_ = openEngine(t, backend, clock, 20, nil)
+	key := storageformat.WriteGateKey()
+	object, err := backend.Get(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope storageformat.Envelope
+	var gate storageformat.WriteGate
+	if err := storageformat.DecodeEnvelope(object.Body, key, "write-gate-v1", &envelope, &gate); err != nil {
+		t.Fatal(err)
+	}
+	gate.WriterFeatures = nil
+	body, err := storageformat.EncodeEnvelope("write-gate-v1", key, envelope.Revision+1, gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Put(context.Background(), key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = portable.Open(context.Background(), portable.Options{
+		Backend: backend, Clock: clock,
+		IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(21, 1<<20))),
+		Writer: portable.WriterConfiguration{
+			WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1",
+			KeyringIdentifiers: []string{"session-v1"},
+		},
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	})
+	if !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("current-schema startup with legacy unbound gate error = %v; want precondition failed", err)
+	}
+}
+
 type stepFailure struct {
 	mu   sync.Mutex
 	step string

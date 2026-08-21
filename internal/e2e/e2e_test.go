@@ -890,7 +890,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.Reload()); err != nil {
 		t.Fatalf("reload remaining-items URL state: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector("#file-view-list").checked && Number(document.querySelector("#filter-max-size").value) > 0 && document.querySelector("#file-sort").value === "size:desc" && !document.querySelector("#metadata-filters").closest("details").open && document.querySelector("#breadcrumbs").textContent.trim() === "Files"`, 10*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector("#app").dataset.state === "authenticated" && document.querySelector("#loading-view").hidden && document.querySelector("#file-view-list").checked && Number(document.querySelector("#filter-max-size").value) > 0 && document.querySelector("#file-sort").value === "size:desc" && !document.querySelector("#metadata-filters").closest("details").open && document.querySelector("#breadcrumbs").textContent.trim() === "Files"`, 10*time.Second); err != nil {
 		t.Fatalf("remaining-items URL state did not survive reload: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := chromedp.Run(ctx,

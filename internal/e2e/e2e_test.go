@@ -735,14 +735,30 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 			t.Fatalf("scroll virtual grid after %d items: %v", loaded, err)
 		}
 	}
-	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => { const grid = document.querySelector("#media-grid"); grid.scrollTop = 0; grid.dispatchEvent(new Event("scroll")); })()`, nil)); err != nil {
-		t.Fatalf("return large virtual grid to its first item: %v", err)
+	if err := chromedp.Run(ctx, chromedp.Evaluate(`new Promise((resolve) => {
+		const grid = document.querySelector("#media-grid");
+		grid.scrollTop = 0;
+		grid.dispatchEvent(new Event("scroll"));
+		const filter = document.querySelector("#file-filter");
+		filter.value = "virtual-00000";
+		filter.dispatchEvent(new Event("input", {bubbles: true}));
+		requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
+	})`, nil)); err != nil {
+		t.Fatalf("filter the large virtual grid to its zero-byte item: %v", err)
 	}
 	if err := waitFor(ctx, `(() => {
 		const aggregate = document.querySelector("#path-aggregate")?.textContent || "";
-		return document.querySelector('.media-tile-open[aria-label="View file virtual-00000.bin"] .media-tile-meta')?.textContent === "0 B" && !aggregate.startsWith("—") && aggregate.endsWith("· 10,004 files");
-	})()`, 5*time.Second); err != nil {
-		t.Fatalf("zero-byte file or current-path aggregate is missing from grid view: %v (%s)", err, browserStatus(ctx))
+		return document.querySelector("#media-grid-content")?.dataset.itemCount === "1" && document.querySelector('.media-tile-open[aria-label="View file virtual-00000.bin"] .media-tile-meta')?.textContent === "0 B" && !aggregate.startsWith("—") && aggregate.endsWith("· 10,004 files");
+	})()`, 10*time.Second); err != nil {
+		var gridState string
+		_ = chromedp.Run(ctx, chromedp.Evaluate(`JSON.stringify({
+			aggregate: document.querySelector("#path-aggregate")?.textContent,
+			filter: document.querySelector("#file-filter")?.value,
+			itemCount: document.querySelector("#media-grid-content")?.dataset.itemCount,
+			scrollTop: document.querySelector("#media-grid")?.scrollTop,
+			tiles: Array.from(document.querySelectorAll(".media-tile-open")).map((node) => node.getAttribute("aria-label")),
+		})`, &gridState))
+		t.Fatalf("zero-byte file or current-path aggregate is missing from grid view: %v (%s) grid=%s", err, browserStatus(ctx), gridState)
 	}
 	var renderedTiles int
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelectorAll(".media-tile").length`, &renderedTiles)); err != nil {

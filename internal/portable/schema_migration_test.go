@@ -260,6 +260,57 @@ func TestMigrationOldestSchemaTraversesLedgerEdgesInOrder(t *testing.T) {
 	}
 }
 
+func TestMigrationSchema001CASLoserAcceptsValidatedSchema003Winner(t *testing.T) {
+	family := storageSchemaFixtures[0]
+	fixture := loadStorageSchemaFixture(t, family)
+	stateBackend := objectmemory.New()
+	fileBackend := objectmemory.New()
+	if err := stateBackend.Import(fixture.StateObjects); err != nil {
+		t.Fatal(err)
+	}
+	if err := fileBackend.Import(fixture.FileObjects); err != nil {
+		t.Fatal(err)
+	}
+	clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
+	paused := make(chan struct{})
+	resume := make(chan struct{})
+	pausedOnce := false
+	scheduler := portable.SchedulerFunc(func(ctx context.Context, step string) error {
+		if step != portable.MigrationStepName("schema-001-to-002", portable.StepMigrationAfterDirectoryPrerequisites) || pausedOnce {
+			return nil
+		}
+		pausedOnce = true
+		close(paused)
+		select {
+		case <-resume:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+
+	firstResult := make(chan error, 1)
+	go func() {
+		_, err := portable.Open(context.Background(), schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 181, scheduler))
+		firstResult <- err
+	}()
+	<-paused
+	winner, winnerErr := portable.Open(context.Background(), schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 182, nil))
+	close(resume)
+	if winnerErr != nil {
+		t.Fatalf("winning migration error = %v", winnerErr)
+	}
+	if err := <-firstResult; err != nil {
+		t.Fatalf("schema-001 CAS loser rejected validated schema-003 winner: %v", err)
+	}
+	user, _ := domain.ParseUserID(fixture.UserID)
+	live, _ := domain.NewScope(user, domain.AreaLive)
+	root, err := winner.Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
+	if err != nil || root.Size != family.wantSize || root.FileCount != family.wantFiles {
+		t.Fatalf("winning migration root = %+v, %v", root, err)
+	}
+}
+
 func TestSchema001MigrationResumesAfterUploadRecordUpgrade(t *testing.T) {
 	family := storageSchemaFixtures[0]
 	fixture := loadStorageSchemaFixture(t, family)

@@ -610,14 +610,14 @@ func (walk *migrationWalk) directory(ctx context.Context, directoryID, parentID 
 	_, err = walk.engine.backend.Put(ctx, root.object.Key, prepared.rootBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: root.object.Version})
 	if err != nil {
 		if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
-			winner, getErr := walk.engine.backend.Get(ctx, root.object.Key)
-			if getErr == nil && bytes.Equal(winner.Body, prepared.rootBody) {
+			matched, matchErr := walk.engine.migrationWinnerMatchesTarget(ctx, walk.group.scope, directoryID, total, walk.transition)
+			if matchErr == nil && matched {
 				walk.state[directoryID] = 2
 				walk.totals[directoryID] = total
 				return total, nil
 			}
-			if getErr != nil {
-				return migrationAggregate{}, getErr
+			if matchErr != nil {
+				return migrationAggregate{}, matchErr
 			}
 			return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "directory root changed unexpectedly during migration")
 		}
@@ -629,6 +629,31 @@ func (walk *migrationWalk) directory(ctx context.Context, directoryID, parentID 
 	walk.state[directoryID] = 2
 	walk.totals[directoryID] = total
 	return total, nil
+}
+
+func (e *Engine) migrationWinnerMatchesTarget(ctx context.Context, scope domain.Scope, directoryID string, want migrationAggregate, transition storageMigration) (bool, error) {
+	root, err := e.readMigrationDirectoryRoot(ctx, scope, directoryID)
+	if err != nil {
+		return false, err
+	}
+	manifest, err := e.readMigrationDirectoryManifest(ctx, scope, directoryID, root.manifestID)
+	if err != nil {
+		return false, err
+	}
+	if root.current != manifest.current || root.hasRecursiveBytes != manifest.hasRecursiveBytes {
+		return false, domain.NewError(domain.ErrorInvalid, "winning directory root and manifest migration states differ")
+	}
+	if !root.hasRecursiveBytes || root.recursiveBytes != want.bytes || manifest.manifest.RecursiveBytes != want.bytes {
+		return false, nil
+	}
+	switch transition.to {
+	case storageSchema002:
+		return true, nil
+	case storageSchema003:
+		return root.current && manifest.current && root.recursiveFileCount == want.files && manifest.manifest.RecursiveFileCount == want.files, nil
+	default:
+		return false, domain.NewError(domain.ErrorPreconditionFailed, "aggregate migration has no target-schema reconciliation rule")
+	}
 }
 
 func (e *Engine) readMigrationDirectoryRoot(ctx context.Context, scope domain.Scope, directoryID string) (migrationDirectoryRoot, error) {

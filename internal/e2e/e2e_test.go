@@ -1923,8 +1923,31 @@ func waitVisible(ctx context.Context, selector string, timeout time.Duration) er
 }
 
 func waitFor(ctx context.Context, expression string, timeout time.Duration) error {
-	var result bool
-	return runStage(ctx, timeout, chromedp.Poll(expression, &result, chromedp.WithPollingMutation(), chromedp.WithPollingTimeout(timeout)))
+	stageContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	var lastEvaluationError error
+	for {
+		var result bool
+		if err := chromedp.Run(stageContext, chromedp.Evaluate(expression, &result)); err == nil {
+			if result {
+				return nil
+			}
+		} else {
+			lastEvaluationError = err
+		}
+
+		select {
+		case <-stageContext.Done():
+			if lastEvaluationError != nil {
+				return fmt.Errorf("%w (last browser evaluation: %v)", stageContext.Err(), lastEvaluationError)
+			}
+			return stageContext.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func closeTransferSheet(ctx context.Context) error {

@@ -1122,7 +1122,10 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	admin := newTestBrowser(t)
 	bootstrapBrowser(t, admin, harness)
 
-	if err := runStage(admin.ctx, 10*time.Second, chromedp.Focus("a[data-route='admin']", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+	if err := waitVisible(admin.ctx, "#admin-nav", 10*time.Second); err != nil {
+		t.Fatalf("wait for administration navigation: %v (%s)", err, browserStatus(admin.ctx))
+	}
+	if err := runStage(admin.ctx, 10*time.Second, chromedp.Focus("#admin-nav", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatalf("open administration: %v (%s)", err, browserStatus(admin.ctx))
 	}
 	if err := waitVisible(admin.ctx, "#admin-view", 10*time.Second); err != nil {
@@ -1432,7 +1435,19 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 		t.Fatalf("inspect narrow admin user table: %v", err)
 	}
 	if !adminUsersFitNarrow {
-		t.Fatal("admin users table overflows or loses primary controls at 320 CSS pixels")
+		var adminUsersGeometry string
+		_ = chromedp.Run(admin.ctx,
+			emulation.SetDeviceMetricsOverride(320, 720, 1, false),
+			chromedp.Evaluate(`(() => {
+				const scroller = document.querySelector("#users-table").parentElement;
+				const table = document.querySelector("#users-table");
+				const headings = Array.from(table.querySelectorAll("th"));
+				const buttons = Array.from(table.querySelectorAll("#user-list .user-actions button"));
+				return JSON.stringify({viewport: innerWidth, documentWidth: document.documentElement.scrollWidth, scroller: [scroller.clientWidth, scroller.scrollWidth], table: [table.clientWidth, table.scrollWidth], headings: headings.map((heading) => getComputedStyle(heading).display), buttons: buttons.map((button) => { const rect = button.getBoundingClientRect(); return [rect.left, rect.right]; })});
+			})()`, &adminUsersGeometry),
+			emulation.SetDeviceMetricsOverride(800, 600, 1, false),
+		)
+		t.Fatalf("admin users table overflows or loses primary controls at 320 CSS pixels: %s", adminUsersGeometry)
 	}
 	if err := chromedp.Run(admin.ctx, chromedp.Evaluate(`Array.from(document.querySelectorAll("#user-list tr")).find((node) => node.textContent.includes("Renamed Member")).querySelector("button").click()`, nil), chromedp.WaitVisible("#action-dialog", chromedp.ByQuery)); err != nil {
 		t.Fatalf("disable invited user: %v", err)
@@ -1764,7 +1779,7 @@ func newTestBrowser(t *testing.T) *testBrowser {
 		}
 	})
 	if err := chromedp.Run(ctx,
-		network.Enable(), runtime.Enable(), chromedp.Navigate("about:blank"), cdpwebauthn.Enable(),
+		network.Enable(), runtime.Enable(), emulation.SetDeviceMetricsOverride(800, 600, 1, false), chromedp.Navigate("about:blank"), cdpwebauthn.Enable(),
 		chromedp.ActionFunc(func(actionContext context.Context) error {
 			_, err := addVirtualAuthenticator(actionContext)
 			return err
@@ -1856,7 +1871,11 @@ func browserStatus(ctx context.Context) string {
 	_ = chromedp.Run(statusContext,
 		chromedp.Text("#urgent-status", &urgent, chromedp.ByQuery),
 		chromedp.Location(&locationValue),
-		chromedp.Evaluate(`document.readyState + " loading=" + document.querySelector("#loading-view").hidden + " auth=" + document.querySelector("#auth-view").hidden + " registration=" + document.querySelector("#registration-view").hidden + " dialogOpen=" + document.querySelector("#action-dialog").open + " dialogDisplay=" + getComputedStyle(document.querySelector("#action-dialog")).display`, &documentState),
+		chromedp.Evaluate(`(() => {
+			const admin = document.querySelector("#admin-nav");
+			const adminRect = admin.getBoundingClientRect();
+			return document.readyState + " loading=" + document.querySelector("#loading-view").hidden + " auth=" + document.querySelector("#auth-view").hidden + " registration=" + document.querySelector("#registration-view").hidden + " dialogOpen=" + document.querySelector("#action-dialog").open + " dialogDisplay=" + getComputedStyle(document.querySelector("#action-dialog")).display + " viewport=" + innerWidth + " adminHidden=" + admin.hidden + " adminDisplay=" + getComputedStyle(admin).display + " adminRect=" + adminRect.width + "x" + adminRect.height;
+		})()`, &documentState),
 	)
 	return "url=" + locationValue + " state=" + documentState + " alert=" + urgent
 }

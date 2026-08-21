@@ -18,6 +18,31 @@ type boundedStorageMapProvider struct {
 	rootCount int
 }
 
+type storageMapListProvider struct {
+	provider.Storage
+	list func(domain.ListRequest) (domain.ListPage, error)
+}
+
+func (p storageMapListProvider) List(_ context.Context, _ domain.Scope, request domain.ListRequest) (domain.ListPage, error) {
+	return p.list(request)
+}
+
+func storageMapDirectory(path string, size, fileCount int64, version string) domain.Entry {
+	parsed := domain.MustParseUserPath(path)
+	return domain.Entry{
+		Path: parsed, Name: parsed.Name(), Kind: domain.EntryDirectory, Size: size, FileCount: fileCount,
+		Version: domain.Version(version), ModifiedAt: time.Unix(1, 0).UTC(),
+	}
+}
+
+func storageMapFile(path string, size int64, version string) domain.Entry {
+	parsed := domain.MustParseUserPath(path)
+	return domain.Entry{
+		Path: parsed, Name: parsed.Name(), Kind: domain.EntryFile, Size: size, FileCount: 1,
+		MediaType: "application/octet-stream", Version: domain.Version(version), ModifiedAt: time.Unix(1, 0).UTC(),
+	}
+}
+
 func (p *boundedStorageMapProvider) List(_ context.Context, _ domain.Scope, request domain.ListRequest) (domain.ListPage, error) {
 	p.calls = append(p.calls, request)
 	if request.Directory.IsRoot() {
@@ -132,5 +157,105 @@ func TestStorageMapBuildsOneBoundedSnapshotCheckedHierarchy(t *testing.T) {
 		if request.PageSize > storageMapChildrenPerDirectory+1 || request.Sort != domain.SortSize || !request.Descending {
 			t.Fatalf("unbounded child request = %+v", request)
 		}
+	}
+}
+
+func TestStorageMapFailsClosedForInvalidScopesAndProviderPages(t *testing.T) {
+	root := storageMapDirectory("/", 100, 1, "root-version")
+	directory := storageMapDirectory("/directory", 100, 1, "directory-version")
+	validUserID, err := domain.ParseUserID(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x51}, 16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&Service{}).StorageMap(context.Background(), domain.UserID{}, domain.MustParseUserPath("/")); err == nil {
+		t.Fatal("invalid owner scope was accepted")
+	}
+
+	tests := []struct {
+		name    string
+		list    func(domain.ListRequest) (domain.ListPage, error)
+		wantErr bool
+	}{
+		{
+			name: "root provider failure",
+			list: func(domain.ListRequest) (domain.ListPage, error) {
+				return domain.ListPage{}, domain.NewError(domain.ErrorUnavailable, "list unavailable")
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid root",
+			list: func(domain.ListRequest) (domain.ListPage, error) {
+				return domain.ListPage{}, nil
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid root child",
+			list: func(domain.ListRequest) (domain.ListPage, error) {
+				invalid := storageMapFile("/file.bin", 100, "file-version")
+				invalid.Name = "different.bin"
+				return domain.ListPage{Current: root, Entries: []domain.Entry{invalid}}, nil
+			},
+			wantErr: true,
+		},
+		{
+			name: "removed child directory",
+			list: func(request domain.ListRequest) (domain.ListPage, error) {
+				if request.Directory.IsRoot() {
+					return domain.ListPage{Current: root, Entries: []domain.Entry{directory}}, nil
+				}
+				return domain.ListPage{}, domain.NewError(domain.ErrorNotFound, "directory removed")
+			},
+		},
+		{
+			name: "child provider failure",
+			list: func(request domain.ListRequest) (domain.ListPage, error) {
+				if request.Directory.IsRoot() {
+					return domain.ListPage{Current: root, Entries: []domain.Entry{directory}}, nil
+				}
+				return domain.ListPage{}, domain.NewError(domain.ErrorUnavailable, "list unavailable")
+			},
+			wantErr: true,
+		},
+		{
+			name: "unbounded child page",
+			list: func(request domain.ListRequest) (domain.ListPage, error) {
+				if request.Directory.IsRoot() {
+					return domain.ListPage{Current: root, Entries: []domain.Entry{directory}}, nil
+				}
+				entries := make([]domain.Entry, storageMapChildrenPerDirectory+2)
+				for index := range entries {
+					entries[index] = storageMapFile(fmt.Sprintf("/directory/file-%02d.bin", index), 1, fmt.Sprintf("file-version-%02d", index))
+				}
+				return domain.ListPage{Current: directory, Entries: entries}, nil
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid nested child",
+			list: func(request domain.ListRequest) (domain.ListPage, error) {
+				if request.Directory.IsRoot() {
+					return domain.ListPage{Current: root, Entries: []domain.Entry{directory}}, nil
+				}
+				invalid := storageMapFile("/outside.bin", 1, "outside-version")
+				return domain.ListPage{Current: directory, Entries: []domain.Entry{invalid}}, nil
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &Service{storage: storageMapListProvider{list: test.list}}
+			page, err := service.StorageMap(context.Background(), validUserID, domain.MustParseUserPath("/"))
+			if test.wantErr && err == nil {
+				t.Fatalf("StorageMap() = %+v, want error", page)
+			}
+			if !test.wantErr && (err != nil || len(page.Entries) != 1 || len(page.Entries[0].Children) != 0) {
+				t.Fatalf("StorageMap() = %+v, %v; want unexpanded removed directory", page, err)
+			}
+		})
 	}
 }

@@ -246,6 +246,8 @@ func (b *Backend) AbortUpload(ctx context.Context, sealed []byte) error {
 		if requestErr != nil {
 			return domain.NewError(domain.ErrorInternal, "create GCS resumable cancellation request")
 		}
+		// Go otherwise omits Content-Length for a bodyless DELETE, but GCS requires an explicit zero.
+		request.TransferEncoding = []string{"identity"}
 		response, requestErr := b.transfer.httpClient.Do(request)
 		if requestErr != nil {
 			return domain.WrapError(domain.ErrorUnavailable, "GCS resumable cancellation failed", requestErr)

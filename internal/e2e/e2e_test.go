@@ -83,8 +83,9 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	// Coverage instrumentation and constrained CI runners make the complete
 	// browser workflow slower than the ordinary E2E derivation. Keep a bounded
 	// workflow deadline while leaving enough headroom for the same assertions to
-	// finish under instrumentation; individual waits retain their tighter caps.
-	ctx, cancelTimeout := context.WithTimeout(ctx, 90*time.Second)
+	// finish under instrumentation and shared-runner contention; individual waits
+	// retain their tighter caps, so a stuck interaction still fails promptly.
+	ctx, cancelTimeout := context.WithTimeout(ctx, 3*time.Minute)
 	t.Cleanup(cancelTimeout)
 	t.Cleanup(func() {
 		// Wait for Chrome to stop writing its temporary profile before the

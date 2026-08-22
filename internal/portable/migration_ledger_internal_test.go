@@ -101,9 +101,9 @@ func TestStorageSchemaReleaseLedgerDefinesDerivedValidityRanges(t *testing.T) {
 	want := map[storageSchemaID][]StorageSchemaReleaseRange{
 		"endlessfs-portable-v1/schema-001": {{First: "v0.1.0", Before: "v0.1.5"}},
 		"endlessfs-portable-v1/schema-002": nil,
-		"endlessfs-portable-v1/schema-003": {{First: "v0.1.5", Before: "v0.1.15"}},
-		"endlessfs-portable-v1/schema-004": {{First: "v0.1.15", Before: "v0.1.16"}},
-		"endlessfs-portable-v1/schema-005": {{First: "v0.1.16"}},
+		"endlessfs-portable-v1/schema-003": {{First: "v0.1.5", Before: "v0.2.0"}},
+		"endlessfs-portable-v1/schema-004": nil,
+		"endlessfs-portable-v1/schema-005": {{First: "v0.2.0"}},
 	}
 	for _, schema := range storageSchemaLedger {
 		got := releaseRangesForSchema(schema.id)
@@ -140,9 +140,10 @@ func TestStorageSchemaLedgerResolvesReleaseValidityRanges(t *testing.T) {
 		{release: "v0.1.4", want: storageSchema001, found: true},
 		{release: "v0.1.5", want: storageSchema003, found: true},
 		{release: "v0.1.14", want: storageSchema003, found: true},
-		{release: "v0.1.15", want: storageSchema004, found: true},
-		{release: "v0.1.16", want: "endlessfs-portable-v1/schema-005", found: true},
-		{release: "v0.1.999", want: "endlessfs-portable-v1/schema-005", found: true},
+		{release: "v0.1.15", want: storageSchema003, found: true},
+		{release: "v0.1.999", want: storageSchema003, found: true},
+		{release: "v0.2.0", want: "endlessfs-portable-v1/schema-005", found: true},
+		{release: "v0.2.999", want: "endlessfs-portable-v1/schema-005", found: true},
 		{release: "v0.0.9"},
 		{release: "0.1.7"},
 		{release: "v0.1"},

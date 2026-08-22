@@ -67,7 +67,7 @@ func TestGenerateSchema005MigrationFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-005-v0.1.16-"+profile.name+".json")
+			path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-005-v0.2.0-"+profile.name+".json")
 			if err := os.WriteFile(path, body, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -143,7 +143,7 @@ func buildSchema005MigrationFixture(t *testing.T, commit string, seed byte, writ
 		t.Fatal(err)
 	}
 	return applicationMigrationFixture{
-		SchemaVersion: 1, SourceRelease: "v0.1.16", SourceCommit: commit, CreatedAt: createdAt,
+		SchemaVersion: 1, SourceRelease: "v0.2.0", SourceCommit: commit, CreatedAt: createdAt,
 		UserID: user.String(), StateObjects: stateBackend.Export(), FileObjects: fileBackend.Export(),
 	}
 }

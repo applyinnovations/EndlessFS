@@ -235,6 +235,15 @@ func (s *FileStore) markDirectoryTree(ctx context.Context, session storageformat
 			if err := s.markDirectoryIndexTree(ctx, session, scope, directoryID, reference, visiting, make(map[string]struct{})); err != nil {
 				return err
 			}
+			for _, field := range directorySecondarySorts {
+				sortRoot, err := s.directorySortIndexRoot(ctx, scope, directoryID, snapshot.manifest, field)
+				if err != nil {
+					return err
+				}
+				if err := s.markDirectorySortIndexTree(ctx, session, scope, directoryID, field, sortRoot, make(map[string]struct{})); err != nil {
+					return err
+				}
+			}
 		}
 		manifestKey := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, snapshot.manifestID)
 		if err := s.engine.ensureGarbageCollectionMark(ctx, session, garbageCollectionStateRole, manifestKey); err != nil {
@@ -242,6 +251,29 @@ func (s *FileStore) markDirectoryTree(ctx context.Context, session storageformat
 		}
 	}
 	return s.engine.ensureGarbageCollectionMark(ctx, session, garbageCollectionStateRole, rootKey)
+}
+
+func (s *FileStore) markDirectorySortIndexTree(ctx context.Context, session storageformat.GarbageCollectionSession, scope domain.Scope, directoryID string, field domain.SortField, reference storageformat.DirectorySortIndexChild, visiting map[string]struct{}) error {
+	key := storageformat.DirectorySortIndexNodeKey(scope.UserID().String(), areaName(scope.Area()), directoryID, field, reference.NodeID)
+	if _, cycle := visiting[key.String()]; cycle {
+		return domain.NewError(domain.ErrorInvalid, "directory sort-index cycle encountered during garbage collection")
+	}
+	marked, err := s.engine.garbageCollectionMarked(ctx, session, garbageCollectionStateRole, key)
+	if err != nil || marked {
+		return err
+	}
+	visiting[key.String()] = struct{}{}
+	defer delete(visiting, key.String())
+	node, err := s.readDirectorySortIndexNode(ctx, scope, directoryID, field, reference)
+	if err != nil {
+		return err
+	}
+	for _, child := range node.Children {
+		if err := s.markDirectorySortIndexTree(ctx, session, scope, directoryID, field, child, visiting); err != nil {
+			return err
+		}
+	}
+	return s.engine.ensureGarbageCollectionMark(ctx, session, garbageCollectionStateRole, key)
 }
 
 func (s *FileStore) markDirectoryIndexTree(ctx context.Context, session storageformat.GarbageCollectionSession, scope domain.Scope, directoryID string, reference storageformat.DirectoryIndexChild, directoryVisiting, indexVisiting map[string]struct{}) error {

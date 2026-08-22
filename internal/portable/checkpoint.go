@@ -2,13 +2,9 @@ package portable
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/base64"
 	"errors"
 	"math"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -22,7 +18,6 @@ const (
 	checkpointSchema                = "checkpoint-v1"
 	checkpointSchemaV2              = "checkpoint-v2"
 	checkpointSchemaV3              = "checkpoint-v3"
-	checkpointWorkSchema            = "checkpoint-work-v1"
 	checkpointInventoryPageSchema   = "checkpoint-inventory-page-v1"
 	checkpointInventoryPageSchemaV2 = "checkpoint-inventory-page-v2"
 	checkpointInventoryPageEntries  = 512
@@ -198,20 +193,6 @@ func (e *Engine) VerifyCheckpoint(ctx context.Context, checkpointID string) erro
 		return e.verifyCheckpointV3(ctx, checkpoint, gate)
 	}
 	return domain.NewError(domain.ErrorPreconditionFailed, "legacy SHA-only checkpoint requires replacement with metadata checkpoint v3 while writes remain closed")
-}
-
-func (e *Engine) verifyCheckpointInventory(checkpoint storageformat.Checkpoint, gate storageformat.WriteGate, objects []storageformat.CheckpointObject) error {
-	if gate.Mode != storageformat.GateClosed || gate.Epoch != checkpoint.GateEpoch || gate.CheckpointID != checkpoint.CheckpointID || checkpoint.WriterSetID != e.writer.WriterSetID {
-		return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint does not match closed write gate")
-	}
-	encoded, err := storageformat.EncodeCanonical(objects)
-	if err != nil {
-		return err
-	}
-	if storageformat.Digest(encoded) != checkpoint.InventoryDigest || !reflect.DeepEqual(objects, checkpoint.Objects) {
-		return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint inventory mismatch")
-	}
-	return nil
 }
 
 func (e *Engine) openWritesAfterCreatedCheckpoint(ctx context.Context, checkpoint storageformat.Checkpoint) error {
@@ -394,115 +375,6 @@ func checkpointInventorySeedV3(checkpointID string, gateEpoch uint64) string {
 	return storageformat.Digest([]byte("endlessfs-checkpoint-inventory-v3\x00" + checkpointID + "\x00" + strconv.FormatUint(gateEpoch, 10)))
 }
 
-func (e *Engine) prepareCheckpointInventory(ctx context.Context, checkpointID string, gateEpoch uint64) (checkpointInventorySummary, error) {
-	stateObjects, err := e.checkpointInventoryRole(ctx, e.backend, false, checkpointID, gateEpoch)
-	if err != nil {
-		return checkpointInventorySummary{}, err
-	}
-	var fileBackend objectstore.MetadataBackend = e.backend
-	if e.separateFileBackend {
-		fileBackend = e.fileBackend
-	}
-	fileObjects, err := e.checkpointInventoryRole(ctx, fileBackend, true, checkpointID, gateEpoch)
-	if err != nil {
-		return checkpointInventorySummary{}, err
-	}
-	if stateObjects > math.MaxUint64-fileObjects {
-		return checkpointInventorySummary{}, domain.NewError(domain.ErrorPreconditionFailed, "checkpoint object count overflow")
-	}
-	return e.buildCheckpointInventoryPages(ctx, checkpointID, gateEpoch, stateObjects, fileObjects)
-}
-
-func (e *Engine) checkpointInventoryRole(ctx context.Context, backend objectstore.MetadataBackend, fileData bool, checkpointID string, gateEpoch uint64) (uint64, error) {
-	totalObjects, totalBytes, err := e.checkpointRoleTotals(ctx, backend, fileData)
-	if err != nil {
-		return 0, err
-	}
-	var completedObjects uint64
-	var resumedObjects uint64
-	var completedBytes int64
-	migrationID := ""
-	if migration, found := migrationForCheckpoint(checkpointID); found {
-		migrationID = migration.id.String()
-	}
-	reportProgress := func() {
-		if completedObjects == totalObjects || completedObjects%64 == 0 {
-			role := "state"
-			if fileData {
-				role = "file"
-			}
-			e.observeMigration(MigrationProgress{
-				MigrationID: migrationID, Stage: MigrationStageCheckpointInventory, Role: role,
-				CompletedObjects: boundedProgressCount(completedObjects), TotalObjects: boundedProgressCount(totalObjects),
-				CompletedBytes: completedBytes, TotalBytes: totalBytes, ResumedObjects: boundedProgressCount(resumedObjects),
-			})
-		}
-	}
-	err = walkObjectInfos(ctx, backend, "endlessfs/v1/", func(info objectstore.ObjectInfo) error {
-		included, includeErr := e.checkpointRoleIncludes(info.Key.String(), fileData)
-		if includeErr != nil || !included {
-			return includeErr
-		}
-		entry, found, readErr := e.readCheckpointWorkEntry(ctx, checkpointID, gateEpoch, info.Key.String())
-		if readErr != nil {
-			return readErr
-		}
-		if found {
-			if entry.fileData != fileData || entry.object.Size != info.Size {
-				return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint work does not match authoritative object")
-			}
-			if _, verifyErr := backend.Verify(ctx, info.Key, objectstore.ExpectedIntegrity{Size: entry.object.Size, Checksum: objectstore.Checksum{Algorithm: objectstore.ChecksumCRC32C, Value: entry.crc32c}}); verifyErr != nil {
-				return verifyErr
-			}
-			resumedObjects++
-			completedObjects++
-			completedBytes = saturatingInventoryBytes(completedBytes, entry.object.Size)
-			reportProgress()
-			return nil
-		}
-		checkpointObject, crc32c, streamErr := streamCheckpointObject(ctx, backend, info)
-		if streamErr != nil {
-			return streamErr
-		}
-		progress := storageformat.CheckpointWork{SchemaVersion: 1, CheckpointID: checkpointID, GateEpoch: gateEpoch, FileData: fileData, Object: checkpointObject, CRC32C: crc32c}
-		if writeErr := e.writeCheckpointWork(ctx, progress); writeErr != nil {
-			return writeErr
-		}
-		completedObjects++
-		completedBytes = saturatingInventoryBytes(completedBytes, checkpointObject.Size)
-		reportProgress()
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-	if totalObjects == 0 {
-		reportProgress()
-	}
-	if completedObjects != totalObjects {
-		return 0, domain.NewError(domain.ErrorPreconditionFailed, "checkpoint inventory count changed")
-	}
-	return completedObjects, nil
-}
-
-func (e *Engine) checkpointRoleTotals(ctx context.Context, backend objectstore.MetadataBackend, fileData bool) (uint64, int64, error) {
-	var objects uint64
-	var totalBytes int64
-	err := walkObjectInfos(ctx, backend, "endlessfs/v1/", func(info objectstore.ObjectInfo) error {
-		included, err := e.checkpointRoleIncludes(info.Key.String(), fileData)
-		if err != nil || !included {
-			return err
-		}
-		if info.Size < 0 || objects == math.MaxUint64 {
-			return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint inventory size is invalid")
-		}
-		objects++
-		totalBytes = saturatingInventoryBytes(totalBytes, info.Size)
-		return nil
-	})
-	return objects, totalBytes, err
-}
-
 func (e *Engine) checkpointRoleIncludes(key string, fileData bool) (bool, error) {
 	if transientOrCheckpoint(key) {
 		return false, nil
@@ -539,134 +411,6 @@ func walkObjectInfos(ctx context.Context, backend objectstore.MetadataBackend, p
 	}
 }
 
-func (e *Engine) readCheckpointWorkEntry(ctx context.Context, checkpointID string, gateEpoch uint64, objectKey string) (checkpointWorkEntry, bool, error) {
-	key := storageformat.CheckpointWorkKey(checkpointID, objectKey)
-	object, err := e.backend.Get(ctx, key)
-	if errors.Is(err, domain.ErrNotFound) {
-		return checkpointWorkEntry{}, false, nil
-	}
-	if err != nil {
-		return checkpointWorkEntry{}, false, err
-	}
-	entry, err := e.decodeCheckpointWork(object, checkpointID, gateEpoch)
-	return entry, err == nil, err
-}
-
-func (e *Engine) decodeCheckpointWork(object objectstore.Object, checkpointID string, gateEpoch uint64) (checkpointWorkEntry, error) {
-	var envelope storageformat.Envelope
-	var progress storageformat.CheckpointWork
-	if err := storageformat.DecodeEnvelope(object.Body, object.Key, checkpointWorkSchema, &envelope, &progress); err != nil {
-		return checkpointWorkEntry{}, err
-	}
-	parsedKey, keyErr := objectstore.ParseKey(progress.Object.Key)
-	integrity := objectstore.ExpectedIntegrity{Size: progress.Object.Size, Checksum: objectstore.Checksum{Algorithm: objectstore.ChecksumCRC32C, Value: progress.CRC32C}}
-	if keyErr != nil || transientOrCheckpoint(progress.Object.Key) || progress.FileData != isFileDataKey(progress.Object.Key) || progress.SchemaVersion != 1 || progress.CheckpointID != checkpointID || progress.GateEpoch != gateEpoch || progress.Object.Size < 0 || progress.Object.SHA256 == "" || integrity.Validate() != nil || storageformat.CheckpointWorkKey(checkpointID, parsedKey.String()) != object.Key {
-		return checkpointWorkEntry{}, domain.NewError(domain.ErrorPreconditionFailed, "invalid checkpoint work record")
-	}
-	proof, proofErr := e.checkpointWorkProof(progress)
-	if proofErr != nil || !hmac.Equal([]byte(progress.Proof), []byte(proof)) {
-		return checkpointWorkEntry{}, domain.NewError(domain.ErrorPreconditionFailed, "checkpoint work authentication failed")
-	}
-	return checkpointWorkEntry{fileData: progress.FileData, object: progress.Object, crc32c: progress.CRC32C}, nil
-}
-
-func (e *Engine) writeCheckpointWork(ctx context.Context, progress storageformat.CheckpointWork) error {
-	proof, err := e.checkpointWorkProof(progress)
-	if err != nil {
-		return err
-	}
-	progress.Proof = proof
-	key := storageformat.CheckpointWorkKey(progress.CheckpointID, progress.Object.Key)
-	body, err := storageformat.EncodeEnvelope(checkpointWorkSchema, key, 1, progress)
-	if err != nil {
-		return err
-	}
-	if _, err := e.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-		if !errors.Is(err, domain.ErrConflict) {
-			return err
-		}
-		existing, readErr := e.backend.Get(ctx, key)
-		if readErr != nil || !reflect.DeepEqual(existing.Body, body) {
-			return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint work record conflict")
-		}
-	}
-	return nil
-}
-
-func (e *Engine) buildCheckpointInventoryPages(ctx context.Context, checkpointID string, gateEpoch, stateObjects, fileObjects uint64) (checkpointInventorySummary, error) {
-	previousDigest := checkpointInventorySeed(checkpointID, gateEpoch)
-	pageIndex := uint64(0)
-	entries := make([]storageformat.CheckpointInventoryEntry, 0, checkpointInventoryPageEntries)
-	var seenState uint64
-	var seenFile uint64
-	flush := func() error {
-		if len(entries) == 0 {
-			return nil
-		}
-		page := storageformat.CheckpointInventoryPage{SchemaVersion: 1, CheckpointID: checkpointID, GateEpoch: gateEpoch, Index: pageIndex, PreviousDigest: previousDigest, Entries: entries}
-		key := storageformat.CheckpointInventoryPageKey(checkpointID, pageIndex)
-		body, err := storageformat.EncodeEnvelope(checkpointInventoryPageSchema, key, 1, page)
-		if err != nil {
-			return err
-		}
-		if _, err := e.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-			if !errors.Is(err, domain.ErrConflict) {
-				return err
-			}
-			existing, readErr := e.backend.Get(ctx, key)
-			if readErr != nil || !reflect.DeepEqual(existing.Body, body) {
-				return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint inventory page conflict")
-			}
-		}
-		previousDigest = storageformat.Digest(body)
-		if pageIndex == math.MaxUint64 {
-			return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint inventory page count overflow")
-		}
-		pageIndex++
-		entries = make([]storageformat.CheckpointInventoryEntry, 0, checkpointInventoryPageEntries)
-		return nil
-	}
-	err := walkObjectInfos(ctx, e.backend, storageformat.CheckpointWorkPrefix(checkpointID), func(info objectstore.ObjectInfo) error {
-		object, err := e.backend.Get(ctx, info.Key)
-		if err != nil {
-			return err
-		}
-		entry, err := e.decodeCheckpointWork(object, checkpointID, gateEpoch)
-		if err != nil {
-			return err
-		}
-		if entry.fileData {
-			if seenFile == math.MaxUint64 {
-				return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint object count overflow")
-			}
-			seenFile++
-		} else {
-			if seenState == math.MaxUint64 {
-				return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint object count overflow")
-			}
-			seenState++
-		}
-		entries = append(entries, storageformat.CheckpointInventoryEntry{FileData: entry.fileData, Object: entry.object})
-		if len(entries) == checkpointInventoryPageEntries {
-			return flush()
-		}
-		return nil
-	})
-	if err != nil {
-		return checkpointInventorySummary{}, err
-	}
-	if err := flush(); err != nil {
-		return checkpointInventorySummary{}, err
-	}
-	if seenState != stateObjects || seenFile != fileObjects || pageIndex == 0 {
-		return checkpointInventorySummary{}, domain.NewError(domain.ErrorPreconditionFailed, "checkpoint work references a missing authoritative object")
-	}
-	if err := e.validateCheckpointPageSet(ctx, checkpointID, pageIndex); err != nil {
-		return checkpointInventorySummary{}, err
-	}
-	return checkpointInventorySummary{pageCount: pageIndex, stateObjects: stateObjects, fileObjects: fileObjects, inventoryDigest: previousDigest}, nil
-}
-
 func (e *Engine) validateCheckpointPageSet(ctx context.Context, checkpointID string, pageCount uint64) error {
 	var index uint64
 	err := walkObjectInfos(ctx, e.backend, storageformat.CheckpointInventoryPagePrefix(checkpointID), func(info objectstore.ObjectInfo) error {
@@ -683,18 +427,6 @@ func (e *Engine) validateCheckpointPageSet(ctx context.Context, checkpointID str
 		return domain.NewError(domain.ErrorPreconditionFailed, "missing checkpoint inventory page")
 	}
 	return nil
-}
-
-func checkpointInventorySeed(checkpointID string, gateEpoch uint64) string {
-	return storageformat.Digest([]byte("endlessfs-checkpoint-inventory-v2\x00" + checkpointID + "\x00" + strconv.FormatUint(gateEpoch, 10)))
-}
-
-func boundedProgressCount(value uint64) int {
-	maximum := uint64(^uint(0) >> 1)
-	if value > maximum {
-		return int(maximum)
-	}
-	return int(value)
 }
 
 func saturatingInventoryBytes(current, add int64) int64 {
@@ -751,7 +483,7 @@ func (e *Engine) visitCheckpointInventory(ctx context.Context, checkpoint storag
 	}
 	pageSchema := checkpointInventoryPageSchema
 	pageVersion := 1
-	previousDigest := checkpointInventorySeed(checkpoint.CheckpointID, checkpoint.GateEpoch)
+	previousDigest := storageformat.Digest([]byte("endlessfs-checkpoint-inventory-v2\x00" + checkpoint.CheckpointID + "\x00" + strconv.FormatUint(checkpoint.GateEpoch, 10)))
 	if checkpoint.SchemaVersion == 3 {
 		pageSchema = checkpointInventoryPageSchemaV2
 		pageVersion = 2
@@ -1005,67 +737,6 @@ func (e *Engine) walkCheckpointMetadata(ctx context.Context, visit func(objectst
 			return err
 		}
 	}
-}
-
-func (e *Engine) authoritativeInventory(ctx context.Context) ([]storageformat.CheckpointObject, error) {
-	objects, err := e.authoritativeInventoryFrom(ctx, e.backend, false)
-	if err != nil {
-		return nil, err
-	}
-	if e.separateFileBackend {
-		fileObjects, fileErr := e.authoritativeInventoryFrom(ctx, e.fileBackend, true)
-		if fileErr != nil {
-			return nil, fileErr
-		}
-		objects = append(objects, fileObjects...)
-	}
-	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
-	return objects, nil
-}
-
-type checkpointWorkEntry struct {
-	fileData bool
-	object   storageformat.CheckpointObject
-	crc32c   string
-}
-
-func (e *Engine) checkpointWorkProof(progress storageformat.CheckpointWork) (string, error) {
-	if len(e.checkpointWorkKey) != 32 {
-		return "", domain.NewError(domain.ErrorInvalid, "checkpoint work key is unavailable")
-	}
-	progress.Proof = ""
-	body, err := storageformat.EncodeCanonical(progress)
-	if err != nil {
-		return "", err
-	}
-	mac := hmac.New(sha256.New, e.checkpointWorkKey)
-	_, _ = mac.Write([]byte("endlessfs-checkpoint-work-v1"))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write(body)
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
-}
-
-func (e *Engine) authoritativeInventoryFrom(ctx context.Context, backend objectstore.MetadataBackend, fileData bool) ([]storageformat.CheckpointObject, error) {
-	infos, err := listAllFrom(ctx, backend, "endlessfs/v1/")
-	if err != nil {
-		return nil, err
-	}
-	objects := make([]storageformat.CheckpointObject, 0, len(infos))
-	for _, info := range infos {
-		key := info.Key.String()
-		if transientOrCheckpoint(key) {
-			continue
-		}
-		if e.separateFileBackend && fileData != isFileDataKey(key) {
-			return nil, domain.NewError(domain.ErrorPreconditionFailed, "canonical object is stored in the wrong backend")
-		}
-		entry, _, streamErr := streamCheckpointObject(ctx, backend, info)
-		if streamErr != nil {
-			return nil, streamErr
-		}
-		objects = append(objects, entry)
-	}
-	return objects, nil
 }
 
 func isFileDataKey(key string) bool {

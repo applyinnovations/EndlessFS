@@ -104,12 +104,13 @@ type listCursor struct {
 	PageSize       int              `json:"pageSize"`
 	Sort           domain.SortField `json:"sort"`
 	Descending     bool             `json:"descending"`
-	// Index is retained for the materialized secondary-sort cursor.
-	Index       int       `json:"index,omitempty"`
-	AfterName   string    `json:"afterName,omitempty"`
-	GateEpoch   uint64    `json:"gateEpoch"`
-	GateVersion string    `json:"gateVersion"`
-	ExpiresAt   time.Time `json:"expiresAt"`
+	// Index is retained only to reject historical materialized-sort cursors.
+	Index        int       `json:"index,omitempty"`
+	AfterName    string    `json:"afterName,omitempty"`
+	AfterSortKey string    `json:"afterSortKey,omitempty"`
+	GateEpoch    uint64    `json:"gateEpoch"`
+	GateVersion  string    `json:"gateVersion"`
+	ExpiresAt    time.Time `json:"expiresAt"`
 }
 
 func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain.ListRequest) (domain.ListPage, error) {
@@ -133,16 +134,16 @@ func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain
 	if err != nil {
 		return domain.ListPage{}, err
 	}
-	start := 0
 	afterName := ""
+	afterSortKey := ""
 	var directoryID, manifestID, parentID, parentManifest string
 	var manifest storageformat.DirectoryManifest
 	var current domain.Entry
 	var entries []storageformat.DirectoryEntry
 	if request.Cursor != "" {
 		cursor, decodeErr := s.decodeListCursor(request.Cursor)
-		nameCursor := request.Sort == domain.SortName && cursor.SchemaVersion == 3 && cursor.AfterName != "" && cursor.Index == 0
-		secondaryCursor := request.Sort != domain.SortName && cursor.SchemaVersion == 2 && cursor.Index >= 1 && cursor.AfterName == ""
+		nameCursor := request.Sort == domain.SortName && cursor.SchemaVersion == 3 && cursor.AfterName != "" && cursor.AfterSortKey == "" && cursor.Index == 0
+		secondaryCursor := request.Sort != domain.SortName && cursor.SchemaVersion == 4 && cursor.AfterSortKey != "" && cursor.AfterName == "" && cursor.Index == 0
 		if decodeErr != nil || cursor.UserID != scope.UserID().String() || cursor.Area != areaName(scope.Area()) || cursor.DirectoryPath != request.Directory.String() || cursor.DirectoryID == "" || cursor.PageSize != pageSize || cursor.Sort != request.Sort || cursor.Descending != request.Descending || (!nameCursor && !secondaryCursor) || cursor.ManifestID == "" || cursor.GateEpoch != gate.Epoch || cursor.GateVersion != gateEnvelope.LogicalVersion || !s.engine.clock.Now().Before(cursor.ExpiresAt) || (request.Directory.IsRoot() && (cursor.ParentID != "" || cursor.ParentManifest != "")) || (!request.Directory.IsRoot() && (cursor.ParentID == "" || cursor.ParentManifest == "")) {
 			return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "invalid or out-of-scope list cursor")
 		}
@@ -171,14 +172,7 @@ func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain
 		if request.Sort == domain.SortName {
 			afterName = cursor.AfterName
 		} else {
-			entries, err = s.readManifestPageEntries(ctx, scope, directoryID, manifest)
-			if err != nil {
-				return domain.ListPage{}, err
-			}
-			start = cursor.Index
-			if start > len(entries) {
-				return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "invalid list cursor offset")
-			}
+			afterSortKey = cursor.AfterSortKey
 		}
 	} else {
 		view, err := s.resolveDirectoryMetadataView(ctx, scope, request.Directory)
@@ -187,12 +181,6 @@ func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain
 		}
 		directoryID, manifestID, parentID, parentManifest = view.directoryID, view.snapshot.manifestID, view.parentID, view.parentManifest
 		manifest, current = view.snapshot.manifest, view.current
-		if request.Sort != domain.SortName {
-			entries, err = s.readManifestPageEntries(ctx, scope, directoryID, manifest)
-			if err != nil {
-				return domain.ListPage{}, err
-			}
-		}
 	}
 	if request.Sort == domain.SortName {
 		entries, err = s.collectDirectoryIndexEntries(ctx, scope, directoryID, manifest, afterName, request.Descending, pageSize+1)
@@ -222,26 +210,29 @@ func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain
 		}
 		return page, nil
 	}
-	result := make([]domain.Entry, 0, len(entries))
-	for _, entry := range entries {
+	entries, err = s.collectDirectorySortIndexEntries(ctx, scope, directoryID, manifest, request.Sort, afterSortKey, request.Descending, pageSize+1)
+	if err != nil {
+		return domain.ListPage{}, err
+	}
+	result := make([]domain.Entry, 0, min(pageSize, len(entries)))
+	for _, entry := range entries[:min(pageSize, len(entries))] {
 		path, joinErr := request.Directory.Join(entry.Name)
 		if joinErr != nil {
 			return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "stored directory name is invalid")
 		}
 		result = append(result, domainEntry(path, entry))
 	}
-	sortDomainEntries(result, request.Sort, request.Descending)
-	if start == len(result) {
-		return domain.ListPage{Current: current, Entries: []domain.Entry{}}, nil
-	}
-	end := min(start+pageSize, len(result))
-	page := domain.ListPage{Current: current, Entries: append([]domain.Entry(nil), result[start:end]...)}
-	if end < len(result) {
+	page := domain.ListPage{Current: current, Entries: result}
+	if len(entries) > pageSize {
+		after, keyErr := directorySortKey(request.Sort, entries[pageSize-1])
+		if keyErr != nil {
+			return domain.ListPage{}, keyErr
+		}
 		page.NextCursor, err = s.encodeListCursor(listCursor{
-			SchemaVersion: 2, UserID: scope.UserID().String(), Area: areaName(scope.Area()),
+			SchemaVersion: 4, UserID: scope.UserID().String(), Area: areaName(scope.Area()),
 			DirectoryPath: request.Directory.String(), DirectoryID: directoryID, ManifestID: manifestID,
 			ParentID: parentID, ParentManifest: parentManifest,
-			PageSize: pageSize, Sort: request.Sort, Descending: request.Descending, Index: end,
+			PageSize: pageSize, Sort: request.Sort, Descending: request.Descending, AfterSortKey: after,
 			GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion, ExpiresAt: s.engine.clock.Now().UTC().Add(s.engine.cursorTTL),
 		})
 		if err != nil {
@@ -748,7 +739,7 @@ func (s *FileStore) readDirectoryManifest(ctx context.Context, scope domain.Scop
 	}
 	accumulator, accumulatorErr := decodeDirectoryContentAccumulator(manifest.ContentAccumulator)
 	expectedDigest, digestErr := directoryContentAccumulatorDigest(accumulator, manifest.EntryCount)
-	if manifest.SchemaVersion != 2 || manifest.DirectoryID != directoryID || manifest.ManifestID != manifestID || manifest.EntryCount < 0 || manifest.RecursiveBytes < 0 || manifest.RecursiveFileCount < 0 || accumulatorErr != nil || digestErr != nil || manifest.ContentDigest == "" || expectedDigest != manifest.ContentDigest || len(manifest.PageIDs) != 0 || manifest.EntryCount == 0 && (manifest.IndexRootID != "" || manifest.IndexRootDigest != "") || manifest.EntryCount > 0 && (manifest.IndexRootID == "" || manifest.IndexRootDigest == "") {
+	if manifest.SchemaVersion != 2 || manifest.DirectoryID != directoryID || manifest.ManifestID != manifestID || manifest.EntryCount < 0 || manifest.RecursiveBytes < 0 || manifest.RecursiveFileCount < 0 || accumulatorErr != nil || digestErr != nil || manifest.ContentDigest == "" || expectedDigest != manifest.ContentDigest || len(manifest.PageIDs) != 0 || manifest.EntryCount == 0 && (manifest.IndexRootID != "" || manifest.IndexRootDigest != "") || manifest.EntryCount > 0 && (manifest.IndexRootID == "" || manifest.IndexRootDigest == "") || validateDirectorySortIndexRoots(manifest.SortIndexes, manifest.EntryCount) != nil {
 		return storageformat.DirectoryManifest{}, domain.NewError(domain.ErrorInvalid, "invalid directory manifest")
 	}
 	return manifest, nil
@@ -808,11 +799,16 @@ func (s *FileStore) prepareDirectory(ctx context.Context, scope domain.Scope, di
 	if err != nil {
 		return preparedDirectory{}, err
 	}
+	sortRoots, sortNodes, err := s.buildDirectorySortIndexes(scope, directoryID, entries)
+	if err != nil {
+		return preparedDirectory{}, err
+	}
+	nodes = append(nodes, sortNodes...)
 	contentAccumulator, contentDigest, err := directoryContentIdentity(entries)
 	if err != nil {
 		return preparedDirectory{}, err
 	}
-	return s.prepareDirectoryWithIndex(scope, directoryID, entries, revision, indexRoot, nodes, contentAccumulator, contentDigest)
+	return s.prepareDirectoryWithIndex(scope, directoryID, entries, revision, indexRoot, sortRoots, nodes, contentAccumulator, contentDigest)
 }
 
 func (s *FileStore) prepareDirectoryUpdate(ctx context.Context, scope domain.Scope, directoryID string, snapshot directorySnapshot, entries []storageformat.DirectoryEntry, revision uint64) (preparedDirectory, error) {
@@ -824,11 +820,16 @@ func (s *FileStore) prepareDirectoryUpdate(ctx context.Context, scope domain.Sco
 		if err != nil {
 			return preparedDirectory{}, err
 		}
+		sortRoots, sortNodes, err := s.buildDirectorySortIndexes(scope, directoryID, entries)
+		if err != nil {
+			return preparedDirectory{}, err
+		}
+		nodes = append(nodes, sortNodes...)
 		contentAccumulator, contentDigest, err := directoryContentIdentity(entries)
 		if err != nil {
 			return preparedDirectory{}, err
 		}
-		return s.prepareDirectoryWithIndex(scope, directoryID, entries, revision, indexRoot, nodes, contentAccumulator, contentDigest)
+		return s.prepareDirectoryWithIndex(scope, directoryID, entries, revision, indexRoot, sortRoots, nodes, contentAccumulator, contentDigest)
 	}
 	if !snapshot.exists || snapshot.manifest.SchemaVersion != 2 || snapshot.manifest.EntryCount != len(snapshot.entries) {
 		return preparedDirectory{}, domain.NewError(domain.ErrorInvalid, "directory update has no current index snapshot")
@@ -837,11 +838,30 @@ func (s *FileStore) prepareDirectoryUpdate(ctx context.Context, scope domain.Sco
 	if err != nil {
 		return preparedDirectory{}, err
 	}
+	names, replacements := directoryEntryChanges(snapshot.entries, entries)
+	changes := make(map[string]directoryEntryMutation, len(names))
+	old := make(map[string]storageformat.DirectoryEntry, len(snapshot.entries))
+	for _, entry := range snapshot.entries {
+		old[entry.Name] = entry
+	}
+	for _, name := range names {
+		change := directoryEntryMutation{after: replacements[name]}
+		if entry, found := old[name]; found {
+			before := entry
+			change.before = &before
+		}
+		changes[name] = change
+	}
+	sortRoots, sortNodes, err := s.mutateDirectorySortIndexes(ctx, scope, directoryID, snapshot.manifest, changes, len(entries))
+	if err != nil {
+		return preparedDirectory{}, err
+	}
+	nodes = append(nodes, sortNodes...)
 	contentAccumulator, contentDigest, err := updateDirectoryContentIdentity(snapshot.contentAccumulator, snapshot.entries, entries)
 	if err != nil {
 		return preparedDirectory{}, err
 	}
-	return s.prepareDirectoryWithIndex(scope, directoryID, entries, revision, indexRoot, nodes, contentAccumulator, contentDigest)
+	return s.prepareDirectoryWithIndex(scope, directoryID, entries, revision, indexRoot, sortRoots, nodes, contentAccumulator, contentDigest)
 }
 
 func (s *FileStore) prepareDirectoryMutation(ctx context.Context, update directoryUpdate, revision uint64) (preparedDirectory, error) {
@@ -859,13 +879,18 @@ func (s *FileStore) prepareDirectoryMutation(ctx context.Context, update directo
 	if err != nil {
 		return preparedDirectory{}, err
 	}
+	sortRoots, sortNodes, err := s.mutateDirectorySortIndexes(ctx, update.scope, update.directoryID, manifest, update.changes, update.entryCount)
+	if err != nil {
+		return preparedDirectory{}, err
+	}
+	nodes = append(nodes, sortNodes...)
 	if update.entryCount > 0 && (indexRoot.EntryCount != uint64(update.entryCount) || indexRoot.RecursiveBytes != update.recursiveBytes || indexRoot.RecursiveFileCount != update.recursiveFileCount) {
 		return preparedDirectory{}, domain.NewError(domain.ErrorInvalid, "directory mutation index aggregate mismatch")
 	}
-	return s.prepareDirectoryWithIndexAggregates(update.scope, update.directoryID, update.entryCount, update.recursiveBytes, update.recursiveFileCount, revision, indexRoot, nodes, update.contentAccumulator, update.contentDigest)
+	return s.prepareDirectoryWithIndexAggregates(update.scope, update.directoryID, update.entryCount, update.recursiveBytes, update.recursiveFileCount, revision, indexRoot, sortRoots, nodes, update.contentAccumulator, update.contentDigest)
 }
 
-func (s *FileStore) prepareDirectoryWithIndex(scope domain.Scope, directoryID string, entries []storageformat.DirectoryEntry, revision uint64, indexRoot storageformat.DirectoryIndexChild, nodes []storageformat.MutationObject, contentAccumulator, contentDigest string) (preparedDirectory, error) {
+func (s *FileStore) prepareDirectoryWithIndex(scope domain.Scope, directoryID string, entries []storageformat.DirectoryEntry, revision uint64, indexRoot storageformat.DirectoryIndexChild, sortRoots []storageformat.DirectorySortIndexRoot, nodes []storageformat.MutationObject, contentAccumulator, contentDigest string) (preparedDirectory, error) {
 	recursiveBytes, err := recursiveByteSize(entries)
 	if err != nil {
 		return preparedDirectory{}, err
@@ -874,11 +899,11 @@ func (s *FileStore) prepareDirectoryWithIndex(scope domain.Scope, directoryID st
 	if err != nil {
 		return preparedDirectory{}, err
 	}
-	return s.prepareDirectoryWithIndexAggregates(scope, directoryID, len(entries), recursiveBytes, fileCount, revision, indexRoot, nodes, contentAccumulator, contentDigest)
+	return s.prepareDirectoryWithIndexAggregates(scope, directoryID, len(entries), recursiveBytes, fileCount, revision, indexRoot, sortRoots, nodes, contentAccumulator, contentDigest)
 }
 
-func (s *FileStore) prepareDirectoryWithIndexAggregates(scope domain.Scope, directoryID string, entryCount int, recursiveBytes, fileCount int64, revision uint64, indexRoot storageformat.DirectoryIndexChild, nodes []storageformat.MutationObject, contentAccumulator, contentDigest string) (preparedDirectory, error) {
-	if entryCount < 0 || recursiveBytes < 0 || fileCount < 0 || entryCount == 0 && (indexRoot.NodeID != "" || indexRoot.NodeDigest != "") || entryCount > 0 && (indexRoot.NodeID == "" || indexRoot.NodeDigest == "") {
+func (s *FileStore) prepareDirectoryWithIndexAggregates(scope domain.Scope, directoryID string, entryCount int, recursiveBytes, fileCount int64, revision uint64, indexRoot storageformat.DirectoryIndexChild, sortRoots []storageformat.DirectorySortIndexRoot, nodes []storageformat.MutationObject, contentAccumulator, contentDigest string) (preparedDirectory, error) {
+	if entryCount < 0 || recursiveBytes < 0 || fileCount < 0 || entryCount == 0 && (indexRoot.NodeID != "" || indexRoot.NodeDigest != "") || entryCount > 0 && (indexRoot.NodeID == "" || indexRoot.NodeDigest == "") || validateDirectorySortIndexRoots(sortRoots, entryCount) != nil {
 		return preparedDirectory{}, domain.NewError(domain.ErrorInvalid, "invalid directory index aggregates")
 	}
 	accumulator, err := decodeDirectoryContentAccumulator(contentAccumulator)
@@ -896,7 +921,7 @@ func (s *FileStore) prepareDirectoryWithIndexAggregates(scope domain.Scope, dire
 	manifestKey := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifestID)
 	manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, storageformat.DirectoryManifest{
 		SchemaVersion: 2, DirectoryID: directoryID, ManifestID: manifestID, IndexRootID: indexRoot.NodeID, IndexRootDigest: indexRoot.NodeDigest,
-		EntryCount: entryCount, RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount, ContentAccumulator: contentAccumulator, ContentDigest: contentDigest, CreatedAt: s.engine.clock.Now().UTC(),
+		SortIndexes: sortRoots, EntryCount: entryCount, RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount, ContentAccumulator: contentAccumulator, ContentDigest: contentDigest, CreatedAt: s.engine.clock.Now().UTC(),
 	})
 	if err != nil {
 		return preparedDirectory{}, err
@@ -1548,7 +1573,7 @@ func decodeListCursor(value string) (listCursor, error) {
 	if err := decodeCanonicalValue(body, &cursor); err != nil {
 		return listCursor{}, err
 	}
-	if cursor.SchemaVersion != 2 && cursor.SchemaVersion != 3 {
+	if cursor.SchemaVersion != 2 && cursor.SchemaVersion != 3 && cursor.SchemaVersion != 4 {
 		return listCursor{}, domain.NewError(domain.ErrorInvalid, "invalid list cursor schema")
 	}
 	return cursor, nil

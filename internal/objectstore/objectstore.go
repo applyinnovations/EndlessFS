@@ -63,9 +63,9 @@ type Object struct {
 	Size    int64
 }
 
-// ObjectReader streams one immutable object at a fixed native version. Large
-// file bodies must not be materialized in process memory merely to hash or
-// verify them.
+// ObjectReader streams one immutable object at a fixed native version. It is
+// absent from the ordinary file-control boundary and is available only to an
+// explicitly exempt optional feature such as image preview generation.
 type ObjectReader struct {
 	Key     Key
 	Body    io.ReadCloser
@@ -107,9 +107,9 @@ func FingerprintFor(body []byte) ContentFingerprint {
 }
 
 // ExpectedIntegrity is a provider-independent assertion about one immutable
-// object body. Backends may satisfy it from native integrity metadata or by
-// reading and hashing the body, but native checksum values never cross this
-// boundary or become durable application state.
+// object body. Production backends satisfy it from provider integrity
+// metadata; the Go service never downloads a stored file merely to verify it.
+// Native checksum encodings never cross this boundary or become durable state.
 type ExpectedIntegrity struct {
 	Size     int64
 	Checksum Checksum

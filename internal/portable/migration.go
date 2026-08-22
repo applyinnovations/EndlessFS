@@ -1022,7 +1022,7 @@ func validateMigrationManifest(manifest storageformat.DirectoryManifest, directo
 	if manifest.SchemaVersion == 2 {
 		accumulator, accumulatorErr := decodeDirectoryContentAccumulator(manifest.ContentAccumulator)
 		digest, digestErr := directoryContentAccumulatorDigest(accumulator, manifest.EntryCount)
-		validShape = accumulatorErr == nil && digestErr == nil && digest == manifest.ContentDigest && len(manifest.PageIDs) == 0 && (manifest.EntryCount == 0 && manifest.IndexRootID == "" && manifest.IndexRootDigest == "" || manifest.EntryCount > 0 && manifest.IndexRootID != "" && manifest.IndexRootDigest != "")
+		validShape = accumulatorErr == nil && digestErr == nil && digest == manifest.ContentDigest && len(manifest.PageIDs) == 0 && validateDirectorySortIndexRoots(manifest.SortIndexes, manifest.EntryCount) == nil && (manifest.EntryCount == 0 && manifest.IndexRootID == "" && manifest.IndexRootDigest == "" || manifest.EntryCount > 0 && manifest.IndexRootID != "" && manifest.IndexRootDigest != "")
 	}
 	if !validShape || manifest.DirectoryID != directoryID || manifest.ManifestID != manifestID || manifest.EntryCount < 0 || manifest.RecursiveBytes < 0 || manifest.RecursiveFileCount < 0 || manifest.CreatedAt.IsZero() {
 		return domain.NewError(domain.ErrorInvalid, fmt.Sprintf("invalid directory manifest during migration (schema=%d entries=%d pages=%d index=%t)", manifest.SchemaVersion, manifest.EntryCount, len(manifest.PageIDs), manifest.IndexRootID != ""))
@@ -1057,10 +1057,15 @@ func (e *Engine) prepareMigratedDirectory(scope domain.Scope, directoryID string
 		if err != nil {
 			return preparedDirectory{}, err
 		}
+		sortRoots, sortNodes, err := e.Files().buildDirectorySortIndexes(scope, directoryID, entries)
+		if err != nil {
+			return preparedDirectory{}, err
+		}
+		nodes = append(nodes, sortNodes...)
 		manifestKey := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifestID)
 		manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, storageformat.DirectoryManifest{
 			SchemaVersion: 2, DirectoryID: directoryID, ManifestID: manifestID,
-			IndexRootID: indexRoot.NodeID, IndexRootDigest: indexRoot.NodeDigest,
+			IndexRootID: indexRoot.NodeID, IndexRootDigest: indexRoot.NodeDigest, SortIndexes: sortRoots,
 			EntryCount: len(entries), RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount, ContentAccumulator: contentAccumulator, ContentDigest: contentDigest, CreatedAt: createdAt,
 		})
 		if err != nil {

@@ -99,7 +99,6 @@ type Engine struct {
 	cursorTTL           time.Duration
 	scheduler           Scheduler
 	migrationObserver   func(MigrationProgress)
-	checkpointWorkKey   []byte
 
 	admissionSequence atomic.Uint64
 }
@@ -137,7 +136,7 @@ func Open(ctx context.Context, options Options) (*Engine, error) {
 	if fileBackend == nil {
 		fileBackend = options.Backend
 	}
-	engine := &Engine{backend: options.Backend, fileBackend: fileBackend, separateFileBackend: separateFileBackend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, uploadTTL: options.UploadTTL, downloadTTL: options.DownloadTTL, cursorAEAD: cursorAEAD, cursorTTL: options.CursorTTL, scheduler: options.Scheduler, migrationObserver: options.MigrationObserver, checkpointWorkKey: append([]byte(nil), options.CursorKey...)}
+	engine := &Engine{backend: options.Backend, fileBackend: fileBackend, separateFileBackend: separateFileBackend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, uploadTTL: options.UploadTTL, downloadTTL: options.DownloadTTL, cursorAEAD: cursorAEAD, cursorTTL: options.CursorTTL, scheduler: options.Scheduler, migrationObserver: options.MigrationObserver}
 	if err := engine.initialize(ctx); err != nil {
 		return nil, err
 	}

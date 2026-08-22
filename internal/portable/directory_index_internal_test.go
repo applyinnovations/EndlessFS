@@ -99,6 +99,24 @@ func TestDirectoryIndexSingleEntryUpdateRetainsUnchangedNodesAndReadsBoundedPage
 	if len(page.Entries) != 10 || page.NextCursor == "" || len(page.NextCursor) > 2048 || gets > 8 {
 		t.Fatalf("bounded directory page = entries:%d cursor:%d backend gets:%d", len(page.Entries), len(page.NextCursor), gets)
 	}
+	for _, field := range directorySecondarySorts {
+		gets = 0
+		secondary, err := engine.Files().List(ctx, scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), PageSize: 10, Sort: field})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(secondary.Entries) != 10 || secondary.NextCursor == "" || len(secondary.NextCursor) > 2048 || gets > 9 {
+			t.Fatalf("bounded %s page = entries:%d cursor:%d backend gets:%d", field, len(secondary.Entries), len(secondary.NextCursor), gets)
+		}
+		gets = 0
+		continued, err := engine.Files().List(ctx, scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), PageSize: 10, Sort: field, Cursor: secondary.NextCursor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(continued.Entries) != 10 || gets > 10 {
+			t.Fatalf("bounded continued %s page = entries:%d backend gets:%d", field, len(continued.Entries), gets)
+		}
+	}
 	if err := engine.CloseWrites(ctx, "invalidate-directory-cursor"); err != nil {
 		t.Fatal(err)
 	}

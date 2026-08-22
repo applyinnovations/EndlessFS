@@ -755,13 +755,23 @@ func (s *FileStore) CompareDuplicateDirectories(ctx context.Context, userID doma
 	for group := range all {
 		left := leftCounts[group]
 		right := rightCounts[group]
+		if left.count != 0 && right.count != 0 && left.size != right.size {
+			return domain.DuplicateDirectoryComparison{}, domain.NewError(domain.ErrorInvalid, "duplicate file identity size mismatch")
+		}
+		size := left.size
+		if left.count == 0 {
+			size = right.size
+		}
 		common := min(left.count, right.count)
-		result.CommonFiles += common
-		result.CommonBytes += common * left.size
-		result.LeftOnlyFiles += left.count - common
-		result.LeftOnlyBytes += (left.count - common) * left.size
-		result.RightOnlyFiles += right.count - common
-		result.RightOnlyBytes += (right.count - common) * right.size
+		if err := addDuplicateTotals(&result.CommonFiles, &result.CommonBytes, common, size); err != nil {
+			return domain.DuplicateDirectoryComparison{}, err
+		}
+		if err := addDuplicateTotals(&result.LeftOnlyFiles, &result.LeftOnlyBytes, left.count-common, size); err != nil {
+			return domain.DuplicateDirectoryComparison{}, err
+		}
+		if err := addDuplicateTotals(&result.RightOnlyFiles, &result.RightOnlyBytes, right.count-common, size); err != nil {
+			return domain.DuplicateDirectoryComparison{}, err
+		}
 	}
 	return result, nil
 }
@@ -943,21 +953,37 @@ func compareDirectoryInventories(left, right domain.DuplicateOccurrence, leftFil
 		if len(leftValues) != 0 {
 			size = leftValues[0].Size
 		}
-		if len(rightValues) != 0 && (size != 0 && size != rightValues[0].Size) {
+		if len(leftValues) != 0 && len(rightValues) != 0 && size != rightValues[0].Size {
 			return domain.DuplicateDirectoryComparison{}, domain.NewError(domain.ErrorInvalid, "duplicate file identity size mismatch")
 		}
 		if size == 0 && len(rightValues) != 0 {
 			size = rightValues[0].Size
 		}
 		common := min(int64(len(leftValues)), int64(len(rightValues)))
-		result.CommonFiles += common
-		result.CommonBytes += common * size
-		result.LeftOnlyFiles += int64(len(leftValues)) - common
-		result.LeftOnlyBytes += (int64(len(leftValues)) - common) * size
-		result.RightOnlyFiles += int64(len(rightValues)) - common
-		result.RightOnlyBytes += (int64(len(rightValues)) - common) * size
+		if err := addDuplicateTotals(&result.CommonFiles, &result.CommonBytes, common, size); err != nil {
+			return domain.DuplicateDirectoryComparison{}, err
+		}
+		if err := addDuplicateTotals(&result.LeftOnlyFiles, &result.LeftOnlyBytes, int64(len(leftValues))-common, size); err != nil {
+			return domain.DuplicateDirectoryComparison{}, err
+		}
+		if err := addDuplicateTotals(&result.RightOnlyFiles, &result.RightOnlyBytes, int64(len(rightValues))-common, size); err != nil {
+			return domain.DuplicateDirectoryComparison{}, err
+		}
 	}
 	return result, nil
+}
+
+func addDuplicateTotals(files, bytes *int64, count, size int64) error {
+	if files == nil || bytes == nil || count < 0 || size < 0 || count > math.MaxInt64-*files || count != 0 && size > math.MaxInt64/count {
+		return domain.NewError(domain.ErrorInvalid, "duplicate directory comparison overflows")
+	}
+	additionalBytes := count * size
+	if additionalBytes > math.MaxInt64-*bytes {
+		return domain.NewError(domain.ErrorInvalid, "duplicate directory comparison overflows")
+	}
+	*files += count
+	*bytes += additionalBytes
+	return nil
 }
 
 func (s *FileStore) reconciliationItems(ctx context.Context, userID domain.UserID, left, right domain.DuplicateOccurrence, leftFiles, rightFiles map[string][]domain.DuplicateOccurrence, removeFrom domain.DuplicateSide) ([]domain.DuplicateReconciliationItem, error) {

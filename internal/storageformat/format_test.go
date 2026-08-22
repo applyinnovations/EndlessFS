@@ -189,6 +189,7 @@ func TestCanonicalKeyLayoutAndBounds(t *testing.T) {
 		"directory":       DirectoryRootKey("user-id", "live", RootDirectoryID),
 		"manifest":        DirectoryManifestKey("user-id", "live", RootDirectoryID, "manifest-id"),
 		"page":            DirectoryPageKey("user-id", "live", RootDirectoryID, "page-id"),
+		"sort index":      DirectorySortIndexNodeKey("user-id", "live", RootDirectoryID, domain.SortSize, "node-id"),
 		"operation":       OperationKey("user-id", "operation-id"),
 		"idempotency":     IdempotencyKey("user-id", "request-key"),
 		"checkpoint":      CheckpointKey("checkpoint-id"),

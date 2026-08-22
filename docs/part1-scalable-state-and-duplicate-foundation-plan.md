@@ -1,6 +1,6 @@
 # Part 1: scalable state and duplicate-reconciliation foundation
 
-**Status:** implementation plan for the first independently releasable pull request  
+**Status:** implementation in progress for the first independently releasable pull request
 **Input:** production migration review dated 2026-08-22  
 **Primary objective:** make authoritative state management and maintenance materially faster, cheaper, and bounded before adding the duplicate-management UI.
 
@@ -83,6 +83,17 @@ Part 2 consumes these APIs to implement the review-first UI, bulk selection, fol
 - A lint tied to one known checkpoint call would miss aliases and future helpers. Enforcement must be structural at the storage boundary and backed by an exact exemption registry.
 - Checkpoint v3 initially required complete provider fingerprints for state objects as well as blobs. This is useful for portable checkpoint integrity, but missing metadata must produce a clear provider-capability error rather than trigger a body-read fallback.
 - Synthetic large-object tests must model provider-attested metadata explicitly; materializing or hashing multi-gigabyte fixtures in the service is not acceptable test behavior.
+- The first refactor left the complete checkpoint-v2 builder, authenticated SHA journal codec, and its secret key in production even though checkpoint-v3 no longer called them. Keeping a forbidden mechanism as dead production code invites regression and needlessly expands the maintenance/security surface. Part 1 removes the builder, journal codec, and key; only legacy artifact keys and checkpoint envelopes remain recognizable for closed-gate retirement.
+- Directory mutation originally converted the persistent index back into a complete entry slice before changing one child. Part 1 now applies an exact before/after entry delta to O(log D) copy-on-write nodes and then propagates bounded aggregate/content deltas through the ancestor trail.
+- State listing originally embedded a complete namespace snapshot in every cursor. Part 1 now uses a constant-size authenticated continuation over an immutable persistent state-index root.
+- Aggregate migration originally retained complete discovered/root maps and revisited every completed leaf after restart. Part 1 now uses bounded provider listing plus exact persisted transform/verify directory marks. Its active graph traversal is O(depth), but the current adjacent transformer still materializes the largest single legacy directory while rebuilding that directory's indexes; eliminating that final O(largest-directory) component remains in scope before this PR is complete.
+- Operation and admission records originally embedded prerequisite bodies and whole copy/root arrays. Part 1 moves bodies once to immutable operation staging and publishes bounded hash-chained step pages; terminal artifacts and idempotency bindings now have an explicit 30-day recovery window.
+- Closed-gate maintenance ran a complete legacy state-version lookup pass immediately before reachability collection. Part 1 removes that duplicate traversal for schema 004 and binds resumable mark/sweep state to the exact closed-gate logical version.
+- Directory comparison arithmetic could wrap reclaimable/intersection bytes and its zero-byte size consistency check was incomplete. Part 1 adds overflow-safe accumulation and rejects any same-group size contradiction, including `0` versus nonzero.
+- Non-name directory sorting originally materialized and re-sorted the selected directory. Part 1 now maintains fixed persistent `kind`, `modified`, and `size` indexes beside the name index, and all four orders use authenticated keyset cursors with O(log D + page-size) reads.
+- Selected partial-folder comparison still materializes both complete file multisets, and exact reconciliation recomputes them for each preview page. This is now a Part 1 scalability item: introduce a bounded mergeable per-directory content-posting traversal and bind its immutable roots into cursors/plans before this PR is complete.
+- Recursive copy/move catalog preparation still accumulates the complete subtree's prerequisites, copy list, and occurrences before it emits operation pages. This is now a Part 1 scalability item: make subtree preparation a durable paged operation phase with a restart cursor and O(depth + page-size) working memory before this PR is complete.
+- Automatic overlap-candidate discovery is not supplied by exact directory digests alone. This remains in Part 1 backend scope: maintain a bounded mutation-friendly similarity sketch/posting index and expose paginated candidates; the Part 2 UI must not discover candidates by scanning the bucket or materializing an O(directory-pairs) matrix.
 
 ## Pull-request gates
 

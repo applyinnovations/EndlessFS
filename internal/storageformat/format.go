@@ -291,15 +291,45 @@ type DirectoryManifest struct {
 	DirectoryID   string `json:"directoryID"`
 	ManifestID    string `json:"manifestID"`
 	// PageIDs is retained only for migration decoding of schemas 001-003.
-	PageIDs            []string  `json:"pageIDs,omitempty"`
-	IndexRootID        string    `json:"indexRootID,omitempty"`
-	IndexRootDigest    string    `json:"indexRootDigest,omitempty"`
-	EntryCount         int       `json:"entryCount"`
-	RecursiveBytes     int64     `json:"recursiveBytes"`
-	RecursiveFileCount int64     `json:"recursiveFileCount"`
-	ContentAccumulator string    `json:"contentAccumulator,omitempty"`
-	ContentDigest      string    `json:"contentDigest,omitempty"`
-	CreatedAt          time.Time `json:"createdAt"`
+	PageIDs            []string                 `json:"pageIDs,omitempty"`
+	IndexRootID        string                   `json:"indexRootID,omitempty"`
+	IndexRootDigest    string                   `json:"indexRootDigest,omitempty"`
+	SortIndexes        []DirectorySortIndexRoot `json:"sortIndexes,omitempty"`
+	EntryCount         int                      `json:"entryCount"`
+	RecursiveBytes     int64                    `json:"recursiveBytes"`
+	RecursiveFileCount int64                    `json:"recursiveFileCount"`
+	ContentAccumulator string                   `json:"contentAccumulator,omitempty"`
+	ContentDigest      string                   `json:"contentDigest,omitempty"`
+	CreatedAt          time.Time                `json:"createdAt"`
+}
+
+type DirectorySortIndexRoot struct {
+	Sort       domain.SortField `json:"sort"`
+	NodeID     string           `json:"nodeID"`
+	NodeDigest string           `json:"nodeDigest"`
+}
+
+type DirectorySortIndexEntry struct {
+	SortKey string         `json:"sortKey"`
+	Entry   DirectoryEntry `json:"entry"`
+}
+
+type DirectorySortIndexChild struct {
+	NodeID     string `json:"nodeID"`
+	NodeDigest string `json:"nodeDigest"`
+	FirstKey   string `json:"firstKey"`
+	LastKey    string `json:"lastKey"`
+	EntryCount uint64 `json:"entryCount"`
+}
+
+type DirectorySortIndexNode struct {
+	SchemaVersion int                       `json:"schemaVersion"`
+	DirectoryID   string                    `json:"directoryID"`
+	Sort          domain.SortField          `json:"sort"`
+	NodeID        string                    `json:"nodeID"`
+	Leaf          bool                      `json:"leaf"`
+	Entries       []DirectorySortIndexEntry `json:"entries,omitempty"`
+	Children      []DirectorySortIndexChild `json:"children,omitempty"`
 }
 
 type DirectoryIndexChild struct {
@@ -548,19 +578,6 @@ type CheckpointInventoryPage struct {
 	Index          uint64                     `json:"index"`
 	PreviousDigest string                     `json:"previousDigest"`
 	Entries        []CheckpointInventoryEntry `json:"entries"`
-}
-
-// CheckpointWork records one completed provider-independent inventory digest.
-// It is durable only while a closed-gate checkpoint is being constructed and
-// is excluded from the checkpoint's authoritative inventory.
-type CheckpointWork struct {
-	SchemaVersion int              `json:"schemaVersion"`
-	CheckpointID  string           `json:"checkpointID"`
-	GateEpoch     uint64           `json:"gateEpoch"`
-	FileData      bool             `json:"fileData"`
-	Object        CheckpointObject `json:"object"`
-	CRC32C        string           `json:"crc32c"`
-	Proof         string           `json:"proof"`
 }
 
 type GarbageCollectionSession struct {

@@ -66,6 +66,25 @@ Each successful `GET /api/v1/trash` row preserves the prior trash-record fields 
 
 `GET /api/v1/public/shares/{token}/stat?path=...` returns the same safe share-relative entry metadata for one exact item inside the shared root. It exists so a copied public-preview URL can restore one file without walking paginated directory listings. Invalid, escaped, stale, revoked, expired, disabled-owner, or changed-root requests all return the same not-found boundary.
 
+## Duplicate reconciliation foundation
+
+These authenticated owner routes expose the schema-004 duplicate catalog for the separate Part 2 browser workflow. They return only virtual paths, portable logical versions, counts, and opaque group/cursor/plan values. Provider keys, provider-native versions, and raw checksums are never public fields.
+
+| Method | Route | Request or query |
+|---|---|---|
+| `GET` | `/api/v1/duplicates/groups` | Optional `kind=file|directory`, `includeIgnored=true|false`, `limit`, and owner-scoped opaque `cursor` |
+| `GET` | `/api/v1/duplicates/groups/{groupID}/occurrences` | `limit` and owner/group-scoped opaque `cursor` |
+| `PUT` | `/api/v1/duplicates/groups/{groupID}/ignore` | `{ "ignored": true|false, "expectedRevision": n }`; CSRF and exact origin required |
+| `POST` | `/api/v1/duplicates/directories/compare` | `{ "left": {"area":"live|trash","path":"/..."}, "right": {...} }`; CSRF and exact origin required |
+| `POST` | `/api/v1/duplicates/directories/reconciliation-preview` | Two disjoint live locations plus `removeFrom=left|right`, optional `limit` 1–100, and optional opaque `cursor`; CSRF and exact origin required |
+| `POST` | `/api/v1/duplicates/directories/reconcile` | `{ "planToken": "..." }`; CSRF, exact origin, and `Idempotency-Key` required |
+
+A group row is `{ "id", "kind", "occurrenceCount", "size", "fileCount", "reclaimableBytes", "ignored", "ignoreRevision"? }`. A file occurrence has `fileCount: 1`; a directory occurrence uses its recursive count. `reclaimableBytes` is exact for that one group and counts all but one occurrence. Directory rows and their descendant file rows overlap, so clients must not add unrelated row values into a bucket-wide total.
+
+Directory comparison returns `exact`, `commonFiles`, `commonBytes`, and both `leftOnly*` and `rightOnly*` totals. Intersection is a multiset of confirmed file identities, so repeated equal files are counted no more times than they appear on both sides. Exact directory equality additionally requires the complete name-sensitive nested structure to match.
+
+Preview returns at most 100 removal/keep pairs, the comparison, page reclaimable bytes, an optional next cursor, and a short-lived authenticated `planToken`. Ignored groups are omitted. Reconcile revalidates the gate, selected manifests, occurrence group/version, and ignore revisions, then moves only the pinned removal paths to Trash. Stale items fail safely and no duplicate route permanently deletes data.
+
 ## Generated image previews (v1.1)
 
 These authenticated-owner routes use the optional independent preview store. Resolve is a POST because it may lazily generate a missing artifact. All three routes derive owner scope from the session; content identities, store keys, and bucket configuration are never public fields.

@@ -12,11 +12,13 @@ If a replica disappears while it owns a mutation, the durable operation remains.
 
 ## Automatic storage-schema migration chain
 
-Startup detects one exact epoch in the append-only storage-schema ledger and executes every remaining adjacent transformation in order. The current ledger is schema 001 (v0.1.0–v0.1.4 pre-aggregate state), schema 002 (the historical byte-aggregate intermediate), then schema 003 (byte and file-count aggregates from v0.1.5). A schema-001 bucket therefore runs `001 -> 002 -> 003`; schema 002 runs only `002 -> 003`; current state performs no migration. No operator migration command or bucket edit is required. Unknown or contradictory epoch markers fail closed.
+Startup detects one exact epoch in the append-only storage-schema ledger and executes every remaining adjacent transformation in order. The current ledger is schema 001 (v0.1.0–v0.1.4 pre-aggregate state), schema 002 (the historical byte-aggregate intermediate), schema 003 (byte and file-count aggregates from v0.1.5–v0.1.14), then schema 004 (indexed metadata-only state from v0.1.15). A schema-001 bucket therefore runs `001 -> 002 -> 003 -> 004`; schema 003 runs only `003 -> 004`; current schema-004 state performs no migration. No operator migration command or bucket edit is required. Unknown or contradictory epoch markers fail closed.
 
-Each edge owns a stable checkpoint and CAS-closes the durable write gate before changing state. The current transforms drain admitted mutations and expired upload capabilities, upgrade schema-001 upload records where applicable, walk every live and trash directory graph bottom-up, create deterministic immutable pages/manifests for that edge's computed aggregates, and conditionally advance each directory root. They verify pre-existing byte totals rather than recomputing over provider blobs. Each edge then verifies every parent/child aggregate, advances the writer-set and superblock markers, binds the gate to the target features, creates its closed-gate checkpoint, and reopens at the next gate epoch before the runner starts the following edge.
+Each edge owns a stable checkpoint and CAS-closes the durable write gate before changing state. The earlier edges upgrade aggregate records. The `003 -> 004` edge obtains file `(size, MD5, CRC32C)` through provider metadata only, converts directory pages and mutable state namespaces to persistent copy-on-write indexes, builds incremental directory content summaries and duplicate occurrences, and writes metadata-only checkpoint v3. Each directory has bounded immutable roots for name, modified time, size, and kind, so every supported browser order uses keyset pagination instead of reloading and sorting the directory. It never opens or streams a stored file body. A provider/object class that cannot attest both normalized checksums fails closed instead of downloading the object.
 
-Every edge is safe to retry after process loss and safe for several new replicas to attempt concurrently. A replica that loses a CAS follows the durable winner. An interrupted chain resumes its checkpointed edge and can accept the explicitly reviewed mixture of source, target, and later already-published records without downgrading them. Gate feature binding fences an old process whose admitted writer features no longer match. Until an edge commits, predecessor records remain authoritative and the gate stays closed once migration has begun.
+The schema-004 graph walk persists authenticated transform and verification marks for each completed directory. Every mark is tied to the exact migration checkpoint, parent/root/manifest logical versions, parent entry, aggregates, and content summary. The process holds only the active ancestor stack; after restart, a valid completed mark skips that entire subtree. Several replicas may advance the same deterministic walk through CAS. Stale, forged, misplaced, corrupt, or contradictory marks fail closed and marks are removed only after the independent verification phase succeeds.
+
+Every edge is safe to retry after process loss and safe for several new replicas to attempt concurrently. A replica that loses a CAS follows the durable winner. An interrupted chain resumes its checkpointed edge and can accept the explicitly reviewed mixture of source, target, and later already-published records without downgrading them. Gate feature binding fences an old process whose admitted writer features no longer match. Until an edge commits, predecessor records remain authoritative and the gate stays closed once migration has begun. Immutable schema-004 fixtures cover portable-minimal, application-disabled, and application-GCS writer profiles and are pinned to their producer revision and fixture digest.
 
 An unexpired upload or admitted operation can temporarily prevent startup; allow it to finish or its lease to expire and retry startup. Missing roots, cycles, multiple parents, unreachable roots, malformed canonical records, overflow, an unrelated closed-gate maintenance operation, an unknown epoch, or unrelated feature/configuration drift fails closed. The chain supports both single- and split-bucket storage sets. It does not discover or import arbitrary provider objects outside the canonical `endlessfs/v1` graph.
 
@@ -57,9 +59,9 @@ Canonical state deliberately contains no bucket/account identifier, GCS generati
 
 1. Close the canonical write gate. Every replica stops admitting new mutations.
 2. Allow fenced recovery to finish admitted operations and drain or abort live data-plane capabilities and native leases. A crashed operation may delay closure; do not delete its lock or force the gate closed.
-3. Create the closed-gate checkpoint and copy exactly its paged authoritative key/body inventory plus the state-bucket checkpoint root and every inventory page. The root and each page remain independently bounded; their count may grow with the storage set. Do not copy admissions, staging garbage, backend leases, or transient checkpoint-work records.
+3. Create the closed-gate metadata checkpoint and copy exactly its paged authoritative key/body inventory plus the state-bucket checkpoint root and every inventory page. The root and each page remain independently bounded; their count may grow with the storage set. Inventory entries contain role, key, size, MD5, and CRC32C taken from provider metadata. Checkpoint construction and verification do not fetch object bodies. Do not copy admissions, staging garbage, backend leases, or maintenance records; schema 004 creates no per-object checkpoint-work journal.
 4. Copy each key and body unchanged to its destination role: blob keys to the file bucket and all other authoritative keys to the state bucket. In single-bucket mode both roles name the same destination. Destination-native versions and metadata may differ and are not preserved.
-5. Run the read-only destination verifier against both configured roles. Missing, extra-authoritative, misplaced, corrupt, mixed-version, or unsupported objects fail closed.
+5. Run the read-only destination verifier against both configured roles. It performs ordered metadata traversals and compares exact `(size, MD5, CRC32C)` tuples. Missing, extra-authoritative, misplaced, fingerprint-mismatched, mixed-version, or unsupported objects fail closed without a body-download fallback.
 6. Reconfigure compatible replicas to the destination while retaining the same provider-independent application secrets and writer-set identity. Verify the checkpoint, increment/open the destination gate epoch, and continue mutations.
 
 The source remains closed. Online dual writes and reconciliation of mutations made outside EndlessFS are not supported. A pre-copy may reduce downtime, but the final checkpoint-authorized copy must be taken after quiescence.
@@ -75,7 +77,7 @@ The verifier configuration is strict JSON. For GCS:
   "writerSetID": "BASE64URL_WRITER_SET_ID",
   "configurationDigest": "EXPECTED_CONFIGURATION_DIGEST",
   "keyringIdentifiers": ["EXPECTED_KEYRING_ID"],
-  "requiredFeatures": ["directory-manifests", "fenced-operations", "portable-checkpoints", "recursive-byte-aggregates-v1", "recursive-file-count-aggregates-v1"]
+  "requiredFeatures": ["directory-content-digests-v1", "directory-manifests", "duplicate-catalog-v1", "fenced-operations", "metadata-only-checkpoints-v1", "paged-operation-steps-v1", "persistent-directory-indexes-v1", "persistent-state-indexes-v1", "portable-checkpoints", "provider-content-fingerprints-v1", "recursive-byte-aggregates-v1", "recursive-file-count-aggregates-v1"]
 }
 ```
 
@@ -96,6 +98,18 @@ The command performs no `Put`, `Copy`, or `Delete`. Its local `memory` mode acce
 - Central redaction remains active at every level. Logs are not a file/account audit trail.
 
 Capability responses and public configuration use `no-store`. Diagnostics omit token-bearing queries, request bodies, authorization values, provider keys, full user paths, native continuation values, and credential material.
+
+## Duplicate maintenance foundation
+
+Schema 004 maintains owner-scoped file and exact-directory duplicate groups incrementally as filesystem mutations commit. File identity is the provider-attested `(size, MD5, CRC32C)` tuple. Exact directory identity additionally binds recursive counts and a name/structure-sensitive content digest. The catalog contains no provider key and does not deduplicate blobs across owners.
+
+The Part 1 control API can page groups and occurrences, include or hide ignored groups, compare any selected live/trash directory pair, preview the exact file-content intersection of two disjoint live directories, and apply one bounded preview page to Trash. Ignore records are keyed by stable group ID and revision. Apply revalidates the selected manifests, gate epoch/version, each keep/remove file group and logical version, and every ignore revision. A stale plan fails closed; a successful plan is recoverable through Trash and leaves a durable redacted batch audit result. No route permanently deletes duplicate data.
+
+Per-group reclaimable bytes count all but one occurrence of that exact group. Do not sum directory-group savings with descendant file-group savings because they overlap. The Part 2 browser will select non-overlapping actions and present ignored groups in a collapsed section.
+
+## Closed-gate retention and collection
+
+Terminal operation results and idempotency bindings are retained for 30 days. Trash is not subject to that window. During gate closure EndlessFS resolves active work, removes expired operation/upload staging and leases, and runs a resumable reachability collector over persistent directory/state indexes, selected manifests and state versions, and committed blobs. Its session and marks bind the exact checkpoint ID, gate epoch, and gate logical version. It deletes only unmarked objects from explicitly collectible namespaces. Do not configure an independent bucket lifecycle rule to approximate this collector.
 
 ## Optional v1.1 previews
 

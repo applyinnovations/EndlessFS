@@ -50,7 +50,7 @@ func TestFileOperationStoresBoundedStepPagesWithoutEmbeddedPrerequisiteBodies(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pageObjects) < len(prerequisites)+int(operation.StepPageCount) || len(pageObjects) > len(prerequisites)+int(operation.StepPageCount)+4 {
+	if len(pageObjects) < len(prerequisites)+int(operation.StepPageCount) || len(pageObjects) > len(prerequisites)+int(operation.StepPageCount)+8 {
 		t.Fatalf("staged operation objects = %d; want caller prerequisites, bounded directory prerequisites, and %d pages", len(pageObjects), operation.StepPageCount)
 	}
 	for index := uint64(0); index < operation.StepPageCount; index++ {

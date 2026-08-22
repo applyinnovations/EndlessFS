@@ -472,6 +472,19 @@ func TestMigrationActivationAndCompletionRejectInconsistentControlRecords(t *tes
 		}
 	})
 
+	t.Run("gate-binding-revision-overflow", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		features := configureMigrationSourceSchema(t, backend, engine, storageSchema002)
+		rewriteMigrationGateAtRevision(t, backend, math.MaxUint64, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosed
+			gate.CheckpointID = schemaMigration002To003.checkpointID
+			gate.WriterFeatures = append([]string(nil), features...)
+		})
+		if err := engine.bindMigrationGateToTarget(t.Context(), schemaMigration002To003); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("gate binding revision overflow error = %v; want invalid", err)
+		}
+	})
+
 	t.Run("completion-corruption", func(t *testing.T) {
 		backend, engine := currentMigrationEngine(t)
 		replaceMigrationBody(t, backend, storageformat.SuperblockKey(), []byte("{}"))
@@ -542,6 +555,26 @@ func rewriteMigrationGate(t *testing.T, backend *objectmemory.Backend, mutate fu
 	replaceMigrationBody(t, backend, key, body)
 }
 
+func rewriteMigrationGateAtRevision(t *testing.T, backend *objectmemory.Backend, revision uint64, mutate func(*storageformat.WriteGate)) {
+	t.Helper()
+	key := storageformat.WriteGateKey()
+	object, err := backend.Get(t.Context(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope storageformat.Envelope
+	var gate storageformat.WriteGate
+	if err := storageformat.DecodeEnvelope(object.Body, key, writeGateSchema, &envelope, &gate); err != nil {
+		t.Fatal(err)
+	}
+	mutate(&gate)
+	body, err := storageformat.EncodeEnvelope(writeGateSchema, key, revision, gate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceMigrationBody(t, backend, key, body)
+}
+
 type closingGateContentionBackend struct {
 	objectstore.Backend
 	once bool
@@ -553,6 +586,36 @@ func (backend *closingGateContentionBackend) Put(ctx context.Context, key object
 		return "", domain.NewError(domain.ErrorPreconditionFailed, "injected closing-gate contention")
 	}
 	return backend.Backend.Put(ctx, key, body, condition)
+}
+
+type migrationGatePutFailureBackend struct {
+	objectstore.Backend
+	err error
+}
+
+func (backend *migrationGatePutFailureBackend) Put(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+	if key == storageformat.WriteGateKey() {
+		return "", backend.err
+	}
+	return backend.Backend.Put(ctx, key, body, condition)
+}
+
+func configureMigrationSourceSchema(t *testing.T, backend *objectmemory.Backend, engine *Engine, schema storageSchemaID) []string {
+	t.Helper()
+	features, found := schemaFeatures(schema, engine.writer.RequiredFeatures)
+	if !found {
+		t.Fatalf("schemaFeatures(%q) not found", schema)
+	}
+	rewriteMigrationWriter(t, backend, features)
+	rewriteMigrationSuperblock(t, backend, func(superblock *storageformat.Superblock) {
+		superblock.RequiredFeatures = append([]string(nil), features...)
+	})
+	rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+		gate.Mode = storageformat.GateOpen
+		gate.CheckpointID = ""
+		gate.WriterFeatures = append([]string(nil), features...)
+	})
+	return features
 }
 
 func TestMigrationSchemaChainFailsClosedForEveryControlPlaneDisagreement(t *testing.T) {
@@ -682,6 +745,19 @@ func TestMigrationGateClosureRejectsEveryUnsafeControlState(t *testing.T) {
 		}
 	})
 
+	t.Run("open-gate-revision-overflow", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		features := configureMigrationSourceSchema(t, backend, engine, storageSchema002)
+		rewriteMigrationGateAtRevision(t, backend, math.MaxUint64, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateOpen
+			gate.CheckpointID = ""
+			gate.WriterFeatures = append([]string(nil), features...)
+		})
+		if _, err := engine.closeStorageMigrationGate(t.Context(), schemaMigration002To003, aggregateMigrationPlan{writeFileCounts: true}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("open gate revision overflow error = %v; want invalid", err)
+		}
+	})
+
 	t.Run("later-edge-owns-gate", func(t *testing.T) {
 		backend, engine := currentMigrationEngine(t)
 		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
@@ -761,6 +837,288 @@ func TestMigrationGateClosureRejectsEveryUnsafeControlState(t *testing.T) {
 		})
 		if _, err := engine.closeStorageMigrationGate(context.Background(), schemaMigration002To003, aggregateMigrationPlan{}); !errors.Is(err, domain.ErrPreconditionFailed) {
 			t.Fatalf("unknown gate schema error = %v; want precondition failed", err)
+		}
+	})
+}
+
+func TestFeatureOnlyMigrationGateClosureRejectsEveryUnsafeControlState(t *testing.T) {
+	t.Run("gate-read-error", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		replaceMigrationBody(t, backend, storageformat.WriteGateKey(), []byte("{}"))
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("gate read error = %v; want invalid", err)
+		}
+	})
+
+	t.Run("target-gate-before-control-activation", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		source := configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		target, _ := schemaFeatures(storageSchema005, source)
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.WriterFeatures = append([]string(nil), target...)
+		})
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("premature target gate error = %v; want precondition failed", err)
+		}
+	})
+
+	t.Run("target-gate-completion-read-error", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		source := configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		target, _ := schemaFeatures(storageSchema005, source)
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.WriterFeatures = append([]string(nil), target...)
+		})
+		replaceMigrationBody(t, backend, storageformat.SuperblockKey(), []byte("{}"))
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("target completion read error = %v; want invalid", err)
+		}
+	})
+
+	t.Run("already-complete-target", func(t *testing.T) {
+		_, engine := currentMigrationEngine(t)
+		closed, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005)
+		if err != nil || closed {
+			t.Fatalf("complete target gate close = %t, %v; want false, nil", closed, err)
+		}
+	})
+
+	t.Run("later-edge-owns-gate", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema003)
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosing
+			gate.CheckpointID = schemaMigration004To005.checkpointID
+		})
+		closed, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration003To004)
+		if err != nil || closed {
+			t.Fatalf("later-owned gate close = %t, %v; want false, nil", closed, err)
+		}
+	})
+
+	t.Run("unknown-maintenance-owns-gate", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosing
+			gate.CheckpointID = "unknown-maintenance"
+		})
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrConflict) {
+			t.Fatalf("unknown maintenance gate error = %v; want conflict", err)
+		}
+	})
+
+	t.Run("already-closed", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosed
+			gate.CheckpointID = schemaMigration004To005.checkpointID
+		})
+		closed, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005)
+		if err != nil || !closed {
+			t.Fatalf("closed gate = %t, %v; want true, nil", closed, err)
+		}
+	})
+
+	t.Run("unknown-gate-schema", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.WriterFeatures = []string{"unknown-feature"}
+		})
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("unknown gate schema error = %v; want precondition failed", err)
+		}
+	})
+
+	t.Run("later-feature-binding-defers", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		source := configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		target, _ := schemaFeatures(storageSchema005, source)
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosing
+			gate.CheckpointID = schemaMigration004To005.checkpointID
+			gate.WriterFeatures = append([]string(nil), target...)
+		})
+		closed, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005)
+		if err != nil || closed {
+			t.Fatalf("later feature binding close = %t, %v; want false, nil", closed, err)
+		}
+	})
+
+	t.Run("earlier-feature-binding-is-rejected", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		earlier := configureMigrationSourceSchema(t, backend, engine, storageSchema003)
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosing
+			gate.CheckpointID = schemaMigration004To005.checkpointID
+			gate.WriterFeatures = append([]string(nil), earlier...)
+		})
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("earlier feature binding error = %v; want precondition failed", err)
+		}
+	})
+
+	t.Run("closing-gate-contention-is-retried", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosing
+			gate.CheckpointID = schemaMigration004To005.checkpointID
+		})
+		contended := &closingGateContentionBackend{Backend: backend}
+		engine.backend = contended
+		closed, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005)
+		if err != nil || !closed || !contended.once {
+			t.Fatalf("contended closing gate = %t, %v, injected=%t; want true, nil, true", closed, err, contended.once)
+		}
+	})
+
+	t.Run("open-gate-closes", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		closed, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005)
+		if err != nil || !closed {
+			t.Fatalf("open gate close = %t, %v; want true, nil", closed, err)
+		}
+	})
+
+	t.Run("admission-drain-error", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		var epoch uint64
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosing
+			gate.CheckpointID = schemaMigration004To005.checkpointID
+			epoch = gate.Epoch
+		})
+		if _, err := backend.Put(t.Context(), storageformat.AdmissionKey(epoch, "corrupt-admission"), []byte("{}"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("admission drain error = %v; want invalid", err)
+		}
+	})
+
+	t.Run("operation-drain-error", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosing
+			gate.CheckpointID = schemaMigration004To005.checkpointID
+		})
+		userID := "WVhXWVhXWVhXWVhXWVhXWQ"
+		if _, err := backend.Put(t.Context(), storageformat.OperationKey(userID, "corrupt-operation"), []byte(`{"schema":"file-operation-v1"}`), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("operation drain error = %v; want invalid", err)
+		}
+	})
+
+	t.Run("post-drain-gate-read-error", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosing
+			gate.CheckpointID = schemaMigration004To005.checkpointID
+		})
+		reads := 0
+		engine.backend = &hookedBackend{Backend: backend, get: func(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
+			if key == storageformat.WriteGateKey() {
+				reads++
+				if reads == 2 {
+					return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "injected post-drain gate read failure")
+				}
+			}
+			return backend.Get(ctx, key)
+		}}
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("post-drain gate read error = %v; want unavailable", err)
+		}
+	})
+
+	t.Run("post-drain-gate-change-is-retried", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosing
+			gate.CheckpointID = schemaMigration004To005.checkpointID
+		})
+		reads := 0
+		engine.backend = &hookedBackend{Backend: backend, get: func(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
+			if key == storageformat.WriteGateKey() {
+				reads++
+				if reads == 2 {
+					rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+						gate.Mode = storageformat.GateOpen
+						gate.CheckpointID = ""
+					})
+				}
+			}
+			return backend.Get(ctx, key)
+		}}
+		closed, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005)
+		if err != nil || !closed || reads < 4 {
+			t.Fatalf("changed post-drain gate close = %t, %v, reads=%d; want true, nil, retry", closed, err, reads)
+		}
+	})
+
+	t.Run("gate-write-error", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		engine.backend = &migrationGatePutFailureBackend{Backend: backend, err: domain.NewError(domain.ErrorUnavailable, "injected gate write failure")}
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("gate write error = %v; want unavailable", err)
+		}
+	})
+
+	t.Run("open-gate-revision-overflow", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		features := configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		rewriteMigrationGateAtRevision(t, backend, math.MaxUint64, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateOpen
+			gate.CheckpointID = ""
+			gate.WriterFeatures = append([]string(nil), features...)
+		})
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("open gate revision overflow error = %v; want invalid", err)
+		}
+	})
+
+	t.Run("closing-gate-write-error", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosing
+			gate.CheckpointID = schemaMigration004To005.checkpointID
+		})
+		engine.backend = &migrationGatePutFailureBackend{Backend: backend, err: domain.NewError(domain.ErrorUnavailable, "injected gate write failure")}
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("closing gate write error = %v; want unavailable", err)
+		}
+	})
+
+	t.Run("closing-gate-revision-overflow", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		features := configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		rewriteMigrationGateAtRevision(t, backend, math.MaxUint64, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosing
+			gate.CheckpointID = schemaMigration004To005.checkpointID
+			gate.WriterFeatures = append([]string(nil), features...)
+		})
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("closing gate revision overflow error = %v; want invalid", err)
+		}
+	})
+
+	t.Run("gate-contention-exhaustion", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+		engine.backend = &migrationGatePutFailureBackend{Backend: backend, err: domain.NewError(domain.ErrorConflict, "injected gate contention")}
+		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("gate contention error = %v; want unavailable", err)
 		}
 	})
 }
@@ -1210,6 +1568,14 @@ func TestMigrationDirectoryPreparationRejectsInvalidAndOverflowingEntries(t *tes
 	sort.Slice(countOverflow, func(i, j int) bool { return countOverflow[i].NameDigest < countOverflow[j].NameDigest })
 	if _, err := engine.prepareMigratedDirectory(context.Background(), scope, storageformat.RootDirectoryID, countOverflow, root, createdAt, schemaMigration002To003, aggregateMigrationPlan{writeFileCounts: true}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("file-count overflow preparation error = %v; want invalid", err)
+	}
+
+	overflowRoot := migrationDirectoryRoot{envelope: storageformat.Envelope{Revision: math.MaxUint64, LogicalVersion: "version"}}
+	if _, err := engine.prepareMigratedDirectory(t.Context(), scope, storageformat.RootDirectoryID, nil, overflowRoot, createdAt, schemaMigration001To002, aggregateMigrationPlan{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("legacy root revision overflow error = %v; want invalid", err)
+	}
+	if _, err := engine.prepareMigratedDirectory(t.Context(), scope, storageformat.RootDirectoryID, nil, overflowRoot, createdAt, schemaMigration003To004, aggregateMigrationPlan{writeProviderFingerprints: true}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("indexed root revision overflow error = %v; want invalid", err)
 	}
 }
 

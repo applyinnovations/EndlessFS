@@ -312,13 +312,11 @@ func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition s
 			return false, domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
 		}
 		if detected.id != transition.from {
-			if detectedIndex, detectedFound := schemaIndex(detected.id); !detectedFound {
-				return false, domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
-			} else if targetIndex, _ := schemaIndex(transition.to); detectedIndex >= targetIndex {
+			detectedIndex, _ := schemaIndex(detected.id)
+			if targetIndex, _ := schemaIndex(transition.to); detectedIndex >= targetIndex {
 				return false, nil
-			} else {
-				return false, domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
 			}
+			return false, domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
 		}
 		switch gate.Mode {
 		case storageformat.GateOpen:
@@ -355,8 +353,6 @@ func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition s
 				}
 				return false, err
 			}
-			return true, nil
-		case storageformat.GateClosed:
 			return true, nil
 		}
 	}

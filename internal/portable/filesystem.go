@@ -717,30 +717,6 @@ func (s *FileStore) readDirectoryMetadata(ctx context.Context, scope domain.Scop
 	return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, manifestID: manifestID, manifest: manifest, recursiveBytes: recursiveBytes, recursiveFileCount: recursiveFileCount, contentAccumulator: contentAccumulator, contentDigest: contentDigest, pending: pending, transitionState: transitionState, transitionFence: transitionFence}, nil
 }
 
-func (s *FileStore) readManifestSnapshot(ctx context.Context, scope domain.Scope, directoryID, manifestID string) (storageformat.DirectoryManifest, []storageformat.DirectoryEntry, error) {
-	manifest, err := s.readDirectoryManifest(ctx, scope, directoryID, manifestID)
-	if err != nil {
-		return storageformat.DirectoryManifest{}, nil, err
-	}
-	entries, err := s.readManifestPageEntries(ctx, scope, directoryID, manifest)
-	if err != nil {
-		return storageformat.DirectoryManifest{}, nil, err
-	}
-	computedBytes, err := recursiveByteSize(entries)
-	if err != nil || computedBytes != manifest.RecursiveBytes {
-		return storageformat.DirectoryManifest{}, nil, domain.NewError(domain.ErrorInvalid, "directory manifest entries recursive byte aggregate mismatch")
-	}
-	computedFiles, err := recursiveFileCount(entries)
-	if err != nil || computedFiles != manifest.RecursiveFileCount {
-		return storageformat.DirectoryManifest{}, nil, domain.NewError(domain.ErrorInvalid, "directory manifest entries recursive file count mismatch")
-	}
-	computedAccumulator, computedDigest, err := directoryContentIdentity(entries)
-	if err != nil || computedAccumulator != manifest.ContentAccumulator || computedDigest != manifest.ContentDigest {
-		return storageformat.DirectoryManifest{}, nil, domain.NewError(domain.ErrorInvalid, "directory manifest content digest mismatch")
-	}
-	return manifest, entries, nil
-}
-
 func (s *FileStore) readDirectoryManifest(ctx context.Context, scope domain.Scope, directoryID, manifestID string) (storageformat.DirectoryManifest, error) {
 	key := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifestID)
 	object, err := s.engine.backend.Get(ctx, key)

@@ -9,8 +9,25 @@ import (
 	"sort"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
+
+func listAllFrom(ctx context.Context, backend objectstore.ListBackend, prefix string) ([]objectstore.ObjectInfo, error) {
+	request := objectstore.ListRequest{Prefix: prefix, Limit: 1000}
+	var result []objectstore.ObjectInfo
+	for {
+		page, err := backend.List(ctx, request)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, page.Objects...)
+		if page.NextCursor == "" {
+			return result, nil
+		}
+		request.Cursor = page.NextCursor
+	}
+}
 
 func (s *FileStore) resolveDirectory(ctx context.Context, scope domain.Scope, path domain.UserPath) (string, directorySnapshot, error) {
 	if path.IsRoot() {
@@ -83,6 +100,30 @@ func (s *FileStore) readDirectory(ctx context.Context, scope domain.Scope, direc
 	}
 	snapshot.entries = entries
 	return snapshot, nil
+}
+
+func (s *FileStore) readManifestSnapshot(ctx context.Context, scope domain.Scope, directoryID, manifestID string) (storageformat.DirectoryManifest, []storageformat.DirectoryEntry, error) {
+	manifest, err := s.readDirectoryManifest(ctx, scope, directoryID, manifestID)
+	if err != nil {
+		return storageformat.DirectoryManifest{}, nil, err
+	}
+	entries, err := s.readManifestPageEntries(ctx, scope, directoryID, manifest)
+	if err != nil {
+		return storageformat.DirectoryManifest{}, nil, err
+	}
+	computedBytes, err := recursiveByteSize(entries)
+	if err != nil || computedBytes != manifest.RecursiveBytes {
+		return storageformat.DirectoryManifest{}, nil, domain.NewError(domain.ErrorInvalid, "directory manifest entries recursive byte aggregate mismatch")
+	}
+	computedFiles, err := recursiveFileCount(entries)
+	if err != nil || computedFiles != manifest.RecursiveFileCount {
+		return storageformat.DirectoryManifest{}, nil, domain.NewError(domain.ErrorInvalid, "directory manifest entries recursive file count mismatch")
+	}
+	computedAccumulator, computedDigest, err := directoryContentIdentity(entries)
+	if err != nil || computedAccumulator != manifest.ContentAccumulator || computedDigest != manifest.ContentDigest {
+		return storageformat.DirectoryManifest{}, nil, domain.NewError(domain.ErrorInvalid, "directory manifest content digest mismatch")
+	}
+	return manifest, entries, nil
 }
 
 func (s *FileStore) prepareDirectoryUpdate(ctx context.Context, scope domain.Scope, directoryID string, snapshot directorySnapshot, entries []storageformat.DirectoryEntry, revision uint64) (preparedDirectory, error) {

@@ -296,22 +296,6 @@ func (e *Engine) decodeStateListCursor(value string) (stateListCursor, error) {
 	return cursor, nil
 }
 
-func listAllFrom(ctx context.Context, backend objectstore.ListBackend, prefix string) ([]objectstore.ObjectInfo, error) {
-	request := objectstore.ListRequest{Prefix: prefix, Limit: 1000}
-	var result []objectstore.ObjectInfo
-	for {
-		page, err := backend.List(ctx, request)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, page.Objects...)
-		if page.NextCursor == "" {
-			return result, nil
-		}
-		request.Cursor = page.NextCursor
-	}
-}
-
 func validateStateKey(key state.Key) error {
 	if !key.Valid() {
 		return domain.NewError(domain.ErrorInvalid, "invalid state key")

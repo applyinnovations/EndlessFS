@@ -3,6 +3,7 @@ package gcs_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -119,6 +120,54 @@ func TestGCSUploadCleanupDistinguishesFinalizedAndIncompleteSessions(t *testing.
 		}
 	})
 
+	t.Run("finalized-session-with-cleaned-object", func(t *testing.T) {
+		server, fake := newGCSServerWithFake(t)
+		fake.rejectCompletedDelete = true
+		backend, err := gcstransport.NewWithTransfers(protocolClient(t, server), "endlessfs-test", gcstransport.TransferOptions{
+			HTTPClient: server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
+			SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x5a}, 256), nil },
+			Hostname:  strings.TrimPrefix(server.URL, "http://"), Insecure: true,
+			LeaseKey: bytes.Repeat([]byte{0x42}, 32), Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 4096)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := objectstore.MustKey("endlessfs/v1/staging/user/finalized-cleaned/data")
+		handle, err := backend.BeginUpload(context.Background(), objectstore.UploadRequest{
+			UploadID: "finalized-cleaned-1", Key: key, Size: 4, MediaType: "application/octet-stream", Resumable: true,
+			ExpiresAt: time.Now().UTC().Add(time.Minute),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, _ := http.NewRequest(http.MethodPut, handle.Capability.URL, strings.NewReader("data"))
+		request.Header.Set("Content-Type", "application/octet-stream")
+		request.Header.Set("Content-Range", "bytes 0-3/4")
+		response, err := server.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("upload status = %d", response.StatusCode)
+		}
+		fake.mu.Lock()
+		delete(fake.objects, key.String())
+		fake.mu.Unlock()
+
+		if err := backend.AbortUpload(context.Background(), handle.Lease); err != nil {
+			t.Fatalf("clean finalized session after object cleanup: %v", err)
+		}
+		fake.mu.Lock()
+		deleteAttempts := fake.sessionDeleteAttempts
+		statusAttempts := fake.sessionStatusAttempts
+		activeSessions := len(fake.sessions)
+		fake.mu.Unlock()
+		if deleteAttempts != 1 || statusAttempts != 1 || activeSessions != 0 {
+			t.Fatalf("finalized session cleanup = session deletes %d, status probes %d, active sessions %d", deleteAttempts, statusAttempts, activeSessions)
+		}
+	})
+
 	t.Run("incomplete-session", func(t *testing.T) {
 		server, fake := newGCSServerWithFake(t)
 		fake.rejectCompletedDelete = true
@@ -177,6 +226,39 @@ func TestGCSUploadCleanupDistinguishesFinalizedAndIncompleteSessions(t *testing.
 		fake.mu.Unlock()
 		if deleteProtocol != "HTTP/1.1" || activeSessions != 0 {
 			t.Fatalf("HTTP/2-client cancellation = protocol %q, active sessions %d", deleteProtocol, activeSessions)
+		}
+	})
+
+	t.Run("active-session-rejecting-cancellation", func(t *testing.T) {
+		server, fake := newGCSServerWithFake(t)
+		backend, err := gcstransport.NewWithTransfers(protocolClient(t, server), "endlessfs-test", gcstransport.TransferOptions{
+			HTTPClient: server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
+			SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x5a}, 256), nil },
+			Hostname:  strings.TrimPrefix(server.URL, "http://"), Insecure: true,
+			LeaseKey: bytes.Repeat([]byte{0x42}, 32), Random: bytes.NewReader(bytes.Repeat([]byte{0x2b}, 4096)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err := backend.BeginUpload(context.Background(), objectstore.UploadRequest{
+			UploadID: "active-rejected-1", Key: objectstore.MustKey("endlessfs/v1/staging/user/active-rejected/data"),
+			Size: 4, MediaType: "application/octet-stream", Resumable: true, ExpiresAt: time.Now().UTC().Add(time.Minute),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fake.mu.Lock()
+		fake.sessionDeleteStatus = http.StatusMethodNotAllowed
+		fake.mu.Unlock()
+		if err := backend.AbortUpload(context.Background(), handle.Lease); !errors.Is(err, domain.ErrInternal) {
+			t.Fatalf("rejected active cancellation error = %v, want internal", err)
+		}
+		fake.mu.Lock()
+		statusAttempts := fake.sessionStatusAttempts
+		activeSessions := len(fake.sessions)
+		fake.mu.Unlock()
+		if statusAttempts != 1 || activeSessions != 1 {
+			t.Fatalf("rejected cancellation = status probes %d, active sessions %d; want 1, 1", statusAttempts, activeSessions)
 		}
 	})
 }

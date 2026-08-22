@@ -263,11 +263,43 @@ func (b *Backend) AbortUpload(ctx context.Context, sealed []byte) error {
 			if err != nil || materialized {
 				return err
 			}
-			return classifyHTTPStatus("GCS resumable cancellation failed", response.StatusCode)
+			terminal, terminalErr := b.resumableSessionTerminal(ctx, lease)
+			if terminalErr != nil {
+				return terminalErr
+			}
+			if !terminal {
+				return classifyHTTPStatus("GCS resumable cancellation failed", response.StatusCode)
+			}
 		}
 	}
 	_, err = b.deleteMaterializedUpload(ctx, key, lease.Size)
 	return err
+}
+
+func (b *Backend) resumableSessionTerminal(ctx context.Context, lease uploadLease) (bool, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPut, lease.SessionURL, http.NoBody)
+	if err != nil {
+		return false, domain.NewError(domain.ErrorInternal, "create GCS resumable status request")
+	}
+	request.Header.Set("Content-Length", "0")
+	request.Header.Set("Content-Range", fmt.Sprintf("bytes */%d", lease.Size))
+	response, err := b.transfer.httpClient.Do(request)
+	if err != nil {
+		return false, domain.WrapError(domain.ErrorUnavailable, "GCS resumable status failed", err)
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	_ = response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusOK, http.StatusCreated, http.StatusNoContent, http.StatusNotFound, http.StatusGone:
+		return true, nil
+	case http.StatusPermanentRedirect:
+		if _, err := confirmedOffset(response.Header.Get("Range"), lease.Size); err != nil {
+			return false, err
+		}
+		return false, nil
+	default:
+		return false, classifyHTTPStatus("GCS resumable status failed", response.StatusCode)
+	}
 }
 
 func clientForExplicitZeroLengthDelete(client *http.Client) (*http.Client, func()) {

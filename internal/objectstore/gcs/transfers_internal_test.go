@@ -610,6 +610,52 @@ func TestBackendRejectsInvalidProviderMutationMetadata(t *testing.T) {
 	}
 }
 
+func TestResumableSessionTerminalClassification(t *testing.T) {
+	now := time.Now().UTC()
+	key := objectstore.MustKey("endlessfs/v1/staging/user/terminal-status/data")
+	for _, test := range []struct {
+		name         string
+		status       int
+		rangeValue   string
+		wantTerminal bool
+		wantError    error
+	}{
+		{name: "completed", status: http.StatusOK, wantTerminal: true},
+		{name: "created", status: http.StatusCreated, wantTerminal: true},
+		{name: "cancelled", status: http.StatusNoContent, wantTerminal: true},
+		{name: "missing", status: http.StatusNotFound, wantTerminal: true},
+		{name: "gone", status: http.StatusGone, wantTerminal: true},
+		{name: "active", status: http.StatusPermanentRedirect, rangeValue: "bytes=0-1"},
+		{name: "malformed-active-range", status: http.StatusPermanentRedirect, rangeValue: "invalid", wantError: domain.ErrInternal},
+		{name: "unexpected", status: http.StatusTeapot, wantError: domain.ErrInternal},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend, server := newTransferBoundaryBackend(t, now, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Range", test.rangeValue)
+				writer.WriteHeader(test.status)
+			}))
+			lease := boundaryLease(now, key, domain.UploadResumable, server.URL+"/session", 4)
+			terminal, err := backend.resumableSessionTerminal(context.Background(), lease)
+			if !errors.Is(err, test.wantError) || terminal != test.wantTerminal {
+				t.Fatalf("resumableSessionTerminal() = %t, %v; want %t, %v", terminal, err, test.wantTerminal, test.wantError)
+			}
+		})
+	}
+
+	backend, _ := newTransferBoundaryBackend(t, now, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	invalid := boundaryLease(now, key, domain.UploadResumable, ":", 4)
+	if _, err := backend.resumableSessionTerminal(context.Background(), invalid); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("invalid status URL error = %v", err)
+	}
+	backend.transfer.httpClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("transport unavailable")
+	})}
+	lease := boundaryLease(now, key, domain.UploadResumable, "https://storage.example/session", 4)
+	if _, err := backend.resumableSessionTerminal(context.Background(), lease); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("status transport error = %v", err)
+	}
+}
+
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {

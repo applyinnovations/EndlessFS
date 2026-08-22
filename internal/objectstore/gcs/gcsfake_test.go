@@ -54,6 +54,8 @@ type fakeGCS struct {
 	nextSession               int64
 	sessionDeleteAttempts     int
 	sessionDeleteProtocol     string
+	sessionDeleteStatus       int
+	sessionStatusAttempts     int
 	rejectCompletedDelete     bool
 	clock                     domain.Clock
 	uploadBytes               int64
@@ -304,6 +306,13 @@ func (f *fakeGCS) resumable(writer http.ResponseWriter, request *http.Request, i
 			f.problem(writer, http.StatusLengthRequired, "lengthRequired")
 			return
 		}
+		if f.sessionDeleteStatus != 0 {
+			f.problem(writer, f.sessionDeleteStatus, "injected")
+			return
+		}
+	}
+	if request.Method == http.MethodPut && strings.HasPrefix(request.Header.Get("Content-Range"), "bytes */") {
+		f.sessionStatusAttempts++
 	}
 	session, exists := f.sessions[id]
 	if !exists {

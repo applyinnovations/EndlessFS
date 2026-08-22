@@ -25,10 +25,10 @@ import (
 
 const migrationFixtureProducerCommitEnvironment = "ENDLESSFS_MIGRATION_FIXTURE_PRODUCER_COMMIT"
 
-// TestGenerateSchema004MigrationFixtures is invoked only through the Nix
+// TestGenerateSchema005MigrationFixtures is invoked only through the Nix
 // fixture-generation app after the epoch writer has been committed. Ordinary
 // tests skip it and never mutate the checkout.
-func TestGenerateSchema004MigrationFixtures(t *testing.T) {
+func TestGenerateSchema005MigrationFixtures(t *testing.T) {
 	commit := os.Getenv(migrationFixtureProducerCommitEnvironment)
 	if commit == "" {
 		t.Skip("schema fixture generation was not requested")
@@ -52,7 +52,7 @@ func TestGenerateSchema004MigrationFixtures(t *testing.T) {
 		}},
 		{name: "application-gcs", writer: func(t *testing.T) portable.WriterConfiguration {
 			cfg := runtimeTestConfig(t)
-			configureSchema004PreviewProfile(&cfg)
+			configureSchema005PreviewProfile(&cfg)
 			writer, err := buildWriterConfiguration(cfg, "session-keyring-v1")
 			if err != nil {
 				t.Fatal(err)
@@ -62,12 +62,12 @@ func TestGenerateSchema004MigrationFixtures(t *testing.T) {
 	}
 	for index, profile := range profiles {
 		t.Run(profile.name, func(t *testing.T) {
-			fixture := buildSchema004MigrationFixture(t, commit, byte(0x91+index*17), profile.writer(t))
+			fixture := buildSchema005MigrationFixture(t, commit, byte(0x91+index*17), profile.writer(t))
 			body, err := json.Marshal(fixture)
 			if err != nil {
 				t.Fatal(err)
 			}
-			path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-004-v0.1.15-"+profile.name+".json")
+			path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-005-v0.1.16-"+profile.name+".json")
 			if err := os.WriteFile(path, body, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -75,7 +75,7 @@ func TestGenerateSchema004MigrationFixtures(t *testing.T) {
 	}
 }
 
-func configureSchema004PreviewProfile(cfg *config.Config) {
+func configureSchema005PreviewProfile(cfg *config.Config) {
 	cfg.PreviewProvider = "gcs"
 	cfg.GCSPreviewBucket = "migration-preview-bucket"
 	cfg.PreviewFormats = []string{"image"}
@@ -83,7 +83,7 @@ func configureSchema004PreviewProfile(cfg *config.Config) {
 	cfg.PreviewKeySecret = secret.Value(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("p", 32))))
 }
 
-func buildSchema004MigrationFixture(t *testing.T, commit string, seed byte, writer portable.WriterConfiguration) applicationMigrationFixture {
+func buildSchema005MigrationFixture(t *testing.T, commit string, seed byte, writer portable.WriterConfiguration) applicationMigrationFixture {
 	t.Helper()
 	ctx := context.Background()
 	createdAt := time.Date(2046, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -122,7 +122,7 @@ func buildSchema004MigrationFixture(t *testing.T, commit string, seed byte, writ
 		{path: "/zero.bin", body: nil},
 		{path: "/trash-me.txt", body: []byte("trash")},
 	} {
-		uploadSchema004FixtureFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath(upload.path), upload.body)
+		uploadSchema005FixtureFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath(upload.path), upload.body)
 	}
 	trashEntry, err := engine.Files().Stat(ctx, live, domain.MustParseUserPath("/trash-me.txt"))
 	if err != nil {
@@ -143,7 +143,7 @@ func buildSchema004MigrationFixture(t *testing.T, commit string, seed byte, writ
 		t.Fatal(err)
 	}
 	return applicationMigrationFixture{
-		SchemaVersion: 1, SourceRelease: "v0.1.15", SourceCommit: commit, CreatedAt: createdAt,
+		SchemaVersion: 1, SourceRelease: "v0.1.16", SourceCommit: commit, CreatedAt: createdAt,
 		UserID: user.String(), StateObjects: stateBackend.Export(), FileObjects: fileBackend.Export(),
 	}
 }
@@ -157,7 +157,7 @@ func stateKeyForFixture(t *testing.T, namespace, part string) state.Key {
 	return key
 }
 
-func uploadSchema004FixtureFile(t *testing.T, client *http.Client, files *portable.FileStore, scope domain.Scope, path domain.UserPath, body []byte) {
+func uploadSchema005FixtureFile(t *testing.T, client *http.Client, files *portable.FileStore, scope domain.Scope, path domain.UserPath, body []byte) {
 	t.Helper()
 	capability, err := files.CreateUpload(context.Background(), scope, domain.CreateUploadRequest{Path: path, Size: int64(len(body)), MediaType: "application/octet-stream", Conflict: domain.ConflictFail, IdempotencyKey: "fixture-upload-" + path.Name() + fmt.Sprint(len(path.String()))})
 	if err != nil {

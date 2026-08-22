@@ -54,63 +54,63 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 		profile:  "portable-minimal",
 		file:     "pre-aggregate-v0.1.4.json", digest: "24111f7739207b53fad5c4e1cf0ca106982b40fce33850f045d7430150260258",
 		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86",
-		wantEpoch: 4, wantSize: 26, wantFiles: 2,
+		wantEpoch: 5, wantSize: 26, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-002",
 		profile:  "portable-minimal",
 		file:     "schema-002-recursive-bytes.json", digest: "c7fc6a6924e62f99e9fdd99a35343385c17088d36bcac5f47b6abfe8776ee854",
 		producer: "schema-002", commit: "b70f6361497d45f20049279bb5381a4fbb1005f1",
-		wantEpoch: 3, wantSize: 10, wantFiles: 2,
+		wantEpoch: 4, wantSize: 10, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-003",
 		profile:  "portable-minimal",
 		file:     "recursive-aggregates-v0.1.7.json", digest: "0e2ce0a0853cba6e29730346b69e3c829240f617b1f277949f394b9a54786a51",
 		producer: "v0.1.7", commit: "1548dafa30ea3fbf0340b3b32381e885a110ef5e",
-		wantEpoch: 2, wantSize: 26, wantFiles: 2,
+		wantEpoch: 3, wantSize: 26, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-001",
 		profile:  "application-preview-disabled",
 		file:     "pre-aggregate-v0.1.4-application-disabled.json", digest: "b6932210f53e927bf0543153290674579e50f0004bdad1e1e474256fbea8e15a",
 		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86",
-		wantEpoch: 4, wantSize: 22, wantFiles: 2,
+		wantEpoch: 5, wantSize: 22, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-001",
 		profile:  "application-preview-gcs",
 		file:     "pre-aggregate-v0.1.4-application-gcs.json", digest: "8e508619ffb77850403f2e83de9d1ce98dabfe330334ffee9c2e87f6c250cab8",
 		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86",
-		wantEpoch: 4, wantSize: 22, wantFiles: 2,
+		wantEpoch: 5, wantSize: 22, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-001",
 		profile:  "application-preview-gcs-v0.1.7-interrupted",
 		file:     "schema-001-v0.1.7-interrupted-application-gcs.json", digest: "998cbd744dce60cdf59400903c0de950a0f96915cdb0e7f0225b5260882e28e9",
 		producer: "v0.1.7-interrupted", commit: "1548dafa30ea3fbf0340b3b32381e885a110ef5e",
-		wantEpoch: 4, wantSize: 22, wantFiles: 2,
+		wantEpoch: 5, wantSize: 22, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-004",
 		profile:  "portable-minimal",
 		file:     "schema-004-v0.1.15-portable-minimal.json", digest: "de44233d6260d403833466b40f910f8c78526da5ea65fa26366021d6cc0d3eb0",
 		producer: "v0.1.15", commit: "f11fe68b2d731e8fd0228352a0b85255d7574abf",
-		wantEpoch: 1, wantSize: 18, wantFiles: 3,
+		wantEpoch: 2, wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-004",
 		profile:  "application-preview-disabled",
 		file:     "schema-004-v0.1.15-application-disabled.json", digest: "4efd4d8807e83f21ae2a39f6ed517267824e6c308e9e18976967a2f8ae99fad8",
 		producer: "v0.1.15", commit: "f11fe68b2d731e8fd0228352a0b85255d7574abf",
-		wantEpoch: 1, wantSize: 18, wantFiles: 3,
+		wantEpoch: 2, wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-004",
 		profile:  "application-preview-gcs",
 		file:     "schema-004-v0.1.15-application-gcs.json", digest: "3c68098d68e6eb0d119b235eca51810246ddc7128705b2111d7a731c9464215a",
 		producer: "v0.1.15", commit: "f11fe68b2d731e8fd0228352a0b85255d7574abf",
-		wantEpoch: 1, wantSize: 18, wantFiles: 3,
+		wantEpoch: 2, wantSize: 18, wantFiles: 3,
 	},
 }
 
@@ -251,7 +251,7 @@ func TestMigrationCheckpointInventoryResumesFromBoundedPagesWithoutReadingFileBo
 	if got := interrupted.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads across interrupted migration = %d; want 0", got)
 	}
-	if got := interrupted.totalAttempts(); got < 4 || got > 6 {
+	if got := interrupted.totalAttempts(); got < 7 || got > 9 {
 		t.Fatalf("file metadata list calls across interrupted migration = %d; want bounded restart traversal", got)
 	}
 	progressRecords := 0
@@ -413,8 +413,8 @@ func TestMigrationDoesNotReadFileBodiesAgainImmediatelyBeforeOpeningWrites(t *te
 	if got := counting.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads during migration = %d; want 0", got)
 	}
-	if got := counting.totalAttempts(); got != 2 {
-		t.Fatalf("file metadata listing calls across two adjacent migration checkpoints = %d; want 2", got)
+	if got := counting.totalAttempts(); got != 3 {
+		t.Fatalf("file metadata listing calls across three metadata-relevant migration checkpoints = %d; want 3", got)
 	}
 }
 
@@ -530,8 +530,20 @@ func TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary(t *testing.T) 
 	history := portable.StorageSchemaHistory()
 	for edgeIndex, entry := range history[:len(history)-1] {
 		families := storageSchemaFixturesFor(entry.ID)
+		edgeBoundaries := boundaries
+		if entry.MigrationID == "schema-004-to-005" {
+			edgeBoundaries = []string{
+				portable.StepMigrationAfterDetection,
+				portable.StepMigrationAfterGateClosed,
+				portable.StepMigrationAfterDirectories,
+				portable.StepMigrationAfterWriterSet,
+				portable.StepMigrationAfterSuperblock,
+				portable.StepMigrationAfterGateBinding,
+				portable.StepMigrationAfterCheckpoint,
+			}
+		}
 		for familyIndex, family := range families {
-			for boundaryIndex, boundary := range boundaries {
+			for boundaryIndex, boundary := range edgeBoundaries {
 				t.Run(entry.MigrationID+"/"+family.profile+"/"+boundary, func(t *testing.T) {
 					fixture := loadStorageSchemaFixture(t, family)
 					stateBackend := objectmemory.New()

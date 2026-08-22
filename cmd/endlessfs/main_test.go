@@ -279,7 +279,7 @@ func TestApplicationWriterProfilesOpenSchema004Fixtures(t *testing.T) {
 		configure func(*config.Config)
 	}{
 		{name: "preview-disabled", fixture: "schema-004-v0.1.15-application-disabled.json", configure: func(*config.Config) {}},
-		{name: "preview-gcs", fixture: "schema-004-v0.1.15-application-gcs.json", configure: configureSchema004PreviewProfile},
+		{name: "preview-gcs", fixture: "schema-004-v0.1.15-application-gcs.json", configure: configureSchema005PreviewProfile},
 	}
 	for _, profile := range profiles {
 		t.Run(profile.name, func(t *testing.T) {

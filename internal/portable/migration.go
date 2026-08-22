@@ -202,6 +202,167 @@ func (e *Engine) runStorageMigration003To004(ctx context.Context, transition sto
 	return e.runAggregateSchemaMigration(ctx, transition, superblockObject, superblock, aggregateMigrationPlan{writeProviderFingerprints: true, writeDuplicateCatalog: true, writeStateIndexes: true})
 }
 
+// Schema 005 changes the durable file-operation representation but does not
+// rewrite any schema-004 authoritative object. The edge still closes and
+// drains the canonical gate, activates the adjacent feature signature, and
+// creates its own checkpoint; it deliberately avoids a redundant directory
+// graph walk and reachability collection.
+func (e *Engine) runStorageMigration004To005(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
+	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageStarted})
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterDetection)); err != nil {
+		return err
+	}
+	complete, err := e.storageMigrationComplete(ctx, transition)
+	if err == nil && complete {
+		e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageComplete})
+		return nil
+	}
+	if err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	if err := e.verifyMigrationWriterSet(ctx, transition); err != nil {
+		return err
+	}
+	closed, err := e.closeFeatureOnlyMigrationGate(ctx, transition)
+	if err != nil || !closed {
+		return err
+	}
+	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageGateClosed})
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterGateClosed)); err != nil {
+		return err
+	}
+	// This edge has no authoritative body transformer. The boundary remains so
+	// the common crash matrix proves exact adjacent-edge order.
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterDirectories)); err != nil {
+		return err
+	}
+	if err := e.activateMigrationWriterSet(ctx, transition); err != nil {
+		return err
+	}
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterWriterSet)); err != nil {
+		return err
+	}
+	if err := e.activateMigrationSuperblock(ctx, transition, superblockObject, superblock); err != nil {
+		return err
+	}
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterSuperblock)); err != nil {
+		return err
+	}
+	if err := e.bindMigrationGateToTarget(ctx, transition); err != nil {
+		return err
+	}
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterGateBinding)); err != nil {
+		return err
+	}
+	if complete, completeErr := e.storageMigrationComplete(ctx, transition); completeErr == nil && complete {
+		return nil
+	}
+	checkpoint, err := e.createCheckpointWhileClosed(ctx, transition.checkpointID)
+	if err != nil {
+		if complete, completeErr := e.storageMigrationComplete(ctx, transition); completeErr == nil && complete {
+			return nil
+		}
+		return err
+	}
+	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageCheckpointCreated})
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterCheckpoint)); err != nil {
+		return err
+	}
+	if err := e.openWritesAfterCreatedCheckpoint(ctx, checkpoint); err != nil {
+		if complete, completeErr := e.storageMigrationComplete(ctx, transition); completeErr == nil && complete {
+			return nil
+		}
+		return err
+	}
+	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageComplete})
+	return nil
+}
+
+func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition storageMigration) (bool, error) {
+	for range 16 {
+		object, envelope, gate, err := e.readGate(ctx)
+		if err != nil {
+			return false, err
+		}
+		if gate.Mode == storageformat.GateOpen && writeGateSchemaAtLeast(gate.WriterFeatures, transition.to, e.writer.RequiredFeatures) {
+			complete, completeErr := e.storageMigrationComplete(ctx, transition)
+			if completeErr != nil {
+				return false, completeErr
+			}
+			if complete {
+				return false, nil
+			}
+			return false, domain.NewError(domain.ErrorPreconditionFailed, "migration gate opened before feature activation completed")
+		}
+		if gate.Mode != storageformat.GateOpen && gate.CheckpointID != transition.checkpointID {
+			if other, found := migrationForCheckpoint(gate.CheckpointID); found {
+				otherIndex, _ := schemaIndex(other.from)
+				transitionIndex, _ := schemaIndex(transition.from)
+				if otherIndex > transitionIndex {
+					return false, nil
+				}
+			}
+			return false, domain.NewError(domain.ErrorConflict, "write gate is reserved by another maintenance operation")
+		}
+		if gate.Mode == storageformat.GateClosed && gate.CheckpointID == transition.checkpointID {
+			return true, nil
+		}
+		detected, found := detectWriteGateSchema(gate.WriterFeatures, e.writer.RequiredFeatures)
+		if !found {
+			return false, domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
+		}
+		if detected.id != transition.from {
+			if detectedIndex, detectedFound := schemaIndex(detected.id); !detectedFound {
+				return false, domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
+			} else if targetIndex, _ := schemaIndex(transition.to); detectedIndex >= targetIndex {
+				return false, nil
+			} else {
+				return false, domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
+			}
+		}
+		switch gate.Mode {
+		case storageformat.GateOpen:
+			gate.Mode, gate.CheckpointID = storageformat.GateClosing, transition.checkpointID
+			body, encodeErr := storageformat.EncodeEnvelope(writeGateSchema, object.Key, envelope.Revision+1, gate)
+			if encodeErr != nil {
+				return false, encodeErr
+			}
+			if _, err = e.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil && !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
+				return false, err
+			}
+		case storageformat.GateClosing:
+			if err := e.drainAdmissions(ctx, gate.Epoch); err != nil {
+				return false, err
+			}
+			if err := e.drainOperationRecords(ctx, true, true); err != nil {
+				return false, err
+			}
+			currentObject, currentEnvelope, current, readErr := e.readGate(ctx)
+			if readErr != nil {
+				return false, readErr
+			}
+			if current.Mode != storageformat.GateClosing || current.Epoch != gate.Epoch || current.CheckpointID != transition.checkpointID {
+				continue
+			}
+			current.Mode = storageformat.GateClosed
+			body, encodeErr := storageformat.EncodeEnvelope(writeGateSchema, currentObject.Key, currentEnvelope.Revision+1, current)
+			if encodeErr != nil {
+				return false, encodeErr
+			}
+			if _, err = e.backend.Put(ctx, currentObject.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: currentObject.Version}); err != nil {
+				if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+					continue
+				}
+				return false, err
+			}
+			return true, nil
+		case storageformat.GateClosed:
+			return true, nil
+		}
+	}
+	return false, domain.NewError(domain.ErrorUnavailable, "feature-only storage migration gate remained contended")
+}
+
 func (e *Engine) runAggregateSchemaMigration(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock, plan aggregateMigrationPlan) error {
 	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageStarted})
 	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterDetection)); err != nil {

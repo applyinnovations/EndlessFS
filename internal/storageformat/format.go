@@ -31,6 +31,7 @@ const (
 	FeaturePagedOperations      = "paged-operation-steps-v1"
 	FeatureStateIndexes         = "persistent-state-indexes-v1"
 	FeatureDirectoryIndexes     = "persistent-directory-indexes-v1"
+	FeatureResumableOperations  = "resumable-operation-preparation-v1"
 )
 
 type Envelope struct {

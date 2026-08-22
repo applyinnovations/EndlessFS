@@ -1589,41 +1589,6 @@ func (s *FileStore) PreviewDuplicateReconciliation(ctx context.Context, userID d
 	return result, nil
 }
 
-func compareDirectoryInventories(left, right domain.DuplicateOccurrence, leftFiles, rightFiles map[string][]domain.DuplicateOccurrence) (domain.DuplicateDirectoryComparison, error) {
-	result := domain.DuplicateDirectoryComparison{Left: left, Right: right, Exact: left.GroupID == right.GroupID}
-	groups := make(map[string]struct{}, len(leftFiles)+len(rightFiles))
-	for groupID := range leftFiles {
-		groups[groupID] = struct{}{}
-	}
-	for groupID := range rightFiles {
-		groups[groupID] = struct{}{}
-	}
-	for groupID := range groups {
-		leftValues, rightValues := leftFiles[groupID], rightFiles[groupID]
-		size := int64(0)
-		if len(leftValues) != 0 {
-			size = leftValues[0].Size
-		}
-		if len(leftValues) != 0 && len(rightValues) != 0 && size != rightValues[0].Size {
-			return domain.DuplicateDirectoryComparison{}, domain.NewError(domain.ErrorInvalid, "duplicate file identity size mismatch")
-		}
-		if size == 0 && len(rightValues) != 0 {
-			size = rightValues[0].Size
-		}
-		common := min(int64(len(leftValues)), int64(len(rightValues)))
-		if err := addDuplicateTotals(&result.CommonFiles, &result.CommonBytes, common, size); err != nil {
-			return domain.DuplicateDirectoryComparison{}, err
-		}
-		if err := addDuplicateTotals(&result.LeftOnlyFiles, &result.LeftOnlyBytes, int64(len(leftValues))-common, size); err != nil {
-			return domain.DuplicateDirectoryComparison{}, err
-		}
-		if err := addDuplicateTotals(&result.RightOnlyFiles, &result.RightOnlyBytes, int64(len(rightValues))-common, size); err != nil {
-			return domain.DuplicateDirectoryComparison{}, err
-		}
-	}
-	return result, nil
-}
-
 func addDuplicateTotals(files, bytes *int64, count, size int64) error {
 	if files == nil || bytes == nil || count < 0 || size < 0 || count > math.MaxInt64-*files || count != 0 && size > math.MaxInt64/count {
 		return domain.NewError(domain.ErrorInvalid, "duplicate directory comparison overflows")
@@ -1832,69 +1797,61 @@ func restoreDuplicateOccurrenceAreas(plan *duplicateReconciliationPlan) error {
 	return nil
 }
 
+// rebuildDuplicateCatalog streams one indexed directory page at a time. Root
+// keys are provider-ordered by owner, so only one owner and one active
+// directory traversal are retained while summaries are finalized.
 func (e *Engine) rebuildDuplicateCatalog(ctx context.Context) error {
-	type rootScope struct {
-		scope domain.Scope
-		key   string
-	}
-	scopes := make(map[string]rootScope)
-	users := make(map[string]domain.UserID)
-	if err := visitObjectPages(ctx, e.backend, storageformat.FilesystemPrefix(), func(info objectstore.ObjectInfo) error {
-		userValue, areaValue, directoryID, matched, err := storageformat.ParseDirectoryRootKey(info.Key)
-		if err != nil {
-			return err
-		}
-		if !matched || directoryID != storageformat.RootDirectoryID {
+	currentUser := ""
+	var summaryUser domain.UserID
+	flushSummaries := func() error {
+		if currentUser == "" {
 			return nil
+		}
+		return e.rebuildDuplicateSummaries(ctx, summaryUser)
+	}
+	err := visitObjectPages(ctx, e.backend, storageformat.FilesystemPrefix(), func(info objectstore.ObjectInfo) error {
+		userValue, areaValue, directoryID, matched, err := storageformat.ParseDirectoryRootKey(info.Key)
+		if err != nil || !matched || directoryID != storageformat.RootDirectoryID {
+			return err
 		}
 		userID, err := domain.ParseUserID(userValue)
 		if err != nil {
 			return err
 		}
+		if currentUser != "" && currentUser != userValue {
+			if err := flushSummaries(); err != nil {
+				return err
+			}
+		}
+		currentUser, summaryUser = userValue, userID
 		area := domain.AreaLive
-		if areaValue == "trash" {
+		switch areaValue {
+		case "live":
+		case "trash":
 			area = domain.AreaTrash
+		default:
+			return domain.NewError(domain.ErrorInvalid, "duplicate catalog migration encountered an invalid area")
 		}
 		scope, err := domain.NewScope(userID, area)
 		if err != nil {
 			return err
 		}
-		key := userValue + "\x00" + areaValue
-		scopes[key] = rootScope{scope: scope, key: key}
-		users[userValue] = userID
-		return nil
-	}); err != nil {
-		return err
-	}
-	ordered := make([]string, 0, len(scopes))
-	for key := range scopes {
-		ordered = append(ordered, key)
-	}
-	sort.Strings(ordered)
-	for _, key := range ordered {
-		scope := scopes[key].scope
-		root, err := e.Files().readDirectory(ctx, scope, storageformat.RootDirectoryID, false)
+		root, err := e.Files().readDirectoryMetadata(ctx, scope, storageformat.RootDirectoryID, false)
 		if err != nil {
 			return err
 		}
-		if err := e.migrateDuplicateDirectory(ctx, scope, domain.MustParseUserPath("/"), root); err != nil {
-			return err
-		}
+		return e.migrateDuplicateDirectoryStream(ctx, scope, domain.MustParseUserPath("/"), root)
+	})
+	if err != nil {
+		return err
 	}
-	userValues := make([]string, 0, len(users))
-	for userValue := range users {
-		userValues = append(userValues, userValue)
-	}
-	sort.Strings(userValues)
-	for _, userValue := range userValues {
-		if err := e.rebuildDuplicateSummaries(ctx, users[userValue]); err != nil {
-			return err
-		}
-	}
-	return nil
+	return flushSummaries()
 }
 
-func (e *Engine) migrateDuplicateDirectory(ctx context.Context, scope domain.Scope, path domain.UserPath, snapshot directorySnapshot) error {
+func (e *Engine) migrateDuplicateDirectoryStream(ctx context.Context, scope domain.Scope, path domain.UserPath, snapshot directorySnapshot) error {
+	if snapshot.pending {
+		return domain.NewError(domain.ErrorUnavailable, "duplicate migration encountered a pending directory")
+	}
 	if snapshot.recursiveFileCount > 0 {
 		postings, err := duplicateSimilarityPostings(scope, path, snapshot.root.DirectoryID, snapshot.manifest.ContentSketch)
 		if err != nil {
@@ -1906,7 +1863,12 @@ func (e *Engine) migrateDuplicateDirectory(ctx context.Context, scope domain.Sco
 			}
 		}
 	}
-	for _, entry := range snapshot.entries {
+	children := e.Files().directoryEntryIterator(ctx, scope, snapshot.root.DirectoryID, snapshot.manifest, domain.SortName, nil)
+	for {
+		entry, found, err := children()
+		if err != nil || !found {
+			return err
+		}
 		childPath, err := path.Join(entry.Name)
 		if err != nil {
 			return err
@@ -1921,18 +1883,17 @@ func (e *Engine) migrateDuplicateDirectory(ctx context.Context, scope domain.Sco
 		if entry.Kind != domain.EntryDirectory {
 			continue
 		}
-		child, err := e.Files().readDirectory(ctx, scope, entry.DirectoryID, false)
+		child, err := e.Files().readDirectoryMetadata(ctx, scope, entry.DirectoryID, false)
 		if err != nil {
 			return err
 		}
 		if child.recursiveBytes != entry.Size || child.recursiveFileCount != entry.FileCount || child.contentDigest != entry.ContentDigest {
 			return domain.NewError(domain.ErrorInvalid, "duplicate migration encountered a stale directory aggregate")
 		}
-		if err := e.migrateDuplicateDirectory(ctx, scope, childPath, child); err != nil {
+		if err := e.migrateDuplicateDirectoryStream(ctx, scope, childPath, child); err != nil {
 			return err
 		}
 	}
-	return nil
 }
 
 func (e *Engine) ensureMigratedSimilarityPosting(ctx context.Context, userID domain.UserID, posting storageformat.DuplicateSimilarityPosting) error {

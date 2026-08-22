@@ -2,6 +2,7 @@ package portable
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -248,5 +249,67 @@ func TestOperationPreparationReducesCatalogChangesWithoutGrowingMaps(t *testing.
 	}
 	if len(groups.Groups) != 1 || groups.Groups[0].OccurrenceCount != 2 {
 		t.Fatalf("reduced duplicate groups = %+v", groups.Groups)
+	}
+}
+
+func TestDirectoryContentDeltaMergeStreamsLargeSubtreeRename(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2047, 5, 6, 7, 8, 9, 0, time.UTC))
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("content-delta-entropy", 1<<16)))
+	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	entries := make([]storageformat.DirectoryEntry, maxDirectoryIndexItems*4+1)
+	for index := range entries {
+		name := fmt.Sprintf("file-%05d.bin", index)
+		entries[index] = withCurrentTestFingerprint(storageformat.DirectoryEntry{
+			Name: name, NameDigest: storageformat.NameDigest(name), Kind: domain.EntryFile,
+			BlobID: fmt.Sprintf("blob-%05d", index), Size: 1, MediaType: "application/octet-stream", ModifiedAt: clock.Now(),
+		})
+	}
+	sort.Slice(entries, func(left, right int) bool { return entries[left].NameDigest < entries[right].NameDigest })
+	prepared, err := engine.Files().prepareDirectory(ctx, scope, storageformat.RootDirectoryID, entries, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prerequisite := range prepared.prerequisites {
+		if _, err := backend.Put(ctx, objectstore.MustKey(prerequisite.Key), prerequisite.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rootKey := storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID)
+	if _, err := backend.Put(ctx, rootKey, prepared.rootBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := engine.Files().readDirectoryMetadata(ctx, scope, storageformat.RootDirectoryID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := directoryUpdate{scope: scope, directoryID: storageformat.RootDirectoryID, snapshot: snapshot, recursiveFileCount: snapshot.recursiveFileCount}
+	deltas := []directoryContentDelta{
+		{scope: scope, directoryID: storageformat.RootDirectoryID, manifest: snapshot.manifest, remove: true},
+		{scope: scope, directoryID: storageformat.RootDirectoryID, manifest: snapshot.manifest, prefix: []string{"renamed"}},
+	}
+	emitted := 0
+	root, err := engine.Files().rebuildDirectoryContentIndexWithDeltas(ctx, update, deltas, func(object storageformat.MutationObject) error {
+		emitted++
+		_, err := backend.Put(ctx, objectstore.MustKey(object.Key), object.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
+		if errors.Is(err, domain.ErrConflict) {
+			return nil
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.EntryCount != uint64(len(entries)) || emitted <= len(entries)/maxDirectoryIndexItems {
+		t.Fatalf("streamed delta root/count = %d, emitted=%d", root.EntryCount, emitted)
+	}
+	_, err = engine.Files().rebuildDirectoryContentIndexWithDeltas(ctx, update, []directoryContentDelta{{
+		scope: scope, directoryID: storageformat.RootDirectoryID, manifest: snapshot.manifest,
+		prefix: []string{"not-in-the-snapshot"}, remove: true,
+	}}, func(storageformat.MutationObject) error { return nil })
+	if !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("stale content-index removal error = %v; want invalid", err)
 	}
 }

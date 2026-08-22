@@ -910,6 +910,34 @@ func TestUploadAbortBatchMoveTrashPagingAndEmptyTrash(t *testing.T) {
 	}
 }
 
+func TestVersionPinnedTrashRejectsAChangedSourceAndAcceptsTheReviewedVersion(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	entry := upload(t, env, env.owner, "/reviewed-copy.txt", []byte("reviewed"), "text/plain", "reviewed-trash-upload-1")
+
+	for _, version := range []domain.Version{"", "bad\nversion", domain.Version(strings.Repeat("v", 513))} {
+		if _, err := env.service.TrashVersioned(ctx, env.owner, []drive.TrashItem{{Path: entry.Path, Version: version}}, fmt.Sprintf("reviewed-trash-invalid-%d", len(version))); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid reviewed version %q = %v", version, err)
+		}
+	}
+
+	stale, err := env.service.TrashVersioned(ctx, env.owner, []drive.TrashItem{{Path: entry.Path, Version: "stale-version"}}, "reviewed-trash-stale-01")
+	if err != nil || len(stale.Items) != 1 || stale.Items[0].State != domain.OperationFailed || stale.Items[0].ErrorKind != domain.ErrorPreconditionFailed {
+		t.Fatalf("stale version-pinned trash = %+v, %v", stale, err)
+	}
+	if _, err := env.service.Stat(ctx, env.owner, entry.Path); err != nil {
+		t.Fatalf("stale version-pinned trash removed the source: %v", err)
+	}
+
+	trashed, err := env.service.TrashVersioned(ctx, env.owner, []drive.TrashItem{{Path: entry.Path, Version: entry.Version}}, "reviewed-trash-valid-001")
+	if err != nil || len(trashed.Items) != 1 || trashed.Items[0].State != domain.OperationSucceeded || trashed.Items[0].TrashID == "" {
+		t.Fatalf("valid version-pinned trash = %+v, %v", trashed, err)
+	}
+	if _, err := env.service.Stat(ctx, env.owner, entry.Path); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("valid version-pinned trash retained source: %v", err)
+	}
+}
+
 func TestShareIdempotencyFileRootAndPublicFailureMatrix(t *testing.T) {
 	env := newDriveEnvironment(t)
 	ctx := context.Background()

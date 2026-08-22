@@ -512,6 +512,24 @@ func TestIntegrationBatchUploadEmptyTrashAndPublicDownloadRoutes(t *testing.T) {
 	}
 
 	entry, _ := createHTTPFile(t, env, env.session, env.csrf, "/public.txt", "public", "public-download-upload-1")
+	versioned, _ := createHTTPFile(t, env, env.session, env.csrf, "/versioned-trash.txt", "versioned", "versioned-trash-upload-1")
+	mixedTrash := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"paths":["/versioned-trash.txt"],"items":[{"path":"/versioned-trash.txt","version":"stale"}]}`, cookies, driveMutationHeaders(env.csrf.Value, "versioned-trash-mixed-01"))
+	if mixedTrash.Code != http.StatusBadRequest {
+		t.Fatalf("mixed versioned trash = %d %s", mixedTrash.Code, mixedTrash.Body.String())
+	}
+	mixedEmptyTrash := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"paths":[],"items":[{"path":"/versioned-trash.txt","version":"stale"}]}`, cookies, driveMutationHeaders(env.csrf.Value, "versioned-trash-mixed-02"))
+	if mixedEmptyTrash.Code != http.StatusBadRequest {
+		t.Fatalf("mixed empty versioned trash = %d %s", mixedEmptyTrash.Code, mixedEmptyTrash.Body.String())
+	}
+	staleTrash := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"items":[{"path":"/versioned-trash.txt","version":"stale"}]}`, cookies, driveMutationHeaders(env.csrf.Value, "versioned-trash-stale-1"))
+	if staleTrash.Code != http.StatusAccepted || !bytes.Contains(staleTrash.Body.Bytes(), []byte(`"errorKind":"precondition_failed"`)) {
+		t.Fatalf("stale versioned trash = %d %s", staleTrash.Code, staleTrash.Body.String())
+	}
+	versionedBody, _ := json.Marshal(map[string]any{"items": []map[string]any{{"path": "/versioned-trash.txt", "version": versioned.Version}}})
+	validTrash := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, string(versionedBody), cookies, driveMutationHeaders(env.csrf.Value, "versioned-trash-valid-01"))
+	if validTrash.Code != http.StatusAccepted || !bytes.Contains(validTrash.Body.Bytes(), []byte(`"state":"succeeded"`)) {
+		t.Fatalf("valid versioned trash = %d %s", validTrash.Code, validTrash.Body.String())
+	}
 	share := performRequest(t, env.handler, http.MethodPost, "/api/v1/shares", origin, `{"path":"/public.txt"}`, cookies, driveMutationHeaders(env.csrf.Value, "public-download-share-01"))
 	if share.Code != http.StatusCreated {
 		t.Fatalf("share = %d %s", share.Code, share.Body.String())

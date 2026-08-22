@@ -44,6 +44,19 @@
     users: [],
     usersCursor: "",
     usersLoading: false,
+    duplicateKind: "directory",
+    duplicateGroups: [],
+    duplicateGroupsCursor: "",
+    duplicateGroupsLoading: false,
+    duplicateGroupsRequest: 0,
+    duplicateOccurrences: new Map(),
+    duplicateFolderPath: "",
+    duplicateOverlaps: [],
+    duplicateOverlapsCursor: "",
+    duplicateOverlapsLoading: false,
+    duplicateOverlapsRequest: 0,
+    duplicateReconciliation: null,
+    duplicateDialogOpener: null,
     publicToken: "",
     publicPath: "/",
     publicCursor: "",
@@ -698,7 +711,7 @@
 
   function setRoute(route, push = true) {
     if (!state.user) return Promise.resolve();
-    const paths = { drive: "/", trash: "/trash", settings: "/settings", admin: "/admin" };
+    const paths = { drive: "/", trash: "/trash", duplicates: "/duplicates", settings: "/settings", admin: "/admin" };
     if (route === "admin" && !(state.user.roles || []).includes("admin")) route = "drive";
     const previousRoute = routeFromPath();
     if (push && (previousRoute === "drive" || previousRoute === "trash")) {
@@ -728,6 +741,7 @@
     if (route === "trash") return loadTrash();
     if (route === "settings") return loadSettings();
     if (route === "admin") return loadAdmin();
+    if (route === "duplicates") return loadDuplicates();
     return Promise.resolve();
   }
 
@@ -735,6 +749,7 @@
     if (location.pathname === "/trash") return "trash";
     if (location.pathname === "/settings") return "settings";
     if (location.pathname === "/admin") return "admin";
+    if (location.pathname === "/duplicates") return "duplicates";
     return "drive";
   }
 

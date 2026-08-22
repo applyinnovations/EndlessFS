@@ -207,6 +207,20 @@
     byID("restore-selected").addEventListener("click", restoreSelectedTrash);
     byID("delete-selected-permanently").addEventListener("click", deleteSelectedTrash);
     byID("empty-trash").addEventListener("click", emptyTrash);
+    byID("duplicate-refresh").addEventListener("click", refreshDuplicates);
+    byID("duplicate-groups-more").addEventListener("click", () => loadDuplicateGroups(true));
+    for (const control of document.querySelectorAll('input[name="duplicate-kind"]')) control.addEventListener("change", async (event) => {
+      if (!event.target.checked) return;
+      state.duplicateKind = event.target.value;
+      syncDuplicateURL(true);
+      await loadDuplicateGroups(false);
+    });
+    byID("duplicate-folder-form").addEventListener("submit", submitDuplicateFolder);
+    byID("duplicate-overlaps-more").addEventListener("click", () => loadDuplicateOverlaps(true));
+    byID("duplicate-reconciliation-close").addEventListener("click", () => closeDuplicateReconciliation());
+    byID("duplicate-reconciliation-cancel").addEventListener("click", () => closeDuplicateReconciliation());
+    byID("duplicate-reconciliation-apply").addEventListener("click", applyDuplicateReconciliation);
+    byID("duplicate-reconciliation-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closeDuplicateReconciliation(); });
     byID("profile-form").addEventListener("submit", async (event) => { event.preventDefault(); try { const profile = await api("/api/v1/me", { method: "PATCH", body: { displayName: byID("profile-name").value } }); state.user.displayName = profile.displayName; announce("Display name saved."); } catch (error) { announce(friendlyError(error), true); } });
     byID("theme-form").addEventListener("submit", async (event) => { event.preventDefault(); try { const dark = matchMedia("(prefers-color-scheme: dark)").matches; state.safeTheme = byID("safe-theme").checked; syncSafeThemeURL(); const selection = state.safeTheme ? await api(themePreferenceURL(dark)) : await api("/api/v1/me/preferences/theme", { method: "PUT", body: { themeID: byID("theme-select").value, dark } }); applyTheme(selection); byID("theme-note").textContent = `Using ${selection.resolved.name}.`; announce("Theme applied."); } catch (error) { announce(friendlyError(error), true); } });
     byID("safe-theme").addEventListener("change", () => byID("theme-form").requestSubmit());

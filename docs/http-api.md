@@ -47,7 +47,7 @@ This document fixes the v1 JSON field casing and control-plane routes implemente
 | `DELETE` | `/api/v1/uploads/{uploadID}` | Abort and invalidate the upload capability |
 | `POST` | `/api/v1/downloads` | `path`, exact `version`, optional `preview` |
 | `POST` | `/api/v1/files/copy`, `/move` | Singular `source`/`destination`, or `items` with 1–100 source/destination objects; optional conflict/version fields |
-| `POST` | `/api/v1/files/trash` | `paths` with 1–100 virtual paths |
+| `POST` | `/api/v1/files/trash` | Either `paths` with 1–100 virtual paths, or `items` with 1–100 `{path, version}` objects |
 | `GET` | `/api/v1/operations/{operationID}` | Poll a session-owner-scoped provider or aggregate operation |
 | `GET` | `/api/v1/trash` | `limit`, owner-scoped opaque `cursor` |
 | `POST` | `/api/v1/trash/{trashID}/restore` | Optional `conflict` (`fail` default or `rename`) |
@@ -55,6 +55,8 @@ This document fixes the v1 JSON field casing and control-plane routes implemente
 | `POST` | `/api/v1/trash/empty` | `confirm: true`; bounded to 100 records per call |
 
 `preview: true` is accepted only for provider-validated PNG, JPEG, GIF, WebP, PDF, and UTF-8 `text/plain` within `ENDLESSFS_TEXT_PREVIEW_MAX_BYTES`. HTML, JavaScript, SVG, XML, office, unknown, oversized, and media-spoofed files remain attachment-only.
+
+`paths` and `items` are mutually exclusive in a trash request. The versioned `items` form is used after a duplicate review: each path is moved only if its portable logical version is still exactly the reviewed version. A changed path fails that batch item with `precondition_failed` and remains in Files.
 
 Every entry returns `fileCount`. A file has `fileCount: 1`. A directory has the persisted recursive number of descendant logical files; directories themselves are not counted. File-entry `size` is the file's byte length. Directory-entry `size`, including the entry returned for `/`, is the persisted recursive sum of all descendant file bytes in that live or trash tree. Both directory aggregates are retrieved by verifying constant-size root and manifest metadata without scanning the subtree. Empty directories return `size: 0` and `fileCount: 0`; a zero-byte file returns `size: 0` and `fileCount: 1`.
 
@@ -68,7 +70,7 @@ Each successful `GET /api/v1/trash` row preserves the prior trash-record fields 
 
 ## Duplicate reconciliation foundation
 
-These authenticated owner routes expose the duplicate catalog introduced by schema 004 and consumed by the current schema-005 backend foundation for the separate Part 2 browser workflow. They return only virtual paths, portable logical versions, counts, and opaque group/cursor/plan values. Provider keys, provider-native versions, and raw checksums are never public fields.
+These authenticated owner routes expose the duplicate catalog introduced by schema 004 and consumed by the schema-005 browser workflow at `/duplicates`. They return only virtual paths, portable logical versions, counts, and opaque group/cursor/plan values. Provider keys, provider-native versions, raw checksums, and object bodies are never public fields.
 
 | Method | Route | Request or query |
 |---|---|---|
@@ -85,7 +87,7 @@ A group row is `{ "id", "kind", "occurrenceCount", "size", "fileCount", "reclaim
 
 Directory comparison returns `exact`, `commonFiles`, `commonBytes`, and both `leftOnly*` and `rightOnly*` totals. Intersection is a multiset of confirmed file identities, so repeated equal files are counted no more times than they appear on both sides. Exact directory equality additionally requires the complete name-sensitive nested structure to match.
 
-Overlap candidates return `sharedSketch`, `sketchSize`, the exact comparison, pair `ignored`/`ignoreRevision`, and independent exact-group ignore state. The sketch fraction is candidate-discovery evidence, not the reported exact overlap percentage. Default pages omit either ignored relationship; `includeIgnored` supports the Part 2 collapsed ignored section.
+Overlap candidates return `sharedSketch`, `sketchSize`, the exact comparison, pair `ignored`/`ignoreRevision`, and independent exact-group ignore state. The sketch fraction is candidate-discovery evidence, not the reported exact overlap percentage. The browser computes its displayed shared percentage from exact common-file count divided by the exact union count, orders each bounded loaded page by exactness and overlap, and separates either ignored relationship into collapsed sections.
 
 Preview returns at most 100 removal/keep pairs, the comparison, page reclaimable bytes, an optional next cursor, and a short-lived authenticated `planToken`. Ignored groups are omitted. Reconcile revalidates the gate, selected manifests, occurrence group/version, and ignore revisions, then moves only the pinned removal paths to Trash. Stale items fail safely and no duplicate route permanently deletes data.
 

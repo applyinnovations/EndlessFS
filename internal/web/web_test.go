@@ -30,7 +30,7 @@ func TestPinnedInterAssetsMatchApprovedReleaseDigests(t *testing.T) {
 func TestApplicationShellExposesCompleteAccessibleWorkspaces(t *testing.T) {
 	t.Parallel()
 
-	for _, path := range []string{"/", "/bootstrap", "/register", "/settings", "/trash", "/admin"} {
+	for _, path := range []string{"/", "/bootstrap", "/register", "/duplicates", "/settings", "/trash", "/admin"} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		response := httptest.NewRecorder()
 		Handler().ServeHTTP(response, request)
@@ -40,7 +40,7 @@ func TestApplicationShellExposesCompleteAccessibleWorkspaces(t *testing.T) {
 		body := response.Body.String()
 		for _, required := range []string{
 			`href="#workspace"`, `id="workspace"`, `id="live-status"`,
-			`id="drive-view"`, `id="trash-view"`, `id="settings-view"`, `id="admin-view"`,
+			`id="drive-view"`, `id="trash-view"`, `id="duplicates-view"`, `id="settings-view"`, `id="admin-view"`,
 			`id="upload-input"`, `webkitdirectory`, `id="share-list"`, `role="dialog"`,
 			`id="open-transfers"`, `id="transfer-close"`, `id="transfer-progress"`, `id="transfer-filter"`,
 			`class="transfer-sheet-content"`,
@@ -805,6 +805,7 @@ func TestBrowserSourcesAreSplitIntoOrderedDomains(t *testing.T) {
 		"ui/js/transfers.js":     "function transferFileSize",
 		"ui/js/previews.js":      "async function download",
 		"ui/js/operations.js":    "async function copyMove",
+		"ui/js/duplicates.js":    "async function loadDuplicateGroups",
 		"ui/js/account-admin.js": "async function createShare",
 		"ui/js/bootstrap.js":     "function ask",
 	}
@@ -813,6 +814,7 @@ func TestBrowserSourcesAreSplitIntoOrderedDomains(t *testing.T) {
 		"ui/css/shell.css":          ".app-header {",
 		"ui/css/files.css":          ".surface-header {",
 		"ui/css/transfers.css":      ".transfer-panel {",
+		"ui/css/duplicates.css":     ".duplicate-dashboard {",
 		"ui/css/settings-admin.css": ".settings-list {",
 		"ui/css/overlays.css":       "dialog {",
 		"ui/css/responsive.css":     "@media (max-width: 900px)",
@@ -829,6 +831,42 @@ func TestBrowserSourcesAreSplitIntoOrderedDomains(t *testing.T) {
 			if !strings.Contains(source, sources.markers[name]) {
 				t.Errorf("domain source %s is missing boundary marker %q", name, sources.markers[name])
 			}
+		}
+	}
+}
+
+func TestDuplicateWorkspaceSupportsExactAndPartialReconciliation(t *testing.T) {
+	t.Parallel()
+
+	shell := string(mustRead("ui/index.html"))
+	script := string(applicationScript)
+	duplicateScript := string(mustRead("ui/js/duplicates.js"))
+	stylesheet := string(applicationStylesheet)
+	for _, required := range []string{
+		`href="/duplicates" data-route="duplicates">Duplicates</a>`,
+		`id="duplicates-view"`, `id="duplicate-kind"`, `id="duplicate-groups"`,
+		`id="duplicate-ignored-groups"`, `id="duplicate-folder-path"`,
+		`id="duplicate-overlaps"`, `id="duplicate-ignored-overlaps"`,
+		`id="duplicate-reconciliation-dialog"`, `id="duplicate-reconciliation-items"`,
+		`/api/v1/duplicates/groups?`, `/occurrences?limit=${duplicateOccurrencePageSize}`,
+		`/api/v1/duplicates/directories/overlaps`,
+		`/api/v1/duplicates/directories/reconciliation-preview`,
+		`/api/v1/duplicates/directories/reconcile`,
+		`/api/v1/files/trash`, `version: item.version`, `expectedRevision`, `planToken`,
+		`Unique files stay where they are.`, `Move to Trash`,
+		`matchMedia("(prefers-reduced-motion: reduce)")`,
+		`.duplicate-dashboard {`, `@media (max-width: 760px)`,
+	} {
+		if !strings.Contains(shell+script+stylesheet, required) {
+			t.Errorf("duplicate workspace is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		`fetchObjectBody`, `arrayBuffer()`, `crypto.subtle.digest`,
+		`Remove permanently`, `Delete permanently`,
+	} {
+		if strings.Contains(duplicateScript, forbidden) {
+			t.Errorf("duplicate workspace includes unsafe or byte-reading behavior %q", forbidden)
 		}
 	}
 }

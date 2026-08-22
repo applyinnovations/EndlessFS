@@ -107,6 +107,22 @@ func (s *Service) CompareDuplicateDirectories(ctx context.Context, userID domain
 	return storage.CompareDuplicateDirectories(ctx, userID, request)
 }
 
+func (s *Service) DuplicateDirectoryOverlaps(ctx context.Context, userID domain.UserID, request domain.DuplicateDirectoryOverlapRequest) (domain.DuplicateDirectoryOverlapPage, error) {
+	storage, err := s.duplicateStorage()
+	if err != nil {
+		return domain.DuplicateDirectoryOverlapPage{}, err
+	}
+	return storage.ListDuplicateDirectoryOverlaps(ctx, userID, request)
+}
+
+func (s *Service) SetDuplicateDirectoryIgnored(ctx context.Context, userID domain.UserID, request domain.SetDuplicateDirectoryIgnoredRequest) (domain.DuplicateDirectoryIgnore, error) {
+	storage, err := s.duplicateStorage()
+	if err != nil {
+		return domain.DuplicateDirectoryIgnore{}, err
+	}
+	return storage.SetDuplicateDirectoryIgnored(ctx, userID, request)
+}
+
 func (s *Service) PreviewDuplicateReconciliation(ctx context.Context, userID domain.UserID, request domain.DuplicateReconciliationPreviewRequest) (domain.DuplicateReconciliationPreview, error) {
 	storage, err := s.duplicateStorage()
 	if err != nil {

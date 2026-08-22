@@ -48,8 +48,10 @@ type treePreparation struct {
 }
 
 type relativeCatalogEntry struct {
-	segments []string
-	entry    storageformat.DirectoryEntry
+	segments      []string
+	entry         storageformat.DirectoryEntry
+	manifestID    string
+	contentSketch []string
 }
 
 func (s *FileStore) Copy(ctx context.Context, from, to domain.Scope, request domain.CopyRequest) (domain.Operation, error) {
@@ -237,11 +239,24 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 			if occurrenceErr != nil {
 				return occurrenceErr
 			}
-			if remove {
-				catalogChanges = append(catalogChanges, catalogChange{pre: &occurrence})
-			} else {
-				catalogChanges = append(catalogChanges, catalogChange{post: &occurrence})
+			change := catalogChange{}
+			if item.entry.Kind == domain.EntryDirectory && item.entry.FileCount > 0 {
+				postings, postingErr := duplicateSimilarityPostings(scope, path, item.entry.DirectoryID, item.contentSketch)
+				if postingErr != nil {
+					return postingErr
+				}
+				if remove {
+					change.similarityPre = postings
+				} else {
+					change.similarityPost = postings
+				}
 			}
+			if remove {
+				change.pre = &occurrence
+			} else {
+				change.post = &occurrence
+			}
+			catalogChanges = append(catalogChanges, change)
 		}
 		return nil
 	}
@@ -334,7 +349,14 @@ func (s *FileStore) Delete(ctx context.Context, scope domain.Scope, request doma
 		if err != nil {
 			return domain.Operation{}, err
 		}
-		catalogChanges = append(catalogChanges, catalogChange{pre: &occurrence})
+		change := catalogChange{pre: &occurrence}
+		if item.entry.Kind == domain.EntryDirectory && item.entry.FileCount > 0 {
+			change.similarityPre, err = duplicateSimilarityPostings(scope, path, item.entry.DirectoryID, item.contentSketch)
+			if err != nil {
+				return domain.Operation{}, err
+			}
+		}
+		catalogChanges = append(catalogChanges, change)
 	}
 	operation, body, err := s.buildFileOperation(ctx, scope.UserID(), operationID, ownerID, operationDelete, updates, nil, nil, catalogChanges)
 	if err != nil {
@@ -411,7 +433,7 @@ func (s *FileStore) cloneTree(ctx context.Context, from, to domain.Scope, source
 			segments := make([]string, 0, len(occurrence.segments)+1)
 			segments = append(segments, child.Name)
 			segments = append(segments, occurrence.segments...)
-			result.occurrences = append(result.occurrences, relativeCatalogEntry{segments: segments, entry: occurrence.entry})
+			result.occurrences = append(result.occurrences, relativeCatalogEntry{segments: segments, entry: occurrence.entry, manifestID: occurrence.manifestID, contentSketch: append([]string(nil), occurrence.contentSketch...)})
 		}
 	}
 	contentEntries := make([]storageformat.DirectoryContentIndexEntry, 0, source.FileCount)
@@ -449,7 +471,7 @@ func (s *FileStore) cloneTree(ctx context.Context, from, to domain.Scope, source
 	if err != nil {
 		return treePreparation{}, err
 	}
-	result.occurrences = append([]relativeCatalogEntry{{entry: result.entry}}, result.occurrences...)
+	result.occurrences = append([]relativeCatalogEntry{{entry: result.entry, manifestID: prepared.manifestID, contentSketch: append([]string(nil), prepared.contentSketch...)}}, result.occurrences...)
 	return result, nil
 }
 
@@ -465,6 +487,8 @@ func (s *FileStore) collectCatalogTree(ctx context.Context, scope domain.Scope, 
 	if directory.pending || directory.recursiveBytes != source.Size || directory.recursiveFileCount != source.FileCount || directory.contentDigest != source.ContentDigest {
 		return nil, domain.NewError(domain.ErrorUnavailable, "source tree changed during duplicate catalog preparation")
 	}
+	result[0].manifestID = directory.manifestID
+	result[0].contentSketch = append([]string(nil), directory.manifest.ContentSketch...)
 	for _, child := range directory.entries {
 		children, err := s.collectCatalogTree(ctx, scope, child)
 		if err != nil {
@@ -474,7 +498,7 @@ func (s *FileStore) collectCatalogTree(ctx context.Context, scope domain.Scope, 
 			segments := make([]string, 0, len(occurrence.segments)+1)
 			segments = append(segments, child.Name)
 			segments = append(segments, occurrence.segments...)
-			result = append(result, relativeCatalogEntry{segments: segments, entry: occurrence.entry})
+			result = append(result, relativeCatalogEntry{segments: segments, entry: occurrence.entry, manifestID: occurrence.manifestID, contentSketch: append([]string(nil), occurrence.contentSketch...)})
 		}
 	}
 	return result, nil
@@ -546,10 +570,20 @@ func (s *FileStore) buildFileOperation(
 			Key: keyValue, ExpectedLogicalVersion: expected, PreExisted: update.snapshot.exists,
 			PendingBody: pendingBody, FinalBody: finalBody, RollbackBody: rollbackBody,
 		})
-		if update.path.Valid() && !update.path.IsRoot() {
-			before, err := catalogOccurrence(update.scope, update.path, update.entry)
-			if err != nil {
-				return storageformat.FileOperation{}, nil, err
+		if update.path.Valid() {
+			change := catalogChange{}
+			if !update.path.IsRoot() {
+				before, err := catalogOccurrence(update.scope, update.path, update.entry)
+				if err != nil {
+					return storageformat.FileOperation{}, nil, err
+				}
+				change.pre = &before
+			}
+			if update.snapshot.recursiveFileCount > 0 {
+				change.similarityPre, err = duplicateSimilarityPostings(update.scope, update.path, update.directoryID, update.snapshot.manifest.ContentSketch)
+				if err != nil {
+					return storageformat.FileOperation{}, nil, err
+				}
 			}
 			afterEntry := update.entry
 			afterEntry.Size = prepared.recursiveBytes
@@ -559,11 +593,20 @@ func (s *FileStore) buildFileOperation(
 			if err != nil {
 				return storageformat.FileOperation{}, nil, err
 			}
-			after, err := catalogOccurrence(update.scope, update.path, afterEntry)
-			if err != nil {
-				return storageformat.FileOperation{}, nil, err
+			if !update.path.IsRoot() {
+				after, err := catalogOccurrence(update.scope, update.path, afterEntry)
+				if err != nil {
+					return storageformat.FileOperation{}, nil, err
+				}
+				change.post = &after
 			}
-			catalogChangeSets = append(catalogChangeSets, []catalogChange{{pre: &before, post: &after}})
+			if prepared.recursiveFileCount > 0 {
+				change.similarityPost, err = duplicateSimilarityPostings(update.scope, update.path, update.directoryID, prepared.contentSketch)
+				if err != nil {
+					return storageformat.FileOperation{}, nil, err
+				}
+			}
+			catalogChangeSets = append(catalogChangeSets, []catalogChange{change})
 		}
 	}
 	var catalogChanges []catalogChange

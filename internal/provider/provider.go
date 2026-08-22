@@ -33,6 +33,8 @@ type DuplicateStorage interface {
 	ListDuplicateOccurrences(context.Context, domain.UserID, domain.DuplicateOccurrenceRequest) (domain.DuplicateOccurrencePage, error)
 	SetDuplicateGroupIgnored(context.Context, domain.UserID, domain.SetDuplicateIgnoredRequest) (domain.DuplicateIgnore, error)
 	CompareDuplicateDirectories(context.Context, domain.UserID, domain.DuplicateDirectoryComparisonRequest) (domain.DuplicateDirectoryComparison, error)
+	ListDuplicateDirectoryOverlaps(context.Context, domain.UserID, domain.DuplicateDirectoryOverlapRequest) (domain.DuplicateDirectoryOverlapPage, error)
+	SetDuplicateDirectoryIgnored(context.Context, domain.UserID, domain.SetDuplicateDirectoryIgnoredRequest) (domain.DuplicateDirectoryIgnore, error)
 	PreviewDuplicateReconciliation(context.Context, domain.UserID, domain.DuplicateReconciliationPreviewRequest) (domain.DuplicateReconciliationPreview, error)
 	ValidateDuplicateReconciliation(context.Context, domain.UserID, string) (domain.DuplicateReconciliationSelection, error)
 }

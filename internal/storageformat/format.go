@@ -297,6 +297,7 @@ type DirectoryManifest struct {
 	SortIndexes            []DirectorySortIndexRoot `json:"sortIndexes,omitempty"`
 	ContentIndexRootID     string                   `json:"contentIndexRootID,omitempty"`
 	ContentIndexRootDigest string                   `json:"contentIndexRootDigest,omitempty"`
+	ContentSketch          []string                 `json:"contentSketch,omitempty"`
 	EntryCount             int                      `json:"entryCount"`
 	RecursiveBytes         int64                    `json:"recursiveBytes"`
 	RecursiveFileCount     int64                    `json:"recursiveFileCount"`
@@ -345,11 +346,12 @@ type DirectoryContentIndexEntry struct {
 }
 
 type DirectoryContentIndexChild struct {
-	NodeID     string `json:"nodeID"`
-	NodeDigest string `json:"nodeDigest"`
-	FirstKey   string `json:"firstKey"`
-	LastKey    string `json:"lastKey"`
-	EntryCount uint64 `json:"entryCount"`
+	NodeID     string   `json:"nodeID"`
+	NodeDigest string   `json:"nodeDigest"`
+	FirstKey   string   `json:"firstKey"`
+	LastKey    string   `json:"lastKey"`
+	EntryCount uint64   `json:"entryCount"`
+	Sketch     []string `json:"sketch"`
 }
 
 type DirectoryContentIndexNode struct {
@@ -554,12 +556,46 @@ type DuplicateSummaryRoot struct {
 	Pending       *DuplicateSummaryTransition `json:"pending,omitempty"`
 }
 
+type DuplicateSimilarityPosting struct {
+	Position    int    `json:"position"`
+	SketchValue string `json:"sketchValue"`
+	Area        string `json:"area"`
+	DirectoryID string `json:"directoryID"`
+	Path        string `json:"path"`
+}
+
+type DuplicateSimilarityPostingTransition struct {
+	OperationID string                      `json:"operationID"`
+	Fence       uint64                      `json:"fence"`
+	Pre         *DuplicateSimilarityPosting `json:"pre,omitempty"`
+	Post        *DuplicateSimilarityPosting `json:"post,omitempty"`
+}
+
+type DuplicateSimilarityPostingRoot struct {
+	SchemaVersion int                                   `json:"schemaVersion"`
+	UserID        string                                `json:"userID"`
+	Current       *DuplicateSimilarityPosting           `json:"current,omitempty"`
+	Pending       *DuplicateSimilarityPostingTransition `json:"pending,omitempty"`
+}
+
 type DuplicateIgnore struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	UserID        string `json:"userID"`
 	GroupID       string `json:"groupID"`
 	Ignored       bool   `json:"ignored"`
 	Revision      uint64 `json:"revision"`
+}
+
+type DuplicateDirectoryIgnore struct {
+	SchemaVersion    int    `json:"schemaVersion"`
+	UserID           string `json:"userID"`
+	PairID           string `json:"pairID"`
+	LeftArea         string `json:"leftArea"`
+	LeftDirectoryID  string `json:"leftDirectoryID"`
+	RightArea        string `json:"rightArea"`
+	RightDirectoryID string `json:"rightDirectoryID"`
+	Ignored          bool   `json:"ignored"`
+	Revision         uint64 `json:"revision"`
 }
 
 type IdempotencyRecord struct {

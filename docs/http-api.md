@@ -76,12 +76,16 @@ These authenticated owner routes expose the schema-004 duplicate catalog for the
 | `GET` | `/api/v1/duplicates/groups/{groupID}/occurrences` | `limit` and owner/group-scoped opaque `cursor` |
 | `PUT` | `/api/v1/duplicates/groups/{groupID}/ignore` | `{ "ignored": true|false, "expectedRevision": n }`; CSRF and exact origin required |
 | `POST` | `/api/v1/duplicates/directories/compare` | `{ "left": {"area":"live|trash","path":"/..."}, "right": {...} }`; CSRF and exact origin required |
+| `POST` | `/api/v1/duplicates/directories/overlaps` | One `directory`, optional `includeIgnored`, `limit` 1–100, and owner/manifest/gate-scoped opaque `cursor`; CSRF and exact origin required |
+| `PUT` | `/api/v1/duplicates/directories/ignore` | Two directory locations plus `ignored` and optional `expectedRevision`; the stable directory pair, not either path, is the preference identity |
 | `POST` | `/api/v1/duplicates/directories/reconciliation-preview` | Two disjoint live locations plus `removeFrom=left|right`, optional `limit` 1–100, and optional opaque `cursor`; CSRF and exact origin required |
 | `POST` | `/api/v1/duplicates/directories/reconcile` | `{ "planToken": "..." }`; CSRF, exact origin, and `Idempotency-Key` required |
 
 A group row is `{ "id", "kind", "occurrenceCount", "size", "fileCount", "reclaimableBytes", "ignored", "ignoreRevision"? }`. A file occurrence has `fileCount: 1`; a directory occurrence uses its recursive count. `reclaimableBytes` is exact for that one group and counts all but one occurrence. Directory rows and their descendant file rows overlap, so clients must not add unrelated row values into a bucket-wide total.
 
 Directory comparison returns `exact`, `commonFiles`, `commonBytes`, and both `leftOnly*` and `rightOnly*` totals. Intersection is a multiset of confirmed file identities, so repeated equal files are counted no more times than they appear on both sides. Exact directory equality additionally requires the complete name-sensitive nested structure to match.
+
+Overlap candidates return `sharedSketch`, `sketchSize`, the exact comparison, pair `ignored`/`ignoreRevision`, and independent exact-group ignore state. The sketch fraction is candidate-discovery evidence, not the reported exact overlap percentage. Default pages omit either ignored relationship; `includeIgnored` supports the Part 2 collapsed ignored section.
 
 Preview returns at most 100 removal/keep pairs, the comparison, page reclaimable bytes, an optional next cursor, and a short-lived authenticated `planToken`. Ignored groups are omitted. Reconcile revalidates the gate, selected manifests, occurrence group/version, and ignore revisions, then moves only the pinned removal paths to Trash. Stale items fail safely and no duplicate route permanently deletes data.
 

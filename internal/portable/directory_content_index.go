@@ -2,13 +2,18 @@ package portable
 
 import (
 	"context"
+	"math"
+	"slices"
 	"sort"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
-const directoryContentIndexNodeSchema = "directory-content-index-node-v1"
+const (
+	directoryContentIndexNodeSchema = "directory-content-index-node-v1"
+	directoryContentSketchSize      = 16
+)
 
 type directoryContentIndexMutation struct {
 	before *storageformat.DirectoryContentIndexEntry
@@ -104,10 +109,59 @@ func directoryContentIndexKey(value storageformat.DirectoryContentIndexEntry) (s
 }
 
 func validateDirectoryContentIndexChild(child storageformat.DirectoryContentIndexChild) error {
-	if child.NodeID == "" || child.NodeDigest == "" || child.FirstKey == "" || child.LastKey < child.FirstKey || child.EntryCount == 0 {
+	if child.NodeID == "" || child.NodeDigest == "" || child.FirstKey == "" || child.LastKey < child.FirstKey || child.EntryCount == 0 || validateDirectoryContentSketch(child.Sketch) != nil {
 		return domain.NewError(domain.ErrorInvalid, "invalid directory content-index child")
 	}
 	return nil
+}
+
+func sameDirectoryContentIndexChild(left, right storageformat.DirectoryContentIndexChild) bool {
+	return left.NodeID == right.NodeID && left.NodeDigest == right.NodeDigest && left.FirstKey == right.FirstKey && left.LastKey == right.LastKey && left.EntryCount == right.EntryCount && slices.Equal(left.Sketch, right.Sketch)
+}
+
+func validateDirectoryContentSketch(sketch []string) error {
+	if len(sketch) != directoryContentSketchSize {
+		return domain.NewError(domain.ErrorInvalid, "invalid directory content sketch")
+	}
+	for _, value := range sketch {
+		if validateDuplicateGroupID(value) != nil {
+			return domain.NewError(domain.ErrorInvalid, "invalid directory content sketch")
+		}
+	}
+	return nil
+}
+
+func directoryContentSketch(entries []storageformat.DirectoryContentIndexEntry, children []storageformat.DirectoryContentIndexChild) ([]string, error) {
+	result := make([]string, directoryContentSketchSize)
+	merge := func(position int, value string) {
+		if result[position] == "" || value < result[position] {
+			result[position] = value
+		}
+	}
+	for _, entry := range entries {
+		if validateDuplicateGroupID(entry.GroupID) != nil {
+			return nil, domain.NewError(domain.ErrorInvalid, "invalid directory content sketch source")
+		}
+		for position := range directoryContentSketchSize {
+			material := make([]byte, 0, len("endlessfs-directory-content-sketch-v1\x00")+2+len(entry.GroupID))
+			material = append(material, "endlessfs-directory-content-sketch-v1\x00"...)
+			material = append(material, byte(position), 0)
+			material = append(material, entry.GroupID...)
+			merge(position, storageformat.Digest(material))
+		}
+	}
+	for _, child := range children {
+		if err := validateDirectoryContentSketch(child.Sketch); err != nil {
+			return nil, err
+		}
+		for position, value := range child.Sketch {
+			merge(position, value)
+		}
+	}
+	if len(entries)+len(children) == 0 || validateDirectoryContentSketch(result) != nil {
+		return nil, domain.NewError(domain.ErrorInvalid, "empty directory content sketch source")
+	}
+	return result, nil
 }
 
 func validateDirectoryContentIndexNode(directoryID string, node storageformat.DirectoryContentIndexNode) error {
@@ -136,6 +190,11 @@ func validateDirectoryContentIndexNode(directoryID string, node storageformat.Di
 
 func directoryContentIndexNodeChild(node storageformat.DirectoryContentIndexNode, digest string) (storageformat.DirectoryContentIndexChild, error) {
 	child := storageformat.DirectoryContentIndexChild{NodeID: node.NodeID, NodeDigest: digest}
+	sketch, err := directoryContentSketch(node.Entries, node.Children)
+	if err != nil {
+		return storageformat.DirectoryContentIndexChild{}, err
+	}
+	child.Sketch = sketch
 	if node.Leaf {
 		if len(node.Entries) == 0 {
 			return storageformat.DirectoryContentIndexChild{}, domain.NewError(domain.ErrorInvalid, "empty directory content-index leaf")
@@ -238,15 +297,15 @@ func (s *FileStore) buildDirectoryContentIndex(scope domain.Scope, directoryID s
 
 func directoryContentIndexManifestRoot(manifest storageformat.DirectoryManifest) (storageformat.DirectoryContentIndexChild, error) {
 	if manifest.RecursiveFileCount == 0 {
-		if manifest.ContentIndexRootID != "" || manifest.ContentIndexRootDigest != "" {
+		if manifest.ContentIndexRootID != "" || manifest.ContentIndexRootDigest != "" || len(manifest.ContentSketch) != 0 {
 			return storageformat.DirectoryContentIndexChild{}, domain.NewError(domain.ErrorInvalid, "empty directory has a content index")
 		}
 		return storageformat.DirectoryContentIndexChild{}, nil
 	}
-	if manifest.ContentIndexRootID == "" || manifest.ContentIndexRootDigest == "" {
+	if manifest.ContentIndexRootID == "" || manifest.ContentIndexRootDigest == "" || validateDirectoryContentSketch(manifest.ContentSketch) != nil {
 		return storageformat.DirectoryContentIndexChild{}, domain.NewError(domain.ErrorInvalid, "directory content index is missing")
 	}
-	return storageformat.DirectoryContentIndexChild{NodeID: manifest.ContentIndexRootID, NodeDigest: manifest.ContentIndexRootDigest}, nil
+	return storageformat.DirectoryContentIndexChild{NodeID: manifest.ContentIndexRootID, NodeDigest: manifest.ContentIndexRootDigest, Sketch: append([]string(nil), manifest.ContentSketch...)}, nil
 }
 
 func (s *FileStore) readDirectoryContentIndexNode(ctx context.Context, scope domain.Scope, directoryID string, reference storageformat.DirectoryContentIndexChild) (storageformat.DirectoryContentIndexNode, error) {
@@ -270,7 +329,7 @@ func (s *FileStore) readDirectoryContentIndexNode(ctx context.Context, scope dom
 		return storageformat.DirectoryContentIndexNode{}, err
 	}
 	derived, err := directoryContentIndexNodeChild(node, reference.NodeDigest)
-	if err != nil || derived != reference {
+	if err != nil || !sameDirectoryContentIndexChild(derived, reference) {
 		return storageformat.DirectoryContentIndexNode{}, domain.NewError(domain.ErrorInvalid, "directory content-index child metadata mismatch")
 	}
 	return node, nil
@@ -291,11 +350,11 @@ func (s *FileStore) directoryContentIndexRoot(ctx context.Context, scope domain.
 	if storageformat.Digest(object.Body) != reference.NodeDigest || storageformat.DecodeEnvelope(object.Body, key, directoryContentIndexNodeSchema, &envelope, &node) != nil || validateDirectoryContentIndexNode(directoryID, node) != nil {
 		return storageformat.DirectoryContentIndexChild{}, domain.NewError(domain.ErrorInvalid, "invalid directory content-index root")
 	}
-	reference, err = directoryContentIndexNodeChild(node, storageformat.Digest(object.Body))
-	if err != nil || reference.EntryCount != uint64(manifest.RecursiveFileCount) {
+	derived, err := directoryContentIndexNodeChild(node, storageformat.Digest(object.Body))
+	if err != nil || derived.NodeID != reference.NodeID || derived.NodeDigest != reference.NodeDigest || !slices.Equal(derived.Sketch, reference.Sketch) || derived.EntryCount != uint64(manifest.RecursiveFileCount) {
 		return storageformat.DirectoryContentIndexChild{}, domain.NewError(domain.ErrorInvalid, "directory content-index root count mismatch")
 	}
-	return reference, nil
+	return derived, nil
 }
 
 func (s *FileStore) collectDirectoryContentIndexEntries(ctx context.Context, scope domain.Scope, directoryID string, manifest storageformat.DirectoryManifest, after string, limit int) ([]storageformat.DirectoryContentIndexEntry, error) {
@@ -350,7 +409,7 @@ func (s *FileStore) verifyDirectoryContentIndex(ctx context.Context, scope domai
 			return err
 		}
 		for _, value := range page {
-			if files == int64(^uint64(0)>>1) || value.Size > int64(^uint64(0)>>1)-bytes {
+			if files == math.MaxInt64 || value.Size > math.MaxInt64-bytes {
 				return domain.NewError(domain.ErrorInvalid, "directory content-index aggregates overflow")
 			}
 			entry, err := s.resolveDirectoryContentIndexEntry(ctx, scope, directoryID, value.RelativePath)
@@ -417,7 +476,7 @@ func (s *FileStore) readStagedDirectoryContentIndexNode(ctx context.Context, sco
 	if node, found := staged.nodes[reference.NodeID]; found {
 		object := staged.objects[reference.NodeID]
 		derived, err := directoryContentIndexNodeChild(node, storageformat.Digest(object.Body))
-		if err != nil || derived != reference {
+		if err != nil || !sameDirectoryContentIndexChild(derived, reference) {
 			return storageformat.DirectoryContentIndexNode{}, domain.NewError(domain.ErrorInvalid, "staged directory content-index metadata mismatch")
 		}
 		return node, nil

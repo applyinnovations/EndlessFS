@@ -90,6 +90,40 @@ type DuplicateDirectoryComparison struct {
 	RightOnlyBytes int64               `json:"rightOnlyBytes"`
 }
 
+type DuplicateDirectoryOverlapRequest struct {
+	Directory      DuplicateLocation
+	Limit          int
+	Cursor         string
+	IncludeIgnored bool
+}
+
+type DuplicateDirectoryOverlapCandidate struct {
+	SharedSketch             int                          `json:"sharedSketch"`
+	SketchSize               int                          `json:"sketchSize"`
+	Ignored                  bool                         `json:"ignored"`
+	IgnoreRevision           uint64                       `json:"ignoreRevision,omitempty"`
+	ExactGroupIgnored        bool                         `json:"exactGroupIgnored"`
+	ExactGroupIgnoreRevision uint64                       `json:"exactGroupIgnoreRevision,omitempty"`
+	Comparison               DuplicateDirectoryComparison `json:"comparison"`
+}
+
+type DuplicateDirectoryOverlapPage struct {
+	Candidates []DuplicateDirectoryOverlapCandidate `json:"candidates"`
+	NextCursor string                               `json:"nextCursor,omitempty"`
+}
+
+type SetDuplicateDirectoryIgnoredRequest struct {
+	Left             DuplicateLocation
+	Right            DuplicateLocation
+	Ignored          bool
+	ExpectedRevision uint64
+}
+
+type DuplicateDirectoryIgnore struct {
+	Ignored  bool   `json:"ignored"`
+	Revision uint64 `json:"revision"`
+}
+
 type DuplicateSide string
 
 const (

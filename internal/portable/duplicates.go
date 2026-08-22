@@ -5,23 +5,30 @@ import (
 	"encoding/base64"
 	"errors"
 	"math"
+	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
+	"github.com/applyinnovations/endlessfs/internal/state"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
 const (
-	duplicateOccurrenceSchema = "duplicate-occurrence-root-v1"
-	duplicateSummarySchema    = "duplicate-summary-root-v1"
-	duplicateIgnoreSchema     = "duplicate-ignore-v1"
+	duplicateOccurrenceSchema      = "duplicate-occurrence-root-v1"
+	duplicateSummarySchema         = "duplicate-summary-root-v1"
+	duplicateIgnoreSchema          = "duplicate-ignore-v1"
+	duplicateDirectoryIgnoreSchema = "duplicate-directory-ignore-v1"
+	duplicateSimilaritySchema      = "duplicate-similarity-posting-root-v1"
 )
 
 type catalogChange struct {
-	pre  *storageformat.DuplicateOccurrence
-	post *storageformat.DuplicateOccurrence
+	pre            *storageformat.DuplicateOccurrence
+	post           *storageformat.DuplicateOccurrence
+	similarityPre  []storageformat.DuplicateSimilarityPosting
+	similarityPost []storageformat.DuplicateSimilarityPosting
 }
 
 type catalogRootChange struct {
@@ -53,6 +60,20 @@ type duplicateOccurrenceCursor struct {
 	Limit         int                  `json:"limit"`
 	After         string               `json:"after,omitempty"`
 	ExpiresAt     time.Time            `json:"expiresAt"`
+}
+
+type duplicateOverlapCursor struct {
+	SchemaVersion  int                      `json:"schemaVersion"`
+	UserID         string                   `json:"userID"`
+	Directory      domain.DuplicateLocation `json:"directory"`
+	IncludeIgnored bool                     `json:"includeIgnored"`
+	Limit          int                      `json:"limit"`
+	ManifestID     string                   `json:"manifestID"`
+	Position       int                      `json:"position"`
+	After          string                   `json:"after,omitempty"`
+	GateEpoch      uint64                   `json:"gateEpoch"`
+	GateVersion    string                   `json:"gateVersion"`
+	ExpiresAt      time.Time                `json:"expiresAt"`
 }
 
 type duplicateReconciliationCursor struct {
@@ -154,6 +175,36 @@ func validateDuplicateGroupID(value string) error {
 
 func duplicateOccurrenceKey(userID string, occurrence storageformat.DuplicateOccurrence) objectstore.Key {
 	return storageformat.DuplicateOccurrenceKey(userID, string(occurrence.Kind), occurrence.GroupID, occurrence.Area, occurrence.Path)
+}
+
+func validateDuplicateSimilarityPosting(value storageformat.DuplicateSimilarityPosting) error {
+	path, err := domain.ParseUserPath(value.Path)
+	if err != nil || value.Position < 0 || value.Position >= directoryContentSketchSize || validateDuplicateGroupID(value.SketchValue) != nil || value.Area != "live" && value.Area != "trash" || value.DirectoryID == "" || !path.Valid() {
+		return domain.NewError(domain.ErrorInvalid, "invalid duplicate similarity posting")
+	}
+	return nil
+}
+
+func duplicateSimilarityPostingKey(userID string, value storageformat.DuplicateSimilarityPosting) objectstore.Key {
+	return storageformat.DuplicateSimilarityPostingKey(userID, value.Position, value.SketchValue, value.Area, value.DirectoryID)
+}
+
+func duplicateSimilarityPostings(scope domain.Scope, path domain.UserPath, directoryID string, sketch []string) ([]storageformat.DuplicateSimilarityPosting, error) {
+	if !scope.Valid() || !path.Valid() || directoryID == "" || validateDirectoryContentSketch(sketch) != nil {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid directory similarity source")
+	}
+	result := make([]storageformat.DuplicateSimilarityPosting, 0, len(sketch))
+	for position, value := range sketch {
+		posting := storageformat.DuplicateSimilarityPosting{
+			Position: position, SketchValue: value, Area: areaName(scope.Area()), DirectoryID: directoryID,
+			Path: path.String(),
+		}
+		if err := validateDuplicateSimilarityPosting(posting); err != nil {
+			return nil, err
+		}
+		result = append(result, posting)
+	}
+	return result, nil
 }
 
 func duplicateSummaryShard(occurrence storageformat.DuplicateOccurrence) string {
@@ -258,7 +309,115 @@ func (s *FileStore) buildCatalogOperationRoots(ctx context.Context, userID domai
 			PendingBody: change.pendingBody, FinalBody: change.finalBody, RollbackBody: change.rollbackBody,
 		})
 	}
+	similarityRoots, err := s.buildSimilarityOperationRoots(ctx, userID, operationID, changes)
+	if err != nil {
+		return nil, err
+	}
+	result = append(result, similarityRoots...)
 	return result, nil
+}
+
+func (s *FileStore) buildSimilarityOperationRoots(ctx context.Context, userID domain.UserID, operationID string, changes []catalogChange) ([]storageformat.FileOperationRoot, error) {
+	type update struct {
+		pre  *storageformat.DuplicateSimilarityPosting
+		post *storageformat.DuplicateSimilarityPosting
+	}
+	updates := make(map[string]update)
+	add := func(value storageformat.DuplicateSimilarityPosting, before bool) error {
+		if err := validateDuplicateSimilarityPosting(value); err != nil {
+			return err
+		}
+		key := duplicateSimilarityPostingKey(userID.String(), value).String()
+		current := updates[key]
+		copy := value
+		if before {
+			if current.pre != nil && !reflect.DeepEqual(current.pre, &copy) {
+				return domain.NewError(domain.ErrorInvalid, "conflicting similarity posting removal")
+			}
+			current.pre = &copy
+		} else {
+			if current.post != nil && !reflect.DeepEqual(current.post, &copy) {
+				return domain.NewError(domain.ErrorInvalid, "conflicting similarity posting addition")
+			}
+			current.post = &copy
+		}
+		updates[key] = current
+		return nil
+	}
+	for _, change := range changes {
+		for _, value := range change.similarityPre {
+			if err := add(value, true); err != nil {
+				return nil, err
+			}
+		}
+		for _, value := range change.similarityPost {
+			if err := add(value, false); err != nil {
+				return nil, err
+			}
+		}
+	}
+	keys := make([]string, 0, len(updates))
+	for key := range updates {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]storageformat.FileOperationRoot, 0, len(keys))
+	for _, keyValue := range keys {
+		change := updates[keyValue]
+		if reflect.DeepEqual(change.pre, change.post) {
+			continue
+		}
+		root, err := s.prepareSimilarityPostingRootChange(ctx, userID, operationID, objectstore.MustKey(keyValue), change.pre, change.post)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, root)
+	}
+	return result, nil
+}
+
+func (s *FileStore) prepareSimilarityPostingRootChange(ctx context.Context, userID domain.UserID, operationID string, key objectstore.Key, pre, post *storageformat.DuplicateSimilarityPosting) (storageformat.FileOperationRoot, error) {
+	object, err := s.engine.backend.Get(ctx, key)
+	revision := uint64(0)
+	expected := ""
+	preExisted := false
+	var current *storageformat.DuplicateSimilarityPosting
+	if err == nil {
+		preExisted = true
+		var envelope storageformat.Envelope
+		var root storageformat.DuplicateSimilarityPostingRoot
+		if err := storageformat.DecodeEnvelope(object.Body, key, duplicateSimilaritySchema, &envelope, &root); err != nil {
+			return storageformat.FileOperationRoot{}, err
+		}
+		if root.SchemaVersion != 1 || root.UserID != userID.String() || root.Pending != nil {
+			return storageformat.FileOperationRoot{}, domain.NewError(domain.ErrorUnavailable, "duplicate similarity posting is changing concurrently")
+		}
+		current, revision, expected = root.Current, envelope.Revision, envelope.LogicalVersion
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return storageformat.FileOperationRoot{}, err
+	}
+	if !reflect.DeepEqual(current, pre) {
+		return storageformat.FileOperationRoot{}, domain.NewError(domain.ErrorPreconditionFailed, "duplicate similarity posting changed")
+	}
+	pendingBody, err := storageformat.EncodeEnvelope(duplicateSimilaritySchema, key, revision+1, storageformat.DuplicateSimilarityPostingRoot{
+		SchemaVersion: 1, UserID: userID.String(), Current: current,
+		Pending: &storageformat.DuplicateSimilarityPostingTransition{OperationID: operationID, Fence: 1, Pre: pre, Post: post},
+	})
+	if err != nil {
+		return storageformat.FileOperationRoot{}, err
+	}
+	finalBody, err := storageformat.EncodeEnvelope(duplicateSimilaritySchema, key, revision+2, storageformat.DuplicateSimilarityPostingRoot{SchemaVersion: 1, UserID: userID.String(), Current: post})
+	if err != nil {
+		return storageformat.FileOperationRoot{}, err
+	}
+	var rollbackBody []byte
+	if preExisted {
+		rollbackBody, err = storageformat.EncodeEnvelope(duplicateSimilaritySchema, key, revision+2, storageformat.DuplicateSimilarityPostingRoot{SchemaVersion: 1, UserID: userID.String(), Current: pre})
+		if err != nil {
+			return storageformat.FileOperationRoot{}, err
+		}
+	}
+	return storageformat.FileOperationRoot{Key: key.String(), ExpectedLogicalVersion: expected, PreExisted: preExisted, PendingBody: pendingBody, FinalBody: finalBody, RollbackBody: rollbackBody}, nil
 }
 
 func (s *FileStore) prepareOccurrenceRootChange(ctx context.Context, userID domain.UserID, operationID string, key objectstore.Key, pre, post *storageformat.DuplicateOccurrence) (catalogRootChange, error) {
@@ -394,6 +553,9 @@ func (s *FileStore) visibleDuplicateSummary(ctx context.Context, userID domain.U
 			current = root.Pending.Pre
 		}
 	}
+	if current != nil && (validateDuplicateSummary(*current) != nil || storageformat.DuplicateSummaryKey(userID.String(), string(current.Kind), current.GroupID, current.Shard) != object.Key) {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid duplicate summary")
+	}
 	return current, nil
 }
 
@@ -419,6 +581,44 @@ func (s *FileStore) visibleDuplicateOccurrence(ctx context.Context, userID domai
 			current = root.Pending.Post
 		} else {
 			current = root.Pending.Pre
+		}
+	}
+	if current != nil {
+		occurrence, err := domainDuplicateOccurrence(*current)
+		if err != nil || occurrence.Kind == domain.DuplicateFile && occurrence.FileCount != 1 || duplicateOccurrenceKey(userID.String(), *current) != object.Key {
+			return nil, domain.NewError(domain.ErrorInvalid, "invalid duplicate occurrence")
+		}
+	}
+	return current, nil
+}
+
+func (s *FileStore) visibleDuplicateSimilarityPosting(ctx context.Context, userID domain.UserID, object objectstore.Object) (*storageformat.DuplicateSimilarityPosting, error) {
+	var envelope storageformat.Envelope
+	var root storageformat.DuplicateSimilarityPostingRoot
+	if err := storageformat.DecodeEnvelope(object.Body, object.Key, duplicateSimilaritySchema, &envelope, &root); err != nil {
+		return nil, err
+	}
+	if root.SchemaVersion != 1 || root.UserID != userID.String() {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid duplicate similarity posting")
+	}
+	current := root.Current
+	if root.Pending != nil {
+		operation, err := s.readFileOperation(ctx, userID, root.Pending.OperationID)
+		if err != nil {
+			return nil, err
+		}
+		if operation.Fence < root.Pending.Fence {
+			return nil, domain.NewError(domain.ErrorInvalid, "duplicate similarity transition fence is invalid")
+		}
+		if operation.State == storageformat.FileOperationCommitted || operation.State == storageformat.FileOperationSucceeded {
+			current = root.Pending.Post
+		} else {
+			current = root.Pending.Pre
+		}
+	}
+	if current != nil {
+		if validateDuplicateSimilarityPosting(*current) != nil || duplicateSimilarityPostingKey(userID.String(), *current) != object.Key {
+			return nil, domain.NewError(domain.ErrorInvalid, "invalid duplicate similarity posting")
 		}
 	}
 	return current, nil
@@ -732,6 +932,142 @@ func (s *FileStore) readDuplicateIgnore(ctx context.Context, userID domain.UserI
 	return record, nil
 }
 
+func duplicateDirectoryIgnoreRecord(userID domain.UserID, left, right duplicateDirectoryContentInventory) (storageformat.DuplicateDirectoryIgnore, error) {
+	if !userID.Valid() || !left.scope.Valid() || !right.scope.Valid() || left.scope.UserID() != userID || right.scope.UserID() != userID || left.directory == "" || right.directory == "" {
+		return storageformat.DuplicateDirectoryIgnore{}, domain.NewError(domain.ErrorInvalid, "invalid duplicate directory pair")
+	}
+	leftArea, leftID := areaName(left.scope.Area()), left.directory
+	rightArea, rightID := areaName(right.scope.Area()), right.directory
+	leftIdentity, rightIdentity := leftArea+"\x00"+leftID, rightArea+"\x00"+rightID
+	if leftIdentity == rightIdentity {
+		return storageformat.DuplicateDirectoryIgnore{}, domain.NewError(domain.ErrorInvalid, "duplicate directory pair must contain two directories")
+	}
+	if leftIdentity > rightIdentity {
+		leftArea, rightArea = rightArea, leftArea
+		leftID, rightID = rightID, leftID
+		leftIdentity, rightIdentity = rightIdentity, leftIdentity
+	}
+	pairID := storageformat.Digest([]byte("endlessfs-duplicate-directory-pair-v1\x00" + leftIdentity + "\x00" + rightIdentity))
+	return storageformat.DuplicateDirectoryIgnore{
+		SchemaVersion: 1, UserID: userID.String(), PairID: pairID,
+		LeftArea: leftArea, LeftDirectoryID: leftID, RightArea: rightArea, RightDirectoryID: rightID,
+	}, nil
+}
+
+func validateDuplicateDirectoryIgnore(value storageformat.DuplicateDirectoryIgnore) error {
+	userID, err := domain.ParseUserID(value.UserID)
+	if err != nil || value.SchemaVersion != 1 || value.LeftArea != "live" && value.LeftArea != "trash" || value.RightArea != "live" && value.RightArea != "trash" || value.LeftDirectoryID == "" || value.RightDirectoryID == "" || value.Revision == 0 {
+		return domain.NewError(domain.ErrorInvalid, "invalid duplicate directory ignore")
+	}
+	leftScope, _ := domain.NewScope(userID, domain.AreaLive)
+	if value.LeftArea == "trash" {
+		leftScope, _ = domain.NewScope(userID, domain.AreaTrash)
+	}
+	rightScope, _ := domain.NewScope(userID, domain.AreaLive)
+	if value.RightArea == "trash" {
+		rightScope, _ = domain.NewScope(userID, domain.AreaTrash)
+	}
+	canonical, err := duplicateDirectoryIgnoreRecord(userID,
+		duplicateDirectoryContentInventory{scope: leftScope, directory: value.LeftDirectoryID},
+		duplicateDirectoryContentInventory{scope: rightScope, directory: value.RightDirectoryID},
+	)
+	if err != nil || canonical.PairID != value.PairID || canonical.LeftArea != value.LeftArea || canonical.LeftDirectoryID != value.LeftDirectoryID || canonical.RightArea != value.RightArea || canonical.RightDirectoryID != value.RightDirectoryID {
+		return domain.NewError(domain.ErrorInvalid, "invalid duplicate directory ignore identity")
+	}
+	return nil
+}
+
+func (s *FileStore) SetDuplicateDirectoryIgnored(ctx context.Context, userID domain.UserID, request domain.SetDuplicateDirectoryIgnoredRequest) (domain.DuplicateDirectoryIgnore, error) {
+	if !userID.Valid() || request.Left.Area != domain.AreaLive && request.Left.Area != domain.AreaTrash || request.Right.Area != domain.AreaLive && request.Right.Area != domain.AreaTrash || !request.Left.Path.Valid() || !request.Right.Path.Valid() {
+		return domain.DuplicateDirectoryIgnore{}, domain.NewError(domain.ErrorInvalid, "invalid duplicate directory ignore request")
+	}
+	leftScope, _ := domain.NewScope(userID, request.Left.Area)
+	rightScope, _ := domain.NewScope(userID, request.Right.Area)
+	left, err := s.readDuplicateDirectoryContentInventory(ctx, leftScope, request.Left.Path)
+	if err != nil {
+		return domain.DuplicateDirectoryIgnore{}, err
+	}
+	right, err := s.readDuplicateDirectoryContentInventory(ctx, rightScope, request.Right.Path)
+	if err != nil {
+		return domain.DuplicateDirectoryIgnore{}, err
+	}
+	record, err := duplicateDirectoryIgnoreRecord(userID, left, right)
+	if err != nil {
+		return domain.DuplicateDirectoryIgnore{}, err
+	}
+	key := storageformat.DuplicateDirectoryIgnoreKey(userID.String(), record.PairID)
+	object, err := s.engine.backend.Get(ctx, key)
+	revision := uint64(1)
+	condition := objectstore.PutCondition{Mode: objectstore.PutCreateOnly}
+	if err == nil {
+		var envelope storageformat.Envelope
+		var current storageformat.DuplicateDirectoryIgnore
+		if err := storageformat.DecodeEnvelope(object.Body, key, duplicateDirectoryIgnoreSchema, &envelope, &current); err != nil {
+			return domain.DuplicateDirectoryIgnore{}, err
+		}
+		if validateDuplicateDirectoryIgnore(current) != nil || current.PairID != record.PairID {
+			return domain.DuplicateDirectoryIgnore{}, domain.NewError(domain.ErrorInvalid, "invalid stored duplicate directory ignore")
+		}
+		if request.ExpectedRevision != 0 && request.ExpectedRevision != current.Revision {
+			return domain.DuplicateDirectoryIgnore{}, domain.NewError(domain.ErrorPreconditionFailed, "duplicate directory ignore revision changed")
+		}
+		if current.Ignored == request.Ignored {
+			return domain.DuplicateDirectoryIgnore{Ignored: current.Ignored, Revision: current.Revision}, nil
+		}
+		revision = current.Revision + 1
+		condition = objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return domain.DuplicateDirectoryIgnore{}, err
+	} else if request.ExpectedRevision != 0 {
+		return domain.DuplicateDirectoryIgnore{}, domain.NewError(domain.ErrorPreconditionFailed, "duplicate directory ignore is missing")
+	}
+	record.Ignored, record.Revision = request.Ignored, revision
+	body, err := storageformat.EncodeEnvelope(duplicateDirectoryIgnoreSchema, key, revision, record)
+	if err != nil {
+		return domain.DuplicateDirectoryIgnore{}, err
+	}
+	intent := storageformat.MutationIntent{Action: storageformat.MutationCreate, TargetKey: key.String(), TargetBody: body}
+	if condition.Mode == objectstore.PutMatch {
+		intent.Action = storageformat.MutationCAS
+		intent.ExpectedLogicalVersion, err = canonicalLogicalVersion(object.Body)
+		if err != nil {
+			return domain.DuplicateDirectoryIgnore{}, err
+		}
+	}
+	err = s.engine.withAdmission(ctx, intent, func() error {
+		_, putErr := s.engine.backend.Put(ctx, key, body, condition)
+		return putErr
+	})
+	if err != nil {
+		return domain.DuplicateDirectoryIgnore{}, err
+	}
+	return domain.DuplicateDirectoryIgnore{Ignored: record.Ignored, Revision: record.Revision}, nil
+}
+
+func (s *FileStore) duplicateDirectoryIgnoreState(ctx context.Context, userID domain.UserID, left, right duplicateDirectoryContentInventory) (bool, uint64, error) {
+	record, err := duplicateDirectoryIgnoreRecord(userID, left, right)
+	if err != nil {
+		return false, 0, err
+	}
+	key := storageformat.DuplicateDirectoryIgnoreKey(userID.String(), record.PairID)
+	object, err := s.engine.backend.Get(ctx, key)
+	if errors.Is(err, domain.ErrNotFound) {
+		return false, 0, nil
+	}
+	if err != nil {
+		return false, 0, err
+	}
+	var envelope storageformat.Envelope
+	var current storageformat.DuplicateDirectoryIgnore
+	if err := storageformat.DecodeEnvelope(object.Body, key, duplicateDirectoryIgnoreSchema, &envelope, &current); err != nil {
+		return false, 0, err
+	}
+	if validateDuplicateDirectoryIgnore(current) != nil || current.PairID != record.PairID {
+		return false, 0, domain.NewError(domain.ErrorInvalid, "invalid stored duplicate directory ignore")
+	}
+	return current.Ignored, current.Revision, nil
+}
+
 func (s *FileStore) CompareDuplicateDirectories(ctx context.Context, userID domain.UserID, request domain.DuplicateDirectoryComparisonRequest) (domain.DuplicateDirectoryComparison, error) {
 	if !userID.Valid() || request.Left.Area != domain.AreaLive && request.Left.Area != domain.AreaTrash || request.Right.Area != domain.AreaLive && request.Right.Area != domain.AreaTrash || !request.Left.Path.Valid() || !request.Right.Path.Valid() {
 		return domain.DuplicateDirectoryComparison{}, domain.NewError(domain.ErrorInvalid, "invalid duplicate directory comparison")
@@ -747,6 +1083,260 @@ func (s *FileStore) CompareDuplicateDirectories(ctx context.Context, userID doma
 		return domain.DuplicateDirectoryComparison{}, err
 	}
 	return s.compareDuplicateDirectoryContentIndexes(ctx, left, right)
+}
+
+func (s *FileStore) ListDuplicateDirectoryOverlaps(ctx context.Context, userID domain.UserID, request domain.DuplicateDirectoryOverlapRequest) (domain.DuplicateDirectoryOverlapPage, error) {
+	if !userID.Valid() || request.Directory.Area != domain.AreaLive && request.Directory.Area != domain.AreaTrash || !request.Directory.Path.Valid() {
+		return domain.DuplicateDirectoryOverlapPage{}, domain.NewError(domain.ErrorInvalid, "invalid duplicate overlap request")
+	}
+	limit := request.Limit
+	if limit == 0 {
+		limit = 50
+	}
+	if limit < 1 || limit > 100 {
+		return domain.DuplicateDirectoryOverlapPage{}, domain.NewError(domain.ErrorInvalid, "duplicate overlap page limit must be between 1 and 100")
+	}
+	_, gateEnvelope, gate, err := s.engine.readGate(ctx)
+	if err != nil {
+		return domain.DuplicateDirectoryOverlapPage{}, err
+	}
+	scope, _ := domain.NewScope(userID, request.Directory.Area)
+	selected, err := s.readDuplicateDirectoryContentInventory(ctx, scope, request.Directory.Path)
+	if err != nil {
+		return domain.DuplicateDirectoryOverlapPage{}, err
+	}
+	if selected.manifest.RecursiveFileCount == 0 || validateDirectoryContentSketch(selected.manifest.ContentSketch) != nil {
+		return domain.DuplicateDirectoryOverlapPage{Candidates: []domain.DuplicateDirectoryOverlapCandidate{}}, nil
+	}
+	cursor := duplicateOverlapCursor{
+		SchemaVersion: 1, UserID: userID.String(), Directory: request.Directory, IncludeIgnored: request.IncludeIgnored, Limit: limit,
+		ManifestID: selected.manifestID, GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion,
+		ExpiresAt: s.engine.clock.Now().UTC().Add(s.engine.cursorTTL),
+	}
+	if request.Cursor != "" {
+		if err := s.decodeDuplicateCursor(request.Cursor, &cursor); err != nil || cursor.SchemaVersion != 1 || cursor.UserID != userID.String() || cursor.Directory != request.Directory || cursor.IncludeIgnored != request.IncludeIgnored || cursor.Limit != limit || cursor.ManifestID != selected.manifestID || cursor.Position < 0 || cursor.Position >= directoryContentSketchSize || cursor.GateEpoch != gate.Epoch || cursor.GateVersion != gateEnvelope.LogicalVersion || !s.engine.clock.Now().Before(cursor.ExpiresAt) {
+			return domain.DuplicateDirectoryOverlapPage{}, domain.NewError(domain.ErrorInvalid, "invalid or stale duplicate overlap cursor")
+		}
+	}
+	result := domain.DuplicateDirectoryOverlapPage{Candidates: make([]domain.DuplicateDirectoryOverlapCandidate, 0, limit)}
+	for cursor.Position < directoryContentSketchSize {
+		prefix := storageformat.DuplicateSimilarityPostingPrefix(userID.String(), cursor.Position, selected.manifest.ContentSketch[cursor.Position])
+		page, err := s.engine.backend.List(ctx, objectstore.ListRequest{Prefix: prefix, Limit: 256, After: cursor.After})
+		if err != nil {
+			return domain.DuplicateDirectoryOverlapPage{}, err
+		}
+		for index, info := range page.Objects {
+			cursor.After = info.Key.String()
+			object, err := s.engine.backend.Get(ctx, info.Key)
+			if err != nil {
+				return domain.DuplicateDirectoryOverlapPage{}, err
+			}
+			posting, err := s.visibleDuplicateSimilarityPosting(ctx, userID, object)
+			if err != nil {
+				return domain.DuplicateDirectoryOverlapPage{}, err
+			}
+			if posting == nil || posting.Area == areaName(selected.scope.Area()) && posting.DirectoryID == selected.directory {
+				continue
+			}
+			candidate, err := s.similarityPostingInventory(ctx, userID, *posting)
+			if err != nil {
+				return domain.DuplicateDirectoryOverlapPage{}, err
+			}
+			shared, first := sharedDirectoryContentSketch(selected.manifest.ContentSketch, candidate.manifest.ContentSketch)
+			if shared == 0 || first != cursor.Position {
+				continue
+			}
+			pairIgnored, pairIgnoreRevision, err := s.duplicateDirectoryIgnoreState(ctx, userID, selected, candidate)
+			if err != nil {
+				return domain.DuplicateDirectoryOverlapPage{}, err
+			}
+			if pairIgnored && !request.IncludeIgnored {
+				continue
+			}
+			comparison, err := s.compareDuplicateDirectoryContentIndexes(ctx, selected, candidate)
+			if err != nil {
+				return domain.DuplicateDirectoryOverlapPage{}, err
+			}
+			exactGroupIgnored, exactGroupIgnoreRevision := false, uint64(0)
+			if comparison.Exact {
+				exactGroupIgnored, exactGroupIgnoreRevision, err = s.duplicateGroupIgnoreState(ctx, userID, comparison.Left.GroupID)
+				if err != nil {
+					return domain.DuplicateDirectoryOverlapPage{}, err
+				}
+				if exactGroupIgnored && !request.IncludeIgnored {
+					continue
+				}
+			}
+			result.Candidates = append(result.Candidates, domain.DuplicateDirectoryOverlapCandidate{
+				SharedSketch: shared, SketchSize: directoryContentSketchSize,
+				Ignored: pairIgnored, IgnoreRevision: pairIgnoreRevision,
+				ExactGroupIgnored: exactGroupIgnored, ExactGroupIgnoreRevision: exactGroupIgnoreRevision,
+				Comparison: comparison,
+			})
+			if len(result.Candidates) == limit {
+				if index+1 < len(page.Objects) || page.NextCursor != "" || cursor.Position+1 < directoryContentSketchSize {
+					result.NextCursor, err = s.encodeDuplicateCursor(cursor)
+					if err != nil {
+						return domain.DuplicateDirectoryOverlapPage{}, err
+					}
+				}
+				return result, nil
+			}
+		}
+		if page.NextCursor != "" {
+			continue
+		}
+		cursor.Position++
+		cursor.After = ""
+	}
+	return result, nil
+}
+
+func sharedDirectoryContentSketch(left, right []string) (shared, first int) {
+	first = -1
+	if len(left) != directoryContentSketchSize || len(right) != directoryContentSketchSize {
+		return 0, -1
+	}
+	for position := range directoryContentSketchSize {
+		if left[position] != right[position] {
+			continue
+		}
+		if first == -1 {
+			first = position
+		}
+		shared++
+	}
+	return shared, first
+}
+
+func (s *FileStore) similarityPostingInventory(ctx context.Context, userID domain.UserID, posting storageformat.DuplicateSimilarityPosting) (duplicateDirectoryContentInventory, error) {
+	if err := validateDuplicateSimilarityPosting(posting); err != nil {
+		return duplicateDirectoryContentInventory{}, err
+	}
+	area := domain.AreaLive
+	if posting.Area == "trash" {
+		area = domain.AreaTrash
+	}
+	scope, _ := domain.NewScope(userID, area)
+	path, err := domain.ParseUserPath(posting.Path)
+	if err != nil {
+		return duplicateDirectoryContentInventory{}, err
+	}
+	inventory, err := s.readDuplicateDirectoryContentInventory(ctx, scope, path)
+	if err != nil {
+		return duplicateDirectoryContentInventory{}, err
+	}
+	if inventory.directory != posting.DirectoryID || validateDirectoryContentSketch(inventory.manifest.ContentSketch) != nil || inventory.manifest.ContentSketch[posting.Position] != posting.SketchValue {
+		return duplicateDirectoryContentInventory{}, domain.NewError(domain.ErrorInvalid, "duplicate similarity posting is stale")
+	}
+	return inventory, nil
+}
+
+// pruneDuplicateTombstones runs only after the closed-gate operation drain.
+// Nil visibility roots are no longer needed for recovery at that point and
+// otherwise grow without bound as files and directory sketches change.
+func (e *Engine) pruneDuplicateTombstones(ctx context.Context) error {
+	return visitObjectPages(ctx, e.backend, storageformat.DuplicateRecordsPrefix(), func(info objectstore.ObjectInfo) error {
+		object, err := e.backend.Get(ctx, info.Key)
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var generic storageformat.Envelope
+		if err := state.DecodeJSONWithLimit(object.Body, &generic, storageformat.MaxCanonicalBytes); err != nil {
+			return err
+		}
+		remove := false
+		switch generic.Schema {
+		case duplicateOccurrenceSchema:
+			var envelope storageformat.Envelope
+			var root storageformat.DuplicateOccurrenceRoot
+			if err := storageformat.DecodeEnvelope(object.Body, info.Key, duplicateOccurrenceSchema, &envelope, &root); err != nil {
+				return err
+			}
+			if err := validateDuplicateMaintenanceRoot(root.UserID, root.SchemaVersion, root.Pending != nil, info.Key); err != nil {
+				return err
+			}
+			if root.Current == nil {
+				remove = true
+			} else if _, err := domainDuplicateOccurrence(*root.Current); err != nil || duplicateOccurrenceKey(root.UserID, *root.Current) != info.Key {
+				return domain.NewError(domain.ErrorInvalid, "invalid duplicate occurrence during tombstone pruning")
+			}
+		case duplicateSummarySchema:
+			var envelope storageformat.Envelope
+			var root storageformat.DuplicateSummaryRoot
+			if err := storageformat.DecodeEnvelope(object.Body, info.Key, duplicateSummarySchema, &envelope, &root); err != nil {
+				return err
+			}
+			if err := validateDuplicateMaintenanceRoot(root.UserID, root.SchemaVersion, root.Pending != nil, info.Key); err != nil {
+				return err
+			}
+			if root.Current == nil {
+				remove = true
+			} else if validateDuplicateSummary(*root.Current) != nil || storageformat.DuplicateSummaryKey(root.UserID, string(root.Current.Kind), root.Current.GroupID, root.Current.Shard) != info.Key {
+				return domain.NewError(domain.ErrorInvalid, "invalid duplicate summary during tombstone pruning")
+			}
+		case duplicateSimilaritySchema:
+			var envelope storageformat.Envelope
+			var root storageformat.DuplicateSimilarityPostingRoot
+			if err := storageformat.DecodeEnvelope(object.Body, info.Key, duplicateSimilaritySchema, &envelope, &root); err != nil {
+				return err
+			}
+			if err := validateDuplicateMaintenanceRoot(root.UserID, root.SchemaVersion, root.Pending != nil, info.Key); err != nil {
+				return err
+			}
+			if root.Current == nil {
+				remove = true
+			} else if validateDuplicateSimilarityPosting(*root.Current) != nil || duplicateSimilarityPostingKey(root.UserID, *root.Current) != info.Key {
+				return domain.NewError(domain.ErrorInvalid, "invalid duplicate similarity posting during tombstone pruning")
+			}
+		case duplicateIgnoreSchema:
+			var envelope storageformat.Envelope
+			var value storageformat.DuplicateIgnore
+			if err := storageformat.DecodeEnvelope(object.Body, info.Key, duplicateIgnoreSchema, &envelope, &value); err != nil {
+				return err
+			}
+			if _, err := domain.ParseUserID(value.UserID); err != nil || value.SchemaVersion != 1 || validateDuplicateGroupID(value.GroupID) != nil || value.Revision == 0 || storageformat.DuplicateIgnoreKey(value.UserID, value.GroupID) != info.Key {
+				return domain.NewError(domain.ErrorInvalid, "invalid duplicate ignore during tombstone pruning")
+			}
+		case duplicateDirectoryIgnoreSchema:
+			var envelope storageformat.Envelope
+			var value storageformat.DuplicateDirectoryIgnore
+			if err := storageformat.DecodeEnvelope(object.Body, info.Key, duplicateDirectoryIgnoreSchema, &envelope, &value); err != nil {
+				return err
+			}
+			if validateDuplicateDirectoryIgnore(value) != nil || storageformat.DuplicateDirectoryIgnoreKey(value.UserID, value.PairID) != info.Key {
+				return domain.NewError(domain.ErrorInvalid, "invalid duplicate directory ignore during tombstone pruning")
+			}
+		default:
+			return domain.NewError(domain.ErrorInvalid, "unknown duplicate record during tombstone pruning")
+		}
+		if remove {
+			return deleteMaintenanceObject(ctx, e.backend, object)
+		}
+		return nil
+	})
+}
+
+func validateDuplicateMaintenanceRoot(userID string, schemaVersion int, pending bool, key objectstore.Key) error {
+	if _, err := domain.ParseUserID(userID); err != nil || schemaVersion != 1 || pending || !strings.HasPrefix(key.String(), storageformat.DuplicateOccurrenceOwnerPrefix(userID)) {
+		return domain.NewError(domain.ErrorInvalid, "invalid or unresolved duplicate root during tombstone pruning")
+	}
+	return nil
+}
+
+func validateDuplicateSummary(value storageformat.DuplicateSummary) error {
+	if validateDuplicateGroupID(value.GroupID) != nil || !value.Kind.Valid() || len(value.Shard) != 2 || value.OccurrenceCount <= 0 || value.Size < 0 || value.FileCount < 0 || value.Kind == domain.DuplicateFile && value.FileCount != 1 {
+		return domain.NewError(domain.ErrorInvalid, "invalid duplicate summary")
+	}
+	for _, character := range value.Shard {
+		if (character < 'a' || character > 'z') && (character < '2' || character > '7') {
+			return domain.NewError(domain.ErrorInvalid, "invalid duplicate summary shard")
+		}
+	}
+	return nil
 }
 
 type duplicateDirectoryContentInventory struct {
@@ -1297,6 +1887,17 @@ func (e *Engine) rebuildDuplicateCatalog(ctx context.Context) error {
 }
 
 func (e *Engine) migrateDuplicateDirectory(ctx context.Context, scope domain.Scope, path domain.UserPath, snapshot directorySnapshot) error {
+	if snapshot.recursiveFileCount > 0 {
+		postings, err := duplicateSimilarityPostings(scope, path, snapshot.root.DirectoryID, snapshot.manifest.ContentSketch)
+		if err != nil {
+			return err
+		}
+		for _, posting := range postings {
+			if err := e.ensureMigratedSimilarityPosting(ctx, scope.UserID(), posting); err != nil {
+				return err
+			}
+		}
+	}
 	for _, entry := range snapshot.entries {
 		childPath, err := path.Join(entry.Name)
 		if err != nil {
@@ -1324,6 +1925,41 @@ func (e *Engine) migrateDuplicateDirectory(ctx context.Context, scope domain.Sco
 		}
 	}
 	return nil
+}
+
+func (e *Engine) ensureMigratedSimilarityPosting(ctx context.Context, userID domain.UserID, posting storageformat.DuplicateSimilarityPosting) error {
+	if err := validateDuplicateSimilarityPosting(posting); err != nil {
+		return err
+	}
+	key := duplicateSimilarityPostingKey(userID.String(), posting)
+	body, err := storageformat.EncodeEnvelope(duplicateSimilaritySchema, key, 1, storageformat.DuplicateSimilarityPostingRoot{SchemaVersion: 1, UserID: userID.String(), Current: &posting})
+	if err != nil {
+		return err
+	}
+	for range 2 {
+		object, err := e.backend.Get(ctx, key)
+		if errors.Is(err, domain.ErrNotFound) {
+			if _, err := e.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err == nil {
+				return nil
+			} else if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrPreconditionFailed) {
+				continue
+			} else {
+				return err
+			}
+		}
+		if err != nil {
+			return err
+		}
+		current, err := e.Files().visibleDuplicateSimilarityPosting(ctx, userID, object)
+		if err != nil {
+			return err
+		}
+		if current == nil || !reflect.DeepEqual(current, &posting) {
+			return domain.NewError(domain.ErrorInvalid, "migrated similarity posting disagrees with the filesystem")
+		}
+		return nil
+	}
+	return domain.NewError(domain.ErrorUnavailable, "duplicate similarity posting migration remained contended")
 }
 
 func (e *Engine) ensureMigratedDuplicateOccurrence(ctx context.Context, userID domain.UserID, occurrence storageformat.DuplicateOccurrence) error {

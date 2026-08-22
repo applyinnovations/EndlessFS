@@ -113,6 +113,14 @@ func (s *reconciliationStorage) CompareDuplicateDirectories(context.Context, dom
 	return domain.DuplicateDirectoryComparison{}, nil
 }
 
+func (s *reconciliationStorage) ListDuplicateDirectoryOverlaps(context.Context, domain.UserID, domain.DuplicateDirectoryOverlapRequest) (domain.DuplicateDirectoryOverlapPage, error) {
+	return domain.DuplicateDirectoryOverlapPage{}, nil
+}
+
+func (s *reconciliationStorage) SetDuplicateDirectoryIgnored(context.Context, domain.UserID, domain.SetDuplicateDirectoryIgnoredRequest) (domain.DuplicateDirectoryIgnore, error) {
+	return domain.DuplicateDirectoryIgnore{}, nil
+}
+
 func (s *reconciliationStorage) PreviewDuplicateReconciliation(context.Context, domain.UserID, domain.DuplicateReconciliationPreviewRequest) (domain.DuplicateReconciliationPreview, error) {
 	return domain.DuplicateReconciliationPreview{}, nil
 }

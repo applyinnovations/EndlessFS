@@ -148,6 +148,18 @@ func DuplicateIgnoreKey(userID, groupID string) objectstore.Key {
 	return fixedKey(strings.Join([]string{"duplicates", encodedPart(userID), "ignores", encodedPart(groupID) + ".json"}, "/"))
 }
 
+func DuplicateDirectoryIgnoreKey(userID, pairID string) objectstore.Key {
+	return fixedKey(strings.Join([]string{"duplicates", encodedPart(userID), "directory-ignores", encodedPart(pairID) + ".json"}, "/"))
+}
+
+func DuplicateSimilarityPostingKey(userID string, position int, sketchValue, area, directoryID string) objectstore.Key {
+	return fixedKey(strings.Join([]string{"duplicates", encodedPart(userID), "similarity", fmt.Sprintf("%02x", position), encodedPart(sketchValue), area, encodedPart(directoryID) + ".json"}, "/"))
+}
+
+func DuplicateSimilarityPostingPrefix(userID string, position int, sketchValue string) string {
+	return root + strings.Join([]string{"duplicates", encodedPart(userID), "similarity", fmt.Sprintf("%02x", position), encodedPart(sketchValue), ""}, "/")
+}
+
 func DuplicateRecordsPrefix() string { return root + "duplicates/" }
 
 // ParseDirectoryRootKey validates and decodes a canonical directory-root key.

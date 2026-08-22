@@ -630,7 +630,10 @@ func (walk *migrationWalk) directoryEntry(ctx context.Context, directoryID, pare
 	if err != nil {
 		return migrationAggregate{}, err
 	}
-	if walk.transition.to == storageSchema004 && root.current {
+	// Schema 003 already decodes through the current Go root/manifest types. Only
+	// schema-004 manifests pin a descendant-content index, so do not require one
+	// while reading an untransformed schema-003 source directory.
+	if walk.transition.to == storageSchema004 && root.current && manifest.current && manifest.manifest.SchemaVersion == 2 {
 		if err := walk.engine.Files().verifyDirectoryContentIndex(ctx, walk.group.scope, directoryID, manifest.manifest); err != nil {
 			return migrationAggregate{}, err
 		}
@@ -1081,7 +1084,7 @@ func (e *Engine) prepareMigratedDirectory(ctx context.Context, scope domain.Scop
 		manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, storageformat.DirectoryManifest{
 			SchemaVersion: 2, DirectoryID: directoryID, ManifestID: manifestID,
 			IndexRootID: indexRoot.NodeID, IndexRootDigest: indexRoot.NodeDigest, SortIndexes: sortRoots,
-			ContentIndexRootID: contentRoot.NodeID, ContentIndexRootDigest: contentRoot.NodeDigest,
+			ContentIndexRootID: contentRoot.NodeID, ContentIndexRootDigest: contentRoot.NodeDigest, ContentSketch: contentRoot.Sketch,
 			EntryCount: len(entries), RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount, ContentAccumulator: contentAccumulator, ContentDigest: contentDigest, CreatedAt: createdAt,
 		})
 		if err != nil {
@@ -1096,7 +1099,7 @@ func (e *Engine) prepareMigratedDirectory(ctx context.Context, scope domain.Scop
 		if err != nil {
 			return preparedDirectory{}, err
 		}
-		return preparedDirectory{manifestID: manifestID, recursiveBytes: recursiveBytes, recursiveFileCount: fileCount, contentAccumulator: contentAccumulator, contentDigest: contentDigest, rootBody: rootBody, prerequisites: prerequisites}, nil
+		return preparedDirectory{manifestID: manifestID, recursiveBytes: recursiveBytes, recursiveFileCount: fileCount, contentAccumulator: contentAccumulator, contentDigest: contentDigest, contentSketch: append([]string(nil), contentRoot.Sketch...), rootBody: rootBody, prerequisites: prerequisites}, nil
 	}
 	pages := make([]storageformat.MutationObject, 0, max(1, (len(entries)+maxEntriesPerPage-1)/maxEntriesPerPage))
 	pageIDs := make([]string, 0, cap(pages))

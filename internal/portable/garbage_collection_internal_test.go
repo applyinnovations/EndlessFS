@@ -150,6 +150,86 @@ func TestClosedGateMaintenancePrunesExpiredOperationRetentionPairs(t *testing.T)
 	}
 }
 
+func TestClosedGateMaintenancePrunesDuplicateTombstonesAndRetainsPreferences(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2049, 2, 4, 4, 5, 6, 0, time.UTC))
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("duplicate-tombstone-entropy", 1<<17)))
+	user, _ := domain.ParseUserID("bW1tbW1tbW1tbW1tbW1tbQ")
+	groupID := storageformat.Digest([]byte("removed duplicate group"))
+	sketchValue := storageformat.Digest([]byte("removed similarity sketch"))
+	tombstones := []struct {
+		key    objectstore.Key
+		schema string
+		value  any
+	}{
+		{
+			key: storageformat.DuplicateOccurrenceKey(user.String(), string(domain.DuplicateFile), groupID, "live", "/removed.bin"), schema: duplicateOccurrenceSchema,
+			value: storageformat.DuplicateOccurrenceRoot{SchemaVersion: 1, UserID: user.String()},
+		},
+		{
+			key: storageformat.DuplicateSummaryKey(user.String(), string(domain.DuplicateFile), groupID, "aa"), schema: duplicateSummarySchema,
+			value: storageformat.DuplicateSummaryRoot{SchemaVersion: 1, UserID: user.String()},
+		},
+		{
+			key: storageformat.DuplicateSimilarityPostingKey(user.String(), 0, sketchValue, "live", "removed-directory"), schema: duplicateSimilaritySchema,
+			value: storageformat.DuplicateSimilarityPostingRoot{SchemaVersion: 1, UserID: user.String()},
+		},
+	}
+	for _, tombstone := range tombstones {
+		body, err := storageformat.EncodeEnvelope(tombstone.schema, tombstone.key, 1, tombstone.value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := backend.Put(ctx, tombstone.key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ignoreKey := storageformat.DuplicateIgnoreKey(user.String(), groupID)
+	ignoreBody, err := storageformat.EncodeEnvelope(duplicateIgnoreSchema, ignoreKey, 1, storageformat.DuplicateIgnore{SchemaVersion: 1, UserID: user.String(), GroupID: groupID, Ignored: false, Revision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Put(ctx, ignoreKey, ignoreBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.CloseWrites(ctx, "prune-duplicate-tombstones"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tombstone := range tombstones {
+		if _, err := backend.Get(ctx, tombstone.key); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("duplicate tombstone %s remains: %v", tombstone.key, err)
+		}
+	}
+	if _, err := backend.Get(ctx, ignoreKey); err != nil {
+		t.Fatalf("duplicate preference was pruned: %v", err)
+	}
+}
+
+func TestClosedGateMaintenanceRejectsUnresolvedDuplicateTransitions(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2049, 2, 5, 4, 5, 6, 0, time.UTC))
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("duplicate-transition-entropy", 1<<17)))
+	user, _ := domain.ParseUserID("bm5ubm5ubm5ubm5ubm5ubg")
+	groupID := storageformat.Digest([]byte("pending duplicate group"))
+	key := storageformat.DuplicateOccurrenceKey(user.String(), string(domain.DuplicateFile), groupID, "live", "/pending.bin")
+	value := storageformat.DuplicateOccurrence{GroupID: groupID, Kind: domain.DuplicateFile, Area: "live", Path: "/pending.bin", Size: 1, FileCount: 1, Version: "pending-version"}
+	body, err := storageformat.EncodeEnvelope(duplicateOccurrenceSchema, key, 1, storageformat.DuplicateOccurrenceRoot{
+		SchemaVersion: 1, UserID: user.String(), Current: &value,
+		Pending: &storageformat.DuplicateOccurrenceTransition{OperationID: "missing-operation", Fence: 1, Pre: &value},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.CloseWrites(ctx, "reject-unresolved-duplicate-transition"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("CloseWrites() error = %v; want invalid", err)
+	}
+}
+
 func TestGarbageCollectionMarksBindExactClosedGateVersion(t *testing.T) {
 	ctx := context.Background()
 	backend := objectmemory.New()

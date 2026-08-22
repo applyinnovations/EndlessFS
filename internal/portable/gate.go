@@ -72,6 +72,9 @@ func (e *Engine) finishClosingWrites(ctx context.Context, checkpointID string) e
 	if err := e.drainOperationRecords(ctx, true, true); err != nil {
 		return err
 	}
+	if err := e.pruneDuplicateTombstones(ctx); err != nil {
+		return err
+	}
 	if err := e.pruneExpiredOperationRecords(ctx); err != nil {
 		return err
 	}

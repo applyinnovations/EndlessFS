@@ -56,6 +56,9 @@ func TestDirectoryIndexSingleEntryUpdateRetainsUnchangedNodesAndReadsBoundedPage
 	if snapshot.manifest.ContentIndexRootID == "" || snapshot.manifest.ContentIndexRootDigest == "" {
 		t.Fatal("non-empty directory has no persistent content-occurrence index")
 	}
+	if len(snapshot.manifest.ContentSketch) != directoryContentSketchSize {
+		t.Fatalf("directory content sketch size = %d", len(snapshot.manifest.ContentSketch))
+	}
 	changed, found := findDirectoryEntry(entries, "file-0512.bin")
 	if !found {
 		t.Fatal("test entry is missing")

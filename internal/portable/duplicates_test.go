@@ -3,7 +3,9 @@ package portable_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +13,44 @@ import (
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
 )
+
+func TestDuplicateSimilarityPostingsDoNotRewriteWhenContentSetIsUnchanged(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2048, 1, 1, 3, 4, 5, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(139, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engine := openEngine(t, backend, clock, 140, nil)
+	user, _ := domain.ParseUserID("Z2dnaGdnaGdnaGdnaGdnaA")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	if _, err := engine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/copies")}); err != nil {
+		t.Fatal(err)
+	}
+	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/copies/a.bin"), []byte("same bytes"))
+	before := duplicateSimilarityObjects(backend.Export())
+	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/copies/b.bin"), []byte("same bytes"))
+	after := duplicateSimilarityObjects(backend.Export())
+	if len(before) == 0 || len(after) != len(before) {
+		t.Fatalf("similarity posting count changed for duplicate multiplicity: %d -> %d", len(before), len(after))
+	}
+	for key, body := range before {
+		if !bytes.Equal(body, after[key]) {
+			t.Fatalf("unchanged content set rewrote similarity posting %s", key)
+		}
+	}
+}
+
+func duplicateSimilarityObjects(objects map[string][]byte) map[string][]byte {
+	result := make(map[string][]byte)
+	for key, body := range objects {
+		if strings.Contains(key, "/duplicates/") && strings.Contains(key, "/similarity/") {
+			result[key] = body
+		}
+	}
+	return result
+}
 
 func TestDuplicateCatalogTracksFileAndExactDirectoryGroupsIncrementally(t *testing.T) {
 	backend := objectmemory.New()
@@ -56,6 +96,56 @@ func TestDuplicateCatalogTracksFileAndExactDirectoryGroupsIncrementally(t *testi
 	if !duplicateOccurrencePathsEqual(occurrences.Occurrences, "/backup/project-a", "/project-a") {
 		t.Fatalf("directory occurrences = %+v", occurrences.Occurrences)
 	}
+	overlaps, err := engine.Files().ListDuplicateDirectoryOverlaps(context.Background(), user, domain.DuplicateDirectoryOverlapRequest{
+		Directory: domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/project-a")}, Limit: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundExactOverlap := false
+	for _, candidate := range overlaps.Candidates {
+		if candidate.Comparison.Right.Path.String() == "/backup/project-a" {
+			foundExactOverlap = candidate.Comparison.Exact && candidate.SharedSketch == candidate.SketchSize && candidate.SketchSize > 0
+		}
+	}
+	if !foundExactOverlap {
+		t.Fatalf("exact overlap candidate is missing: %+v", overlaps.Candidates)
+	}
+	pairPreference, err := engine.Files().SetDuplicateDirectoryIgnored(context.Background(), user, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left:  domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/project-a")},
+		Right: domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/backup/project-a")}, Ignored: true,
+	})
+	if err != nil || !pairPreference.Ignored || pairPreference.Revision != 1 {
+		t.Fatalf("pair ignore = %+v, %v", pairPreference, err)
+	}
+	hidden, err := engine.Files().ListDuplicateDirectoryOverlaps(context.Background(), user, domain.DuplicateDirectoryOverlapRequest{
+		Directory: domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/project-a")}, Limit: 20,
+	})
+	if err != nil || duplicateOverlapContainsPath(hidden.Candidates, "/backup/project-a") {
+		t.Fatalf("pair-ignored overlap remained visible: %+v, %v", hidden, err)
+	}
+	included, err := engine.Files().ListDuplicateDirectoryOverlaps(context.Background(), user, domain.DuplicateDirectoryOverlapRequest{
+		Directory: domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/project-a")}, Limit: 20, IncludeIgnored: true,
+	})
+	includedPair, found := duplicateOverlapByPath(included.Candidates, "/backup/project-a")
+	if err != nil || !found || !includedPair.Ignored || includedPair.IgnoreRevision != pairPreference.Revision {
+		t.Fatalf("included pair ignore = %+v, %v", included, err)
+	}
+	pairPreference, err = engine.Files().SetDuplicateDirectoryIgnored(context.Background(), user, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left:    domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/backup/project-a")},
+		Right:   domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/project-a")},
+		Ignored: false, ExpectedRevision: pairPreference.Revision,
+	})
+	if err != nil || pairPreference.Ignored || pairPreference.Revision != 2 {
+		t.Fatalf("pair unignore = %+v, %v", pairPreference, err)
+	}
+	if _, err := engine.Files().SetDuplicateDirectoryIgnored(context.Background(), user, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left:    domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/project-a")},
+		Right:   domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/backup/project-a")},
+		Ignored: true, ExpectedRevision: 1,
+	}); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("stale duplicate directory ignore error = %v; want precondition failed", err)
+	}
 	exactPreview, err := engine.Files().PreviewDuplicateReconciliation(context.Background(), user, domain.DuplicateReconciliationPreviewRequest{
 		Left:       domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/project-a")},
 		Right:      domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/backup/project-a")},
@@ -88,6 +178,21 @@ func TestDuplicateCatalogTracksFileAndExactDirectoryGroupsIncrementally(t *testi
 	}
 	if comparison.Exact || comparison.CommonFiles != 1 || comparison.CommonBytes != 10 || comparison.LeftOnlyFiles != 0 || comparison.RightOnlyFiles != 1 || comparison.RightOnlyBytes != 6 {
 		t.Fatalf("directory comparison = %+v", comparison)
+	}
+	overlaps, err = engine.Files().ListDuplicateDirectoryOverlaps(context.Background(), user, domain.DuplicateDirectoryOverlapRequest{
+		Directory: domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/project-a")}, Limit: 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundPartialOverlap := false
+	for _, candidate := range overlaps.Candidates {
+		if candidate.Comparison.Right.Path.String() == "/backup/project-a" {
+			foundPartialOverlap = !candidate.Comparison.Exact && candidate.Comparison.CommonFiles == 1 && candidate.Comparison.RightOnlyFiles == 1 && candidate.SharedSketch > 0 && candidate.SharedSketch < candidate.SketchSize
+		}
+	}
+	if !foundPartialOverlap {
+		t.Fatalf("partial overlap candidate is missing: %+v", overlaps.Candidates)
 	}
 	partialPreview, err := engine.Files().PreviewDuplicateReconciliation(context.Background(), user, domain.DuplicateReconciliationPreviewRequest{
 		Left:       domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/project-a")},
@@ -335,4 +440,18 @@ func duplicateOccurrencePathsEqual(occurrences []domain.DuplicateOccurrence, pat
 		delete(want, occurrence.Path.String())
 	}
 	return len(want) == 0
+}
+
+func duplicateOverlapContainsPath(candidates []domain.DuplicateDirectoryOverlapCandidate, path string) bool {
+	_, found := duplicateOverlapByPath(candidates, path)
+	return found
+}
+
+func duplicateOverlapByPath(candidates []domain.DuplicateDirectoryOverlapCandidate, path string) (domain.DuplicateDirectoryOverlapCandidate, bool) {
+	for _, candidate := range candidates {
+		if candidate.Comparison.Right.Path.String() == path {
+			return candidate, true
+		}
+	}
+	return domain.DuplicateDirectoryOverlapCandidate{}, false
 }

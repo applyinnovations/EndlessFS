@@ -19,6 +19,8 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/duplicates/groups/{groupID}/occurrences", api.duplicateOccurrences)
 	mux.HandleFunc("PUT /api/v1/duplicates/groups/{groupID}/ignore", api.setDuplicateIgnored)
 	mux.HandleFunc("POST /api/v1/duplicates/directories/compare", api.compareDuplicateDirectories)
+	mux.HandleFunc("POST /api/v1/duplicates/directories/overlaps", api.duplicateDirectoryOverlaps)
+	mux.HandleFunc("PUT /api/v1/duplicates/directories/ignore", api.setDuplicateDirectoryIgnored)
 	mux.HandleFunc("POST /api/v1/duplicates/directories/reconciliation-preview", api.previewDuplicateReconciliation)
 	mux.HandleFunc("POST /api/v1/duplicates/directories/reconcile", api.applyDuplicateReconciliation)
 	mux.HandleFunc("POST /api/v1/directories", api.createDirectory)
@@ -122,6 +124,18 @@ func parseDuplicateArea(value string) (domain.Area, error) {
 	}
 }
 
+func parseDuplicateLocation(areaValue, pathValue string) (domain.DuplicateLocation, error) {
+	area, err := parseDuplicateArea(areaValue)
+	if err != nil {
+		return domain.DuplicateLocation{}, err
+	}
+	path, err := parsePath(pathValue)
+	if err != nil {
+		return domain.DuplicateLocation{}, err
+	}
+	return domain.DuplicateLocation{Area: area, Path: path}, nil
+}
+
 func (api *identityAPI) compareDuplicateDirectories(w http.ResponseWriter, r *http.Request) {
 	current, ok := api.mutation(w, r)
 	if !ok {
@@ -161,6 +175,83 @@ func (api *identityAPI) compareDuplicateDirectories(w http.ResponseWriter, r *ht
 		return
 	}
 	result, err := api.drive.CompareDuplicateDirectories(r.Context(), current.Record.UserID, domain.DuplicateDirectoryComparisonRequest{Left: domain.DuplicateLocation{Area: leftArea, Path: leftPath}, Right: domain.DuplicateLocation{Area: rightArea, Path: rightPath}})
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (api *identityAPI) duplicateDirectoryOverlaps(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.mutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Directory struct {
+			Area string `json:"area"`
+			Path string `json:"path"`
+		} `json:"directory"`
+		Limit          int    `json:"limit,omitempty"`
+		Cursor         string `json:"cursor,omitempty"`
+		IncludeIgnored bool   `json:"includeIgnored,omitempty"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	area, err := parseDuplicateArea(request.Directory.Area)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	path, err := parsePath(request.Directory.Path)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	result, err := api.drive.DuplicateDirectoryOverlaps(r.Context(), current.Record.UserID, domain.DuplicateDirectoryOverlapRequest{
+		Directory: domain.DuplicateLocation{Area: area, Path: path}, Limit: request.Limit, Cursor: request.Cursor, IncludeIgnored: request.IncludeIgnored,
+	})
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (api *identityAPI) setDuplicateDirectoryIgnored(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.mutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Left struct {
+			Area string `json:"area"`
+			Path string `json:"path"`
+		} `json:"left"`
+		Right struct {
+			Area string `json:"area"`
+			Path string `json:"path"`
+		} `json:"right"`
+		Ignored          bool   `json:"ignored"`
+		ExpectedRevision uint64 `json:"expectedRevision,omitempty"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	left, err := parseDuplicateLocation(request.Left.Area, request.Left.Path)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	right, err := parseDuplicateLocation(request.Right.Area, request.Right.Path)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	result, err := api.drive.SetDuplicateDirectoryIgnored(r.Context(), current.Record.UserID, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left: left, Right: right, Ignored: request.Ignored, ExpectedRevision: request.ExpectedRevision,
+	})
 	if err != nil {
 		writeProblem(w, r, err)
 		return

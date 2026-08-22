@@ -468,10 +468,11 @@ func TestFileHTTPRejectsProviderFieldsBodiesAndTraversalBeforeProvider(t *testin
 	cookies := []*http.Cookie{env.session, env.csrf}
 	before := env.storage.Instrumentation()
 	for name, testCase := range map[string][2]string{
-		"provider key": {"/api/v1/directories", `{"path":"/safe","providerKey":"users/other/file"}`},
-		"dot segment":  {"/api/v1/directories", `{"path":"/../escape"}`},
-		"backslash":    {"/api/v1/directories", `{"path":"/safe\\escape"}`},
-		"reserved":     {"/api/v1/directories", `{"path":"/.endlessfs/metadata"}`},
+		"provider key":              {"/api/v1/directories", `{"path":"/safe","providerKey":"users/other/file"}`},
+		"dot segment":               {"/api/v1/directories", `{"path":"/../escape"}`},
+		"backslash":                 {"/api/v1/directories", `{"path":"/safe\\escape"}`},
+		"reserved":                  {"/api/v1/directories", `{"path":"/.endlessfs/metadata"}`},
+		"overlap provider identity": {"/api/v1/duplicates/directories/overlaps", `{"directory":{"area":"live","path":"/safe"},"bucket":"private"}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			response := performRequest(t, env.handler, http.MethodPost, testCase[0], origin, testCase[1], cookies, driveMutationHeaders(env.csrf.Value, ""))
@@ -480,6 +481,10 @@ func TestFileHTTPRejectsProviderFieldsBodiesAndTraversalBeforeProvider(t *testin
 			}
 			assertProblem(t, response)
 		})
+	}
+	pairIgnore := performRequest(t, env.handler, http.MethodPut, "/api/v1/duplicates/directories/ignore", origin, `{"left":{"area":"live","path":"/safe"},"right":{"area":"live","path":"/../escape"},"ignored":true}`, cookies, driveMutationHeaders(env.csrf.Value, ""))
+	if pairIgnore.Code != http.StatusBadRequest {
+		t.Fatalf("pair ignore traversal = %d %s", pairIgnore.Code, pairIgnore.Body.String())
 	}
 	after := env.storage.Instrumentation()
 	if after.ProviderCalls[providermemory.OperationCreateDirectory] != before.ProviderCalls[providermemory.OperationCreateDirectory] {

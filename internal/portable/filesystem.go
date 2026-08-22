@@ -58,6 +58,7 @@ type preparedDirectory struct {
 	recursiveFileCount int64
 	contentAccumulator string
 	contentDigest      string
+	contentSketch      []string
 	rootBody           []byte
 	prerequisites      []storageformat.MutationObject
 }
@@ -393,7 +394,14 @@ func (s *FileStore) CreateDirectory(ctx context.Context, scope domain.Scope, req
 				if occurrenceErr != nil {
 					return domain.Entry{}, occurrenceErr
 				}
-				catalogChanges = append(catalogChanges, catalogChange{pre: &removed})
+				change := catalogChange{pre: &removed}
+				if item.entry.Kind == domain.EntryDirectory && item.entry.FileCount > 0 {
+					change.similarityPre, err = duplicateSimilarityPostings(scope, existingPath, item.entry.DirectoryID, item.contentSketch)
+					if err != nil {
+						return domain.Entry{}, err
+					}
+				}
+				catalogChanges = append(catalogChanges, change)
 			}
 		}
 		operation, operationBody, err := s.buildFileOperation(ctx, scope.UserID(), operationID, ownerID, operationCreateDirectory, updates, prerequisites, nil, catalogChanges)
@@ -965,7 +973,7 @@ func (s *FileStore) prepareDirectoryWithIndexAggregates(scope domain.Scope, dire
 	manifestKey := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifestID)
 	manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, storageformat.DirectoryManifest{
 		SchemaVersion: 2, DirectoryID: directoryID, ManifestID: manifestID, IndexRootID: indexRoot.NodeID, IndexRootDigest: indexRoot.NodeDigest,
-		SortIndexes: sortRoots, ContentIndexRootID: contentRoot.NodeID, ContentIndexRootDigest: contentRoot.NodeDigest,
+		SortIndexes: sortRoots, ContentIndexRootID: contentRoot.NodeID, ContentIndexRootDigest: contentRoot.NodeDigest, ContentSketch: contentRoot.Sketch,
 		EntryCount: entryCount, RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount, ContentAccumulator: contentAccumulator, ContentDigest: contentDigest, CreatedAt: s.engine.clock.Now().UTC(),
 	})
 	if err != nil {
@@ -978,7 +986,7 @@ func (s *FileStore) prepareDirectoryWithIndexAggregates(scope domain.Scope, dire
 	if err != nil {
 		return preparedDirectory{}, err
 	}
-	return preparedDirectory{manifestID: manifestID, recursiveBytes: recursiveBytes, recursiveFileCount: fileCount, contentAccumulator: contentAccumulator, contentDigest: contentDigest, rootBody: rootBody, prerequisites: prerequisites}, nil
+	return preparedDirectory{manifestID: manifestID, recursiveBytes: recursiveBytes, recursiveFileCount: fileCount, contentAccumulator: contentAccumulator, contentDigest: contentDigest, contentSketch: append([]string(nil), contentRoot.Sketch...), rootBody: rootBody, prerequisites: prerequisites}, nil
 }
 
 func validateDirectoryEntries(entries []storageformat.DirectoryEntry) error {

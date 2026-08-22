@@ -142,7 +142,7 @@ type migrationDirectoryManifest struct {
 type migrationScope struct {
 	scope     domain.Scope
 	rootSeen  bool
-	rootCount int
+	rootCount int64
 	// roots is populated only by focused legacy migration tests. Production
 	// traversal counts roots while streaming the namespace.
 	roots map[string]struct{}
@@ -668,7 +668,31 @@ func (e *Engine) migrateAllDirectoryAggregatesPhase(ctx context.Context, transit
 	if phase != "" && phase != migrationPhaseTransform && phase != migrationPhaseVerify {
 		return domain.NewError(domain.ErrorInvalid, "invalid directory migration phase")
 	}
-	groups := make(map[string]migrationScope)
+	currentKey := ""
+	current := migrationScope{}
+	flush := func() error {
+		if currentKey == "" {
+			return nil
+		}
+		if !current.rootSeen {
+			return domain.NewError(domain.ErrorInvalid, "directory scope has no canonical root")
+		}
+		walk := migrationWalk{engine: e, group: current, transition: transition, plan: plan, phase: phase}
+		if phase == "" {
+			walk.state = make(map[string]uint8)
+			walk.parents = make(map[string]string)
+		} else {
+			walk.active = make(map[string]struct{})
+		}
+		total, err := walk.directory(ctx, storageformat.RootDirectoryID, "")
+		if err != nil {
+			return err
+		}
+		if phase == "" && int64(len(walk.state)) != current.rootCount || phase != "" && total.directories != current.rootCount {
+			return domain.NewError(domain.ErrorInvalid, "directory scope contains an unreachable directory root")
+		}
+		return nil
+	}
 	if err := visitObjectPages(ctx, e.backend, storageformat.FilesystemPrefix(), func(info objectstore.ObjectInfo) error {
 		userIDValue, areaValue, directoryID, matched, parseErr := storageformat.ParseDirectoryRootKey(info.Key)
 		if parseErr != nil {
@@ -690,45 +714,26 @@ func (e *Engine) migrateAllDirectoryAggregatesPhase(ctx context.Context, transit
 			return scopeErr
 		}
 		groupKey := userIDValue + "\x00" + areaValue
-		group := groups[groupKey]
-		if !group.scope.Valid() {
-			group.scope = scope
+		if currentKey != "" && groupKey != currentKey {
+			if err := flush(); err != nil {
+				return err
+			}
+			current = migrationScope{}
 		}
-		group.rootCount++
-		group.rootSeen = group.rootSeen || directoryID == storageformat.RootDirectoryID
-		groups[groupKey] = group
+		currentKey = groupKey
+		if !current.scope.Valid() {
+			current.scope = scope
+		}
+		if current.rootCount == math.MaxInt64 {
+			return domain.NewError(domain.ErrorInvalid, "directory scope root count overflows")
+		}
+		current.rootCount++
+		current.rootSeen = current.rootSeen || directoryID == storageformat.RootDirectoryID
 		return nil
 	}); err != nil {
 		return err
 	}
-	keys := make([]string, 0, len(groups))
-	for key := range groups {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		group := groups[key]
-		if !group.rootSeen {
-			return domain.NewError(domain.ErrorInvalid, "directory scope has no canonical root")
-		}
-		walk := migrationWalk{
-			engine: e, group: group, transition: transition, plan: plan, phase: phase,
-		}
-		if phase == "" {
-			walk.state = make(map[string]uint8)
-			walk.parents = make(map[string]string)
-		} else {
-			walk.active = make(map[string]struct{})
-		}
-		total, err := walk.directory(ctx, storageformat.RootDirectoryID, "")
-		if err != nil {
-			return err
-		}
-		if phase == "" && len(walk.state) != group.rootCount || phase != "" && total.directories != int64(group.rootCount) {
-			return domain.NewError(domain.ErrorInvalid, "directory scope contains an unreachable directory root")
-		}
-	}
-	return nil
+	return flush()
 }
 
 func (walk *migrationWalk) directory(ctx context.Context, directoryID, parentID string) (migrationAggregate, error) {

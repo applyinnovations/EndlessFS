@@ -30,6 +30,8 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/httpapi"
 	"github.com/applyinnovations/endlessfs/internal/identity"
+	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
+	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/preview"
 	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
 	previewmemory "github.com/applyinnovations/endlessfs/internal/preview/memory"
@@ -53,6 +55,127 @@ func TestVirtualAuthenticatorUsesPlatformTransport(t *testing.T) {
 	if options.Transport != cdpwebauthn.AuthenticatorTransportInternal {
 		t.Fatalf("virtual authenticator transport = %q, want internal", options.Transport)
 	}
+}
+
+func TestE2EDuplicateWorkspaceReviewsIgnoresAndReconcilesWithoutDeletingUniqueFiles(t *testing.T) {
+	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
+		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
+	}
+	harness := newDuplicateHarness(t)
+	client := newTestBrowser(t)
+	bootstrapBrowser(t, client, harness)
+	seedDuplicateBrowserWorkspace(t, harness)
+
+	if err := chromedp.Run(client.ctx, chromedp.Click("a[data-route='duplicates']", chromedp.ByQuery)); err != nil {
+		t.Fatalf("open duplicates workspace: %v", err)
+	}
+	if err := waitFor(client.ctx, `!document.querySelector("#duplicates-view").hidden && document.querySelectorAll("#duplicate-groups .duplicate-card-actions button").length >= 1`, 15*time.Second); err != nil {
+		t.Fatalf("load exact duplicate groups: %v (%s)", err, browserStatus(client.ctx))
+	}
+	var activeExactGroups int
+	if err := chromedp.Run(client.ctx,
+		chromedp.Evaluate(`document.querySelectorAll("#duplicate-groups .duplicate-card").length`, &activeExactGroups),
+		chromedp.Evaluate(`document.querySelector("#duplicate-groups .duplicate-card-actions button:last-child").click()`, nil),
+	); err != nil {
+		t.Fatalf("ignore exact duplicate group: %v", err)
+	}
+	if err := waitFor(client.ctx, `document.querySelectorAll("#duplicate-groups .duplicate-card").length < `+fmt.Sprint(activeExactGroups)+` && document.querySelectorAll("#duplicate-ignored-groups .duplicate-card").length === 1`, 15*time.Second); err != nil {
+		t.Fatalf("collapse ignored exact duplicate group: %v (%s)", err, browserStatus(client.ctx))
+	}
+	if err := chromedp.Run(client.ctx,
+		chromedp.Click("#duplicate-ignored-disclosure summary", chromedp.ByQuery),
+		chromedp.Click("#duplicate-ignored-groups .duplicate-card-actions button:last-child", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("unignore exact duplicate group: %v", err)
+	}
+	if err := waitFor(client.ctx, `document.querySelectorAll("#duplicate-groups .duplicate-card").length === `+fmt.Sprint(activeExactGroups)+` && document.querySelectorAll("#duplicate-ignored-groups .duplicate-card").length === 0`, 15*time.Second); err != nil {
+		t.Fatalf("return exact duplicate group to active results: %v (%s)", err, browserStatus(client.ctx))
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`(() => {
+		for (const button of document.querySelectorAll("#duplicate-groups .duplicate-card-actions button:first-child")) button.click();
+	})()`, nil)); err != nil {
+		t.Fatalf("expand exact duplicate locations: %v", err)
+	}
+	if err := waitFor(client.ctx, `[...document.querySelectorAll("#duplicate-groups .duplicate-occurrence-path")].some((node) => node.textContent === "/Projects/Project Atlas")`, 15*time.Second); err != nil {
+		var snapshot string
+		_ = chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector("#duplicate-groups").textContent + " | state=" + document.querySelector("#duplicate-groups-state").textContent + " | alert=" + document.querySelector("#urgent-status").textContent`, &snapshot))
+		t.Fatalf("show exact project locations: %v (%s) duplicate-ui=%q", err, browserStatus(client.ctx), snapshot)
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`(() => {
+		const card = [...document.querySelectorAll("#duplicate-groups .duplicate-card")].find((node) => node.textContent.includes("/Projects/Project Atlas"));
+		const action = card && card.querySelector(".duplicate-card-footer .danger");
+		if (!action) return false;
+		action.click();
+		return true;
+	})()`, nil)); err != nil {
+		t.Fatalf("start exact folder cleanup: %v", err)
+	}
+	if err := waitFor(client.ctx, `document.querySelector("#action-dialog").open && document.querySelector("#dialog-confirm").textContent.includes("Move to Trash")`, 5*time.Second); err != nil {
+		t.Fatalf("review exact folder cleanup: %v (%s)", err, browserStatus(client.ctx))
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Click("#dialog-confirm", chromedp.ByQuery)); err != nil {
+		t.Fatalf("confirm exact folder cleanup: %v", err)
+	}
+	if err := waitFor(client.ctx, `!document.querySelector("#action-dialog").open && document.querySelector("#toast-region").textContent.includes("moved to Trash")`, 15*time.Second); err != nil {
+		t.Fatalf("finish exact folder cleanup: %v (%s)", err, browserStatus(client.ctx))
+	}
+	assertOneDuplicateFolderRemains(t, harness, "/Projects/Project Atlas", "/Backups/Projects/Project Atlas")
+
+	if err := chromedp.Run(client.ctx,
+		chromedp.SetValue("#duplicate-folder-path", "/Photography/Selects", chromedp.ByQuery),
+		chromedp.Click("#duplicate-folder-form button[type='submit']", chromedp.ByQuery),
+	); err != nil {
+		t.Fatalf("find partial folder matches: %v", err)
+	}
+	if err := waitFor(client.ctx, `[...document.querySelectorAll("#duplicate-overlaps .duplicate-card")].some((card) => [...card.querySelectorAll(".duplicate-location strong")].some((node) => node.textContent === "/Backups/Photography/Selects") && card.textContent.includes("2 common files") && card.textContent.includes("1 unique here"))`, 15*time.Second); err != nil {
+		var snapshot string
+		_ = chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector("#duplicate-overlaps").textContent + " | ignored=" + document.querySelector("#duplicate-ignored-overlaps").textContent + " | state=" + document.querySelector("#duplicate-overlaps-state").textContent`, &snapshot))
+		t.Fatalf("load partial folder match: %v (%s) duplicate-ui=%q", err, browserStatus(client.ctx), snapshot)
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`(() => {
+		const card = [...document.querySelectorAll("#duplicate-overlaps .duplicate-card")].find((candidate) => [...candidate.querySelectorAll(".duplicate-location strong")].some((node) => node.textContent === "/Backups/Photography/Selects"));
+		[...card.querySelectorAll(".duplicate-card-actions button")].find((node) => node.textContent === "Ignore").click();
+	})()`, nil)); err != nil {
+		t.Fatalf("ignore partial folder match: %v", err)
+	}
+	if err := waitFor(client.ctx, `![...document.querySelectorAll("#duplicate-overlaps .duplicate-location strong")].some((node) => node.textContent === "/Backups/Photography/Selects") && [...document.querySelectorAll("#duplicate-ignored-overlaps .duplicate-location strong")].some((node) => node.textContent === "/Backups/Photography/Selects")`, 15*time.Second); err != nil {
+		t.Fatalf("collapse ignored folder match: %v (%s)", err, browserStatus(client.ctx))
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`(() => {
+		const card = [...document.querySelectorAll("#duplicate-ignored-overlaps .duplicate-card")].find((candidate) => [...candidate.querySelectorAll(".duplicate-location strong")].some((node) => node.textContent === "/Backups/Photography/Selects"));
+		[...card.querySelectorAll(".duplicate-card-actions button")].find((node) => node.textContent === "Unignore folder match").click();
+	})()`, nil)); err != nil {
+		t.Fatalf("restore ignored folder match: %v", err)
+	}
+	if err := waitFor(client.ctx, `[...document.querySelectorAll("#duplicate-overlaps .duplicate-location strong")].some((node) => node.textContent === "/Backups/Photography/Selects")`, 15*time.Second); err != nil {
+		t.Fatalf("return folder match to active results: %v (%s)", err, browserStatus(client.ctx))
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`(() => {
+		const card = [...document.querySelectorAll("#duplicate-overlaps .duplicate-card")].find((candidate) => [...candidate.querySelectorAll(".duplicate-location strong")].some((node) => node.textContent === "/Backups/Photography/Selects"));
+		[...card.querySelectorAll(".duplicate-card-actions button")].find((node) => node.textContent === "Clean match").click();
+	})()`, nil)); err != nil {
+		t.Fatalf("preview partial cleanup: %v", err)
+	}
+	if err := waitFor(client.ctx, `document.querySelector("#duplicate-reconciliation-dialog").open && document.querySelectorAll("#duplicate-reconciliation-items .duplicate-reconciliation-item").length === 2`, 15*time.Second); err != nil {
+		t.Fatalf("review partial cleanup plan: %v (%s)", err, browserStatus(client.ctx))
+	}
+	var mobileReviewFits bool
+	if err := chromedp.Run(client.ctx,
+		emulation.SetDeviceMetricsOverride(320, 720, 1, false),
+		chromedp.Evaluate(`document.documentElement.scrollWidth <= innerWidth && document.querySelector("#duplicate-reconciliation-apply").getBoundingClientRect().right <= innerWidth`, &mobileReviewFits),
+	); err != nil || !mobileReviewFits {
+		t.Fatalf("duplicate review does not fit a 320 CSS-pixel viewport: %v, fits=%v", err, mobileReviewFits)
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector("#duplicate-reconciliation-apply").click()`, nil)); err != nil {
+		t.Fatalf("apply partial cleanup: %v", err)
+	}
+	if err := waitFor(client.ctx, `!document.querySelector("#duplicate-reconciliation-dialog").open`, 15*time.Second); err != nil {
+		var snapshot string
+		_ = chromedp.Run(client.ctx, chromedp.Evaluate(`"open=" + document.querySelector("#duplicate-reconciliation-dialog").open + " disabled=" + document.querySelector("#duplicate-reconciliation-apply").disabled + " alert=" + document.querySelector("#urgent-status").textContent + " live=" + document.querySelector("#live-status").textContent`, &snapshot))
+		t.Fatalf("finish partial cleanup: %v (%s) duplicate-ui=%q", err, browserStatus(client.ctx), snapshot)
+	}
+	assertDuplicateReconciliationResult(t, harness)
+	client.assertNoExternalRequests(t, harness)
 }
 
 func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
@@ -1973,19 +2096,114 @@ func runStage(ctx context.Context, timeout time.Duration, actions ...chromedp.Ac
 }
 
 type harness struct {
-	origin         string
-	dataOrigin     string
-	previewOrigin  string
-	bootstrapToken string
-	repository     *identity.Repository
-	storage        *providermemory.Provider
-	previewStore   *previewmemory.Store
-	corruptPreview *atomic.Bool
-	clock          domain.Clock
+	origin           string
+	dataOrigin       string
+	previewOrigin    string
+	bootstrapToken   string
+	repository       *identity.Repository
+	storage          *providermemory.Provider
+	previewStore     *previewmemory.Store
+	corruptPreview   *atomic.Bool
+	clock            domain.Clock
+	duplicateFiles   *portable.FileStore
+	duplicateBackend *objectmemory.Backend
 }
 
 func newHarness(t *testing.T) harness {
 	return newHarnessWithPreviews(t, true)
+}
+
+func newDuplicateHarness(t *testing.T) harness {
+	t.Helper()
+	controlListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		controlListener.Close()
+		t.Fatal(err)
+	}
+	_, controlPort, err := net.SplitHostPort(controlListener.Addr().String())
+	if err != nil {
+		controlListener.Close()
+		dataListener.Close()
+		t.Fatal(err)
+	}
+	origin := "http://localhost:" + controlPort
+	dataOrigin := "http://" + dataListener.Addr().String()
+	clock := domain.SystemClock{}
+	ids := domain.SystemIDGenerator()
+	backend := objectmemory.New()
+	if err := backend.ConfigureDataPlane(dataOrigin, clock, ids); err != nil {
+		controlListener.Close()
+		dataListener.Close()
+		t.Fatal(err)
+	}
+	history := portable.StorageSchemaHistory()
+	features := append([]string(nil), history[len(history)-1].Features...)
+	engine, err := portable.Open(context.Background(), portable.Options{
+		Backend: backend, Clock: clock, IDs: ids,
+		Writer: portable.WriterConfiguration{
+			WriterSetID: "ZTJlLWR1cGxpY2F0ZS1lMmU", ConfigurationDigest: "duplicate-e2e-v1",
+			KeyringIdentifiers: []string{"duplicate-e2e-session-v1"}, RequiredFeatures: features,
+		},
+		LeaseTTL: time.Minute, UploadTTL: 10 * time.Minute, DownloadTTL: 10 * time.Minute,
+		CursorKey: bytes.Repeat([]byte{0x8d}, 32),
+	})
+	if err != nil {
+		controlListener.Close()
+		dataListener.Close()
+		t.Fatal(err)
+	}
+	repository := identity.NewRepository(engine)
+	bootstrapToken := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x4a}, 32))
+	sessionKey := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x5b}, 32)))
+	webAuthn, err := auth.NewGoWebAuthn("localhost", "EndlessFS duplicate browser test", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := auth.NewSessionManager(repository, ids, clock, 12*time.Hour, origin, false, sessionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityService, err := identity.NewService(repository, webAuthn, sessions, ids, clock, identity.NewMutablePolicy(identity.RegistrationPolicy{AllowPublic: true, AllowInvite: true}), secret.Value(bootstrapToken), origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	driveService, err := drive.NewService(engine.Files(), engine, repository, ids, clock, sessionKey, origin, dataOrigin, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	themeRegistry, err := theme.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	themeManager, err := theme.NewManager(themeRegistry, engine, "endlessfs-light", "endlessfs-dark", false, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{BaseURL: origin, AllowedOrigin: origin, Secure: false, AllowRegistration: true, InviteRegistration: true, PreviewProvider: "disabled"}
+	controlServer := &http.Server{Handler: httpapi.NewCompleteApplication(cfg, "e2e-duplicates", identityService, sessions, driveService, themeManager)}
+	dataServer := &http.Server{Handler: backend}
+	serveErrors := make(chan error, 2)
+	go func() { serveErrors <- controlServer.Serve(controlListener) }()
+	go func() { serveErrors <- dataServer.Serve(dataListener) }()
+	t.Cleanup(func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = controlServer.Shutdown(shutdownContext)
+		_ = dataServer.Shutdown(shutdownContext)
+		for range 2 {
+			if serveErr := <-serveErrors; serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+				t.Errorf("duplicate browser test server: %v", serveErr)
+			}
+		}
+	})
+	return harness{
+		origin: origin, dataOrigin: dataOrigin, bootstrapToken: bootstrapToken, repository: repository,
+		clock: clock, duplicateFiles: engine.Files(), duplicateBackend: backend,
+	}
 }
 
 func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
@@ -2144,6 +2362,108 @@ func seedVirtualFiles(t *testing.T, harness harness, count int) {
 		}
 		if _, err := harness.storage.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: size, MediaType: "application/octet-stream"}); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+func seedDuplicateBrowserWorkspace(t *testing.T, harness harness) {
+	t.Helper()
+	accounts, err := harness.repository.Accounts(context.Background())
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("resolve duplicate browser account: %v, accounts=%d", err, len(accounts))
+	}
+	scope, err := domain.NewScope(accounts[0].UserID, domain.AreaLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{
+		"/Backups", "/Backups/Photography", "/Backups/Photography/Selects", "/Backups/Projects", "/Backups/Projects/Project Atlas",
+		"/Photography", "/Photography/Selects", "/Projects", "/Projects/Project Atlas",
+	} {
+		if _, err := harness.duplicateFiles.CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(value)}); err != nil {
+			t.Fatalf("seed duplicate directory %s: %v", value, err)
+		}
+	}
+	files := map[string]string{
+		"/Projects/Project Atlas/Brief.txt":            "same project brief\n",
+		"/Backups/Projects/Project Atlas/Brief.txt":    "same project brief\n",
+		"/Projects/Project Atlas/Palette.txt":          "same project palette\n",
+		"/Backups/Projects/Project Atlas/Palette.txt":  "same project palette\n",
+		"/Photography/Selects/Common one.txt":          "common selection one\n",
+		"/Backups/Photography/Selects/Common one.txt":  "common selection one\n",
+		"/Photography/Selects/Common two.txt":          "common selection two\n",
+		"/Backups/Photography/Selects/Common two.txt":  "common selection two\n",
+		"/Photography/Selects/Only selected.txt":       "unique selected notes\n",
+		"/Backups/Photography/Selects/Only backup.txt": "unique backup notes\n",
+	}
+	for pathValue, bodyValue := range files {
+		path := domain.MustParseUserPath(pathValue)
+		body := []byte(bodyValue)
+		capability, err := harness.duplicateFiles.CreateUpload(context.Background(), scope, domain.CreateUploadRequest{Path: path, Size: int64(len(body)), MediaType: "text/plain"})
+		if err != nil {
+			t.Fatalf("seed duplicate upload %s: %v", pathValue, err)
+		}
+		request := httptest.NewRequest(capability.Method, capability.URL, bytes.NewReader(body))
+		for name, value := range capability.Headers {
+			request.Header.Set(name, value)
+		}
+		response := httptest.NewRecorder()
+		harness.duplicateBackend.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("seed duplicate body %s status = %d", pathValue, response.Code)
+		}
+		if _, err := harness.duplicateFiles.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(body)), MediaType: "text/plain"}); err != nil {
+			t.Fatalf("complete duplicate upload %s: %v", pathValue, err)
+		}
+	}
+}
+
+func duplicateBrowserScope(t *testing.T, harness harness) domain.Scope {
+	t.Helper()
+	accounts, err := harness.repository.Accounts(context.Background())
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("resolve duplicate browser scope: %v, accounts=%d", err, len(accounts))
+	}
+	scope, err := domain.NewScope(accounts[0].UserID, domain.AreaLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scope
+}
+
+func assertOneDuplicateFolderRemains(t *testing.T, harness harness, paths ...string) {
+	t.Helper()
+	scope := duplicateBrowserScope(t, harness)
+	found := 0
+	for _, value := range paths {
+		_, err := harness.duplicateFiles.Stat(context.Background(), scope, domain.MustParseUserPath(value))
+		if err == nil {
+			found++
+		} else if !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("stat exact duplicate folder %s: %v", value, err)
+		}
+	}
+	if found != 1 {
+		t.Fatalf("live exact duplicate folders = %d, want one", found)
+	}
+}
+
+func assertDuplicateReconciliationResult(t *testing.T, harness harness) {
+	t.Helper()
+	scope := duplicateBrowserScope(t, harness)
+	for _, value := range []string{
+		"/Photography/Selects/Common one.txt", "/Photography/Selects/Common two.txt",
+		"/Photography/Selects/Only selected.txt", "/Backups/Photography/Selects/Only backup.txt",
+	} {
+		if _, err := harness.duplicateFiles.Stat(context.Background(), scope, domain.MustParseUserPath(value)); err != nil {
+			t.Errorf("reconciliation removed protected file %s: %v", value, err)
+		}
+	}
+	for _, value := range []string{
+		"/Backups/Photography/Selects/Common one.txt", "/Backups/Photography/Selects/Common two.txt",
+	} {
+		if _, err := harness.duplicateFiles.Stat(context.Background(), scope, domain.MustParseUserPath(value)); !errors.Is(err, domain.ErrNotFound) {
+			t.Errorf("reconciliation retained duplicate file %s: %v", value, err)
 		}
 	}
 }

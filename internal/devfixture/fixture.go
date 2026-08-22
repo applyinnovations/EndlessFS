@@ -65,6 +65,10 @@ type fileService interface {
 	CompleteUpload(context.Context, domain.UserID, domain.CompleteUploadRequest) (domain.Entry, error)
 	Trash(context.Context, domain.UserID, []domain.UserPath, string) (drive.BatchResult, error)
 	CreateShare(context.Context, domain.UserID, domain.UserPath, *time.Time, string) (drive.CreatedShare, error)
+	SetDuplicateDirectoryIgnored(context.Context, domain.UserID, domain.SetDuplicateDirectoryIgnoredRequest) (domain.DuplicateDirectoryIgnore, error)
+	DuplicateGroups(context.Context, domain.UserID, domain.DuplicateGroupRequest) (domain.DuplicateGroupPage, error)
+	DuplicateOccurrences(context.Context, domain.UserID, domain.DuplicateOccurrenceRequest) (domain.DuplicateOccurrencePage, error)
+	SetDuplicateIgnored(context.Context, domain.UserID, domain.SetDuplicateIgnoredRequest) (domain.DuplicateIgnore, error)
 }
 
 // Seed creates dense accounts and file collections, recoverable trash, shares,
@@ -194,7 +198,10 @@ type fixtureFile struct {
 
 func seedWorkspace(ctx context.Context, files fileService, dataPlane http.Handler, userID domain.UserID) error {
 	directories := []string{
-		"/Brand", "/Photography", "/Projects", "/Projects/Archive", "/Scale Lab", "/Scale Lab/Reference",
+		"/Backups", "/Backups/Brand", "/Backups/Brand/Published", "/Backups/Photography", "/Backups/Photography/Selects",
+		"/Backups/Projects", "/Backups/Projects/Project Atlas", "/Backups/Projects/Project Atlas/Assets",
+		"/Brand", "/Brand/Published", "/Photography", "/Photography/Selects", "/Projects", "/Projects/Archive",
+		"/Projects/Project Atlas", "/Projects/Project Atlas/Assets", "/Scale Lab", "/Scale Lab/Reference",
 	}
 	for _, value := range directories {
 		path := domain.MustParseUserPath(value)
@@ -235,10 +242,21 @@ func seedWorkspace(ctx context.Context, files fileService, dataPlane http.Handle
 			body:      []byte(fmt.Sprintf("Asset %04d\n", index)),
 		})
 	}
+	fixtureFiles = append(fixtureFiles, duplicateReviewFiles()...)
 	for _, file := range fixtureFiles {
 		if err := upload(ctx, files, dataPlane, userID, file); err != nil {
 			return err
 		}
+	}
+	if _, err := files.SetDuplicateDirectoryIgnored(ctx, userID, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left:    domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/Brand/Published")},
+		Right:   domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/Backups/Brand/Published")},
+		Ignored: true,
+	}); err != nil {
+		return fmt.Errorf("seed ignored duplicate directory pair: %w", err)
+	}
+	if err := ignoreExactDuplicateFixture(ctx, files, userID, "/Brand/Published", "/Backups/Brand/Published"); err != nil {
+		return err
 	}
 
 	trashed := []domain.UserPath{
@@ -270,6 +288,73 @@ func seedWorkspace(ctx context.Context, files fileService, dataPlane http.Handle
 		}
 	}
 	return nil
+}
+
+func ignoreExactDuplicateFixture(ctx context.Context, files fileService, userID domain.UserID, leftPath, rightPath string) error {
+	groups, err := files.DuplicateGroups(ctx, userID, domain.DuplicateGroupRequest{Kind: domain.DuplicateDirectory, Limit: 100, IncludeIgnored: true})
+	if err != nil {
+		return fmt.Errorf("list exact duplicate fixture groups: %w", err)
+	}
+	for _, group := range groups.Groups {
+		occurrences, occurrenceErr := files.DuplicateOccurrences(ctx, userID, domain.DuplicateOccurrenceRequest{GroupID: group.ID, Limit: 100})
+		if occurrenceErr != nil {
+			return fmt.Errorf("list exact duplicate fixture locations: %w", occurrenceErr)
+		}
+		foundLeft, foundRight := false, false
+		for _, occurrence := range occurrences.Occurrences {
+			foundLeft = foundLeft || occurrence.Area == domain.AreaLive && occurrence.Path.String() == leftPath
+			foundRight = foundRight || occurrence.Area == domain.AreaLive && occurrence.Path.String() == rightPath
+		}
+		if !foundLeft || !foundRight {
+			continue
+		}
+		if _, err := files.SetDuplicateIgnored(ctx, userID, domain.SetDuplicateIgnoredRequest{GroupID: group.ID, Ignored: true, ExpectedRevision: group.IgnoreRevision}); err != nil {
+			return fmt.Errorf("seed ignored exact duplicate group: %w", err)
+		}
+		return nil
+	}
+	return domain.NewError(domain.ErrorInternal, "ignored exact duplicate fixture group was not indexed")
+}
+
+func duplicateReviewFiles() []fixtureFile {
+	files := make([]fixtureFile, 0, 22)
+	for _, item := range []struct {
+		relative  string
+		mediaType string
+		body      string
+	}{
+		{relative: "Brief.txt", mediaType: "text/plain", body: "Project Atlas brief\nGoals, owners, delivery notes.\n"},
+		{relative: "Schedule.csv", mediaType: "text/csv", body: "phase,status\nDiscovery,complete\nBuild,active\n"},
+		{relative: "Assets/Palette.csv", mediaType: "text/csv", body: "token,value\nprimary,#166374\nsurface,#f7f7f4\n"},
+		{relative: "Assets/Readme.txt", mediaType: "text/plain", body: "Approved Project Atlas working assets.\n"},
+	} {
+		for _, root := range []string{"/Projects/Project Atlas", "/Backups/Projects/Project Atlas"} {
+			files = append(files, fixtureFile{path: root + "/" + item.relative, mediaType: item.mediaType, body: []byte(item.body)})
+		}
+	}
+	for _, item := range []struct {
+		relative string
+		body     string
+	}{
+		{relative: "Coastline notes.txt", body: "Select 14 for the final coastline sequence.\n"},
+		{relative: "Frame 001.txt", body: "shared frame metadata 001\n"},
+		{relative: "Frame 002.txt", body: "shared frame metadata 002\n"},
+	} {
+		for _, root := range []string{"/Photography/Selects", "/Backups/Photography/Selects"} {
+			files = append(files, fixtureFile{path: root + "/" + item.relative, mediaType: "text/plain", body: []byte(item.body)})
+		}
+	}
+	files = append(files,
+		fixtureFile{path: "/Photography/Selects/Only in working set.txt", mediaType: "text/plain", body: []byte("Unpublished shortlist notes.\n")},
+		fixtureFile{path: "/Backups/Photography/Selects/Only in backup.txt", mediaType: "text/plain", body: []byte("Historic selection retained in backup.\n")},
+	)
+	for _, root := range []string{"/Brand/Published", "/Backups/Brand/Published"} {
+		files = append(files,
+			fixtureFile{path: root + "/Release notes.txt", mediaType: "text/plain", body: []byte("Intentional published mirror.\n")},
+			fixtureFile{path: root + "/Manifest.csv", mediaType: "text/csv", body: []byte("asset,revision\nmark,4\nwordmark,2\n")},
+		)
+	}
+	return files
 }
 
 func representativeFiles() ([]fixtureFile, error) {

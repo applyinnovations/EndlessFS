@@ -684,21 +684,44 @@ func (api *identityAPI) trashFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Paths []string `json:"paths"`
+		Paths *[]string `json:"paths"`
+		Items *[]struct {
+			Path    string         `json:"path"`
+			Version domain.Version `json:"version"`
+		} `json:"items"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	paths := make([]domain.UserPath, 0, len(request.Paths))
-	for _, value := range request.Paths {
-		path, err := parsePath(value)
-		if err != nil {
-			writeProblem(w, r, err)
-			return
-		}
-		paths = append(paths, path)
+	if (request.Paths == nil) == (request.Items == nil) {
+		writeProblem(w, r, domain.NewError(domain.ErrorInvalid, "provide either paths or versioned items"))
+		return
 	}
-	result, err := api.drive.Trash(r.Context(), current.Record.UserID, paths, r.Header.Get("Idempotency-Key"))
+	var result drive.BatchResult
+	var err error
+	if request.Paths != nil {
+		paths := make([]domain.UserPath, 0, len(*request.Paths))
+		for _, value := range *request.Paths {
+			path, parseErr := parsePath(value)
+			if parseErr != nil {
+				writeProblem(w, r, parseErr)
+				return
+			}
+			paths = append(paths, path)
+		}
+		result, err = api.drive.Trash(r.Context(), current.Record.UserID, paths, r.Header.Get("Idempotency-Key"))
+	} else {
+		items := make([]drive.TrashItem, 0, len(*request.Items))
+		for _, value := range *request.Items {
+			path, parseErr := parsePath(value.Path)
+			if parseErr != nil {
+				writeProblem(w, r, parseErr)
+				return
+			}
+			items = append(items, drive.TrashItem{Path: path, Version: value.Version})
+		}
+		result, err = api.drive.TrashVersioned(r.Context(), current.Record.UserID, items, r.Header.Get("Idempotency-Key"))
+	}
 	if err != nil {
 		writeProblem(w, r, err)
 		return

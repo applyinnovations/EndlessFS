@@ -267,12 +267,28 @@ func TestApplicationWriterProfilesMigrateV014FixturesBeforeStartup(t *testing.T)
 	}
 	for _, profile := range profiles {
 		t.Run(profile.name, func(t *testing.T) {
-			testApplicationWriterProfileMigration(t, profile.fixture, profile.configure)
+			testApplicationWriterProfileMigration(t, profile.fixture, "v0.1.4", "edb67f8e345694001b9614604c5baded9bde5d86", 22, profile.configure)
 		})
 	}
 }
 
-func testApplicationWriterProfileMigration(t *testing.T, fixtureName string, configure func(*config.Config)) {
+func TestApplicationWriterProfilesOpenSchema004Fixtures(t *testing.T) {
+	profiles := []struct {
+		name      string
+		fixture   string
+		configure func(*config.Config)
+	}{
+		{name: "preview-disabled", fixture: "schema-004-v0.1.15-application-disabled.json", configure: func(*config.Config) {}},
+		{name: "preview-gcs", fixture: "schema-004-v0.1.15-application-gcs.json", configure: configureSchema004PreviewProfile},
+	}
+	for _, profile := range profiles {
+		t.Run(profile.name, func(t *testing.T) {
+			testApplicationWriterProfileMigration(t, profile.fixture, "v0.1.15", "f11fe68b2d731e8fd0228352a0b85255d7574abf", 18, profile.configure)
+		})
+	}
+}
+
+func testApplicationWriterProfileMigration(t *testing.T, fixtureName, sourceRelease, sourceCommit string, wantSize int64, configure func(*config.Config)) {
 	t.Helper()
 	body, err := os.ReadFile("../../internal/portable/testdata/migrations/" + fixtureName)
 	if err != nil {
@@ -287,7 +303,7 @@ func testApplicationWriterProfileMigration(t *testing.T, fixtureName string, con
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		t.Fatalf("fixture trailing JSON error = %v; want EOF", err)
 	}
-	if fixture.SourceRelease != "v0.1.4" || fixture.SourceCommit != "edb67f8e345694001b9614604c5baded9bde5d86" {
+	if fixture.SourceRelease != sourceRelease || fixture.SourceCommit != sourceCommit {
 		t.Fatalf("unexpected production-profile fixture provenance: %s %s", fixture.SourceRelease, fixture.SourceCommit)
 	}
 	stateBackend := objectmemory.New()
@@ -319,8 +335,12 @@ func testApplicationWriterProfileMigration(t *testing.T, fixtureName string, con
 	}
 	live, _ := domain.NewScope(user, domain.AreaLive)
 	root, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
-	if err != nil || root.Size != 22 || root.FileCount != 2 {
-		t.Fatalf("migrated application root = %+v, %v; want 22 bytes/2 files", root, err)
+	wantFiles := int64(2)
+	if sourceRelease == "v0.1.15" {
+		wantFiles = 3
+	}
+	if err != nil || root.Size != wantSize || root.FileCount != wantFiles {
+		t.Fatalf("migrated application root = %+v, %v; want %d bytes/%d files", root, err, wantSize, wantFiles)
 	}
 	if _, err := engine.Files().CreateDirectory(context.Background(), live, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/after-upgrade")}); err != nil {
 		t.Fatalf("post-migration application mutation: %v", err)

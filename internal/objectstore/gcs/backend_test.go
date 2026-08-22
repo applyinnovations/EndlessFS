@@ -43,6 +43,34 @@ func TestLostUploadSuccessIsUnavailableAndNotRetried(t *testing.T) {
 	}
 }
 
+func TestGetReadsBodyVersionAndSizeInOneProviderRequest(t *testing.T) {
+	backend, fake := newProtocolBackend(t)
+	key := objectstore.MustKey("endlessfs/v1/state/users/atomic-read.json")
+	body := []byte("one atomic provider read")
+	version, err := backend.Put(context.Background(), key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	fake.metadataGetRequests = 0
+	fake.mediaGetRequests = 0
+	fake.mu.Unlock()
+
+	object, err := backend.Get(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(object.Body) != string(body) || object.Size != int64(len(body)) || object.Version != version {
+		t.Fatalf("Get() = %+v; want body, size, and version from the created object", object)
+	}
+	fake.mu.Lock()
+	metadataRequests, mediaRequests := fake.metadataGetRequests, fake.mediaGetRequests
+	fake.mu.Unlock()
+	if metadataRequests != 0 || mediaRequests != 1 {
+		t.Fatalf("Get() provider requests = metadata %d, media %d; want zero metadata and one media", metadataRequests, mediaRequests)
+	}
+}
+
 func TestServerWrittenObjectsSetNoStoreMetadata(t *testing.T) {
 	backend, fake := newProtocolBackend(t)
 	key := objectstore.MustKey("endlessfs/v1/state/users/cache-policy.json")

@@ -47,6 +47,8 @@ type fakeGCS struct {
 	failUploadAfterCommit     bool
 	failUploadAfterCommitName string
 	uploadRequests            int
+	metadataGetRequests       int
+	mediaGetRequests          int
 	corruptNextDownloadCRC    bool
 	wrongNextMetadataSizeBy   int
 	baseURL                   string
@@ -78,6 +80,7 @@ func newGCSServerWithFake(t *testing.T) (*httptest.Server, *fakeGCS) {
 		completedSessions: make(map[string]struct{}), nextGeneration: 100, clock: domain.SystemClock{},
 	}
 	server := httptest.NewServer(fake)
+	configureGCSTestClient(t, server)
 	fake.baseURL = server.URL
 	t.Cleanup(server.Close)
 	return server, fake
@@ -92,9 +95,24 @@ func newGCSHTTP2ServerWithFake(t *testing.T) (*httptest.Server, *fakeGCS) {
 	server := httptest.NewUnstartedServer(fake)
 	server.EnableHTTP2 = true
 	server.StartTLS()
+	configureGCSTestClient(t, server)
 	fake.baseURL = server.URL
 	t.Cleanup(server.Close)
 	return server, fake
+}
+
+func configureGCSTestClient(t *testing.T, server *httptest.Server) {
+	t.Helper()
+	client := server.Client()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("GCS protocol fake HTTP transport = %T", client.Transport)
+	}
+	transport = transport.Clone()
+	transport.MaxIdleConns = 128
+	transport.MaxIdleConnsPerHost = 64
+	client.Transport = transport
+	t.Cleanup(transport.CloseIdleConnections)
 }
 
 func (f *fakeGCS) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -449,6 +467,11 @@ func (f *fakeGCS) upload(writer http.ResponseWriter, request *http.Request) {
 func (f *fakeGCS) get(writer http.ResponseWriter, request *http.Request, name string) {
 	f.mu.Lock()
 	object, exists := f.objects[name]
+	if request.URL.Query().Get("alt") == "media" {
+		f.mediaGetRequests++
+	} else {
+		f.metadataGetRequests++
+	}
 	f.mu.Unlock()
 	if !exists {
 		f.problem(writer, http.StatusNotFound, "notFound")
@@ -462,13 +485,17 @@ func (f *fakeGCS) get(writer http.ResponseWriter, request *http.Request, name st
 		f.problem(writer, http.StatusPreconditionFailed, "conditionNotMet")
 		return
 	}
+	f.mu.Lock()
+	sizeDelta := f.wrongNextMetadataSizeBy
+	f.wrongNextMetadataSizeBy = 0
+	f.mu.Unlock()
 	if request.URL.Query().Get("alt") == "media" {
 		f.mu.Lock()
 		corruptCRC := f.corruptNextDownloadCRC
 		f.corruptNextDownloadCRC = false
 		f.mu.Unlock()
 		writer.Header().Set("Content-Type", "application/octet-stream")
-		writer.Header().Set("Content-Length", strconv.Itoa(len(object.body)))
+		writer.Header().Set("Content-Length", strconv.Itoa(len(object.body)+sizeDelta))
 		writer.Header().Set("X-Goog-Generation", strconv.FormatInt(object.generation, 10))
 		writer.Header().Set("X-Goog-Metageneration", strconv.FormatInt(object.metageneration, 10))
 		checksum := crc32c(object.body)
@@ -480,10 +507,6 @@ func (f *fakeGCS) get(writer http.ResponseWriter, request *http.Request, name st
 		_, _ = writer.Write(object.body)
 		return
 	}
-	f.mu.Lock()
-	sizeDelta := f.wrongNextMetadataSizeBy
-	f.wrongNextMetadataSizeBy = 0
-	f.mu.Unlock()
 	if sizeDelta != 0 {
 		value := objectJSON(name, object)
 		value["size"] = strconv.Itoa(len(object.body) + sizeDelta)

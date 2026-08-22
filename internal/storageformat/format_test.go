@@ -334,7 +334,10 @@ func TestCanonicalKeyNamespacePanicsFailClosed(t *testing.T) {
 	for _, function := range []func(){
 		func() { StateKey("INVALID", "key") },
 		func() { StatePrefix("INVALID") },
+		func() { StateIndexRootKey("INVALID") },
+		func() { StateIndexNodeKey("INVALID", "node") },
 		func() { StateVersionKey("INVALID", "key", "version") },
+		func() { StateVersionLogicalPrefix("INVALID", "key") },
 		func() { LeaseKey("INVALID", "lease") },
 	} {
 		func() {
@@ -345,5 +348,20 @@ func TestCanonicalKeyNamespacePanicsFailClosed(t *testing.T) {
 			}()
 			function()
 		}()
+	}
+}
+
+func TestScalableStateAndOperationKeyFamiliesAreCanonical(t *testing.T) {
+	for name, value := range map[string]string{
+		"state-prefix":                 StatePrefix("accounts"),
+		"state-version-logical-prefix": StateVersionLogicalPrefix("identity", "identity/YQ"),
+		"operation-step-page":          FileOperationStepPageKey("user", "operation", "steps", 7).String(),
+		"operation-step-set-prefix":    FileOperationStepPageSetPrefix("user", "operation", "steps"),
+		"operation-preparation-prefix": FileOperationPreparationPrefix("user", "operation"),
+		"migration-directory-prefix":   MigrationDirectoryMarkScopePrefix("checkpoint", "verify", "user", "live"),
+	} {
+		if !strings.HasPrefix(value, "endlessfs/v1/") || strings.Contains(value, "//") {
+			t.Fatalf("%s key = %q", name, value)
+		}
 	}
 }

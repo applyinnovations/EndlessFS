@@ -304,6 +304,129 @@ func TestDuplicateReconciliationAppliesPinnedTrashPlanAndRecordsAudit(t *testing
 	}
 }
 
+func TestDuplicateCatalogMethodsForwardAndFailClosedWhenUnsupported(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	ids := domain.NewIDGenerator(&hashReader{})
+	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, 32)))
+	wrapped := &reconciliationStorage{Storage: env.storage}
+	service, err := drive.NewService(wrapped, env.store, env.repo, ids, env.clock, key, "http://127.0.0.1:8080", "http://127.0.0.1:8081", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.DuplicateGroups(ctx, env.owner, domain.DuplicateGroupRequest{}); err != nil {
+		t.Fatalf("DuplicateGroups() error = %v", err)
+	}
+	if _, err := service.DuplicateOccurrences(ctx, env.owner, domain.DuplicateOccurrenceRequest{}); err != nil {
+		t.Fatalf("DuplicateOccurrences() error = %v", err)
+	}
+	if _, err := service.SetDuplicateIgnored(ctx, env.owner, domain.SetDuplicateIgnoredRequest{}); err != nil {
+		t.Fatalf("SetDuplicateIgnored() error = %v", err)
+	}
+	if _, err := service.CompareDuplicateDirectories(ctx, env.owner, domain.DuplicateDirectoryComparisonRequest{}); err != nil {
+		t.Fatalf("CompareDuplicateDirectories() error = %v", err)
+	}
+	if _, err := service.DuplicateDirectoryOverlaps(ctx, env.owner, domain.DuplicateDirectoryOverlapRequest{}); err != nil {
+		t.Fatalf("DuplicateDirectoryOverlaps() error = %v", err)
+	}
+	if _, err := service.SetDuplicateDirectoryIgnored(ctx, env.owner, domain.SetDuplicateDirectoryIgnoredRequest{}); err != nil {
+		t.Fatalf("SetDuplicateDirectoryIgnored() error = %v", err)
+	}
+	if _, err := service.PreviewDuplicateReconciliation(ctx, env.owner, domain.DuplicateReconciliationPreviewRequest{}); err != nil {
+		t.Fatalf("PreviewDuplicateReconciliation() error = %v", err)
+	}
+
+	unsupported := env.service
+	checks := []func() error{
+		func() error {
+			_, err := unsupported.DuplicateGroups(ctx, env.owner, domain.DuplicateGroupRequest{})
+			return err
+		},
+		func() error {
+			_, err := unsupported.DuplicateOccurrences(ctx, env.owner, domain.DuplicateOccurrenceRequest{})
+			return err
+		},
+		func() error {
+			_, err := unsupported.SetDuplicateIgnored(ctx, env.owner, domain.SetDuplicateIgnoredRequest{})
+			return err
+		},
+		func() error {
+			_, err := unsupported.CompareDuplicateDirectories(ctx, env.owner, domain.DuplicateDirectoryComparisonRequest{})
+			return err
+		},
+		func() error {
+			_, err := unsupported.DuplicateDirectoryOverlaps(ctx, env.owner, domain.DuplicateDirectoryOverlapRequest{})
+			return err
+		},
+		func() error {
+			_, err := unsupported.SetDuplicateDirectoryIgnored(ctx, env.owner, domain.SetDuplicateDirectoryIgnoredRequest{})
+			return err
+		},
+		func() error {
+			_, err := unsupported.PreviewDuplicateReconciliation(ctx, env.owner, domain.DuplicateReconciliationPreviewRequest{})
+			return err
+		},
+	}
+	for index, check := range checks {
+		if err := check(); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("unsupported duplicate method %d error = %v", index, err)
+		}
+	}
+}
+
+func TestDuplicateReconciliationRejectsInvalidOrStalePlans(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	ids := domain.NewIDGenerator(&hashReader{})
+	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, 32)))
+	wrapped := &reconciliationStorage{Storage: env.storage}
+	service, err := drive.NewService(wrapped, env.store, env.repo, ids, env.clock, key, "http://127.0.0.1:8080", "http://127.0.0.1:8081", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.ApplyDuplicateReconciliation(ctx, env.owner, "valid-plan-token", "short"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("short idempotency key error = %v", err)
+	}
+	if _, err := env.service.ApplyDuplicateReconciliation(ctx, env.owner, "valid-plan-token", "duplicate-unsupported-001"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unsupported storage error = %v", err)
+	}
+	if _, err := service.ApplyDuplicateReconciliation(ctx, env.owner, "invalid-plan-token", "duplicate-invalid-plan-001"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid plan error = %v", err)
+	}
+	if _, err := service.ApplyDuplicateReconciliation(ctx, env.owner, "valid-plan-token", "duplicate-empty-plan-0001"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty plan error = %v", err)
+	}
+	wrapped.selection.Items = make([]domain.DuplicateReconciliationItem, drive.MaxBatchItems+1)
+	if _, err := service.ApplyDuplicateReconciliation(ctx, env.owner, "valid-plan-token", "duplicate-large-plan-0001"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("oversized plan error = %v", err)
+	}
+	wrapped.selection.Items = []domain.DuplicateReconciliationItem{{}}
+	if _, err := service.ApplyDuplicateReconciliation(ctx, domain.UserID{}, "valid-plan-token", "duplicate-invalid-owner-01"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid owner error = %v", err)
+	}
+
+	remove := upload(t, env, env.owner, "/stale-remove.bin", []byte("remove"), "application/octet-stream", "stale-remove-upload")
+	keep := upload(t, env, env.owner, "/stale-keep.bin", []byte("keep"), "application/octet-stream", "stale-keep-upload-01")
+	wrapped.selection.Items = []domain.DuplicateReconciliationItem{{
+		GroupID: secret.Hash("stale-group"),
+		Remove:  domain.DuplicateOccurrence{Path: remove.Path, Version: remove.Version, Size: remove.Size},
+		Keep:    domain.DuplicateOccurrence{Path: keep.Path, Version: "stale-version", Size: keep.Size},
+	}}
+	result, err := service.ApplyDuplicateReconciliation(ctx, env.owner, "valid-plan-token", "duplicate-stale-plan-001")
+	if err != nil || len(result.Items) != 1 || result.Items[0].State != domain.OperationFailed || result.Items[0].ErrorKind != domain.ErrorPreconditionFailed {
+		t.Fatalf("stale plan result = %+v, %v", result, err)
+	}
+	if _, err := service.Stat(ctx, env.owner, remove.Path); err != nil {
+		t.Fatalf("stale plan removed source: %v", err)
+	}
+	wrapped.selection.Items[0].Keep.Path = domain.MustParseUserPath("/missing-keep.bin")
+	if result, err := service.ApplyDuplicateReconciliation(ctx, env.owner, "valid-plan-token", "duplicate-missing-keep-01"); err != nil || result.Items[0].ErrorKind != domain.ErrorNotFound {
+		t.Fatalf("missing keep result = %+v, %v", result, err)
+	}
+}
+
 func TestIntegrationCopyMoveTrashRestoreAndDelete(t *testing.T) {
 	env := newDriveEnvironment(t)
 	ctx := context.Background()

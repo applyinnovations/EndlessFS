@@ -170,7 +170,7 @@ func Run(t *testing.T, factory Factory) {
 				if _, err := harness.Storage.CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: concurrent}); err == nil {
 					successes.Add(1)
 				} else if !errors.Is(err, domain.ErrConflict) {
-					t.Errorf("CreateDirectory() error = %v", err)
+					t.Errorf("CreateDirectory() error = %v (cause: %v)", err, errors.Unwrap(err))
 				}
 			}()
 		}

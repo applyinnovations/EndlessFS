@@ -187,19 +187,18 @@ func (b *Backend) Open(ctx context.Context, key objectstore.Key) (objectstore.Ob
 	if !key.Valid() {
 		return objectstore.ObjectReader{}, domain.NewError(domain.ErrorInvalid, "invalid object key")
 	}
-	info, err := b.Head(ctx, key)
-	if err != nil {
-		return objectstore.ObjectReader{}, err
-	}
-	generation, err := decodeVersion(info.Version)
-	if err != nil {
-		return objectstore.ObjectReader{}, err
-	}
-	reader, err := b.bucket.Object(key.String()).Generation(generation).NewReader(ctx)
+	reader, err := b.bucket.Object(key.String()).NewReader(ctx)
 	if err != nil {
 		return objectstore.ObjectReader{}, classify("GCS object read failed", err)
 	}
-	return objectstore.ObjectReader{Key: key, Body: &classifiedObjectReader{ReadCloser: reader}, Version: info.Version, Size: info.Size}, nil
+	if reader.Attrs.Generation <= 0 || reader.Attrs.Size < 0 {
+		_ = reader.Close()
+		return objectstore.ObjectReader{}, domain.NewError(domain.ErrorInternal, "GCS returned invalid object reader metadata")
+	}
+	return objectstore.ObjectReader{
+		Key: key, Body: &classifiedObjectReader{ReadCloser: reader},
+		Version: encodeVersion(reader.Attrs.Generation), Size: reader.Attrs.Size,
+	}, nil
 }
 
 type classifiedObjectReader struct{ io.ReadCloser }

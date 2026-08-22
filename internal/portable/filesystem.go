@@ -366,10 +366,8 @@ func (s *FileStore) CreateDirectory(ctx context.Context, scope domain.Scope, req
 		if err != nil {
 			return domain.Entry{}, err
 		}
-		var existingCatalog []relativeCatalogEntry
 		var existingContentFiles []relativeDirectoryContentFile
 		if existing != nil {
-			existingCatalog = []relativeCatalogEntry{{entry: *existing}}
 			existingContentFiles = []relativeDirectoryContentFile{{entry: *existing}}
 		}
 		updates := make(map[string]directoryUpdate)
@@ -397,27 +395,13 @@ func (s *FileStore) CreateDirectory(ctx context.Context, scope domain.Scope, req
 		}
 		catalogChanges := []catalogChange{{post: &occurrence}}
 		if existing != nil {
-			for _, item := range existingCatalog {
-				existingPath := path
-				for _, segment := range item.segments {
-					existingPath, err = existingPath.Join(segment)
-					if err != nil {
-						return domain.Entry{}, err
-					}
-				}
-				removed, occurrenceErr := catalogOccurrence(scope, existingPath, item.entry)
-				if occurrenceErr != nil {
-					return domain.Entry{}, occurrenceErr
-				}
-				change := catalogChange{pre: &removed}
-				if item.entry.Kind == domain.EntryDirectory && item.entry.FileCount > 0 {
-					change.similarityPre, err = duplicateSimilarityPostings(scope, existingPath, item.entry.DirectoryID, item.contentSketch)
-					if err != nil {
-						return domain.Entry{}, err
-					}
-				}
-				catalogChanges = append(catalogChanges, change)
+			// Existing directories take the durable recursive-preparation path
+			// above. This branch therefore replaces exactly one file occurrence.
+			removed, occurrenceErr := catalogOccurrence(scope, path, *existing)
+			if occurrenceErr != nil {
+				return domain.Entry{}, occurrenceErr
 			}
+			catalogChanges = append(catalogChanges, catalogChange{pre: &removed})
 		}
 		operation, operationBody, err := s.buildFileOperation(ctx, scope.UserID(), operationID, ownerID, operationCreateDirectory, updates, prerequisites, nil, catalogChanges)
 		if err != nil {
@@ -1170,8 +1154,6 @@ func applyDirectoryEntryChangeWithContent(updates map[string]directoryUpdate, tr
 		} else if currentBefore == nil {
 			// A creation is valid only when the caller performed the indexed
 			// absence check against this exact manifest.
-		} else if currentBefore.Name != name {
-			return domain.NewError(domain.ErrorInvalid, "directory entry mutation key mismatch")
 		}
 		beforeBytes, beforeFiles, err := directoryEntryAggregates(currentBefore)
 		if err != nil {

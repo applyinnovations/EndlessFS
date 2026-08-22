@@ -709,6 +709,164 @@ func TestMigrationSchema001CASLoserAcceptsValidatedSchema003Winner(t *testing.T)
 	}
 }
 
+func TestMigrationLaggingReplicaAcceptsCompletedWinnerAfterSourceCollection(t *testing.T) {
+	family := storageSchemaFixtures[0]
+	fixture := loadStorageSchemaFixture(t, family)
+	stateBackend := objectmemory.New()
+	fileBackend := objectmemory.New()
+	if err := stateBackend.Import(fixture.StateObjects); err != nil {
+		t.Fatal(err)
+	}
+	if err := fileBackend.Import(fixture.FileObjects); err != nil {
+		t.Fatal(err)
+	}
+	clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
+	laggingBackend := &pauseOnceGetBackend{
+		Backend: stateBackend,
+		match:   "/manifests/",
+		reached: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	laggingOptions := schemaSplitMigrationOptions(laggingBackend, fileBackend, clock, 183, nil)
+	laggingOptions.Writer = currentWriterForSchemaFixture(t, fixture)
+	laggingResult := make(chan error, 1)
+	go func() {
+		_, err := portable.Open(context.Background(), laggingOptions)
+		laggingResult <- err
+	}()
+
+	<-laggingBackend.reached
+	t.Cleanup(laggingBackend.resume)
+	winnerOptions := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 184, nil)
+	winnerOptions.Writer = currentWriterForSchemaFixture(t, fixture)
+	if _, err := portable.Open(context.Background(), winnerOptions); err != nil {
+		t.Fatalf("winning migration error = %v", err)
+	}
+	supersededKey := laggingBackend.pausedKey()
+	assertMigrationManifestSuperseded(t, stateBackend, supersededKey)
+	superseded, err := stateBackend.Get(context.Background(), supersededKey)
+	if err != nil {
+		t.Fatalf("read superseded source manifest: %v", err)
+	}
+	if err := stateBackend.Delete(context.Background(), supersededKey, objectstore.DeleteCondition{Version: superseded.Version}); err != nil {
+		t.Fatalf("collect superseded source manifest: %v", err)
+	}
+	laggingBackend.resume()
+	if err := <-laggingResult; err != nil {
+		t.Fatalf("lagging migration rejected completed winner after source collection: %v", err)
+	}
+}
+
+func TestMigrationMissingSourceWithoutCompletedWinnerFailsClosed(t *testing.T) {
+	family := storageSchemaFixtures[0]
+	fixture := loadStorageSchemaFixture(t, family)
+	stateBackend := objectmemory.New()
+	fileBackend := objectmemory.New()
+	if err := stateBackend.Import(fixture.StateObjects); err != nil {
+		t.Fatal(err)
+	}
+	if err := fileBackend.Import(fixture.FileObjects); err != nil {
+		t.Fatal(err)
+	}
+	clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
+	backend := &pauseOnceGetBackend{
+		Backend: stateBackend,
+		match:   "/manifests/",
+		reached: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	options := schemaSplitMigrationOptions(backend, fileBackend, clock, 185, nil)
+	options.Writer = currentWriterForSchemaFixture(t, fixture)
+	result := make(chan error, 1)
+	go func() {
+		_, err := portable.Open(context.Background(), options)
+		result <- err
+	}()
+
+	<-backend.reached
+	t.Cleanup(backend.resume)
+	missingKey := backend.pausedKey()
+	missing, err := stateBackend.Get(context.Background(), missingKey)
+	if err != nil {
+		t.Fatalf("read source manifest: %v", err)
+	}
+	if err := stateBackend.Delete(context.Background(), missingKey, objectstore.DeleteCondition{Version: missing.Version}); err != nil {
+		t.Fatalf("remove source manifest: %v", err)
+	}
+	backend.resume()
+	if err := <-result; !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("incomplete migration with missing source error = %v; want not found", err)
+	}
+}
+
+type pauseOnceGetBackend struct {
+	objectstore.Backend
+	match      string
+	reached    chan struct{}
+	release    chan struct{}
+	mu         sync.Mutex
+	resumeOnce sync.Once
+	paused     bool
+	key        objectstore.Key
+}
+
+func (backend *pauseOnceGetBackend) Get(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
+	backend.mu.Lock()
+	shouldPause := !backend.paused && strings.Contains(key.String(), backend.match)
+	if shouldPause {
+		backend.paused = true
+		backend.key = key
+		close(backend.reached)
+	}
+	backend.mu.Unlock()
+	if shouldPause {
+		select {
+		case <-backend.release:
+		case <-ctx.Done():
+			return objectstore.Object{}, ctx.Err()
+		}
+	}
+	return backend.Backend.Get(ctx, key)
+}
+
+func (backend *pauseOnceGetBackend) pausedKey() objectstore.Key {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	return backend.key
+}
+
+func (backend *pauseOnceGetBackend) resume() {
+	backend.resumeOnce.Do(func() { close(backend.release) })
+}
+
+func assertMigrationManifestSuperseded(t *testing.T, backend objectstore.Backend, manifestKey objectstore.Key) {
+	t.Helper()
+	parts := strings.Split(manifestKey.String(), "/")
+	if len(parts) != 9 || parts[0] != "endlessfs" || parts[1] != "v1" || parts[2] != "fs" || parts[5] != "dirs" || parts[7] != "manifests" || !strings.HasSuffix(parts[8], ".json") {
+		t.Fatalf("unexpected migration manifest key %q", manifestKey)
+	}
+	rootKey, err := objectstore.ParseKey(strings.Join(parts[:7], "/") + "/directory.json")
+	if err != nil {
+		t.Fatalf("construct migrated directory root key: %v", err)
+	}
+	rootObject, err := backend.Get(context.Background(), rootKey)
+	if err != nil {
+		t.Fatalf("read migrated directory root: %v", err)
+	}
+	var envelope storageformat.Envelope
+	var root storageformat.DirectoryRoot
+	if err := storageformat.DecodeEnvelope(rootObject.Body, rootKey, "directory-root-v1", &envelope, &root); err != nil {
+		t.Fatalf("decode migrated directory root: %v", err)
+	}
+	userID, area, directoryID, matched, err := storageformat.ParseDirectoryRootKey(rootKey)
+	if err != nil || !matched {
+		t.Fatalf("parse migrated directory root key: %v", err)
+	}
+	if storageformat.DirectoryManifestKey(userID, area, directoryID, root.ManifestID) == manifestKey {
+		t.Fatalf("migration source manifest %q remains authoritative", manifestKey)
+	}
+}
+
 func TestSchema001MigrationResumesAfterUploadRecordUpgrade(t *testing.T) {
 	family := storageSchemaFixtures[0]
 	fixture := loadStorageSchemaFixture(t, family)

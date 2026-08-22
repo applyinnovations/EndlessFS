@@ -456,8 +456,10 @@ func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
 			return err
 		}
 		if migration, found := migrationForCheckpoint(gate.CheckpointID); found {
-			if err := migration.run(e, ctx, migration, superblockObject, superblock); err != nil {
-				return err
+			if runErr := migration.run(e, ctx, migration, superblockObject, superblock); runErr != nil {
+				if err := e.resolveMigrationRunError(ctx, migration, runErr); err != nil {
+					return err
+				}
 			}
 			continue
 		}
@@ -481,9 +483,28 @@ func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
 			return domain.NewError(domain.ErrorPreconditionFailed, "storage schema markers disagree without a resumable migration checkpoint")
 		}
 		migration := path[0]
-		if err := migration.run(e, ctx, migration, superblockObject, superblock); err != nil {
-			return err
+		if runErr := migration.run(e, ctx, migration, superblockObject, superblock); runErr != nil {
+			if err := e.resolveMigrationRunError(ctx, migration, runErr); err != nil {
+				return err
+			}
 		}
 	}
 	return domain.NewError(domain.ErrorUnavailable, "storage schema migration chain did not converge")
+}
+
+// A replica can retain a predecessor object reference while another replica
+// completes the remaining schema suffix and collects that now-unreachable
+// immutable object. Only a not-found result is eligible for winner
+// reconciliation, and it is accepted only after all durable schema markers
+// prove that this edge (or a later edge) completed. Other errors and an
+// incomplete marker set remain fail-closed.
+func (e *Engine) resolveMigrationRunError(ctx context.Context, migration storageMigration, runErr error) error {
+	if !errors.Is(runErr, domain.ErrNotFound) {
+		return runErr
+	}
+	complete, err := e.storageMigrationComplete(ctx, migration)
+	if err == nil && complete {
+		return nil
+	}
+	return runErr
 }

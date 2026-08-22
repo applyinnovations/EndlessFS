@@ -642,7 +642,7 @@ func assertLegacyWriterCannotDecodeMigratedGate(t *testing.T, objects map[string
 	}
 }
 
-func schemaMigrationOptions(backend *objectmemory.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) portable.Options {
+func schemaMigrationOptions(backend objectstore.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) portable.Options {
 	return portable.Options{
 		Backend: backend, Clock: clock, IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(seed, 1<<20))),
 		Writer: portable.WriterConfiguration{
@@ -653,7 +653,7 @@ func schemaMigrationOptions(backend *objectmemory.Backend, clock *domain.FixedCl
 	}
 }
 
-func schemaSplitMigrationOptions(stateBackend, fileBackend *objectmemory.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) portable.Options {
+func schemaSplitMigrationOptions(stateBackend, fileBackend objectstore.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) portable.Options {
 	options := schemaMigrationOptions(stateBackend, clock, seed, scheduler)
 	options.FileBackend = fileBackend
 	return options

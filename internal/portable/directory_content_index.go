@@ -1,6 +1,7 @@
 package portable
 
 import (
+	"container/heap"
 	"context"
 	"math"
 	"slices"
@@ -18,6 +19,75 @@ const (
 type directoryContentIndexMutation struct {
 	before *storageformat.DirectoryContentIndexEntry
 	after  *storageformat.DirectoryContentIndexEntry
+}
+
+type directoryContentMergeSource struct {
+	store       *FileStore
+	ctx         context.Context
+	scope       domain.Scope
+	prefix      string
+	directoryID string
+	manifest    storageformat.DirectoryManifest
+	direct      []storageformat.DirectoryContentIndexEntry
+	page        []storageformat.DirectoryContentIndexEntry
+	index       int
+	after       string
+	done        bool
+}
+
+func (source *directoryContentMergeSource) next() (storageformat.DirectoryContentIndexEntry, bool, error) {
+	if len(source.direct) != 0 {
+		if source.index == len(source.direct) {
+			return storageformat.DirectoryContentIndexEntry{}, false, nil
+		}
+		value := source.direct[source.index]
+		source.index++
+		return value, true, nil
+	}
+	for source.index == len(source.page) {
+		if source.done {
+			return storageformat.DirectoryContentIndexEntry{}, false, nil
+		}
+		page, err := source.store.collectDirectoryContentIndexEntries(source.ctx, source.scope, source.directoryID, source.manifest, source.after, maxEntriesPerPage)
+		if err != nil {
+			return storageformat.DirectoryContentIndexEntry{}, false, err
+		}
+		source.page, source.index = page, 0
+		if len(page) < maxEntriesPerPage {
+			source.done = true
+		}
+		if len(page) == 0 {
+			return storageformat.DirectoryContentIndexEntry{}, false, nil
+		}
+		source.after, _ = directoryContentIndexKey(page[len(page)-1])
+	}
+	value, err := prefixDirectoryContentIndexEntry(source.prefix, source.page[source.index])
+	if err != nil {
+		return storageformat.DirectoryContentIndexEntry{}, false, err
+	}
+	source.index++
+	return value, true, nil
+}
+
+type directoryContentMergeItem struct {
+	source int
+	key    string
+	value  storageformat.DirectoryContentIndexEntry
+}
+
+type directoryContentMergeHeap []directoryContentMergeItem
+
+func (values directoryContentMergeHeap) Len() int           { return len(values) }
+func (values directoryContentMergeHeap) Less(i, j int) bool { return values[i].key < values[j].key }
+func (values directoryContentMergeHeap) Swap(i, j int)      { values[i], values[j] = values[j], values[i] }
+func (values *directoryContentMergeHeap) Push(value any) {
+	*values = append(*values, value.(directoryContentMergeItem))
+}
+func (values *directoryContentMergeHeap) Pop() any {
+	prior := *values
+	last := prior[len(prior)-1]
+	*values = prior[:len(prior)-1]
+	return last
 }
 
 func directoryContentIndexEntry(relativePath domain.UserPath, entry storageformat.DirectoryEntry) (storageformat.DirectoryContentIndexEntry, error) {
@@ -95,6 +165,85 @@ func (s *FileStore) directoryContentIndexEntries(ctx context.Context, scope doma
 		}
 	}
 	return result, nil
+}
+
+// mergedDirectoryContentIndexEntries returns the parent directory's content
+// entries in index-key order without collecting every descendant file. Direct
+// files form one small sorted run and each child contributes bounded pages from
+// its already-published immutable content tree.
+func (s *FileStore) mergedDirectoryContentIndexEntries(ctx context.Context, scope domain.Scope, entries []storageformat.DirectoryEntry) (func() (storageformat.DirectoryContentIndexEntry, bool, error), error) {
+	direct := make([]storageformat.DirectoryContentIndexEntry, 0, len(entries))
+	sources := make([]*directoryContentMergeSource, 0, len(entries)+1)
+	for _, entry := range entries {
+		if entry.Kind == domain.EntryFile {
+			path, err := domain.MustParseUserPath("/").Join(entry.Name)
+			if err != nil {
+				return nil, err
+			}
+			value, err := directoryContentIndexEntry(path, entry)
+			if err != nil {
+				return nil, err
+			}
+			direct = append(direct, value)
+			continue
+		}
+		child, err := s.readDirectoryMetadata(ctx, scope, entry.DirectoryID, false)
+		if err != nil {
+			return nil, err
+		}
+		if child.pending || child.recursiveFileCount != entry.FileCount || child.recursiveBytes != entry.Size || child.contentDigest != entry.ContentDigest {
+			return nil, domain.NewError(domain.ErrorInvalid, "child directory content index has stale aggregates")
+		}
+		if child.recursiveFileCount == 0 {
+			continue
+		}
+		sources = append(sources, &directoryContentMergeSource{
+			store: s, ctx: ctx, scope: scope, prefix: entry.Name,
+			directoryID: entry.DirectoryID, manifest: child.manifest,
+		})
+	}
+	if len(direct) != 0 {
+		sort.Slice(direct, func(i, j int) bool {
+			left, _ := directoryContentIndexKey(direct[i])
+			right, _ := directoryContentIndexKey(direct[j])
+			return left < right
+		})
+		sources = append(sources, &directoryContentMergeSource{direct: direct})
+	}
+	values := make(directoryContentMergeHeap, 0, len(sources))
+	for index, source := range sources {
+		value, ok, err := source.next()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		key, err := directoryContentIndexKey(value)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, directoryContentMergeItem{source: index, key: key, value: value})
+	}
+	heap.Init(&values)
+	return func() (storageformat.DirectoryContentIndexEntry, bool, error) {
+		if len(values) == 0 {
+			return storageformat.DirectoryContentIndexEntry{}, false, nil
+		}
+		item := heap.Pop(&values).(directoryContentMergeItem)
+		next, ok, err := sources[item.source].next()
+		if err != nil {
+			return storageformat.DirectoryContentIndexEntry{}, false, err
+		}
+		if ok {
+			key, err := directoryContentIndexKey(next)
+			if err != nil {
+				return storageformat.DirectoryContentIndexEntry{}, false, err
+			}
+			heap.Push(&values, directoryContentMergeItem{source: item.source, key: key, value: next})
+		}
+		return item.value, true, nil
+	}, nil
 }
 
 func directoryContentIndexKey(value storageformat.DirectoryContentIndexEntry) (string, error) {
@@ -293,6 +442,115 @@ func (s *FileStore) buildDirectoryContentIndex(scope domain.Scope, directoryID s
 	}
 	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
 	return references[0], objects, nil
+}
+
+// buildDirectoryContentIndexStream bulk-builds an index from an already sorted
+// source while retaining at most one leaf and one bounded child buffer per tree
+// level. Every completed immutable node is handed to emit immediately, so a
+// migration or durable preparation phase does not need a subtree-sized object
+// or entry slice merely to publish the resulting root.
+func (s *FileStore) buildDirectoryContentIndexStream(
+	scope domain.Scope,
+	directoryID string,
+	next func() (storageformat.DirectoryContentIndexEntry, bool, error),
+	emit func(storageformat.MutationObject) error,
+) (storageformat.DirectoryContentIndexChild, error) {
+	if !scope.Valid() || directoryID == "" || next == nil || emit == nil {
+		return storageformat.DirectoryContentIndexChild{}, domain.NewError(domain.ErrorInvalid, "invalid streaming directory content-index builder")
+	}
+	levels := make([][]storageformat.DirectoryContentIndexChild, 1)
+	var addChild func(int, storageformat.DirectoryContentIndexChild) error
+	addChild = func(level int, child storageformat.DirectoryContentIndexChild) error {
+		for len(levels) <= level {
+			levels = append(levels, nil)
+		}
+		levels[level] = append(levels[level], child)
+		if len(levels[level]) < maxDirectoryIndexItems {
+			return nil
+		}
+		children := append([]storageformat.DirectoryContentIndexChild(nil), levels[level]...)
+		levels[level] = levels[level][:0]
+		parent, object, _, err := s.makeDirectoryContentIndexNode(scope, directoryID, false, nil, children)
+		if err != nil {
+			return err
+		}
+		if err := emit(object); err != nil {
+			return err
+		}
+		return addChild(level+1, parent)
+	}
+	emitLeaf := func(entries []storageformat.DirectoryContentIndexEntry) error {
+		leaf, object, _, err := s.makeDirectoryContentIndexNode(scope, directoryID, true, append([]storageformat.DirectoryContentIndexEntry(nil), entries...), nil)
+		if err != nil {
+			return err
+		}
+		if err := emit(object); err != nil {
+			return err
+		}
+		return addChild(0, leaf)
+	}
+
+	leaf := make([]storageformat.DirectoryContentIndexEntry, 0, maxDirectoryIndexItems)
+	previous := ""
+	for {
+		value, ok, err := next()
+		if err != nil {
+			return storageformat.DirectoryContentIndexChild{}, err
+		}
+		if !ok {
+			break
+		}
+		key, err := directoryContentIndexKey(value)
+		if err != nil {
+			return storageformat.DirectoryContentIndexChild{}, err
+		}
+		if previous != "" && key <= previous {
+			return storageformat.DirectoryContentIndexChild{}, domain.NewError(domain.ErrorInvalid, "streaming directory content index is not uniquely ordered")
+		}
+		previous = key
+		leaf = append(leaf, value)
+		if len(leaf) == maxDirectoryIndexItems {
+			if err := emitLeaf(leaf); err != nil {
+				return storageformat.DirectoryContentIndexChild{}, err
+			}
+			leaf = leaf[:0]
+		}
+	}
+	if len(leaf) != 0 {
+		if err := emitLeaf(leaf); err != nil {
+			return storageformat.DirectoryContentIndexChild{}, err
+		}
+	}
+	if previous == "" {
+		return storageformat.DirectoryContentIndexChild{}, nil
+	}
+	for {
+		lowest, highest := -1, -1
+		for level, children := range levels {
+			if len(children) == 0 {
+				continue
+			}
+			if lowest == -1 {
+				lowest = level
+			}
+			highest = level
+		}
+		if lowest == highest && len(levels[lowest]) == 1 {
+			return levels[lowest][0], nil
+		}
+		children := append([]storageformat.DirectoryContentIndexChild(nil), levels[lowest]...)
+		levels[lowest] = levels[lowest][:0]
+		parent, object, _, err := s.makeDirectoryContentIndexNode(scope, directoryID, false, nil, children)
+		if err != nil {
+			return storageformat.DirectoryContentIndexChild{}, err
+		}
+		if err := emit(object); err != nil {
+			return storageformat.DirectoryContentIndexChild{}, err
+		}
+		if err := addChild(lowest+1, parent); err != nil {
+			return storageformat.DirectoryContentIndexChild{}, err
+		}
+	}
 }
 
 func directoryContentIndexManifestRoot(manifest storageformat.DirectoryManifest) (storageformat.DirectoryContentIndexChild, error) {

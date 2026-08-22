@@ -1066,20 +1066,26 @@ func (e *Engine) prepareMigratedDirectory(ctx context.Context, scope domain.Scop
 		if err != nil {
 			return preparedDirectory{}, err
 		}
+		if err := e.ensureMutationPrerequisites(ctx, nodes); err != nil {
+			return preparedDirectory{}, err
+		}
 		sortRoots, sortNodes, err := e.Files().buildDirectorySortIndexes(scope, directoryID, entries)
 		if err != nil {
 			return preparedDirectory{}, err
 		}
-		nodes = append(nodes, sortNodes...)
-		contentEntries, err := e.Files().directoryContentIndexEntries(ctx, scope, entries)
+		if err := e.ensureMutationPrerequisites(ctx, sortNodes); err != nil {
+			return preparedDirectory{}, err
+		}
+		nextContent, err := e.Files().mergedDirectoryContentIndexEntries(ctx, scope, entries)
 		if err != nil {
 			return preparedDirectory{}, err
 		}
-		contentRoot, contentNodes, err := e.Files().buildDirectoryContentIndex(scope, directoryID, contentEntries)
+		contentRoot, err := e.Files().buildDirectoryContentIndexStream(scope, directoryID, nextContent, func(object storageformat.MutationObject) error {
+			return e.ensureMutationPrerequisites(ctx, []storageformat.MutationObject{object})
+		})
 		if err != nil {
 			return preparedDirectory{}, err
 		}
-		nodes = append(nodes, contentNodes...)
 		manifestKey := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifestID)
 		manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, storageformat.DirectoryManifest{
 			SchemaVersion: 2, DirectoryID: directoryID, ManifestID: manifestID,
@@ -1090,8 +1096,7 @@ func (e *Engine) prepareMigratedDirectory(ctx context.Context, scope domain.Scop
 		if err != nil {
 			return preparedDirectory{}, err
 		}
-		prerequisites := append(nodes, storageformat.MutationObject{Key: manifestKey.String(), Body: manifestBody})
-		sort.Slice(prerequisites, func(i, j int) bool { return prerequisites[i].Key < prerequisites[j].Key })
+		prerequisites := []storageformat.MutationObject{{Key: manifestKey.String(), Body: manifestBody}}
 		rootBody, err := storageformat.EncodeEnvelope(directoryRootSchema, rootKey, root.envelope.Revision+1, storageformat.DirectoryRoot{
 			SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID,
 			RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount, ContentAccumulator: contentAccumulator, ContentDigest: contentDigest,

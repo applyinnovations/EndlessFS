@@ -122,6 +122,46 @@ func (s *FileStore) cloneTreeStream(
 	return s.cloneTreeStreamAt(ctx, operationID, from, to, source, copyBlobs, nil, emitObject, emitCopy, visitOccurrence)
 }
 
+func (s *FileStore) collectCatalogTreeStream(ctx context.Context, scope domain.Scope, source storageformat.DirectoryEntry, visit func(relativeCatalogEntry) error) error {
+	if !scope.Valid() || visit == nil {
+		return domain.NewError(domain.ErrorInvalid, "invalid streaming catalog traversal")
+	}
+	return s.collectCatalogTreeStreamAt(ctx, scope, source, nil, visit)
+}
+
+func (s *FileStore) collectCatalogTreeStreamAt(ctx context.Context, scope domain.Scope, source storageformat.DirectoryEntry, segments []string, visit func(relativeCatalogEntry) error) error {
+	item := relativeCatalogEntry{segments: append([]string(nil), segments...), entry: source}
+	if source.Kind == domain.EntryFile {
+		return visit(item)
+	}
+	directory, err := s.readDirectoryMetadata(ctx, scope, source.DirectoryID, false)
+	if err != nil {
+		return err
+	}
+	if directory.pending || directory.recursiveBytes != source.Size || directory.recursiveFileCount != source.FileCount || directory.contentDigest != source.ContentDigest {
+		return domain.NewError(domain.ErrorUnavailable, "source tree changed during streaming duplicate catalog preparation")
+	}
+	item.manifestID = directory.manifestID
+	item.contentSketch = append([]string(nil), directory.manifest.ContentSketch...)
+	if err := visit(item); err != nil {
+		return err
+	}
+	children := s.directoryEntryIterator(ctx, scope, source.DirectoryID, directory.manifest, domain.SortName, nil)
+	for {
+		child, ok, err := children()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+		childSegments := append(append([]string(nil), segments...), child.Name)
+		if err := s.collectCatalogTreeStreamAt(ctx, scope, child, childSegments, visit); err != nil {
+			return err
+		}
+	}
+}
+
 func (s *FileStore) cloneTreeStreamAt(
 	ctx context.Context,
 	operationID string,

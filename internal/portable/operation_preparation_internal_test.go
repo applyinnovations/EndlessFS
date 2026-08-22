@@ -179,4 +179,14 @@ func TestCloneTreeStreamEmitsWithoutSubtreeCollections(t *testing.T) {
 	if copies != len(entries) || occurrences != len(entries)+1 || objects <= len(entries)/maxDirectoryIndexItems {
 		t.Fatalf("stream clone emissions = objects:%d copies:%d occurrences:%d", objects, copies, occurrences)
 	}
+	collected := 0
+	if err := engine.Files().collectCatalogTreeStream(ctx, from, source, func(relativeCatalogEntry) error {
+		collected++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if collected != len(entries)+1 {
+		t.Fatalf("streamed source occurrences = %d; want %d", collected, len(entries)+1)
+	}
 }

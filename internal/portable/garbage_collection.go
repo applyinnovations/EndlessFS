@@ -245,12 +245,44 @@ func (s *FileStore) markDirectoryTree(ctx context.Context, session storageformat
 				}
 			}
 		}
+		if snapshot.manifest.RecursiveFileCount > 0 {
+			contentRoot, err := s.directoryContentIndexRoot(ctx, scope, directoryID, snapshot.manifest)
+			if err != nil {
+				return err
+			}
+			if err := s.markDirectoryContentIndexTree(ctx, session, scope, directoryID, contentRoot, make(map[string]struct{})); err != nil {
+				return err
+			}
+		}
 		manifestKey := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, snapshot.manifestID)
 		if err := s.engine.ensureGarbageCollectionMark(ctx, session, garbageCollectionStateRole, manifestKey); err != nil {
 			return err
 		}
 	}
 	return s.engine.ensureGarbageCollectionMark(ctx, session, garbageCollectionStateRole, rootKey)
+}
+
+func (s *FileStore) markDirectoryContentIndexTree(ctx context.Context, session storageformat.GarbageCollectionSession, scope domain.Scope, directoryID string, reference storageformat.DirectoryContentIndexChild, visiting map[string]struct{}) error {
+	key := storageformat.DirectoryContentIndexNodeKey(scope.UserID().String(), areaName(scope.Area()), directoryID, reference.NodeID)
+	if _, cycle := visiting[key.String()]; cycle {
+		return domain.NewError(domain.ErrorInvalid, "directory content-index cycle encountered during garbage collection")
+	}
+	marked, err := s.engine.garbageCollectionMarked(ctx, session, garbageCollectionStateRole, key)
+	if err != nil || marked {
+		return err
+	}
+	visiting[key.String()] = struct{}{}
+	defer delete(visiting, key.String())
+	node, err := s.readDirectoryContentIndexNode(ctx, scope, directoryID, reference)
+	if err != nil {
+		return err
+	}
+	for _, child := range node.Children {
+		if err := s.markDirectoryContentIndexTree(ctx, session, scope, directoryID, child, visiting); err != nil {
+			return err
+		}
+	}
+	return s.engine.ensureGarbageCollectionMark(ctx, session, garbageCollectionStateRole, key)
 }
 
 func (s *FileStore) markDirectorySortIndexTree(ctx context.Context, session storageformat.GarbageCollectionSession, scope domain.Scope, directoryID string, field domain.SortField, reference storageformat.DirectorySortIndexChild, visiting map[string]struct{}) error {

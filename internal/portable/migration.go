@@ -630,6 +630,11 @@ func (walk *migrationWalk) directoryEntry(ctx context.Context, directoryID, pare
 	if err != nil {
 		return migrationAggregate{}, err
 	}
+	if walk.transition.to == storageSchema004 && root.current {
+		if err := walk.engine.Files().verifyDirectoryContentIndex(ctx, walk.group.scope, directoryID, manifest.manifest); err != nil {
+			return migrationAggregate{}, err
+		}
+	}
 	directoryChanged := false
 	totalDirectories := int64(1)
 	for index := range entries {
@@ -719,7 +724,7 @@ func (walk *migrationWalk) directoryEntry(ctx context.Context, directoryID, pare
 	if root.hasRecursiveBytes && (root.recursiveBytes != total.bytes || manifest.manifest.RecursiveBytes != total.bytes) {
 		return migrationAggregate{}, domain.NewError(domain.ErrorInvalid, "source schema directory byte aggregate mismatch")
 	}
-	prepared, err := walk.engine.prepareMigratedDirectory(walk.group.scope, directoryID, entries, root, manifest.manifest.CreatedAt, walk.transition, walk.plan)
+	prepared, err := walk.engine.prepareMigratedDirectory(ctx, walk.group.scope, directoryID, entries, root, manifest.manifest.CreatedAt, walk.transition, walk.plan)
 	if err != nil {
 		return migrationAggregate{}, err
 	}
@@ -1022,7 +1027,8 @@ func validateMigrationManifest(manifest storageformat.DirectoryManifest, directo
 	if manifest.SchemaVersion == 2 {
 		accumulator, accumulatorErr := decodeDirectoryContentAccumulator(manifest.ContentAccumulator)
 		digest, digestErr := directoryContentAccumulatorDigest(accumulator, manifest.EntryCount)
-		validShape = accumulatorErr == nil && digestErr == nil && digest == manifest.ContentDigest && len(manifest.PageIDs) == 0 && validateDirectorySortIndexRoots(manifest.SortIndexes, manifest.EntryCount) == nil && (manifest.EntryCount == 0 && manifest.IndexRootID == "" && manifest.IndexRootDigest == "" || manifest.EntryCount > 0 && manifest.IndexRootID != "" && manifest.IndexRootDigest != "")
+		_, contentIndexErr := directoryContentIndexManifestRoot(manifest)
+		validShape = accumulatorErr == nil && digestErr == nil && contentIndexErr == nil && digest == manifest.ContentDigest && len(manifest.PageIDs) == 0 && validateDirectorySortIndexRoots(manifest.SortIndexes, manifest.EntryCount) == nil && (manifest.EntryCount == 0 && manifest.IndexRootID == "" && manifest.IndexRootDigest == "" || manifest.EntryCount > 0 && manifest.IndexRootID != "" && manifest.IndexRootDigest != "")
 	}
 	if !validShape || manifest.DirectoryID != directoryID || manifest.ManifestID != manifestID || manifest.EntryCount < 0 || manifest.RecursiveBytes < 0 || manifest.RecursiveFileCount < 0 || manifest.CreatedAt.IsZero() {
 		return domain.NewError(domain.ErrorInvalid, fmt.Sprintf("invalid directory manifest during migration (schema=%d entries=%d pages=%d index=%t)", manifest.SchemaVersion, manifest.EntryCount, len(manifest.PageIDs), manifest.IndexRootID != ""))
@@ -1030,7 +1036,7 @@ func validateMigrationManifest(manifest storageformat.DirectoryManifest, directo
 	return nil
 }
 
-func (e *Engine) prepareMigratedDirectory(scope domain.Scope, directoryID string, entries []storageformat.DirectoryEntry, root migrationDirectoryRoot, createdAt time.Time, transition storageMigration, plan aggregateMigrationPlan) (preparedDirectory, error) {
+func (e *Engine) prepareMigratedDirectory(ctx context.Context, scope domain.Scope, directoryID string, entries []storageformat.DirectoryEntry, root migrationDirectoryRoot, createdAt time.Time, transition storageMigration, plan aggregateMigrationPlan) (preparedDirectory, error) {
 	if err := validateDirectoryEntries(entries); err != nil {
 		return preparedDirectory{}, err
 	}
@@ -1062,10 +1068,20 @@ func (e *Engine) prepareMigratedDirectory(scope domain.Scope, directoryID string
 			return preparedDirectory{}, err
 		}
 		nodes = append(nodes, sortNodes...)
+		contentEntries, err := e.Files().directoryContentIndexEntries(ctx, scope, entries)
+		if err != nil {
+			return preparedDirectory{}, err
+		}
+		contentRoot, contentNodes, err := e.Files().buildDirectoryContentIndex(scope, directoryID, contentEntries)
+		if err != nil {
+			return preparedDirectory{}, err
+		}
+		nodes = append(nodes, contentNodes...)
 		manifestKey := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifestID)
 		manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, storageformat.DirectoryManifest{
 			SchemaVersion: 2, DirectoryID: directoryID, ManifestID: manifestID,
 			IndexRootID: indexRoot.NodeID, IndexRootDigest: indexRoot.NodeDigest, SortIndexes: sortRoots,
+			ContentIndexRootID: contentRoot.NodeID, ContentIndexRootDigest: contentRoot.NodeDigest,
 			EntryCount: len(entries), RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount, ContentAccumulator: contentAccumulator, ContentDigest: contentDigest, CreatedAt: createdAt,
 		})
 		if err != nil {

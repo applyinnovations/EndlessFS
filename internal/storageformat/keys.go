@@ -118,6 +118,10 @@ func DirectorySortIndexNodeKey(userID, area, directoryID string, sort domain.Sor
 	return fixedKey(strings.Join([]string{"fs", encodedPart(userID), area, "dirs", encodedPart(directoryID), "sort-index", string(sort), encodedPart(nodeID) + ".json"}, "/"))
 }
 
+func DirectoryContentIndexNodeKey(userID, area, directoryID, nodeID string) objectstore.Key {
+	return fixedKey(strings.Join([]string{"fs", encodedPart(userID), area, "dirs", encodedPart(directoryID), "content-index", encodedPart(nodeID) + ".json"}, "/"))
+}
+
 func FilesystemPrefix() string { return root + "fs/" }
 
 func DuplicateOccurrenceKey(userID, kind, groupID, area, path string) objectstore.Key {

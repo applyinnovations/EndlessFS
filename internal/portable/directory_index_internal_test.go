@@ -53,6 +53,9 @@ func TestDirectoryIndexSingleEntryUpdateRetainsUnchangedNodesAndReadsBoundedPage
 	if err != nil {
 		t.Fatal(err)
 	}
+	if snapshot.manifest.ContentIndexRootID == "" || snapshot.manifest.ContentIndexRootDigest == "" {
+		t.Fatal("non-empty directory has no persistent content-occurrence index")
+	}
 	changed, found := findDirectoryEntry(entries, "file-0512.bin")
 	if !found {
 		t.Fatal("test entry is missing")
@@ -70,9 +73,13 @@ func TestDirectoryIndexSingleEntryUpdateRetainsUnchangedNodesAndReadsBoundedPage
 		t.Fatal(err)
 	}
 	updatedNodes := 0
+	updatedContentNodes := 0
 	for _, prerequisite := range updated.prerequisites {
 		if strings.Contains(prerequisite.Key, "/index/") {
 			updatedNodes++
+		}
+		if strings.Contains(prerequisite.Key, "/content-index/") {
+			updatedContentNodes++
 		}
 		if _, err := backend.Put(ctx, objectstore.MustKey(prerequisite.Key), prerequisite.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
 			t.Fatal(err)
@@ -80,6 +87,9 @@ func TestDirectoryIndexSingleEntryUpdateRetainsUnchangedNodesAndReadsBoundedPage
 	}
 	if initialNodes < 10 || updatedNodes > 4 {
 		t.Fatalf("directory index node writes: initial=%d update=%d; want a multi-page index and at most four copy-on-write nodes", initialNodes, updatedNodes)
+	}
+	if updatedContentNodes == 0 || updatedContentNodes > 8 {
+		t.Fatalf("directory content-index node writes = %d; want a bounded copy-on-write path", updatedContentNodes)
 	}
 	if _, err := backend.Put(ctx, rootKey, updated.rootBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: snapshot.object.Version}); err != nil {
 		t.Fatal(err)

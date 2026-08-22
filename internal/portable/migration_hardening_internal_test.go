@@ -929,7 +929,16 @@ func TestMigrationDirectoryWalkRejectsStaleChildAggregates(t *testing.T) {
 			scope, _ := domain.NewScope(user, domain.AreaLive)
 			childID := "AAAAAAAAAAAAAAAAAAAAAA"
 			entry := migrationDirectoryEntry(t, "child", childID, test.entryBytes, test.entryFiles)
-			prepared, err := engine.Files().prepareDirectory(context.Background(), scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{entry}, 1)
+			var contentEntries []storageformat.DirectoryContentIndexEntry
+			if test.entryFiles == 1 {
+				file := withCurrentTestFingerprint(migrationFileEntry(t, "file", test.entryBytes))
+				content, contentErr := directoryContentIndexEntry(domain.MustParseUserPath("/child/file"), file)
+				if contentErr != nil {
+					t.Fatal(contentErr)
+				}
+				contentEntries = []storageformat.DirectoryContentIndexEntry{content}
+			}
+			prepared, err := engine.Files().prepareDirectoryWithContentEntries(scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{entry}, contentEntries, 1)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -965,7 +974,7 @@ func TestMigrationDirectoryPreparationRejectsInvalidAndOverflowingEntries(t *tes
 	createdAt := time.Date(2042, 1, 2, 3, 4, 5, 0, time.UTC)
 
 	invalid := storageformat.DirectoryEntry{Name: "invalid"}
-	if _, err := engine.prepareMigratedDirectory(scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{invalid}, root, createdAt, schemaMigration001To002, aggregateMigrationPlan{}); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := engine.prepareMigratedDirectory(context.Background(), scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{invalid}, root, createdAt, schemaMigration001To002, aggregateMigrationPlan{}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid entry preparation error = %v; want invalid", err)
 	}
 
@@ -974,7 +983,7 @@ func TestMigrationDirectoryPreparationRejectsInvalidAndOverflowingEntries(t *tes
 		migrationFileEntry(t, "two", 1),
 	}
 	sort.Slice(byteOverflow, func(i, j int) bool { return byteOverflow[i].NameDigest < byteOverflow[j].NameDigest })
-	if _, err := engine.prepareMigratedDirectory(scope, storageformat.RootDirectoryID, byteOverflow, root, createdAt, schemaMigration001To002, aggregateMigrationPlan{}); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := engine.prepareMigratedDirectory(context.Background(), scope, storageformat.RootDirectoryID, byteOverflow, root, createdAt, schemaMigration001To002, aggregateMigrationPlan{}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("byte overflow preparation error = %v; want invalid", err)
 	}
 
@@ -983,7 +992,7 @@ func TestMigrationDirectoryPreparationRejectsInvalidAndOverflowingEntries(t *tes
 		migrationDirectoryEntry(t, "two", "directory-two", 0, 1),
 	}
 	sort.Slice(countOverflow, func(i, j int) bool { return countOverflow[i].NameDigest < countOverflow[j].NameDigest })
-	if _, err := engine.prepareMigratedDirectory(scope, storageformat.RootDirectoryID, countOverflow, root, createdAt, schemaMigration002To003, aggregateMigrationPlan{writeFileCounts: true}); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := engine.prepareMigratedDirectory(context.Background(), scope, storageformat.RootDirectoryID, countOverflow, root, createdAt, schemaMigration002To003, aggregateMigrationPlan{writeFileCounts: true}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("file-count overflow preparation error = %v; want invalid", err)
 	}
 }

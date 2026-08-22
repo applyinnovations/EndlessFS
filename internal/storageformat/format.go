@@ -291,16 +291,18 @@ type DirectoryManifest struct {
 	DirectoryID   string `json:"directoryID"`
 	ManifestID    string `json:"manifestID"`
 	// PageIDs is retained only for migration decoding of schemas 001-003.
-	PageIDs            []string                 `json:"pageIDs,omitempty"`
-	IndexRootID        string                   `json:"indexRootID,omitempty"`
-	IndexRootDigest    string                   `json:"indexRootDigest,omitempty"`
-	SortIndexes        []DirectorySortIndexRoot `json:"sortIndexes,omitempty"`
-	EntryCount         int                      `json:"entryCount"`
-	RecursiveBytes     int64                    `json:"recursiveBytes"`
-	RecursiveFileCount int64                    `json:"recursiveFileCount"`
-	ContentAccumulator string                   `json:"contentAccumulator,omitempty"`
-	ContentDigest      string                   `json:"contentDigest,omitempty"`
-	CreatedAt          time.Time                `json:"createdAt"`
+	PageIDs                []string                 `json:"pageIDs,omitempty"`
+	IndexRootID            string                   `json:"indexRootID,omitempty"`
+	IndexRootDigest        string                   `json:"indexRootDigest,omitempty"`
+	SortIndexes            []DirectorySortIndexRoot `json:"sortIndexes,omitempty"`
+	ContentIndexRootID     string                   `json:"contentIndexRootID,omitempty"`
+	ContentIndexRootDigest string                   `json:"contentIndexRootDigest,omitempty"`
+	EntryCount             int                      `json:"entryCount"`
+	RecursiveBytes         int64                    `json:"recursiveBytes"`
+	RecursiveFileCount     int64                    `json:"recursiveFileCount"`
+	ContentAccumulator     string                   `json:"contentAccumulator,omitempty"`
+	ContentDigest          string                   `json:"contentDigest,omitempty"`
+	CreatedAt              time.Time                `json:"createdAt"`
 }
 
 type DirectorySortIndexRoot struct {
@@ -330,6 +332,33 @@ type DirectorySortIndexNode struct {
 	Leaf          bool                      `json:"leaf"`
 	Entries       []DirectorySortIndexEntry `json:"entries,omitempty"`
 	Children      []DirectorySortIndexChild `json:"children,omitempty"`
+}
+
+// DirectoryContentIndexEntry is one file occurrence relative to the directory
+// whose immutable manifest pins the index. Entries are ordered first by the
+// provider-backed duplicate group and then by relative path.
+type DirectoryContentIndexEntry struct {
+	GroupID      string `json:"groupID"`
+	RelativePath string `json:"relativePath"`
+	Size         int64  `json:"size"`
+	Version      string `json:"version"`
+}
+
+type DirectoryContentIndexChild struct {
+	NodeID     string `json:"nodeID"`
+	NodeDigest string `json:"nodeDigest"`
+	FirstKey   string `json:"firstKey"`
+	LastKey    string `json:"lastKey"`
+	EntryCount uint64 `json:"entryCount"`
+}
+
+type DirectoryContentIndexNode struct {
+	SchemaVersion int                          `json:"schemaVersion"`
+	DirectoryID   string                       `json:"directoryID"`
+	NodeID        string                       `json:"nodeID"`
+	Leaf          bool                         `json:"leaf"`
+	Entries       []DirectoryContentIndexEntry `json:"entries,omitempty"`
+	Children      []DirectoryContentIndexChild `json:"children,omitempty"`
 }
 
 type DirectoryIndexChild struct {

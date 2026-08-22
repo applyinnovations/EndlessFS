@@ -244,6 +244,52 @@ func TestDuplicateCatalogUsesBoundedAuthenticatedPagination(t *testing.T) {
 	}
 }
 
+func TestDuplicateReconciliationPagesPersistentDirectoryContentIndexes(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2048, 2, 5, 4, 5, 6, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(147, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engine := openEngine(t, backend, clock, 148, nil)
+	user, _ := domain.ParseUserID("bG1ubG1ubG1ubG1ubG1ubQ")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	for _, directory := range []string{"/left", "/right"} {
+		if _, err := engine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(directory)}); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"a.bin", "b.bin", "c.bin"} {
+			uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath(directory+"/"+name), []byte("shared"))
+		}
+	}
+	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/left/left-only.bin"), []byte("left only"))
+	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/right/right-only.bin"), []byte("right only"))
+	request := domain.DuplicateReconciliationPreviewRequest{
+		Left:       domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/left")},
+		Right:      domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/right")},
+		RemoveFrom: domain.DuplicateSideRight, Limit: 1,
+	}
+	var removals []string
+	for {
+		page, err := engine.Files().PreviewDuplicateReconciliation(context.Background(), user, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if page.Comparison.Exact || page.Comparison.CommonFiles != 3 || len(page.Items) != 1 || page.PlanToken == "" {
+			t.Fatalf("paged reconciliation = %+v", page)
+		}
+		removals = append(removals, page.Items[0].Remove.Path.String())
+		if page.NextCursor == "" {
+			break
+		}
+		request.Cursor = page.NextCursor
+	}
+	if len(removals) != 3 || removals[0] != "/right/a.bin" || removals[1] != "/right/b.bin" || removals[2] != "/right/c.bin" {
+		t.Fatalf("paged removals = %v", removals)
+	}
+}
+
 func groupsCursorForTest(t *testing.T, files *portable.FileStore, user domain.UserID) string {
 	t.Helper()
 	page, err := files.ListDuplicateGroups(context.Background(), user, domain.DuplicateGroupRequest{Kind: domain.DuplicateFile, Limit: 1})

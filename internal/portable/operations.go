@@ -177,6 +177,9 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 			return domain.Operation{}, err
 		}
 	}
+	sourceContent := relativeDirectoryContentFiles(sourceOccurrences)
+	destinationContent := relativeDirectoryContentFiles(destinationOccurrences)
+	preparedContent := relativeDirectoryContentFiles(preparation.occurrences)
 
 	operationID, err := s.engine.ids.OpaqueID()
 	if err != nil {
@@ -191,30 +194,30 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 	destinationRootKey := storageformat.DirectoryRootKey(to.UserID().String(), areaName(to.Area()), destinationParentID).String()
 	if sourceRootKey == destinationRootKey {
 		if move {
-			if err := applyDirectoryEntryChange(rootUpdates, sourceTrail, &sourceEntry, nil); err != nil {
+			if err := applyDirectoryEntryChangeWithContent(rootUpdates, sourceTrail, &sourceEntry, nil, sourceContent, nil); err != nil {
 				return domain.Operation{}, err
 			}
 		}
 		if destinationExisting != nil && (!move || destinationExisting.Name != sourceEntry.Name) {
-			if err := applyDirectoryEntryChange(rootUpdates, destinationTrail, destinationExisting, nil); err != nil {
+			if err := applyDirectoryEntryChangeWithContent(rootUpdates, destinationTrail, destinationExisting, nil, destinationContent, nil); err != nil {
 				return domain.Operation{}, err
 			}
 		}
-		if err := applyDirectoryEntryChange(rootUpdates, sourceTrail, nil, &preparation.entry); err != nil {
+		if err := applyDirectoryEntryChangeWithContent(rootUpdates, sourceTrail, nil, &preparation.entry, nil, preparedContent); err != nil {
 			return domain.Operation{}, err
 		}
 	} else {
 		if move {
-			if err := applyDirectoryEntryChange(rootUpdates, sourceTrail, &sourceEntry, nil); err != nil {
+			if err := applyDirectoryEntryChangeWithContent(rootUpdates, sourceTrail, &sourceEntry, nil, sourceContent, nil); err != nil {
 				return domain.Operation{}, err
 			}
 		}
 		if destinationExisting != nil {
-			if err := applyDirectoryEntryChange(rootUpdates, destinationTrail, destinationExisting, nil); err != nil {
+			if err := applyDirectoryEntryChangeWithContent(rootUpdates, destinationTrail, destinationExisting, nil, destinationContent, nil); err != nil {
 				return domain.Operation{}, err
 			}
 		}
-		if err := applyDirectoryEntryChange(rootUpdates, destinationTrail, nil, &preparation.entry); err != nil {
+		if err := applyDirectoryEntryChangeWithContent(rootUpdates, destinationTrail, nil, &preparation.entry, nil, preparedContent); err != nil {
 			return domain.Operation{}, err
 		}
 	}
@@ -310,12 +313,12 @@ func (s *FileStore) Delete(ctx context.Context, scope domain.Scope, request doma
 	if err != nil {
 		return domain.Operation{}, err
 	}
-	updates := make(map[string]directoryUpdate)
-	if err := applyDirectoryEntryChange(updates, parentTrail, &entry, nil); err != nil {
-		return domain.Operation{}, err
-	}
 	entries, err := s.collectCatalogTree(ctx, scope, entry)
 	if err != nil {
+		return domain.Operation{}, err
+	}
+	updates := make(map[string]directoryUpdate)
+	if err := applyDirectoryEntryChangeWithContent(updates, parentTrail, &entry, nil, relativeDirectoryContentFiles(entries), nil); err != nil {
 		return domain.Operation{}, err
 	}
 	catalogChanges := make([]catalogChange, 0, len(entries))
@@ -411,7 +414,25 @@ func (s *FileStore) cloneTree(ctx context.Context, from, to domain.Scope, source
 			result.occurrences = append(result.occurrences, relativeCatalogEntry{segments: segments, entry: occurrence.entry})
 		}
 	}
-	prepared, err := s.prepareDirectory(ctx, to, directoryID, children, 1)
+	contentEntries := make([]storageformat.DirectoryContentIndexEntry, 0, source.FileCount)
+	for _, occurrence := range result.occurrences {
+		if occurrence.entry.Kind != domain.EntryFile {
+			continue
+		}
+		path := domain.MustParseUserPath("/")
+		for _, segment := range occurrence.segments {
+			path, err = path.Join(segment)
+			if err != nil {
+				return treePreparation{}, err
+			}
+		}
+		value, contentErr := directoryContentIndexEntry(path, occurrence.entry)
+		if contentErr != nil {
+			return treePreparation{}, contentErr
+		}
+		contentEntries = append(contentEntries, value)
+	}
+	prepared, err := s.prepareDirectoryWithContentEntries(to, directoryID, children, contentEntries, 1)
 	if err != nil {
 		return treePreparation{}, err
 	}
@@ -457,6 +478,17 @@ func (s *FileStore) collectCatalogTree(ctx context.Context, scope domain.Scope, 
 		}
 	}
 	return result, nil
+}
+
+func relativeDirectoryContentFiles(entries []relativeCatalogEntry) []relativeDirectoryContentFile {
+	result := make([]relativeDirectoryContentFile, 0, len(entries))
+	for _, item := range entries {
+		if item.entry.Kind != domain.EntryFile {
+			continue
+		}
+		result = append(result, relativeDirectoryContentFile{segments: append([]string(nil), item.segments...), entry: item.entry})
+	}
+	return result
 }
 
 func (s *FileStore) buildFileOperation(

@@ -56,18 +56,20 @@ type duplicateOccurrenceCursor struct {
 }
 
 type duplicateReconciliationCursor struct {
-	SchemaVersion int                      `json:"schemaVersion"`
-	UserID        string                   `json:"userID"`
-	Left          domain.DuplicateLocation `json:"left"`
-	Right         domain.DuplicateLocation `json:"right"`
-	RemoveFrom    domain.DuplicateSide     `json:"removeFrom"`
-	Limit         int                      `json:"limit"`
-	After         string                   `json:"after,omitempty"`
-	LeftManifest  string                   `json:"leftManifest"`
-	RightManifest string                   `json:"rightManifest"`
-	GateEpoch     uint64                   `json:"gateEpoch"`
-	GateVersion   string                   `json:"gateVersion"`
-	ExpiresAt     time.Time                `json:"expiresAt"`
+	SchemaVersion int                                 `json:"schemaVersion"`
+	UserID        string                              `json:"userID"`
+	Left          domain.DuplicateLocation            `json:"left"`
+	Right         domain.DuplicateLocation            `json:"right"`
+	RemoveFrom    domain.DuplicateSide                `json:"removeFrom"`
+	Limit         int                                 `json:"limit"`
+	LeftAfter     string                              `json:"leftAfter,omitempty"`
+	RightAfter    string                              `json:"rightAfter,omitempty"`
+	Comparison    domain.DuplicateDirectoryComparison `json:"comparison"`
+	LeftManifest  string                              `json:"leftManifest"`
+	RightManifest string                              `json:"rightManifest"`
+	GateEpoch     uint64                              `json:"gateEpoch"`
+	GateVersion   string                              `json:"gateVersion"`
+	ExpiresAt     time.Time                           `json:"expiresAt"`
 }
 
 type duplicateReconciliationPlan struct {
@@ -736,74 +738,34 @@ func (s *FileStore) CompareDuplicateDirectories(ctx context.Context, userID doma
 	}
 	leftScope, _ := domain.NewScope(userID, request.Left.Area)
 	rightScope, _ := domain.NewScope(userID, request.Right.Area)
-	leftOccurrence, leftCounts, err := s.directoryComparisonInventory(ctx, leftScope, request.Left.Path)
+	left, err := s.readDuplicateDirectoryContentInventory(ctx, leftScope, request.Left.Path)
 	if err != nil {
 		return domain.DuplicateDirectoryComparison{}, err
 	}
-	rightOccurrence, rightCounts, err := s.directoryComparisonInventory(ctx, rightScope, request.Right.Path)
+	right, err := s.readDuplicateDirectoryContentInventory(ctx, rightScope, request.Right.Path)
 	if err != nil {
 		return domain.DuplicateDirectoryComparison{}, err
 	}
-	result := domain.DuplicateDirectoryComparison{Left: leftOccurrence, Right: rightOccurrence, Exact: leftOccurrence.GroupID == rightOccurrence.GroupID}
-	all := make(map[string]struct{}, len(leftCounts)+len(rightCounts))
-	for group := range leftCounts {
-		all[group] = struct{}{}
-	}
-	for group := range rightCounts {
-		all[group] = struct{}{}
-	}
-	for group := range all {
-		left := leftCounts[group]
-		right := rightCounts[group]
-		if left.count != 0 && right.count != 0 && left.size != right.size {
-			return domain.DuplicateDirectoryComparison{}, domain.NewError(domain.ErrorInvalid, "duplicate file identity size mismatch")
-		}
-		size := left.size
-		if left.count == 0 {
-			size = right.size
-		}
-		common := min(left.count, right.count)
-		if err := addDuplicateTotals(&result.CommonFiles, &result.CommonBytes, common, size); err != nil {
-			return domain.DuplicateDirectoryComparison{}, err
-		}
-		if err := addDuplicateTotals(&result.LeftOnlyFiles, &result.LeftOnlyBytes, left.count-common, size); err != nil {
-			return domain.DuplicateDirectoryComparison{}, err
-		}
-		if err := addDuplicateTotals(&result.RightOnlyFiles, &result.RightOnlyBytes, right.count-common, size); err != nil {
-			return domain.DuplicateDirectoryComparison{}, err
-		}
-	}
-	return result, nil
+	return s.compareDuplicateDirectoryContentIndexes(ctx, left, right)
 }
 
-type duplicateFileCount struct {
-	count int64
-	size  int64
+type duplicateDirectoryContentInventory struct {
+	occurrence domain.DuplicateOccurrence
+	scope      domain.Scope
+	path       domain.UserPath
+	directory  string
+	manifestID string
+	manifest   storageformat.DirectoryManifest
 }
 
-func (s *FileStore) directoryComparisonInventory(ctx context.Context, scope domain.Scope, path domain.UserPath) (domain.DuplicateOccurrence, map[string]duplicateFileCount, error) {
-	occurrence, files, _, err := s.directoryReconciliationInventory(ctx, scope, path)
-	if err != nil {
-		return domain.DuplicateOccurrence{}, nil, err
-	}
-	counts := make(map[string]duplicateFileCount)
-	for groupID, occurrences := range files {
-		if len(occurrences) == 0 {
-			continue
-		}
-		counts[groupID] = duplicateFileCount{count: int64(len(occurrences)), size: occurrences[0].Size}
-	}
-	return occurrence, counts, nil
-}
-
-func (s *FileStore) directoryReconciliationInventory(ctx context.Context, scope domain.Scope, path domain.UserPath) (domain.DuplicateOccurrence, map[string][]domain.DuplicateOccurrence, string, error) {
+func (s *FileStore) readDuplicateDirectoryContentInventory(ctx context.Context, scope domain.Scope, path domain.UserPath) (duplicateDirectoryContentInventory, error) {
 	view, err := s.resolveDirectoryMetadataView(ctx, scope, path)
 	if err != nil {
-		return domain.DuplicateOccurrence{}, nil, "", err
+		return duplicateDirectoryContentInventory{}, err
 	}
-	leaf, err := s.readDirectory(ctx, scope, view.directoryID, path.IsRoot())
+	leaf, err := s.readDirectoryMetadata(ctx, scope, view.directoryID, path.IsRoot())
 	if err != nil {
-		return domain.DuplicateOccurrence{}, nil, "", err
+		return duplicateDirectoryContentInventory{}, err
 	}
 	version := view.current.Version
 	if path.IsRoot() {
@@ -811,51 +773,139 @@ func (s *FileStore) directoryReconciliationInventory(ctx context.Context, scope 
 	}
 	groupID, err := duplicateDirectoryGroupID(leaf.recursiveBytes, leaf.recursiveFileCount, leaf.contentDigest)
 	if err != nil {
-		return domain.DuplicateOccurrence{}, nil, "", err
+		return duplicateDirectoryContentInventory{}, err
 	}
-	rootOccurrence := domain.DuplicateOccurrence{GroupID: groupID, Kind: domain.DuplicateDirectory, Area: scope.Area(), AreaName: areaName(scope.Area()), Path: path, Size: leaf.recursiveBytes, FileCount: leaf.recursiveFileCount, Version: version}
-	files := make(map[string][]domain.DuplicateOccurrence)
-	var walk func(domain.UserPath, directorySnapshot) error
-	walk = func(currentPath domain.UserPath, snapshot directorySnapshot) error {
-		for _, entry := range snapshot.entries {
-			childPath, err := currentPath.Join(entry.Name)
-			if err != nil {
-				return err
-			}
-			if entry.Kind == domain.EntryDirectory {
-				child, err := s.readDirectory(ctx, scope, entry.DirectoryID, false)
-				if err != nil {
-					return err
-				}
-				if child.recursiveBytes != entry.Size || child.recursiveFileCount != entry.FileCount || child.contentDigest != entry.ContentDigest {
-					return domain.NewError(domain.ErrorInvalid, "directory comparison encountered a stale aggregate")
-				}
-				if err := walk(childPath, child); err != nil {
-					return err
-				}
-				continue
-			}
-			stored, err := catalogOccurrence(scope, childPath, entry)
-			if err != nil {
-				return err
-			}
-			occurrence, err := domainDuplicateOccurrence(stored)
-			if err != nil {
-				return err
-			}
-			files[occurrence.GroupID] = append(files[occurrence.GroupID], occurrence)
+	occurrence := domain.DuplicateOccurrence{
+		GroupID: groupID, Kind: domain.DuplicateDirectory, Area: scope.Area(), AreaName: areaName(scope.Area()),
+		Path: path, Size: leaf.recursiveBytes, FileCount: leaf.recursiveFileCount, Version: version,
+	}
+	return duplicateDirectoryContentInventory{occurrence: occurrence, scope: scope, path: path, directory: view.directoryID, manifestID: leaf.manifestID, manifest: leaf.manifest}, nil
+}
+
+type directoryContentIndexIterator struct {
+	store     *FileStore
+	ctx       context.Context
+	inventory duplicateDirectoryContentInventory
+	after     string
+	values    []storageformat.DirectoryContentIndexEntry
+	index     int
+	exhausted bool
+}
+
+func newDirectoryContentIndexIterator(store *FileStore, ctx context.Context, inventory duplicateDirectoryContentInventory, after string) *directoryContentIndexIterator {
+	return &directoryContentIndexIterator{store: store, ctx: ctx, inventory: inventory, after: after}
+}
+
+func (iterator *directoryContentIndexIterator) peek() (storageformat.DirectoryContentIndexEntry, bool, error) {
+	if iterator.index < len(iterator.values) {
+		return iterator.values[iterator.index], true, nil
+	}
+	if iterator.exhausted {
+		return storageformat.DirectoryContentIndexEntry{}, false, nil
+	}
+	values, err := iterator.store.collectDirectoryContentIndexEntries(iterator.ctx, iterator.inventory.scope, iterator.inventory.directory, iterator.inventory.manifest, iterator.after, maxEntriesPerPage)
+	if err != nil {
+		return storageformat.DirectoryContentIndexEntry{}, false, err
+	}
+	iterator.values, iterator.index = values, 0
+	if len(values) < maxEntriesPerPage {
+		iterator.exhausted = true
+	}
+	if len(values) == 0 {
+		return storageformat.DirectoryContentIndexEntry{}, false, nil
+	}
+	return values[0], true, nil
+}
+
+func (iterator *directoryContentIndexIterator) pop() (storageformat.DirectoryContentIndexEntry, string, bool, error) {
+	value, found, err := iterator.peek()
+	if err != nil || !found {
+		return storageformat.DirectoryContentIndexEntry{}, "", found, err
+	}
+	key, err := directoryContentIndexKey(value)
+	if err != nil {
+		return storageformat.DirectoryContentIndexEntry{}, "", false, err
+	}
+	iterator.index++
+	iterator.after = key
+	return value, key, true, nil
+}
+
+func (s *FileStore) nextDirectoryContentGroup(iterator *directoryContentIndexIterator) (string, int64, int64, bool, error) {
+	first, found, err := iterator.peek()
+	if err != nil || !found {
+		return "", 0, 0, found, err
+	}
+	groupID, size := first.GroupID, first.Size
+	count := int64(0)
+	for {
+		value, found, err := iterator.peek()
+		if err != nil {
+			return "", 0, 0, false, err
 		}
-		return nil
+		if !found || value.GroupID != groupID {
+			return groupID, count, size, true, nil
+		}
+		if value.Size != size || count == math.MaxInt64 {
+			return "", 0, 0, false, domain.NewError(domain.ErrorInvalid, "directory content-index group is inconsistent")
+		}
+		if _, _, _, err := iterator.pop(); err != nil {
+			return "", 0, 0, false, err
+		}
+		count++
 	}
-	if err := walk(path, leaf); err != nil {
-		return domain.DuplicateOccurrence{}, nil, "", err
+}
+
+func (s *FileStore) compareDuplicateDirectoryContentIndexes(ctx context.Context, left, right duplicateDirectoryContentInventory) (domain.DuplicateDirectoryComparison, error) {
+	result := domain.DuplicateDirectoryComparison{Left: left.occurrence, Right: right.occurrence, Exact: left.occurrence.GroupID == right.occurrence.GroupID}
+	if result.Exact {
+		result.CommonFiles, result.CommonBytes = left.occurrence.FileCount, left.occurrence.Size
+		return result, nil
 	}
-	for groupID := range files {
-		sort.Slice(files[groupID], func(i, j int) bool {
-			return duplicateOccurrenceLocation(files[groupID][i]) < duplicateOccurrenceLocation(files[groupID][j])
-		})
+	leftIterator := newDirectoryContentIndexIterator(s, ctx, left, "")
+	rightIterator := newDirectoryContentIndexIterator(s, ctx, right, "")
+	leftGroup, leftCount, leftSize, leftFound, err := s.nextDirectoryContentGroup(leftIterator)
+	if err != nil {
+		return domain.DuplicateDirectoryComparison{}, err
 	}
-	return rootOccurrence, files, leaf.manifestID, nil
+	rightGroup, rightCount, rightSize, rightFound, err := s.nextDirectoryContentGroup(rightIterator)
+	if err != nil {
+		return domain.DuplicateDirectoryComparison{}, err
+	}
+	var leftFiles, leftBytes, rightFiles, rightBytes int64
+	for leftFound || rightFound {
+		switch {
+		case !rightFound || leftFound && leftGroup < rightGroup:
+			if err := addDuplicateTotals(&result.LeftOnlyFiles, &result.LeftOnlyBytes, leftCount, leftSize); err != nil || addDuplicateTotals(&leftFiles, &leftBytes, leftCount, leftSize) != nil {
+				return domain.DuplicateDirectoryComparison{}, domain.NewError(domain.ErrorInvalid, "duplicate directory comparison overflows")
+			}
+			leftGroup, leftCount, leftSize, leftFound, err = s.nextDirectoryContentGroup(leftIterator)
+		case !leftFound || rightGroup < leftGroup:
+			if err := addDuplicateTotals(&result.RightOnlyFiles, &result.RightOnlyBytes, rightCount, rightSize); err != nil || addDuplicateTotals(&rightFiles, &rightBytes, rightCount, rightSize) != nil {
+				return domain.DuplicateDirectoryComparison{}, domain.NewError(domain.ErrorInvalid, "duplicate directory comparison overflows")
+			}
+			rightGroup, rightCount, rightSize, rightFound, err = s.nextDirectoryContentGroup(rightIterator)
+		default:
+			if leftSize != rightSize {
+				return domain.DuplicateDirectoryComparison{}, domain.NewError(domain.ErrorInvalid, "duplicate file identity size mismatch")
+			}
+			common := min(leftCount, rightCount)
+			if addDuplicateTotals(&result.CommonFiles, &result.CommonBytes, common, leftSize) != nil || addDuplicateTotals(&result.LeftOnlyFiles, &result.LeftOnlyBytes, leftCount-common, leftSize) != nil || addDuplicateTotals(&result.RightOnlyFiles, &result.RightOnlyBytes, rightCount-common, rightSize) != nil || addDuplicateTotals(&leftFiles, &leftBytes, leftCount, leftSize) != nil || addDuplicateTotals(&rightFiles, &rightBytes, rightCount, rightSize) != nil {
+				return domain.DuplicateDirectoryComparison{}, domain.NewError(domain.ErrorInvalid, "duplicate directory comparison overflows")
+			}
+			leftGroup, leftCount, leftSize, leftFound, err = s.nextDirectoryContentGroup(leftIterator)
+			if err == nil {
+				rightGroup, rightCount, rightSize, rightFound, err = s.nextDirectoryContentGroup(rightIterator)
+			}
+		}
+		if err != nil {
+			return domain.DuplicateDirectoryComparison{}, err
+		}
+	}
+	if leftFiles != left.occurrence.FileCount || leftBytes != left.occurrence.Size || rightFiles != right.occurrence.FileCount || rightBytes != right.occurrence.Size {
+		return domain.DuplicateDirectoryComparison{}, domain.NewError(domain.ErrorInvalid, "directory content index disagrees with recursive aggregates")
+	}
+	return result, nil
 }
 
 func duplicateOccurrenceLocation(value domain.DuplicateOccurrence) string {
@@ -879,47 +929,58 @@ func (s *FileStore) PreviewDuplicateReconciliation(ctx context.Context, userID d
 	}
 	leftScope, _ := domain.NewScope(userID, request.Left.Area)
 	rightScope, _ := domain.NewScope(userID, request.Right.Area)
-	left, leftFiles, leftManifest, err := s.directoryReconciliationInventory(ctx, leftScope, request.Left.Path)
+	left, err := s.readDuplicateDirectoryContentInventory(ctx, leftScope, request.Left.Path)
 	if err != nil {
 		return domain.DuplicateReconciliationPreview{}, err
 	}
-	right, rightFiles, rightManifest, err := s.directoryReconciliationInventory(ctx, rightScope, request.Right.Path)
-	if err != nil {
-		return domain.DuplicateReconciliationPreview{}, err
-	}
-	comparison, err := compareDirectoryInventories(left, right, leftFiles, rightFiles)
+	right, err := s.readDuplicateDirectoryContentInventory(ctx, rightScope, request.Right.Path)
 	if err != nil {
 		return domain.DuplicateReconciliationPreview{}, err
 	}
 	cursor := duplicateReconciliationCursor{
-		SchemaVersion: 1, UserID: userID.String(), Left: request.Left, Right: request.Right, RemoveFrom: request.RemoveFrom, Limit: limit,
-		LeftManifest: leftManifest, RightManifest: rightManifest, GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion,
+		SchemaVersion: 2, UserID: userID.String(), Left: request.Left, Right: request.Right, RemoveFrom: request.RemoveFrom, Limit: limit,
+		LeftManifest: left.manifestID, RightManifest: right.manifestID, GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion,
 		ExpiresAt: s.engine.clock.Now().UTC().Add(s.engine.cursorTTL),
 	}
 	if request.Cursor != "" {
-		if err := s.decodeDuplicateCursor(request.Cursor, &cursor); err != nil || cursor.SchemaVersion != 1 || cursor.UserID != userID.String() || cursor.Left != request.Left || cursor.Right != request.Right || cursor.RemoveFrom != request.RemoveFrom || cursor.Limit != limit || cursor.LeftManifest != leftManifest || cursor.RightManifest != rightManifest || cursor.GateEpoch != gate.Epoch || cursor.GateVersion != gateEnvelope.LogicalVersion || !s.engine.clock.Now().Before(cursor.ExpiresAt) {
+		if err := s.decodeDuplicateCursor(request.Cursor, &cursor); err != nil || cursor.SchemaVersion != 2 || cursor.UserID != userID.String() || cursor.Left != request.Left || cursor.Right != request.Right || cursor.RemoveFrom != request.RemoveFrom || cursor.Limit != limit || cursor.LeftManifest != left.manifestID || cursor.RightManifest != right.manifestID || cursor.GateEpoch != gate.Epoch || cursor.GateVersion != gateEnvelope.LogicalVersion || !s.engine.clock.Now().Before(cursor.ExpiresAt) {
 			return domain.DuplicateReconciliationPreview{}, domain.NewError(domain.ErrorInvalid, "invalid or stale duplicate reconciliation cursor")
 		}
+		cursor.Comparison.Left, cursor.Comparison.Right = left.occurrence, right.occurrence
+	} else {
+		cursor.Comparison, err = s.compareDuplicateDirectoryContentIndexes(ctx, left, right)
+		if err != nil {
+			return domain.DuplicateReconciliationPreview{}, err
+		}
 	}
-	items, err := s.reconciliationItems(ctx, userID, left, right, leftFiles, rightFiles, request.RemoveFrom)
-	if err != nil {
-		return domain.DuplicateReconciliationPreview{}, err
+	var pageItems []domain.DuplicateReconciliationItem
+	more := false
+	if cursor.Comparison.Exact {
+		ignored, revision, ignoreErr := s.duplicateGroupIgnoreState(ctx, userID, left.occurrence.GroupID)
+		if ignoreErr != nil {
+			return domain.DuplicateReconciliationPreview{}, ignoreErr
+		}
+		if !ignored && request.Cursor == "" {
+			remove, keep := left.occurrence, right.occurrence
+			if request.RemoveFrom == domain.DuplicateSideRight {
+				remove, keep = right.occurrence, left.occurrence
+			}
+			pageItems = []domain.DuplicateReconciliationItem{{GroupID: left.occurrence.GroupID, Remove: remove, Keep: keep, IgnoreRevision: revision}}
+		}
+	} else {
+		pageItems, cursor.LeftAfter, cursor.RightAfter, more, err = s.reconciliationIndexItems(ctx, userID, left, right, request.RemoveFrom, cursor.LeftAfter, cursor.RightAfter, limit)
+		if err != nil {
+			return domain.DuplicateReconciliationPreview{}, err
+		}
 	}
-	start := 0
-	if cursor.After != "" {
-		start = sort.Search(len(items), func(index int) bool { return duplicateOccurrenceLocation(items[index].Remove) > cursor.After })
-	}
-	end := min(start+limit, len(items))
-	pageItems := append([]domain.DuplicateReconciliationItem(nil), items[start:end]...)
-	result := domain.DuplicateReconciliationPreview{Comparison: comparison, RemoveFrom: request.RemoveFrom, Items: pageItems}
+	result := domain.DuplicateReconciliationPreview{Comparison: cursor.Comparison, RemoveFrom: request.RemoveFrom, Items: pageItems}
 	for _, item := range pageItems {
 		if item.Remove.Size > math.MaxInt64-result.ReclaimableBytes {
 			return domain.DuplicateReconciliationPreview{}, domain.NewError(domain.ErrorInvalid, "duplicate reconciliation bytes overflow")
 		}
 		result.ReclaimableBytes += item.Remove.Size
 	}
-	if end < len(items) {
-		cursor.After = duplicateOccurrenceLocation(items[end-1].Remove)
+	if more {
 		result.NextCursor, err = s.encodeDuplicateCursor(cursor)
 		if err != nil {
 			return domain.DuplicateReconciliationPreview{}, err
@@ -927,8 +988,8 @@ func (s *FileStore) PreviewDuplicateReconciliation(ctx context.Context, userID d
 	}
 	if len(pageItems) != 0 {
 		result.PlanToken, err = s.encodeDuplicateCursor(duplicateReconciliationPlan{
-			SchemaVersion: 1, UserID: userID.String(), Left: left, Right: right, RemoveFrom: request.RemoveFrom, Items: pageItems,
-			LeftManifest: leftManifest, RightManifest: rightManifest, GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion,
+			SchemaVersion: 1, UserID: userID.String(), Left: left.occurrence, Right: right.occurrence, RemoveFrom: request.RemoveFrom, Items: pageItems,
+			LeftManifest: left.manifestID, RightManifest: right.manifestID, GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion,
 			ExpiresAt: s.engine.clock.Now().UTC().Add(s.engine.cursorTTL),
 		})
 		if err != nil {
@@ -986,48 +1047,99 @@ func addDuplicateTotals(files, bytes *int64, count, size int64) error {
 	return nil
 }
 
-func (s *FileStore) reconciliationItems(ctx context.Context, userID domain.UserID, left, right domain.DuplicateOccurrence, leftFiles, rightFiles map[string][]domain.DuplicateOccurrence, removeFrom domain.DuplicateSide) ([]domain.DuplicateReconciliationItem, error) {
-	if left.GroupID == right.GroupID {
-		ignored, revision, err := s.duplicateGroupIgnoreState(ctx, userID, left.GroupID)
-		if err != nil || ignored {
-			return nil, err
-		}
-		remove, keep := left, right
-		if removeFrom == domain.DuplicateSideRight {
-			remove, keep = right, left
-		}
-		return []domain.DuplicateReconciliationItem{{GroupID: left.GroupID, Remove: remove, Keep: keep, IgnoreRevision: revision}}, nil
-	}
-	removeFiles, keepFiles := leftFiles, rightFiles
-	if removeFrom == domain.DuplicateSideRight {
-		removeFiles, keepFiles = rightFiles, leftFiles
-	}
-	groups := make([]string, 0, len(removeFiles))
-	for groupID := range removeFiles {
-		if len(keepFiles[groupID]) != 0 {
-			groups = append(groups, groupID)
-		}
-	}
-	sort.Strings(groups)
-	var result []domain.DuplicateReconciliationItem
-	for _, groupID := range groups {
-		ignored, revision, err := s.duplicateGroupIgnoreState(ctx, userID, groupID)
+func (s *FileStore) reconciliationIndexItems(ctx context.Context, userID domain.UserID, left, right duplicateDirectoryContentInventory, removeFrom domain.DuplicateSide, leftAfter, rightAfter string, limit int) ([]domain.DuplicateReconciliationItem, string, string, bool, error) {
+	leftIterator := newDirectoryContentIndexIterator(s, ctx, left, leftAfter)
+	rightIterator := newDirectoryContentIndexIterator(s, ctx, right, rightAfter)
+	items := make([]domain.DuplicateReconciliationItem, 0, limit)
+	ignoreGroup := ""
+	ignored := false
+	ignoreRevision := uint64(0)
+	for {
+		leftValue, leftFound, err := leftIterator.peek()
 		if err != nil {
-			return nil, err
+			return nil, "", "", false, err
 		}
-		if ignored {
+		rightValue, rightFound, err := rightIterator.peek()
+		if err != nil {
+			return nil, "", "", false, err
+		}
+		if !leftFound || !rightFound {
+			return items, leftIterator.after, rightIterator.after, false, nil
+		}
+		switch {
+		case leftValue.GroupID < rightValue.GroupID:
+			if _, _, _, err := leftIterator.pop(); err != nil {
+				return nil, "", "", false, err
+			}
+			continue
+		case rightValue.GroupID < leftValue.GroupID:
+			if _, _, _, err := rightIterator.pop(); err != nil {
+				return nil, "", "", false, err
+			}
 			continue
 		}
-		removeValues, keepValues := removeFiles[groupID], keepFiles[groupID]
-		count := min(len(removeValues), len(keepValues))
-		for index := 0; index < count; index++ {
-			result = append(result, domain.DuplicateReconciliationItem{GroupID: groupID, Remove: removeValues[index], Keep: keepValues[index], IgnoreRevision: revision})
+		if leftValue.Size != rightValue.Size {
+			return nil, "", "", false, domain.NewError(domain.ErrorInvalid, "duplicate file identity size mismatch")
+		}
+		if ignoreGroup != leftValue.GroupID {
+			ignoreGroup = leftValue.GroupID
+			ignored, ignoreRevision, err = s.duplicateGroupIgnoreState(ctx, userID, ignoreGroup)
+			if err != nil {
+				return nil, "", "", false, err
+			}
+		}
+		if ignored {
+			if _, _, _, err := leftIterator.pop(); err != nil {
+				return nil, "", "", false, err
+			}
+			if _, _, _, err := rightIterator.pop(); err != nil {
+				return nil, "", "", false, err
+			}
+			continue
+		}
+		if len(items) == limit {
+			return items, leftIterator.after, rightIterator.after, true, nil
+		}
+		leftValue, _, _, err = leftIterator.pop()
+		if err != nil {
+			return nil, "", "", false, err
+		}
+		rightValue, _, _, err = rightIterator.pop()
+		if err != nil {
+			return nil, "", "", false, err
+		}
+		leftOccurrence, err := duplicateContentIndexOccurrence(left, leftValue)
+		if err != nil {
+			return nil, "", "", false, err
+		}
+		rightOccurrence, err := duplicateContentIndexOccurrence(right, rightValue)
+		if err != nil {
+			return nil, "", "", false, err
+		}
+		remove, keep := leftOccurrence, rightOccurrence
+		if removeFrom == domain.DuplicateSideRight {
+			remove, keep = rightOccurrence, leftOccurrence
+		}
+		items = append(items, domain.DuplicateReconciliationItem{GroupID: leftValue.GroupID, Remove: remove, Keep: keep, IgnoreRevision: ignoreRevision})
+	}
+}
+
+func duplicateContentIndexOccurrence(inventory duplicateDirectoryContentInventory, value storageformat.DirectoryContentIndexEntry) (domain.DuplicateOccurrence, error) {
+	relative, err := domain.ParseUserPath(value.RelativePath)
+	if err != nil || relative.IsRoot() {
+		return domain.DuplicateOccurrence{}, domain.NewError(domain.ErrorInvalid, "invalid duplicate content relative path")
+	}
+	path := inventory.path
+	for _, segment := range relative.Segments() {
+		path, err = path.Join(segment)
+		if err != nil {
+			return domain.DuplicateOccurrence{}, err
 		}
 	}
-	sort.Slice(result, func(i, j int) bool {
-		return duplicateOccurrenceLocation(result[i].Remove) < duplicateOccurrenceLocation(result[j].Remove)
-	})
-	return result, nil
+	return domain.DuplicateOccurrence{
+		GroupID: value.GroupID, Kind: domain.DuplicateFile, Area: inventory.scope.Area(), AreaName: areaName(inventory.scope.Area()),
+		Path: path, Size: value.Size, FileCount: 1, Version: domain.Version(value.Version),
+	}, nil
 }
 
 func (s *FileStore) duplicateGroupIgnoreState(ctx context.Context, userID domain.UserID, groupID string) (bool, uint64, error) {

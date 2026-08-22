@@ -143,6 +143,7 @@ func openFaultEngine(t *testing.T, backend objectstore.Backend, clock *domain.Fi
 }
 
 func TestObjectFailureAtEveryRecursiveCopyBoundaryRecoversWithoutPartialVisibility(t *testing.T) {
+	t.Parallel()
 	fixtureBackend := objectmemory.New()
 	fixtureServer := httptest.NewServer(fixtureBackend)
 	t.Cleanup(fixtureServer.Close)
@@ -308,6 +309,7 @@ func TestObjectFailureAtEveryUploadInitiationBoundaryDrainsSafely(t *testing.T) 
 }
 
 func TestObjectFailureAtEveryUploadCompletionBoundaryReconcilesOnce(t *testing.T) {
+	t.Parallel()
 	user, _ := domain.ParseUserID("W1tbW1tbW1tbW1tbW1tbWw")
 	scope, _ := domain.NewScope(user, domain.AreaLive)
 	content := []byte("complete")
@@ -584,6 +586,7 @@ func TestObjectFailureAtEveryDeleteBoundaryRecoversAtomically(t *testing.T) {
 }
 
 func TestObjectFailureAtEveryMoveBoundaryRecoversWithoutSplitVisibility(t *testing.T) {
+	t.Parallel()
 	fixtureBackend := objectmemory.New()
 	fixtureServer := httptest.NewServer(fixtureBackend)
 	t.Cleanup(fixtureServer.Close)
@@ -821,6 +824,7 @@ func TestObjectFailureAtEveryAdmittedMutationRecoveryBoundaryIsRetrySafe(t *test
 }
 
 func TestObjectFailureAtEveryPreparedFileOperationRecoveryBoundaryIsRetrySafe(t *testing.T) {
+	t.Parallel()
 	fixtureBackend := objectmemory.New()
 	fixtureServer := httptest.NewServer(fixtureBackend)
 	t.Cleanup(fixtureServer.Close)

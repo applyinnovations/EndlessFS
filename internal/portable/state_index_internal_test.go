@@ -15,6 +15,7 @@ import (
 )
 
 func TestPersistentStateIndexMutationAndCursorStayBounded(t *testing.T) {
+	t.Parallel()
 	backend := objectmemory.New()
 	clock := domain.NewFixedClock(time.Date(2048, 4, 5, 6, 7, 8, 0, time.UTC))
 	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("state-index-entropy-0123456789", 1<<18)))

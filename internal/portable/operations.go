@@ -651,40 +651,19 @@ func (s *FileStore) persistFileOperationStepPages(ctx context.Context, operation
 	if len(operation.Roots) == 0 {
 		return domain.NewError(domain.ErrorInvalid, "file operation has no visibility roots")
 	}
-	references := make([]storageformat.MutationObjectReference, 0, len(operation.Prerequisites))
-	for _, prerequisite := range operation.Prerequisites {
-		artifactID := "prerequisite-" + storageformat.Digest([]byte(prerequisite.Key))
-		stagingKey := storageformat.OperationStagingKey(operation.UserID, operation.OperationID, artifactID)
-		if err := s.ensureImmutableOperationObject(ctx, stagingKey, prerequisite.Body); err != nil {
-			return err
-		}
-		references = append(references, storageformat.MutationObjectReference{Key: prerequisite.Key, BodyDigest: storageformat.Digest(prerequisite.Body), StagingKey: stagingKey.String()})
-	}
-	pages := make([]storageformat.FileOperationStepPage, 0)
-	for start := 0; start < len(operation.Roots); start += maxOperationPageRoots {
-		end := min(start+maxOperationPageRoots, len(operation.Roots))
-		pages = append(pages, storageformat.FileOperationStepPage{Roots: append([]storageformat.FileOperationRoot(nil), operation.Roots[start:end]...)})
-	}
-	for start := 0; start < len(references); start += maxOperationPagePrerequisites {
-		end := min(start+maxOperationPagePrerequisites, len(references))
-		pages = append(pages, storageformat.FileOperationStepPage{Prerequisites: append([]storageformat.MutationObjectReference(nil), references[start:end]...)})
-	}
-	for start := 0; start < len(operation.Copies); start += maxOperationPageCopies {
-		end := min(start+maxOperationPageCopies, len(operation.Copies))
-		pages = append(pages, storageformat.FileOperationStepPage{Copies: append([]storageformat.MutationCopy(nil), operation.Copies[start:end]...)})
-	}
 	previous := ""
 	operation.StepSetID = operation.ReplicaAttemptID
 	operation.StepsStaged = true
-	for index := range pages {
-		pages[index].SchemaVersion = 1
-		pages[index].UserID = operation.UserID
-		pages[index].OperationID = operation.OperationID
-		pages[index].StepSetID = operation.StepSetID
-		pages[index].Index = uint64(index)
-		pages[index].PreviousDigest = previous
-		key := stagedFileOperationStepPageKey(*operation, uint64(index))
-		body, err := storageformat.EncodeEnvelope(fileOperationStepPageSchema, key, 1, pages[index])
+	pageCount := uint64(0)
+	writePage := func(page storageformat.FileOperationStepPage) error {
+		page.SchemaVersion = 1
+		page.UserID = operation.UserID
+		page.OperationID = operation.OperationID
+		page.StepSetID = operation.StepSetID
+		page.Index = pageCount
+		page.PreviousDigest = previous
+		key := stagedFileOperationStepPageKey(*operation, pageCount)
+		body, err := storageformat.EncodeEnvelope(fileOperationStepPageSchema, key, 1, page)
 		if err != nil {
 			return domain.WrapError(domain.ErrorInvalid, "operation step page exceeds the bounded record limit", err)
 		}
@@ -692,8 +671,42 @@ func (s *FileStore) persistFileOperationStepPages(ctx context.Context, operation
 			return err
 		}
 		previous = storageformat.Digest(body)
+		pageCount++
+		return nil
 	}
-	operation.StepPageCount = uint64(len(pages))
+	for start := 0; start < len(operation.Roots); start += maxOperationPageRoots {
+		end := min(start+maxOperationPageRoots, len(operation.Roots))
+		if err := writePage(storageformat.FileOperationStepPage{Roots: operation.Roots[start:end]}); err != nil {
+			return err
+		}
+	}
+	references := make([]storageformat.MutationObjectReference, 0, maxOperationPagePrerequisites)
+	for _, prerequisite := range operation.Prerequisites {
+		artifactID := "prerequisite-" + storageformat.Digest([]byte(prerequisite.Key))
+		stagingKey := storageformat.OperationStagingKey(operation.UserID, operation.OperationID, artifactID)
+		if err := s.ensureImmutableOperationObject(ctx, stagingKey, prerequisite.Body); err != nil {
+			return err
+		}
+		references = append(references, storageformat.MutationObjectReference{Key: prerequisite.Key, BodyDigest: storageformat.Digest(prerequisite.Body), StagingKey: stagingKey.String()})
+		if len(references) == maxOperationPagePrerequisites {
+			if err := writePage(storageformat.FileOperationStepPage{Prerequisites: references}); err != nil {
+				return err
+			}
+			references = references[:0]
+		}
+	}
+	if len(references) != 0 {
+		if err := writePage(storageformat.FileOperationStepPage{Prerequisites: references}); err != nil {
+			return err
+		}
+	}
+	for start := 0; start < len(operation.Copies); start += maxOperationPageCopies {
+		end := min(start+maxOperationPageCopies, len(operation.Copies))
+		if err := writePage(storageformat.FileOperationStepPage{Copies: operation.Copies[start:end]}); err != nil {
+			return err
+		}
+	}
+	operation.StepPageCount = pageCount
 	operation.StepDigest = previous
 	operation.Roots = nil
 	operation.Prerequisites = nil

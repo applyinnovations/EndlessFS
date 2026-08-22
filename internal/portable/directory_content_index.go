@@ -554,6 +554,9 @@ func (s *FileStore) buildDirectoryContentIndexStream(
 }
 
 func directoryContentIndexManifestRoot(manifest storageformat.DirectoryManifest) (storageformat.DirectoryContentIndexChild, error) {
+	if manifest.RecursiveFileCount < 0 {
+		return storageformat.DirectoryContentIndexChild{}, domain.NewError(domain.ErrorInvalid, "negative directory recursive file count")
+	}
 	if manifest.RecursiveFileCount == 0 {
 		if manifest.ContentIndexRootID != "" || manifest.ContentIndexRootDigest != "" || len(manifest.ContentSketch) != 0 {
 			return storageformat.DirectoryContentIndexChild{}, domain.NewError(domain.ErrorInvalid, "empty directory has a content index")
@@ -609,7 +612,7 @@ func (s *FileStore) directoryContentIndexRoot(ctx context.Context, scope domain.
 		return storageformat.DirectoryContentIndexChild{}, domain.NewError(domain.ErrorInvalid, "invalid directory content-index root")
 	}
 	derived, err := directoryContentIndexNodeChild(node, storageformat.Digest(object.Body))
-	if err != nil || derived.NodeID != reference.NodeID || derived.NodeDigest != reference.NodeDigest || !slices.Equal(derived.Sketch, reference.Sketch) || derived.EntryCount != uint64(manifest.RecursiveFileCount) {
+	if err != nil || derived.NodeID != reference.NodeID || derived.NodeDigest != reference.NodeDigest || !slices.Equal(derived.Sketch, reference.Sketch) || derived.EntryCount != uint64(manifest.RecursiveFileCount) { // #nosec G115 -- directoryContentIndexManifestRoot rejects negative counts.
 		return storageformat.DirectoryContentIndexChild{}, domain.NewError(domain.ErrorInvalid, "directory content-index root count mismatch")
 	}
 	return derived, nil
@@ -841,6 +844,9 @@ func (s *FileStore) mutateDirectoryContentIndexNode(ctx context.Context, scope d
 }
 
 func (s *FileStore) mutateDirectoryContentIndex(ctx context.Context, update directoryUpdate) (storageformat.DirectoryContentIndexChild, []storageformat.MutationObject, error) {
+	if update.recursiveFileCount < 0 {
+		return storageformat.DirectoryContentIndexChild{}, nil, domain.NewError(domain.ErrorInvalid, "negative directory content-index mutation count")
+	}
 	var root *storageformat.DirectoryContentIndexChild
 	if update.snapshot.manifest.RecursiveFileCount > 0 {
 		reference, err := s.directoryContentIndexRoot(ctx, update.scope, update.directoryID, update.snapshot.manifest)
@@ -899,7 +905,7 @@ func (s *FileStore) mutateDirectoryContentIndex(ctx context.Context, update dire
 		}
 		return storageformat.DirectoryContentIndexChild{}, nil, nil
 	}
-	if root == nil || root.EntryCount != uint64(update.recursiveFileCount) {
+	if root == nil || root.EntryCount != uint64(update.recursiveFileCount) { // #nosec G115 -- negative update counts are rejected above.
 		return storageformat.DirectoryContentIndexChild{}, nil, domain.NewError(domain.ErrorInvalid, "directory content-index mutation count mismatch")
 	}
 	var objects []storageformat.MutationObject

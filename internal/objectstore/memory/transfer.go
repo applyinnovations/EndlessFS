@@ -2,7 +2,7 @@ package memory
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- MD5 models one provider checksum in the non-cryptographic (size, MD5, CRC32C) content fingerprint.
 	"crypto/sha256"
 	"fmt"
 	"hash"
@@ -128,7 +128,8 @@ func (b *Backend) BeginUpload(ctx context.Context, request objectstore.UploadReq
 	session := &uploadSession{
 		id: request.UploadID, key: request.Key, size: request.Size, mediaType: request.MediaType,
 		protocol: protocol, expiresAt: request.ExpiresAt.UTC(), materialized: true,
-		md5: md5.New(), crc32c: crc32.New(crc32.MakeTable(crc32.Castagnoli)), tokenHash: hash,
+		md5:    md5.New(), // #nosec G401 -- local provider metadata only; never authentication or a standalone trust decision.
+		crc32c: crc32.New(crc32.MakeTable(crc32.Castagnoli)), tokenHash: hash,
 	}
 	b.uploads[request.UploadID] = session
 	b.uploadTokens[hash] = request.UploadID

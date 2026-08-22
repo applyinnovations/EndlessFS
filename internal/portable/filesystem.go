@@ -1111,11 +1111,11 @@ func applyDirectoryContentContribution(accumulator *[directoryContentAccumulator
 			} else {
 				carry = 0
 			}
-			accumulator[position] = byte(value)
+			accumulator[position] = byte(value) // #nosec G115 -- borrow normalization bounds value to [0, 255].
 			continue
 		}
 		value := int(accumulator[position]) + int(contribution[index]) + carry
-		accumulator[position] = byte(value)
+		accumulator[position] = byte(value) // #nosec G115 -- truncation is the intended modulo-256 accumulator arithmetic.
 		carry = value >> 8
 	}
 }

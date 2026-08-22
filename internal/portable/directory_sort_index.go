@@ -24,7 +24,7 @@ func directorySortKey(field domain.SortField, entry storageformat.DirectoryEntry
 	case domain.SortModified:
 		primary = entry.ModifiedAt.UTC().Format("20060102T150405.000000000Z")
 	case domain.SortSize:
-		primary = fmt.Sprintf("%016x", uint64(entry.Size))
+		primary = fmt.Sprintf("%016x", uint64(entry.Size)) // #nosec G115 -- validateDirectoryIndexEntry rejects negative sizes above.
 	default:
 		return "", domain.NewError(domain.ErrorInvalid, "invalid directory secondary sort")
 	}
@@ -153,6 +153,9 @@ func (s *FileStore) buildDirectorySortIndexes(scope domain.Scope, directoryID st
 }
 
 func validateDirectorySortIndexRoots(roots []storageformat.DirectorySortIndexRoot, entryCount int) error {
+	if entryCount < 0 {
+		return domain.NewError(domain.ErrorInvalid, "negative directory entry count")
+	}
 	if entryCount == 0 {
 		if len(roots) != 0 {
 			return domain.NewError(domain.ErrorInvalid, "empty directory has secondary sort indexes")
@@ -226,7 +229,7 @@ func (s *FileStore) directorySortIndexRoot(ctx context.Context, scope domain.Sco
 		return storageformat.DirectorySortIndexChild{}, domain.NewError(domain.ErrorInvalid, "invalid directory sort-index root")
 	}
 	reference, err = directorySortIndexNodeChild(node, root.NodeDigest)
-	if err != nil || reference.EntryCount != uint64(manifest.EntryCount) || validateDirectorySortIndexNode(directoryID, field, node) != nil {
+	if err != nil || reference.EntryCount != uint64(manifest.EntryCount) || validateDirectorySortIndexNode(directoryID, field, node) != nil { // #nosec G115 -- directorySortIndexManifestRoot rejects negative entry counts.
 		return storageformat.DirectorySortIndexChild{}, domain.NewError(domain.ErrorInvalid, "directory sort-index root count mismatch")
 	}
 	return reference, nil
@@ -403,6 +406,9 @@ func (s *FileStore) mutateDirectorySortIndexNode(ctx context.Context, scope doma
 }
 
 func (s *FileStore) mutateDirectorySortIndexes(ctx context.Context, scope domain.Scope, directoryID string, manifest storageformat.DirectoryManifest, changes map[string]directoryEntryMutation, expectedCount int) ([]storageformat.DirectorySortIndexRoot, []storageformat.MutationObject, error) {
+	if expectedCount < 0 {
+		return nil, nil, domain.NewError(domain.ErrorInvalid, "negative directory sort-index mutation count")
+	}
 	if expectedCount == 0 && manifest.EntryCount == 0 {
 		return nil, nil, nil
 	}
@@ -470,7 +476,7 @@ func (s *FileStore) mutateDirectorySortIndexes(ctx context.Context, scope domain
 			}
 			continue
 		}
-		if root == nil || root.EntryCount != uint64(expectedCount) {
+		if root == nil || root.EntryCount != uint64(expectedCount) { // #nosec G115 -- expectedCount is rejected when negative above.
 			return nil, nil, domain.NewError(domain.ErrorInvalid, "directory sort-index mutation count mismatch")
 		}
 		roots = append(roots, storageformat.DirectorySortIndexRoot{Sort: field, NodeID: root.NodeID, NodeDigest: root.NodeDigest})

@@ -3,7 +3,7 @@
 package integrity
 
 import (
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- MD5 is one provider checksum in the non-cryptographic (size, MD5, CRC32C) content fingerprint.
 	"encoding/base64"
 	"encoding/binary"
 	"hash/crc32"
@@ -27,7 +27,7 @@ func EncodeCRC32C(value uint32) string {
 // MD5 is used by deterministic local backends and tests. Production file
 // fingerprints come from provider metadata and never from service-side reads.
 func MD5(data []byte) string {
-	digest := md5.Sum(data)
+	digest := md5.Sum(data) // #nosec G401 -- deterministic test/local-provider metadata; never authentication or a standalone trust decision.
 	return EncodeMD5(digest[:])
 }
 

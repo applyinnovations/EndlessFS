@@ -237,3 +237,30 @@ func TestDirectoryContentAccumulatorMatchesFullRebuildAcrossSmallChanges(t *test
 		t.Fatalf("restored directory identity = (%q,%q); want (%q,%q)", restoredAccumulator, restoredDigest, accumulator, digest)
 	}
 }
+
+func TestDirectoryIndexNegativeCountsFailClosedBeforeUnsignedComparison(t *testing.T) {
+	tests := map[string]func() error{
+		"sort roots": func() error {
+			return validateDirectorySortIndexRoots(nil, -1)
+		},
+		"content root": func() error {
+			_, err := directoryContentIndexManifestRoot(storageformat.DirectoryManifest{RecursiveFileCount: -1})
+			return err
+		},
+		"sort mutation": func() error {
+			_, _, err := (&FileStore{}).mutateDirectorySortIndexes(context.Background(), domain.Scope{}, "directory", storageformat.DirectoryManifest{}, nil, -1)
+			return err
+		},
+		"content mutation": func() error {
+			_, _, err := (&FileStore{}).mutateDirectoryContentIndex(context.Background(), directoryUpdate{recursiveFileCount: -1})
+			return err
+		},
+	}
+	for name, run := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := run(); !errors.Is(err, domain.ErrInvalid) {
+				t.Fatalf("error = %v; want invalid", err)
+			}
+		})
+	}
+}

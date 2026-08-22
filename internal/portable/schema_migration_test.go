@@ -112,9 +112,30 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 		producer: "v0.1.15", commit: "f11fe68b2d731e8fd0228352a0b85255d7574abf",
 		wantEpoch: 2, wantSize: 18, wantFiles: 3,
 	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-005",
+		profile:  "portable-minimal",
+		file:     "schema-005-v0.1.16-portable-minimal.json", digest: "85dcd881f46b76eb271b96f40554fcb950ca91fdf3823ef7ead9430064677790",
+		producer: "v0.1.16", commit: "97e70a84b12de0533b8a7cf4add62ecbf575a0fd",
+		wantEpoch: 1, wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-005",
+		profile:  "application-preview-disabled",
+		file:     "schema-005-v0.1.16-application-disabled.json", digest: "566649014e80894f83f01b356f02982913556eae012697e8444cf02de9ad52a5",
+		producer: "v0.1.16", commit: "97e70a84b12de0533b8a7cf4add62ecbf575a0fd",
+		wantEpoch: 1, wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-005",
+		profile:  "application-preview-gcs",
+		file:     "schema-005-v0.1.16-application-gcs.json", digest: "2ed73a6e3d68fe26b1c11f79c6f41e2aee65a7a6bcbdbf3f1542cd2771129f85",
+		producer: "v0.1.16", commit: "97e70a84b12de0533b8a7cf4add62ecbf575a0fd",
+		wantEpoch: 1, wantSize: 18, wantFiles: 3,
+	},
 }
 
-var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.1.15"}
+var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.1.15", "v0.1.16"}
 
 func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *testing.T) {
 	history := portable.StorageSchemaHistory()

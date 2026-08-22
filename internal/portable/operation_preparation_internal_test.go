@@ -3,8 +3,12 @@ package portable
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
@@ -64,5 +68,58 @@ func TestOperationPreparationRunsMergeWithBoundedMemoryAndIdempotentReplay(t *te
 	}
 	if replayGeneration, err := store.mergeOperationPreparationRuns(ctx, operation, 0, runCount); err != nil || replayGeneration != generation {
 		t.Fatalf("replayed merge = generation %d, error %v; want %d", replayGeneration, err, generation)
+	}
+}
+
+func TestPreparingFileOperationSealsBoundedRunsBeforeVisibility(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2047, 1, 2, 3, 4, 5, 0, time.UTC))
+	engine := &Engine{backend: backend, clock: clock, leaseTTL: time.Minute}
+	store := &FileStore{engine: engine}
+	operation := storageformat.FileOperation{
+		SchemaVersion: 2, OperationID: "preparation-seal", UserID: "WVhXWVhXWVhXWVhXWVhXWQ", Kind: operationMove,
+		State: storageformat.FileOperationPreparing, Attempt: 1, Fence: 1, ReplicaAttemptID: "attempt-one",
+		ExpiresAt: clock.Now().Add(time.Minute), StartedAt: clock.Now(), UpdatedAt: clock.Now(),
+		Preparation: &storageformat.FileOperationPreparation{SchemaVersion: 1, RunSetID: "stable-seal-set", Phase: "seal"},
+	}
+	collector, err := newOperationPreparationRunCollector(store, operation, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := objectstore.MustKey("endlessfs/v1/test/prepared-root")
+	root := storageformat.FileOperationRoot{Key: target.String(), PendingBody: []byte("pending"), FinalBody: []byte("final")}
+	if err := collector.Add(ctx, storageformat.FileOperationPreparationItem{SortKey: "root\x00" + root.Key, Kind: storageformat.FileOperationPreparationRoot, Root: &root}); err != nil {
+		t.Fatal(err)
+	}
+	operation.Preparation.RunCount, err = collector.Close(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := storageformat.OperationKey(operation.UserID, operation.OperationID)
+	body, err := storageformat.EncodeEnvelope(fileOperationSchema, key, 1, operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.executeFileOperation(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	userID, parseErr := domain.ParseUserID(operation.UserID)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	stored, err := store.readFileOperation(ctx, userID, operation.OperationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != storageformat.FileOperationSucceeded || stored.Preparation != nil || stored.StepPageCount != 1 {
+		t.Fatalf("sealed operation = state:%q preparation:%+v pages:%d", stored.State, stored.Preparation, stored.StepPageCount)
+	}
+	object, err := backend.Get(ctx, target)
+	if err != nil || strings.Compare(string(object.Body), "final") != 0 {
+		t.Fatalf("prepared root = %q, %v; want final", object.Body, err)
 	}
 }

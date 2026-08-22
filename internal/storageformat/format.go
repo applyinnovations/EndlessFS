@@ -493,6 +493,9 @@ type FileOperation struct {
 type FileOperationPreparation struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	RunSetID      string `json:"runSetID"`
+	Phase         string `json:"phase"`
+	Generation    uint64 `json:"generation"`
+	RunCount      uint64 `json:"runCount"`
 }
 
 type FileOperationPreparationItemKind string

@@ -27,9 +27,10 @@ const (
 	operationDelete          = "delete"
 	operationCreateDirectory = "create-directory"
 
-	StepOperationAfterPrepared  = "operation:after-prepared"
-	StepOperationAfterCommitted = "operation:after-committed"
-	StepOperationAfterFinalized = "operation:after-finalized"
+	StepOperationAfterPrepared          = "operation:after-prepared"
+	StepOperationAfterPreparationSealed = "operation:after-preparation-sealed"
+	StepOperationAfterCommitted         = "operation:after-committed"
+	StepOperationAfterFinalized         = "operation:after-finalized"
 
 	StepUploadCompletionAfterPrepared  = "upload-completion:after-prepared"
 	StepUploadCompletionAfterCommitted = "upload-completion:after-committed"
@@ -909,6 +910,15 @@ func (s *FileStore) executeFileOperation(ctx context.Context, key objectstore.Ke
 	if operation.State == storageformat.FileOperationSucceeded || operation.State == storageformat.FileOperationFailed {
 		return nil
 	}
+	if operation.State == storageformat.FileOperationPreparing {
+		if err := s.sealFileOperationPreparation(ctx, object, envelope, operation); err != nil {
+			return err
+		}
+		if err := s.engine.step(ctx, StepOperationAfterPreparationSealed); err != nil {
+			return err
+		}
+		return s.executeFileOperation(ctx, key)
+	}
 	if operation.State == storageformat.FileOperationRunning {
 		ownedFence := operation.Fence
 		ownedAttempt := operation.ReplicaAttemptID
@@ -1030,7 +1040,7 @@ func (s *FileStore) recoverFileOperation(ctx context.Context, key objectstore.Ke
 		return nil
 	case storageformat.FileOperationCommitted:
 		return s.executeFileOperation(ctx, key)
-	case storageformat.FileOperationRunning:
+	case storageformat.FileOperationPreparing, storageformat.FileOperationRunning:
 		if !expired(s.engine.clock.Now(), operation.ExpiresAt) {
 			return domain.NewError(domain.ErrorUnavailable, "file operation owner is still active")
 		}
@@ -1190,9 +1200,11 @@ func (s *FileStore) readFileOperationObject(ctx context.Context, key objectstore
 	if err := storageformat.DecodeEnvelope(object.Body, key, fileOperationSchema, &envelope, &operation); err != nil {
 		return objectstore.Object{}, storageformat.Envelope{}, storageformat.FileOperation{}, err
 	}
-	legacySteps := operation.StepSetID == "" && operation.StepPageCount == 0 && operation.StepDigest == "" && len(operation.Roots) != 0
-	pagedSteps := operation.StepSetID != "" && operation.StepPageCount != 0 && operation.StepDigest != "" && len(operation.Roots) == 0 && len(operation.Prerequisites) == 0 && len(operation.Copies) == 0
-	if operation.SchemaVersion != 1 || operation.OperationID == "" || operation.UserID == "" || operation.Fence == 0 || operation.Attempt == 0 || operation.StartedAt.IsZero() || operation.UpdatedAt.IsZero() || operation.ExpiresAt.IsZero() || !legacySteps && !pagedSteps {
+	legacySteps := operation.SchemaVersion == 1 && operation.Preparation == nil && operation.StepSetID == "" && operation.StepPageCount == 0 && operation.StepDigest == "" && len(operation.Roots) != 0
+	pagedSteps := operation.Preparation == nil && operation.StepSetID != "" && operation.StepPageCount != 0 && operation.StepDigest != "" && len(operation.Roots) == 0 && len(operation.Prerequisites) == 0 && len(operation.Copies) == 0
+	preparing := operation.SchemaVersion == 2 && operation.State == storageformat.FileOperationPreparing && operation.Preparation != nil && operation.Preparation.SchemaVersion == 1 && operation.Preparation.RunSetID != "" && operation.Preparation.Phase == "seal" && operation.Preparation.RunCount != 0 && operation.StepSetID == "" && operation.StepPageCount == 0 && operation.StepDigest == "" && len(operation.Roots) == 0 && len(operation.Prerequisites) == 0 && len(operation.Copies) == 0
+	validState := operation.State == storageformat.FileOperationPreparing || operation.State == storageformat.FileOperationRunning || operation.State == storageformat.FileOperationCommitted || operation.State == storageformat.FileOperationSucceeded || operation.State == storageformat.FileOperationFailed
+	if operation.SchemaVersion != 1 && operation.SchemaVersion != 2 || operation.OperationID == "" || operation.UserID == "" || operation.Fence == 0 || operation.Attempt == 0 || operation.StartedAt.IsZero() || operation.UpdatedAt.IsZero() || operation.ExpiresAt.IsZero() || !validState || !legacySteps && !pagedSteps && !preparing {
 		return objectstore.Object{}, storageformat.Envelope{}, storageformat.FileOperation{}, domain.NewError(domain.ErrorInvalid, "invalid file operation")
 	}
 	return object, envelope, operation, nil

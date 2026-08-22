@@ -3,9 +3,11 @@ package portable
 import (
 	"container/heap"
 	"context"
+	"errors"
 	"sort"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
@@ -303,4 +305,144 @@ func (s *FileStore) forEachOperationPreparationRunItem(ctx context.Context, oper
 			return err
 		}
 	}
+}
+
+func (s *FileStore) sealFileOperationPreparation(ctx context.Context, object objectstore.Object, envelope storageformat.Envelope, operation storageformat.FileOperation) error {
+	if operation.SchemaVersion != 2 || operation.State != storageformat.FileOperationPreparing || operation.Preparation == nil || operation.Preparation.Phase != "seal" || operation.Preparation.RunCount == 0 {
+		return domain.NewError(domain.ErrorInvalid, "invalid file operation preparation seal")
+	}
+	generation, err := s.mergeOperationPreparationRuns(ctx, operation, operation.Preparation.Generation, operation.Preparation.RunCount)
+	if err != nil {
+		return err
+	}
+	operation.Preparation.Generation = generation
+	operation.Preparation.RunCount = 1
+	if err := s.persistPreparedFileOperationSteps(ctx, &operation); err != nil {
+		return err
+	}
+	operation.State = storageformat.FileOperationRunning
+	operation.Preparation = nil
+	operation.UpdatedAt = s.engine.clock.Now().UTC()
+	body, err := storageformat.EncodeEnvelope(fileOperationSchema, object.Key, envelope.Revision+1, operation)
+	if err != nil {
+		return err
+	}
+	if _, err := s.engine.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
+		if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrNotFound) {
+			return domain.NewError(domain.ErrorUnavailable, "file operation preparation ownership changed")
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *FileStore) persistPreparedFileOperationSteps(ctx context.Context, operation *storageformat.FileOperation) error {
+	if operation == nil || operation.Preparation == nil || operation.Preparation.RunCount != 1 || operation.StepSetID != "" || operation.StepPageCount != 0 || operation.StepDigest != "" {
+		return domain.NewError(domain.ErrorInvalid, "invalid prepared operation step input")
+	}
+	operation.StepSetID = operation.Preparation.RunSetID
+	operation.StepsStaged = true
+	previous := ""
+	pageCount := uint64(0)
+	writePage := func(page storageformat.FileOperationStepPage) error {
+		page.SchemaVersion = 1
+		page.UserID = operation.UserID
+		page.OperationID = operation.OperationID
+		page.StepSetID = operation.StepSetID
+		page.Index = pageCount
+		page.PreviousDigest = previous
+		key := stagedFileOperationStepPageKey(*operation, pageCount)
+		body, err := storageformat.EncodeEnvelope(fileOperationStepPageSchema, key, 1, page)
+		if err != nil {
+			return domain.WrapError(domain.ErrorInvalid, "prepared operation step page exceeds the bounded record limit", err)
+		}
+		if err := s.ensureImmutableOperationObject(ctx, key, body); err != nil {
+			return err
+		}
+		previous = storageformat.Digest(body)
+		pageCount++
+		return nil
+	}
+	var roots []storageformat.FileOperationRoot
+	var prerequisites []storageformat.MutationObjectReference
+	var copies []storageformat.MutationCopy
+	rootCount := uint64(0)
+	lastRoot, lastPrerequisite, lastCopy := "", "", ""
+	flushRoots := func() error {
+		if len(roots) == 0 {
+			return nil
+		}
+		err := writePage(storageformat.FileOperationStepPage{Roots: roots})
+		roots = roots[:0]
+		return err
+	}
+	flushPrerequisites := func() error {
+		if len(prerequisites) == 0 {
+			return nil
+		}
+		err := writePage(storageformat.FileOperationStepPage{Prerequisites: prerequisites})
+		prerequisites = prerequisites[:0]
+		return err
+	}
+	flushCopies := func() error {
+		if len(copies) == 0 {
+			return nil
+		}
+		err := writePage(storageformat.FileOperationStepPage{Copies: copies})
+		copies = copies[:0]
+		return err
+	}
+	err := s.forEachOperationPreparationRunItem(ctx, *operation, operation.Preparation.Generation, 0, func(item storageformat.FileOperationPreparationItem) error {
+		switch item.Kind {
+		case storageformat.FileOperationPreparationRoot:
+			if item.Root.Key == "" || item.Root.Key <= lastRoot {
+				return domain.NewError(domain.ErrorInvalid, "prepared operation roots are not uniquely ordered")
+			}
+			lastRoot = item.Root.Key
+			roots = append(roots, *item.Root)
+			rootCount++
+			if len(roots) == maxOperationPageRoots {
+				return flushRoots()
+			}
+		case storageformat.FileOperationPreparationPrerequisite:
+			if item.Prerequisite.Key == "" || item.Prerequisite.BodyDigest == "" || item.Prerequisite.Key <= lastPrerequisite {
+				return domain.NewError(domain.ErrorInvalid, "prepared operation prerequisites are not uniquely ordered")
+			}
+			lastPrerequisite = item.Prerequisite.Key
+			prerequisites = append(prerequisites, *item.Prerequisite)
+			if len(prerequisites) == maxOperationPagePrerequisites {
+				return flushPrerequisites()
+			}
+		case storageformat.FileOperationPreparationCopy:
+			if item.Copy.DestinationKey == "" || item.Copy.DestinationKey <= lastCopy {
+				return domain.NewError(domain.ErrorInvalid, "prepared operation copies are not uniquely ordered")
+			}
+			lastCopy = item.Copy.DestinationKey
+			copies = append(copies, *item.Copy)
+			if len(copies) == maxOperationPageCopies {
+				return flushCopies()
+			}
+		default:
+			return domain.NewError(domain.ErrorInvalid, "unreduced operation preparation item")
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if err := flushRoots(); err != nil {
+		return err
+	}
+	if err := flushPrerequisites(); err != nil {
+		return err
+	}
+	if err := flushCopies(); err != nil {
+		return err
+	}
+	if rootCount == 0 || pageCount == 0 {
+		return domain.NewError(domain.ErrorInvalid, "prepared file operation has no visibility roots")
+	}
+	operation.StepPageCount = pageCount
+	operation.StepDigest = previous
+	return nil
 }

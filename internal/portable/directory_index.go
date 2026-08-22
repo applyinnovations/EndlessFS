@@ -155,6 +155,108 @@ func (s *FileStore) buildDirectoryIndex(scope domain.Scope, directoryID string, 
 	return refs[0], objects, nil
 }
 
+// buildDirectoryIndexStream bulk-builds the name index from an already
+// name-sorted source while retaining only one leaf and one bounded child
+// buffer per level.
+func (s *FileStore) buildDirectoryIndexStream(
+	scope domain.Scope,
+	directoryID string,
+	next func() (storageformat.DirectoryEntry, bool, error),
+	emit func(storageformat.MutationObject) error,
+) (storageformat.DirectoryIndexChild, error) {
+	if !scope.Valid() || directoryID == "" || next == nil || emit == nil {
+		return storageformat.DirectoryIndexChild{}, domain.NewError(domain.ErrorInvalid, "invalid streaming directory index builder")
+	}
+	levels := make([][]storageformat.DirectoryIndexChild, 1)
+	var addChild func(int, storageformat.DirectoryIndexChild) error
+	addChild = func(level int, child storageformat.DirectoryIndexChild) error {
+		for len(levels) <= level {
+			levels = append(levels, nil)
+		}
+		levels[level] = append(levels[level], child)
+		if len(levels[level]) < maxDirectoryIndexItems {
+			return nil
+		}
+		children := append([]storageformat.DirectoryIndexChild(nil), levels[level]...)
+		levels[level] = levels[level][:0]
+		parent, object, err := s.makeDirectoryIndexNode(scope, directoryID, false, nil, children)
+		if err != nil {
+			return err
+		}
+		if err := emit(object); err != nil {
+			return err
+		}
+		return addChild(level+1, parent)
+	}
+	emitLeaf := func(entries []storageformat.DirectoryEntry) error {
+		leaf, object, err := s.makeDirectoryIndexNode(scope, directoryID, true, append([]storageformat.DirectoryEntry(nil), entries...), nil)
+		if err != nil {
+			return err
+		}
+		if err := emit(object); err != nil {
+			return err
+		}
+		return addChild(0, leaf)
+	}
+	leaf := make([]storageformat.DirectoryEntry, 0, maxDirectoryIndexItems)
+	previous := ""
+	for {
+		entry, ok, err := next()
+		if err != nil {
+			return storageformat.DirectoryIndexChild{}, err
+		}
+		if !ok {
+			break
+		}
+		if err := validateDirectoryIndexEntry(entry); err != nil || previous != "" && entry.Name <= previous {
+			return storageformat.DirectoryIndexChild{}, domain.NewError(domain.ErrorInvalid, "streaming directory index is not uniquely name-sorted")
+		}
+		previous = entry.Name
+		leaf = append(leaf, entry)
+		if len(leaf) == maxDirectoryIndexItems {
+			if err := emitLeaf(leaf); err != nil {
+				return storageformat.DirectoryIndexChild{}, err
+			}
+			leaf = leaf[:0]
+		}
+	}
+	if len(leaf) != 0 {
+		if err := emitLeaf(leaf); err != nil {
+			return storageformat.DirectoryIndexChild{}, err
+		}
+	}
+	if previous == "" {
+		return storageformat.DirectoryIndexChild{}, nil
+	}
+	for {
+		lowest, highest := -1, -1
+		for level, children := range levels {
+			if len(children) == 0 {
+				continue
+			}
+			if lowest == -1 {
+				lowest = level
+			}
+			highest = level
+		}
+		if lowest == highest && len(levels[lowest]) == 1 {
+			return levels[lowest][0], nil
+		}
+		children := append([]storageformat.DirectoryIndexChild(nil), levels[lowest]...)
+		levels[lowest] = levels[lowest][:0]
+		parent, object, err := s.makeDirectoryIndexNode(scope, directoryID, false, nil, children)
+		if err != nil {
+			return storageformat.DirectoryIndexChild{}, err
+		}
+		if err := emit(object); err != nil {
+			return storageformat.DirectoryIndexChild{}, err
+		}
+		if err := addChild(lowest+1, parent); err != nil {
+			return storageformat.DirectoryIndexChild{}, err
+		}
+	}
+}
+
 func (s *FileStore) readDirectoryIndexNode(ctx context.Context, scope domain.Scope, directoryID string, reference storageformat.DirectoryIndexChild) (storageformat.DirectoryIndexNode, error) {
 	if err := validateDirectoryIndexChild(reference); err != nil {
 		return storageformat.DirectoryIndexNode{}, err

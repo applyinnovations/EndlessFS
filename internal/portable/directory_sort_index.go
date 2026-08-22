@@ -152,6 +152,109 @@ func (s *FileStore) buildDirectorySortIndexes(scope domain.Scope, directoryID st
 	return roots, objects, nil
 }
 
+// buildDirectorySortIndexStream bulk-builds one secondary index from entries
+// already ordered by that index's complete sort key.
+func (s *FileStore) buildDirectorySortIndexStream(
+	scope domain.Scope,
+	directoryID string,
+	field domain.SortField,
+	next func() (storageformat.DirectoryEntry, bool, error),
+	emit func(storageformat.MutationObject) error,
+) (storageformat.DirectorySortIndexChild, error) {
+	if !scope.Valid() || directoryID == "" || next == nil || emit == nil || field == domain.SortName {
+		return storageformat.DirectorySortIndexChild{}, domain.NewError(domain.ErrorInvalid, "invalid streaming directory sort-index builder")
+	}
+	levels := make([][]storageformat.DirectorySortIndexChild, 1)
+	var addChild func(int, storageformat.DirectorySortIndexChild) error
+	addChild = func(level int, child storageformat.DirectorySortIndexChild) error {
+		for len(levels) <= level {
+			levels = append(levels, nil)
+		}
+		levels[level] = append(levels[level], child)
+		if len(levels[level]) < maxDirectoryIndexItems {
+			return nil
+		}
+		children := append([]storageformat.DirectorySortIndexChild(nil), levels[level]...)
+		levels[level] = levels[level][:0]
+		parent, object, _, err := s.makeDirectorySortIndexNode(scope, directoryID, field, false, nil, children)
+		if err != nil {
+			return err
+		}
+		if err := emit(object); err != nil {
+			return err
+		}
+		return addChild(level+1, parent)
+	}
+	emitLeaf := func(entries []storageformat.DirectorySortIndexEntry) error {
+		leaf, object, _, err := s.makeDirectorySortIndexNode(scope, directoryID, field, true, append([]storageformat.DirectorySortIndexEntry(nil), entries...), nil)
+		if err != nil {
+			return err
+		}
+		if err := emit(object); err != nil {
+			return err
+		}
+		return addChild(0, leaf)
+	}
+	leaf := make([]storageformat.DirectorySortIndexEntry, 0, maxDirectoryIndexItems)
+	previous := ""
+	for {
+		entry, ok, err := next()
+		if err != nil {
+			return storageformat.DirectorySortIndexChild{}, err
+		}
+		if !ok {
+			break
+		}
+		key, err := directorySortKey(field, entry)
+		if err != nil || previous != "" && key <= previous {
+			return storageformat.DirectorySortIndexChild{}, domain.NewError(domain.ErrorInvalid, "streaming directory sort index is not uniquely ordered")
+		}
+		previous = key
+		leaf = append(leaf, storageformat.DirectorySortIndexEntry{SortKey: key, Entry: entry})
+		if len(leaf) == maxDirectoryIndexItems {
+			if err := emitLeaf(leaf); err != nil {
+				return storageformat.DirectorySortIndexChild{}, err
+			}
+			leaf = leaf[:0]
+		}
+	}
+	if len(leaf) != 0 {
+		if err := emitLeaf(leaf); err != nil {
+			return storageformat.DirectorySortIndexChild{}, err
+		}
+	}
+	if previous == "" {
+		return storageformat.DirectorySortIndexChild{}, nil
+	}
+	for {
+		lowest, highest := -1, -1
+		for level, children := range levels {
+			if len(children) == 0 {
+				continue
+			}
+			if lowest == -1 {
+				lowest = level
+			}
+			highest = level
+		}
+		if lowest == highest && len(levels[lowest]) == 1 {
+			return levels[lowest][0], nil
+		}
+		children := append([]storageformat.DirectorySortIndexChild(nil), levels[lowest]...)
+		levels[lowest] = levels[lowest][:0]
+		parent, object, _, err := s.makeDirectorySortIndexNode(scope, directoryID, field, false, nil, children)
+		if err != nil {
+			return storageformat.DirectorySortIndexChild{}, err
+		}
+		if err := emit(object); err != nil {
+			return storageformat.DirectorySortIndexChild{}, err
+		}
+		if err := addChild(lowest+1, parent); err != nil {
+			return storageformat.DirectorySortIndexChild{}, err
+		}
+	}
+}
+
 func validateDirectorySortIndexRoots(roots []storageformat.DirectorySortIndexRoot, entryCount int) error {
 	if entryCount < 0 {
 		return domain.NewError(domain.ErrorInvalid, "negative directory entry count")

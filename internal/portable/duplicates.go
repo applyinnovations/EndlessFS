@@ -390,7 +390,7 @@ func (s *FileStore) prepareSimilarityPostingRootChange(ctx context.Context, user
 			return storageformat.FileOperationRoot{}, err
 		}
 		if root.SchemaVersion != 1 || root.UserID != userID.String() || root.Pending != nil {
-			return storageformat.FileOperationRoot{}, domain.NewError(domain.ErrorUnavailable, "duplicate similarity posting is changing concurrently")
+			return storageformat.FileOperationRoot{}, domain.NewError(domain.ErrorPreconditionFailed, "duplicate similarity posting is changing concurrently")
 		}
 		current, revision, expected = root.Current, envelope.Revision, envelope.LogicalVersion
 	} else if !errors.Is(err, domain.ErrNotFound) {
@@ -434,7 +434,7 @@ func (s *FileStore) prepareOccurrenceRootChange(ctx context.Context, userID doma
 			return catalogRootChange{}, decodeErr
 		}
 		if root.SchemaVersion != 1 || root.UserID != userID.String() || root.Pending != nil {
-			return catalogRootChange{}, domain.NewError(domain.ErrorUnavailable, "duplicate occurrence is changing concurrently")
+			return catalogRootChange{}, domain.NewError(domain.ErrorPreconditionFailed, "duplicate occurrence is changing concurrently")
 		}
 		physicalCurrent = root.Current
 		revision = envelope.Revision
@@ -485,7 +485,7 @@ func (s *FileStore) prepareSummaryRootChange(ctx context.Context, userID domain.
 			return catalogRootChange{}, decodeErr
 		}
 		if root.SchemaVersion != 1 || root.UserID != userID.String() || root.Pending != nil {
-			return catalogRootChange{}, domain.NewError(domain.ErrorUnavailable, "duplicate summary is changing concurrently")
+			return catalogRootChange{}, domain.NewError(domain.ErrorPreconditionFailed, "duplicate summary is changing concurrently")
 		}
 		pre = root.Current
 		revision = envelope.Revision

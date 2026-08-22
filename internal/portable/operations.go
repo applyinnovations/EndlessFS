@@ -28,6 +28,8 @@ const (
 	operationCreateDirectory = "create-directory"
 
 	StepOperationAfterPrepared          = "operation:after-prepared"
+	StepOperationAfterHeader            = "operation:after-header"
+	StepOperationAfterPreparationRun    = "operation:after-preparation-run"
 	StepOperationAfterPreparationSealed = "operation:after-preparation-sealed"
 	StepOperationAfterCommitted         = "operation:after-committed"
 	StepOperationAfterFinalized         = "operation:after-finalized"
@@ -140,50 +142,6 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 		return domain.Operation{}, err
 	}
 
-	preparation := treePreparation{entry: sourceEntry}
-	if !move || from.Area() != to.Area() {
-		preparation, err = s.cloneTree(ctx, from, to, sourceEntry, !move)
-		if err != nil {
-			return domain.Operation{}, err
-		}
-	}
-	preparation.entry.Name = resolved.Name()
-	preparation.entry.NameDigest = storageformat.NameDigest(resolved.Name())
-	if !move || preparation.entry.Kind == domain.EntryDirectory {
-		preparation.entry.ModifiedAt = s.engine.clock.Now().UTC()
-	}
-	preparation.entry.LogicalVersion, err = directoryEntryVersion(preparation.entry)
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	var sourceOccurrences []relativeCatalogEntry
-	if move && from.Area() == to.Area() {
-		sourceOccurrences, err = s.collectCatalogTree(ctx, from, sourceEntry)
-		if err != nil {
-			return domain.Operation{}, err
-		}
-		preparation.occurrences = append([]relativeCatalogEntry(nil), sourceOccurrences...)
-		preparation.occurrences[0].entry = preparation.entry
-	} else if len(preparation.occurrences) != 0 {
-		preparation.occurrences[0].entry = preparation.entry
-	}
-	if move && len(sourceOccurrences) == 0 {
-		sourceOccurrences, err = s.collectCatalogTree(ctx, from, sourceEntry)
-		if err != nil {
-			return domain.Operation{}, err
-		}
-	}
-	destinationOccurrences := []relativeCatalogEntry(nil)
-	if destinationExisting != nil {
-		destinationOccurrences, err = s.collectCatalogTree(ctx, to, *destinationExisting)
-		if err != nil {
-			return domain.Operation{}, err
-		}
-	}
-	sourceContent := relativeDirectoryContentFiles(sourceOccurrences)
-	destinationContent := relativeDirectoryContentFiles(destinationOccurrences)
-	preparedContent := relativeDirectoryContentFiles(preparation.occurrences)
-
 	operationID, err := s.engine.ids.OpaqueID()
 	if err != nil {
 		return domain.Operation{}, err
@@ -192,91 +150,30 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 	if err != nil {
 		return domain.Operation{}, err
 	}
-	rootUpdates := make(map[string]directoryUpdate)
-	sourceRootKey := storageformat.DirectoryRootKey(from.UserID().String(), areaName(from.Area()), sourceParentID).String()
-	destinationRootKey := storageformat.DirectoryRootKey(to.UserID().String(), areaName(to.Area()), destinationParentID).String()
-	if sourceRootKey == destinationRootKey {
-		if move {
-			if err := applyDirectoryEntryChangeWithContent(rootUpdates, sourceTrail, &sourceEntry, nil, sourceContent, nil); err != nil {
-				return domain.Operation{}, err
-			}
-		}
-		if destinationExisting != nil && (!move || destinationExisting.Name != sourceEntry.Name) {
-			if err := applyDirectoryEntryChangeWithContent(rootUpdates, destinationTrail, destinationExisting, nil, destinationContent, nil); err != nil {
-				return domain.Operation{}, err
-			}
-		}
-		if err := applyDirectoryEntryChangeWithContent(rootUpdates, sourceTrail, nil, &preparation.entry, nil, preparedContent); err != nil {
-			return domain.Operation{}, err
-		}
-	} else {
-		if move {
-			if err := applyDirectoryEntryChangeWithContent(rootUpdates, sourceTrail, &sourceEntry, nil, sourceContent, nil); err != nil {
-				return domain.Operation{}, err
-			}
-		}
-		if destinationExisting != nil {
-			if err := applyDirectoryEntryChangeWithContent(rootUpdates, destinationTrail, destinationExisting, nil, destinationContent, nil); err != nil {
-				return domain.Operation{}, err
-			}
-		}
-		if err := applyDirectoryEntryChangeWithContent(rootUpdates, destinationTrail, nil, &preparation.entry, nil, preparedContent); err != nil {
-			return domain.Operation{}, err
-		}
-	}
-
-	catalogChanges := make([]catalogChange, 0, len(sourceOccurrences)+len(destinationOccurrences)+len(preparation.occurrences))
-	appendTree := func(scope domain.Scope, base domain.UserPath, entries []relativeCatalogEntry, remove bool) error {
-		for _, item := range entries {
-			path := base
-			var joinErr error
-			for _, segment := range item.segments {
-				path, joinErr = path.Join(segment)
-				if joinErr != nil {
-					return joinErr
-				}
-			}
-			occurrence, occurrenceErr := catalogOccurrence(scope, path, item.entry)
-			if occurrenceErr != nil {
-				return occurrenceErr
-			}
-			change := catalogChange{}
-			if item.entry.Kind == domain.EntryDirectory && item.entry.FileCount > 0 {
-				postings, postingErr := duplicateSimilarityPostings(scope, path, item.entry.DirectoryID, item.contentSketch)
-				if postingErr != nil {
-					return postingErr
-				}
-				if remove {
-					change.similarityPre = postings
-				} else {
-					change.similarityPost = postings
-				}
-			}
-			if remove {
-				change.pre = &occurrence
-			} else {
-				change.post = &occurrence
-			}
-			catalogChanges = append(catalogChanges, change)
-		}
-		return nil
-	}
-	if err := appendTree(from, request.Source, sourceOccurrences, true); err != nil {
-		return domain.Operation{}, err
-	}
-	if destinationExisting != nil {
-		if err := appendTree(to, resolved, destinationOccurrences, true); err != nil {
-			return domain.Operation{}, err
-		}
-	}
-	if err := appendTree(to, resolved, preparation.occurrences, false); err != nil {
-		return domain.Operation{}, err
-	}
-	operation, body, err := s.buildFileOperation(ctx, from.UserID(), operationID, ownerID, kind, rootUpdates, preparation.prerequisites, preparation.copies, catalogChanges)
+	_, gateEnvelope, gate, err := s.engine.readGate(ctx)
 	if err != nil {
 		return domain.Operation{}, err
 	}
-	return s.startFileOperation(ctx, operation, body, request.IdempotencyKey, fingerprint)
+	now := s.engine.clock.Now().UTC()
+	preparationRequest := &storageformat.FileOperationPreparationRequest{
+		FromArea: areaName(from.Area()), ToArea: areaName(to.Area()), Source: request.Source.String(),
+		Destination: request.Destination.String(), ResolvedDestination: resolved.String(), Conflict: conflict,
+		ExpectedSource: request.ExpectedSource, ExpectedTarget: request.ExpectedTarget, Fingerprint: fingerprint, Move: move,
+		SourceEntry: sourceEntry, DestinationEntry: cloneDirectoryEntry(destinationExisting),
+		SourceParent:      storageformat.FileOperationDirectoryPin{DirectoryID: sourceParentID, ManifestID: sourceParent.manifestID, LogicalVersion: sourceParent.envelope.LogicalVersion, PreExisted: sourceParent.exists},
+		DestinationParent: &storageformat.FileOperationDirectoryPin{DirectoryID: destinationParentID, ManifestID: destinationParent.manifestID, LogicalVersion: destinationParent.envelope.LogicalVersion, PreExisted: destinationParent.exists},
+	}
+	operation := storageformat.FileOperation{
+		SchemaVersion: 2, OperationID: operationID, UserID: from.UserID().String(), Kind: kind,
+		IntentFingerprint: fingerprint,
+		State:             storageformat.FileOperationPreparing, Attempt: 1, Fence: 1, ReplicaAttemptID: ownerID,
+		ExpiresAt: now.Add(s.engine.leaseTTL), StartedAt: now, UpdatedAt: now,
+		Preparation: &storageformat.FileOperationPreparation{
+			SchemaVersion: 1, RunSetID: deterministicCloneID(operationID, "run-set", "raw"), Phase: "build",
+			GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion, Request: preparationRequest,
+		},
+	}
+	return s.startPreparingFileOperation(ctx, operation, request.IdempotencyKey, fingerprint)
 }
 
 func (s *FileStore) Delete(ctx context.Context, scope domain.Scope, request domain.DeleteRequest) (domain.Operation, error) {
@@ -329,41 +226,27 @@ func (s *FileStore) Delete(ctx context.Context, scope domain.Scope, request doma
 	if err != nil {
 		return domain.Operation{}, err
 	}
-	entries, err := s.collectCatalogTree(ctx, scope, entry)
+	_, gateEnvelope, gate, err := s.engine.readGate(ctx)
 	if err != nil {
 		return domain.Operation{}, err
 	}
-	updates := make(map[string]directoryUpdate)
-	if err := applyDirectoryEntryChangeWithContent(updates, parentTrail, &entry, nil, relativeDirectoryContentFiles(entries), nil); err != nil {
-		return domain.Operation{}, err
+	now := s.engine.clock.Now().UTC()
+	operation := storageformat.FileOperation{
+		SchemaVersion: 2, OperationID: operationID, UserID: scope.UserID().String(), Kind: operationDelete,
+		IntentFingerprint: fingerprint,
+		State:             storageformat.FileOperationPreparing, Attempt: 1, Fence: 1, ReplicaAttemptID: ownerID,
+		ExpiresAt: now.Add(s.engine.leaseTTL), StartedAt: now, UpdatedAt: now,
+		Preparation: &storageformat.FileOperationPreparation{
+			SchemaVersion: 1, RunSetID: deterministicCloneID(operationID, "run-set", "raw"), Phase: "build",
+			GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion,
+			Request: &storageformat.FileOperationPreparationRequest{
+				FromArea: areaName(scope.Area()), Source: request.Path.String(), ExpectedSource: request.ExpectedVersion,
+				Fingerprint: fingerprint, SourceEntry: entry,
+				SourceParent: storageformat.FileOperationDirectoryPin{DirectoryID: parentNode.directoryID, ManifestID: parent.manifestID, LogicalVersion: parent.envelope.LogicalVersion, PreExisted: parent.exists},
+			},
+		},
 	}
-	catalogChanges := make([]catalogChange, 0, len(entries))
-	for _, item := range entries {
-		path := request.Path
-		for _, segment := range item.segments {
-			path, err = path.Join(segment)
-			if err != nil {
-				return domain.Operation{}, err
-			}
-		}
-		occurrence, err := catalogOccurrence(scope, path, item.entry)
-		if err != nil {
-			return domain.Operation{}, err
-		}
-		change := catalogChange{pre: &occurrence}
-		if item.entry.Kind == domain.EntryDirectory && item.entry.FileCount > 0 {
-			change.similarityPre, err = duplicateSimilarityPostings(scope, path, item.entry.DirectoryID, item.contentSketch)
-			if err != nil {
-				return domain.Operation{}, err
-			}
-		}
-		catalogChanges = append(catalogChanges, change)
-	}
-	operation, body, err := s.buildFileOperation(ctx, scope.UserID(), operationID, ownerID, operationDelete, updates, nil, nil, catalogChanges)
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	return s.startFileOperation(ctx, operation, body, request.IdempotencyKey, fingerprint)
+	return s.startPreparingFileOperation(ctx, operation, request.IdempotencyKey, fingerprint)
 }
 
 func (s *FileStore) GetOperation(ctx context.Context, userID domain.UserID, operationID domain.OperationID) (domain.Operation, error) {
@@ -911,7 +794,19 @@ func (s *FileStore) executeFileOperation(ctx context.Context, key objectstore.Ke
 		return nil
 	}
 	if operation.State == storageformat.FileOperationPreparing {
+		if operation.Preparation.Phase == "build" {
+			if err := s.buildRecursiveFileOperationPreparation(ctx, object, envelope, operation); err != nil {
+				if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+					return s.failPreparingFileOperation(ctx, key, "pinned operation input changed before preparation")
+				}
+				return err
+			}
+			return s.executeFileOperation(ctx, key)
+		}
 		if err := s.sealFileOperationPreparation(ctx, object, envelope, operation); err != nil {
+			if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+				return s.failPreparingFileOperation(ctx, key, "derived operation root changed before preparation seal")
+			}
 			return err
 		}
 		if err := s.engine.step(ctx, StepOperationAfterPreparationSealed); err != nil {
@@ -1027,6 +922,32 @@ func (s *FileStore) executeFileOperation(ctx context.Context, key objectstore.Ke
 		return err
 	}
 	_, err = s.engine.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
+	return err
+}
+
+func (s *FileStore) failPreparingFileOperation(ctx context.Context, key objectstore.Key, message string) error {
+	object, envelope, operation, err := s.readFileOperationObject(ctx, key)
+	if err != nil {
+		return err
+	}
+	if operation.State == storageformat.FileOperationFailed {
+		return nil
+	}
+	if operation.State != storageformat.FileOperationPreparing {
+		return domain.NewError(domain.ErrorUnavailable, "file operation preparation state changed concurrently")
+	}
+	operation.State = storageformat.FileOperationFailed
+	operation.ErrorKind = domain.ErrorPreconditionFailed
+	operation.Error = message
+	operation.UpdatedAt = s.engine.clock.Now().UTC()
+	body, err := storageformat.EncodeEnvelope(fileOperationSchema, key, envelope.Revision+1, operation)
+	if err != nil {
+		return err
+	}
+	_, err = s.engine.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
+	if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrNotFound) {
+		return domain.NewError(domain.ErrorUnavailable, "file operation preparation failure was superseded")
+	}
 	return err
 }
 
@@ -1202,9 +1123,11 @@ func (s *FileStore) readFileOperationObject(ctx context.Context, key objectstore
 	}
 	legacySteps := operation.SchemaVersion == 1 && operation.Preparation == nil && operation.StepSetID == "" && operation.StepPageCount == 0 && operation.StepDigest == "" && len(operation.Roots) != 0
 	pagedSteps := operation.Preparation == nil && operation.StepSetID != "" && operation.StepPageCount != 0 && operation.StepDigest != "" && len(operation.Roots) == 0 && len(operation.Prerequisites) == 0 && len(operation.Copies) == 0
-	preparing := operation.SchemaVersion == 2 && operation.State == storageformat.FileOperationPreparing && operation.Preparation != nil && operation.Preparation.SchemaVersion == 1 && operation.Preparation.RunSetID != "" && operation.Preparation.Phase == "seal" && operation.Preparation.RunCount != 0 && operation.StepSetID == "" && operation.StepPageCount == 0 && operation.StepDigest == "" && len(operation.Roots) == 0 && len(operation.Prerequisites) == 0 && len(operation.Copies) == 0
+	preparationState := operation.State == storageformat.FileOperationPreparing || operation.State == storageformat.FileOperationFailed
+	preparingBuild := operation.SchemaVersion == 2 && preparationState && operation.Preparation != nil && operation.Preparation.SchemaVersion == 1 && operation.Preparation.RunSetID != "" && operation.Preparation.Phase == "build" && operation.Preparation.Request != nil && operation.Preparation.GateVersion != "" && operation.StepSetID == "" && operation.StepPageCount == 0 && operation.StepDigest == "" && len(operation.Roots) == 0 && len(operation.Prerequisites) == 0 && len(operation.Copies) == 0
+	preparingSeal := operation.SchemaVersion == 2 && preparationState && operation.Preparation != nil && operation.Preparation.SchemaVersion == 1 && operation.Preparation.RunSetID != "" && operation.Preparation.Phase == "seal" && operation.Preparation.Request == nil && operation.Preparation.RunCount != 0 && operation.StepSetID == "" && operation.StepPageCount == 0 && operation.StepDigest == "" && len(operation.Roots) == 0 && len(operation.Prerequisites) == 0 && len(operation.Copies) == 0
 	validState := operation.State == storageformat.FileOperationPreparing || operation.State == storageformat.FileOperationRunning || operation.State == storageformat.FileOperationCommitted || operation.State == storageformat.FileOperationSucceeded || operation.State == storageformat.FileOperationFailed
-	if operation.SchemaVersion != 1 && operation.SchemaVersion != 2 || operation.OperationID == "" || operation.UserID == "" || operation.Fence == 0 || operation.Attempt == 0 || operation.StartedAt.IsZero() || operation.UpdatedAt.IsZero() || operation.ExpiresAt.IsZero() || !validState || !legacySteps && !pagedSteps && !preparing {
+	if operation.SchemaVersion != 1 && operation.SchemaVersion != 2 || operation.SchemaVersion == 2 && operation.IntentFingerprint == "" || operation.OperationID == "" || operation.UserID == "" || operation.Fence == 0 || operation.Attempt == 0 || operation.StartedAt.IsZero() || operation.UpdatedAt.IsZero() || operation.ExpiresAt.IsZero() || !validState || !legacySteps && !pagedSteps && !preparingBuild && !preparingSeal {
 		return objectstore.Object{}, storageformat.Envelope{}, storageformat.FileOperation{}, domain.NewError(domain.ErrorInvalid, "invalid file operation")
 	}
 	return object, envelope, operation, nil

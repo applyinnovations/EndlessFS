@@ -2,6 +2,7 @@ package portable
 
 import (
 	"context"
+	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
@@ -17,12 +18,12 @@ func deterministicCloneID(operationID, kind, sourceID string) string {
 	return storageformat.Digest([]byte("endlessfs-operation-clone-v1\x00" + operationID + "\x00" + kind + "\x00" + sourceID))
 }
 
-func (s *FileStore) transformedCloneEntry(operationID string, source storageformat.DirectoryEntry, copyBlobs bool) (storageformat.DirectoryEntry, error) {
+func (s *FileStore) transformedCloneEntry(operationID string, modifiedAt time.Time, source storageformat.DirectoryEntry, copyBlobs bool) (storageformat.DirectoryEntry, error) {
 	if err := validateDirectoryIndexEntry(source); err != nil {
 		return storageformat.DirectoryEntry{}, err
 	}
 	result := source
-	result.ModifiedAt = s.engine.clock.Now().UTC()
+	result.ModifiedAt = modifiedAt.UTC()
 	switch result.Kind {
 	case domain.EntryFile:
 		if copyBlobs {
@@ -109,6 +110,7 @@ func (s *FileStore) directoryContentIterator(ctx context.Context, scope domain.S
 func (s *FileStore) cloneTreeStream(
 	ctx context.Context,
 	operationID string,
+	modifiedAt time.Time,
 	from, to domain.Scope,
 	source storageformat.DirectoryEntry,
 	copyBlobs bool,
@@ -119,7 +121,7 @@ func (s *FileStore) cloneTreeStream(
 	if operationID == "" || !from.Valid() || !to.Valid() || emitObject == nil || emitCopy == nil || visitOccurrence == nil {
 		return streamedTreePreparation{}, domain.NewError(domain.ErrorInvalid, "invalid streaming tree clone")
 	}
-	return s.cloneTreeStreamAt(ctx, operationID, from, to, source, copyBlobs, nil, emitObject, emitCopy, visitOccurrence)
+	return s.cloneTreeStreamAt(ctx, operationID, modifiedAt, from, to, source, copyBlobs, nil, emitObject, emitCopy, visitOccurrence)
 }
 
 func (s *FileStore) collectCatalogTreeStream(ctx context.Context, scope domain.Scope, source storageformat.DirectoryEntry, visit func(relativeCatalogEntry) error) error {
@@ -165,6 +167,7 @@ func (s *FileStore) collectCatalogTreeStreamAt(ctx context.Context, scope domain
 func (s *FileStore) cloneTreeStreamAt(
 	ctx context.Context,
 	operationID string,
+	modifiedAt time.Time,
 	from, to domain.Scope,
 	source storageformat.DirectoryEntry,
 	copyBlobs bool,
@@ -173,7 +176,7 @@ func (s *FileStore) cloneTreeStreamAt(
 	emitCopy func(storageformat.MutationCopy) error,
 	visitOccurrence func(relativeCatalogEntry) error,
 ) (streamedTreePreparation, error) {
-	entry, err := s.transformedCloneEntry(operationID, source, copyBlobs)
+	entry, err := s.transformedCloneEntry(operationID, modifiedAt, source, copyBlobs)
 	if err != nil {
 		return streamedTreePreparation{}, err
 	}
@@ -201,7 +204,7 @@ func (s *FileStore) cloneTreeStreamAt(
 	}
 	directoryID := entry.DirectoryID
 	transform := func(value storageformat.DirectoryEntry) (storageformat.DirectoryEntry, error) {
-		return s.transformedCloneEntry(operationID, value, copyBlobs)
+		return s.transformedCloneEntry(operationID, modifiedAt, value, copyBlobs)
 	}
 	indexRoot, err := s.buildDirectoryIndexStream(to, directoryID, s.directoryEntryIterator(ctx, from, source.DirectoryID, sourceDirectory.manifest, domain.SortName, transform), emitObject)
 	if err != nil {
@@ -228,7 +231,7 @@ func (s *FileStore) cloneTreeStreamAt(
 		return streamedTreePreparation{}, err
 	}
 	manifestID := deterministicCloneID(operationID, "manifest", source.DirectoryID+"\x00"+sourceDirectory.manifestID)
-	prepared, err := s.prepareClonedDirectoryRoots(to, directoryID, manifestID, sourceDirectory, indexRoot, sortRoots, contentRoot, emitObject)
+	prepared, err := s.prepareClonedDirectoryRoots(to, directoryID, manifestID, modifiedAt, sourceDirectory, indexRoot, sortRoots, contentRoot, emitObject)
 	if err != nil {
 		return streamedTreePreparation{}, err
 	}
@@ -250,7 +253,7 @@ func (s *FileStore) cloneTreeStreamAt(
 			break
 		}
 		childSegments := append(append([]string(nil), segments...), child.Name)
-		if _, childErr = s.cloneTreeStreamAt(ctx, operationID, from, to, child, copyBlobs, childSegments, emitObject, emitCopy, visitOccurrence); childErr != nil {
+		if _, childErr = s.cloneTreeStreamAt(ctx, operationID, modifiedAt, from, to, child, copyBlobs, childSegments, emitObject, emitCopy, visitOccurrence); childErr != nil {
 			return streamedTreePreparation{}, childErr
 		}
 	}
@@ -260,6 +263,7 @@ func (s *FileStore) cloneTreeStreamAt(
 func (s *FileStore) prepareClonedDirectoryRoots(
 	scope domain.Scope,
 	directoryID, manifestID string,
+	createdAt time.Time,
 	source directorySnapshot,
 	indexRoot storageformat.DirectoryIndexChild,
 	sortRoots []storageformat.DirectorySortIndexRoot,
@@ -278,7 +282,7 @@ func (s *FileStore) prepareClonedDirectoryRoots(
 		ContentIndexRootID: contentRoot.NodeID, ContentIndexRootDigest: contentRoot.NodeDigest,
 		ContentSketch:      append([]string(nil), contentRoot.Sketch...),
 		ContentAccumulator: source.contentAccumulator, ContentDigest: source.contentDigest,
-		CreatedAt: s.engine.clock.Now().UTC(),
+		CreatedAt: createdAt.UTC(),
 	}
 	manifestKey := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifestID)
 	manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, manifest)

@@ -24,6 +24,8 @@ type operationPreparationRunCollector struct {
 	operation   storageformat.FileOperation
 	generation  uint64
 	runCount    uint64
+	skipRuns    uint64
+	checkpoint  func(uint64) error
 	buffer      []storageformat.FileOperationPreparationItem
 	maxBuffered int
 }
@@ -33,6 +35,16 @@ func newOperationPreparationRunCollector(store *FileStore, operation storageform
 		return nil, domain.NewError(domain.ErrorInvalid, "invalid operation preparation collector")
 	}
 	return &operationPreparationRunCollector{store: store, operation: operation, generation: generation, buffer: make([]storageformat.FileOperationPreparationItem, 0, maxOperationPreparationPageItems)}, nil
+}
+
+func newResumableOperationPreparationRunCollector(store *FileStore, operation storageformat.FileOperation, checkpoint func(uint64) error) (*operationPreparationRunCollector, error) {
+	collector, err := newOperationPreparationRunCollector(store, operation, operation.Preparation.Generation)
+	if err != nil {
+		return nil, err
+	}
+	collector.skipRuns = operation.Preparation.RunCount
+	collector.checkpoint = checkpoint
+	return collector, nil
 }
 
 func (collector *operationPreparationRunCollector) Add(ctx context.Context, item storageformat.FileOperationPreparationItem) error {
@@ -61,16 +73,26 @@ func (collector *operationPreparationRunCollector) flush(ctx context.Context) er
 	sort.Slice(collector.buffer, func(left, right int) bool {
 		return operationPreparationItemLess(collector.buffer[left], collector.buffer[right])
 	})
+	run := collector.runCount
+	collector.runCount++
+	if run < collector.skipRuns {
+		collector.buffer = collector.buffer[:0]
+		return nil
+	}
 	page := storageformat.FileOperationPreparationPage{
 		SchemaVersion: 1, UserID: collector.operation.UserID, OperationID: collector.operation.OperationID,
 		RunSetID: collector.operation.Preparation.RunSetID, Generation: collector.generation,
-		Run: collector.runCount, Page: 0, Final: true,
+		Run: run, Page: 0, Final: true,
 		Items: append([]storageformat.FileOperationPreparationItem(nil), collector.buffer...),
 	}
 	if _, err := collector.store.writeOperationPreparationPage(ctx, collector.operation, page); err != nil {
 		return err
 	}
-	collector.runCount++
+	if collector.checkpoint != nil {
+		if err := collector.checkpoint(collector.runCount); err != nil {
+			return err
+		}
+	}
 	collector.buffer = collector.buffer[:0]
 	return nil
 }
@@ -444,6 +466,8 @@ func (s *FileStore) reduceOperationPreparationRun(ctx context.Context, operation
 		return domain.NewError(domain.ErrorInvalid, "invalid operation preparation reduction")
 	}
 	pending := operationPreparationReduction{}
+	lastDirectKey := ""
+	var lastDirect storageformat.FileOperationPreparationItem
 	emitRoot := func(root storageformat.FileOperationRoot) error {
 		copy := root
 		return output.Add(ctx, storageformat.FileOperationPreparationItem{SortKey: "root\x00" + root.Key, Kind: storageformat.FileOperationPreparationRoot, Root: &copy})
@@ -514,6 +538,13 @@ func (s *FileStore) reduceOperationPreparationRun(ctx context.Context, operation
 			if err := flush(); err != nil {
 				return err
 			}
+			if item.SortKey == lastDirectKey {
+				if !reflect.DeepEqual(item, lastDirect) {
+					return domain.NewError(domain.ErrorInvalid, "conflicting direct operation preparation item")
+				}
+				return nil
+			}
+			lastDirectKey, lastDirect = item.SortKey, item
 			return output.Add(ctx, item)
 		case storageformat.FileOperationPreparationOccurrence, storageformat.FileOperationPreparationSummary, storageformat.FileOperationPreparationSimilarity:
 		default:

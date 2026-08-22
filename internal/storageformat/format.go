@@ -467,35 +467,67 @@ type FileOperationRoot struct {
 }
 
 type FileOperation struct {
-	SchemaVersion    int                       `json:"schemaVersion"`
-	OperationID      string                    `json:"operationID"`
-	UserID           string                    `json:"userID"`
-	Kind             string                    `json:"kind"`
-	State            FileOperationState        `json:"state"`
-	Attempt          uint64                    `json:"attempt"`
-	Fence            uint64                    `json:"fence"`
-	ReplicaAttemptID string                    `json:"replicaAttemptID"`
-	ExpiresAt        time.Time                 `json:"expiresAt"`
-	StartedAt        time.Time                 `json:"startedAt"`
-	UpdatedAt        time.Time                 `json:"updatedAt"`
-	ErrorKind        domain.ErrorKind          `json:"errorKind,omitempty"`
-	Error            string                    `json:"error,omitempty"`
-	Roots            []FileOperationRoot       `json:"roots"`
-	Prerequisites    []MutationObject          `json:"prerequisites,omitempty"`
-	Copies           []MutationCopy            `json:"copies,omitempty"`
-	StepPageCount    uint64                    `json:"stepPageCount,omitempty"`
-	StepSetID        string                    `json:"stepSetID,omitempty"`
-	StepDigest       string                    `json:"stepDigest,omitempty"`
-	StepsStaged      bool                      `json:"stepsStaged,omitempty"`
-	Preparation      *FileOperationPreparation `json:"preparation,omitempty"`
+	SchemaVersion     int                       `json:"schemaVersion"`
+	OperationID       string                    `json:"operationID"`
+	UserID            string                    `json:"userID"`
+	Kind              string                    `json:"kind"`
+	State             FileOperationState        `json:"state"`
+	Attempt           uint64                    `json:"attempt"`
+	Fence             uint64                    `json:"fence"`
+	ReplicaAttemptID  string                    `json:"replicaAttemptID"`
+	ExpiresAt         time.Time                 `json:"expiresAt"`
+	StartedAt         time.Time                 `json:"startedAt"`
+	UpdatedAt         time.Time                 `json:"updatedAt"`
+	ErrorKind         domain.ErrorKind          `json:"errorKind,omitempty"`
+	Error             string                    `json:"error,omitempty"`
+	IntentFingerprint string                    `json:"intentFingerprint,omitempty"`
+	Roots             []FileOperationRoot       `json:"roots"`
+	Prerequisites     []MutationObject          `json:"prerequisites,omitempty"`
+	Copies            []MutationCopy            `json:"copies,omitempty"`
+	StepPageCount     uint64                    `json:"stepPageCount,omitempty"`
+	StepSetID         string                    `json:"stepSetID,omitempty"`
+	StepDigest        string                    `json:"stepDigest,omitempty"`
+	StepsStaged       bool                      `json:"stepsStaged,omitempty"`
+	Preparation       *FileOperationPreparation `json:"preparation,omitempty"`
 }
 
 type FileOperationPreparation struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	RunSetID      string `json:"runSetID"`
-	Phase         string `json:"phase"`
-	Generation    uint64 `json:"generation"`
-	RunCount      uint64 `json:"runCount"`
+	SchemaVersion int                              `json:"schemaVersion"`
+	RunSetID      string                           `json:"runSetID"`
+	Phase         string                           `json:"phase"`
+	Generation    uint64                           `json:"generation"`
+	RunCount      uint64                           `json:"runCount"`
+	GateEpoch     uint64                           `json:"gateEpoch,omitempty"`
+	GateVersion   string                           `json:"gateVersion,omitempty"`
+	Request       *FileOperationPreparationRequest `json:"request,omitempty"`
+}
+
+type FileOperationDirectoryPin struct {
+	DirectoryID    string `json:"directoryID"`
+	ManifestID     string `json:"manifestID"`
+	LogicalVersion string `json:"logicalVersion"`
+	PreExisted     bool   `json:"preExisted"`
+}
+
+// FileOperationPreparationRequest contains only portable canonical values. It
+// is sufficient for a new replica to reconstruct the same deterministic
+// bounded preparation runs without a process-local closure or provider-native
+// version.
+type FileOperationPreparationRequest struct {
+	FromArea            string                     `json:"fromArea"`
+	ToArea              string                     `json:"toArea"`
+	Source              string                     `json:"source"`
+	Destination         string                     `json:"destination,omitempty"`
+	ResolvedDestination string                     `json:"resolvedDestination,omitempty"`
+	Conflict            domain.ConflictMode        `json:"conflict,omitempty"`
+	ExpectedSource      domain.Version             `json:"expectedSource,omitempty"`
+	ExpectedTarget      domain.Version             `json:"expectedTarget,omitempty"`
+	Fingerprint         string                     `json:"fingerprint"`
+	Move                bool                       `json:"move,omitempty"`
+	SourceEntry         DirectoryEntry             `json:"sourceEntry"`
+	DestinationEntry    *DirectoryEntry            `json:"destinationEntry,omitempty"`
+	SourceParent        FileOperationDirectoryPin  `json:"sourceParent"`
+	DestinationParent   *FileOperationDirectoryPin `json:"destinationParent,omitempty"`
 }
 
 type FileOperationPreparationItemKind string

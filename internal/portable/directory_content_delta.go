@@ -18,6 +18,7 @@ type directoryContentDelta struct {
 	manifest    storageformat.DirectoryManifest
 	prefix      []string
 	remove      bool
+	entry       *storageformat.DirectoryEntry
 }
 
 type directoryContentDeltaSource struct {
@@ -103,8 +104,31 @@ func (s *FileStore) rebuildDirectoryContentIndexWithDeltas(
 		base: true,
 	}}
 	for _, delta := range deltas {
-		if !delta.scope.Valid() || delta.directoryID == "" {
+		if !delta.scope.Valid() || delta.entry == nil && delta.directoryID == "" || delta.entry != nil && (delta.directoryID != "" || delta.entry.Kind != domain.EntryFile) {
 			return storageformat.DirectoryContentIndexChild{}, domain.NewError(domain.ErrorInvalid, "invalid directory content delta source")
+		}
+		if delta.entry != nil {
+			path := domain.MustParseUserPath("/")
+			for _, segment := range delta.prefix {
+				joined, joinErr := path.Join(segment)
+				if joinErr != nil {
+					return storageformat.DirectoryContentIndexChild{}, joinErr
+				}
+				path = joined
+			}
+			value, err := directoryContentIndexEntry(path, *delta.entry)
+			if err != nil {
+				return storageformat.DirectoryContentIndexChild{}, err
+			}
+			emitted := false
+			sources = append(sources, directoryContentDeltaSource{remove: delta.remove, next: func() (storageformat.DirectoryContentIndexEntry, bool, error) {
+				if emitted {
+					return storageformat.DirectoryContentIndexEntry{}, false, nil
+				}
+				emitted = true
+				return value, true, nil
+			}})
+			continue
 		}
 		sources = append(sources, directoryContentDeltaSource{
 			next:   s.directoryContentIterator(ctx, delta.scope, delta.directoryID, delta.manifest),

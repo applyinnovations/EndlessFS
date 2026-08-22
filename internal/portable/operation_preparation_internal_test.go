@@ -15,6 +15,18 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
+type preparationPutCountingBackend struct {
+	objectstore.Backend
+	puts map[string]int
+}
+
+func (backend *preparationPutCountingBackend) Put(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+	if strings.HasPrefix(key.String(), storageformat.FileOperationPreparationsPrefix()) {
+		backend.puts[key.String()]++
+	}
+	return backend.Backend.Put(ctx, key, body, condition)
+}
+
 func TestOperationPreparationRunsMergeWithBoundedMemoryAndIdempotentReplay(t *testing.T) {
 	ctx := context.Background()
 	backend := objectmemory.New()
@@ -73,6 +85,106 @@ func TestOperationPreparationRunsMergeWithBoundedMemoryAndIdempotentReplay(t *te
 	}
 }
 
+func TestResumedOperationPreparationDoesNotRewriteCompletedRuns(t *testing.T) {
+	ctx := context.Background()
+	memory := objectmemory.New()
+	backend := &preparationPutCountingBackend{Backend: memory, puts: make(map[string]int)}
+	store := &FileStore{engine: &Engine{backend: backend}}
+	operation := storageformat.FileOperation{
+		UserID: "WVhXWVhXWVhXWVhXWVhXWQ", OperationID: "resumed-preparation",
+		Preparation: &storageformat.FileOperationPreparation{SchemaVersion: 1, RunSetID: "resumed-run-set", Phase: "build"},
+	}
+	addRuns := func(collector *operationPreparationRunCollector, runs int) uint64 {
+		for index := 0; index < runs*maxOperationPreparationPageItems; index++ {
+			root := storageformat.FileOperationRoot{Key: fmt.Sprintf("endlessfs/v1/test/resumed/%08d", index)}
+			if err := collector.Add(ctx, storageformat.FileOperationPreparationItem{SortKey: "root\x00" + root.Key, Kind: storageformat.FileOperationPreparationRoot, Root: &root}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		count, err := collector.Close(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	initial, err := newOperationPreparationRunCollector(store, operation, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := addRuns(initial, 2); count != 2 {
+		t.Fatalf("initial run count = %d; want 2", count)
+	}
+	backend.puts = make(map[string]int)
+	operation.Preparation.RunCount = 2
+	var checkpoints []uint64
+	resumed, err := newResumableOperationPreparationRunCollector(store, operation, func(count uint64) error {
+		checkpoints = append(checkpoints, count)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := addRuns(resumed, 3); count != 3 {
+		t.Fatalf("resumed run count = %d; want 3", count)
+	}
+	if len(backend.puts) != 1 || len(checkpoints) != 1 || checkpoints[0] != 3 {
+		t.Fatalf("resumed writes/checkpoints = %+v / %+v; want only unfinished run 3", backend.puts, checkpoints)
+	}
+}
+
+func TestAdmittedOperationHeaderResumesWithoutProcessLocalPreparationState(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2047, 6, 7, 8, 9, 10, 0, time.UTC))
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("durable-header-entropy", 1<<16)))
+	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	if _, err := engine.Files().CreateDirectory(ctx, scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/source")}); err != nil {
+		t.Fatal(err)
+	}
+	crashed := false
+	engine.scheduler = SchedulerFunc(func(_ context.Context, step string) error {
+		if step == StepOperationAfterHeader && !crashed {
+			crashed = true
+			return domain.NewError(domain.ErrorUnavailable, "simulated process loss after operation header")
+		}
+		return nil
+	})
+	if _, err := engine.Files().Move(ctx, scope, scope, domain.MoveRequest{
+		Source: domain.MustParseUserPath("/source"), Destination: domain.MustParseUserPath("/moved"), IdempotencyKey: "durable-header-move",
+	}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("crashed Move() error = %v; want unavailable", err)
+	}
+	page, err := backend.List(ctx, objectstore.ListRequest{Prefix: storageformat.OperationPrefix(), Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var preparationKey objectstore.Key
+	for _, info := range page.Objects {
+		_, _, operation, readErr := engine.Files().readFileOperationObject(ctx, info.Key)
+		if readErr == nil && operation.State == storageformat.FileOperationPreparing {
+			preparationKey = info.Key
+			if operation.Preparation == nil || operation.Preparation.Phase != "build" || operation.Preparation.Request == nil || operation.Preparation.Request.Source != "/source" || operation.Preparation.Request.ResolvedDestination != "/moved" {
+				t.Fatalf("durable preparation header = %+v", operation.Preparation)
+			}
+		}
+	}
+	if !preparationKey.Valid() {
+		t.Fatal("admitted preparing operation header was not persisted")
+	}
+	engine.scheduler = nil
+	clock.Advance(2 * time.Minute)
+	if err := engine.Files().recoverFileOperation(ctx, preparationKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Files().Stat(ctx, scope, domain.MustParseUserPath("/moved")); err != nil {
+		t.Fatalf("resumed destination = %v", err)
+	}
+	if _, err := engine.Files().Stat(ctx, scope, domain.MustParseUserPath("/source")); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("resumed source status = %v; want not found", err)
+	}
+}
+
 func TestPreparingFileOperationSealsBoundedRunsBeforeVisibility(t *testing.T) {
 	ctx := context.Background()
 	backend := objectmemory.New()
@@ -81,7 +193,8 @@ func TestPreparingFileOperationSealsBoundedRunsBeforeVisibility(t *testing.T) {
 	store := &FileStore{engine: engine}
 	operation := storageformat.FileOperation{
 		SchemaVersion: 2, OperationID: "preparation-seal", UserID: "WVhXWVhXWVhXWVhXWVhXWQ", Kind: operationMove,
-		State: storageformat.FileOperationPreparing, Attempt: 1, Fence: 1, ReplicaAttemptID: "attempt-one",
+		IntentFingerprint: "preparation-seal-fingerprint",
+		State:             storageformat.FileOperationPreparing, Attempt: 1, Fence: 1, ReplicaAttemptID: "attempt-one",
 		ExpiresAt: clock.Now().Add(time.Minute), StartedAt: clock.Now(), UpdatedAt: clock.Now(),
 		Preparation: &storageformat.FileOperationPreparation{SchemaVersion: 1, RunSetID: "stable-seal-set", Phase: "seal"},
 	}
@@ -166,7 +279,7 @@ func TestCloneTreeStreamEmitsWithoutSubtreeCollections(t *testing.T) {
 		t.Fatal(err)
 	}
 	objects, copies, occurrences := 0, 0, 0
-	result, err := engine.Files().cloneTreeStream(ctx, "stable-clone-operation", from, to, source, true,
+	result, err := engine.Files().cloneTreeStream(ctx, "stable-clone-operation", clock.Now(), from, to, source, true,
 		func(storageformat.MutationObject) error { objects++; return nil },
 		func(storageformat.MutationCopy) error { copies++; return nil },
 		func(relativeCatalogEntry) error { occurrences++; return nil },
@@ -210,7 +323,8 @@ func TestOperationPreparationReducesCatalogChangesWithoutGrowingMaps(t *testing.
 	}
 	operation := storageformat.FileOperation{
 		SchemaVersion: 2, OperationID: "catalog-reduction", UserID: user.String(), Kind: operationMove,
-		State: storageformat.FileOperationPreparing, Attempt: 1, Fence: 1, ReplicaAttemptID: "catalog-attempt",
+		IntentFingerprint: "catalog-reduction-fingerprint",
+		State:             storageformat.FileOperationPreparing, Attempt: 1, Fence: 1, ReplicaAttemptID: "catalog-attempt",
 		ExpiresAt: clock.Now().Add(time.Minute), StartedAt: clock.Now(), UpdatedAt: clock.Now(),
 		Preparation: &storageformat.FileOperationPreparation{SchemaVersion: 1, RunSetID: "catalog-raw-set", Phase: "seal"},
 	}

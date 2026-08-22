@@ -833,6 +833,9 @@ func sameFileOperationIntent(currentBody, initialBody []byte, key objectstore.Ke
 	if storageformat.DecodeEnvelope(currentBody, key, fileOperationSchema, &currentEnvelope, &current) != nil || storageformat.DecodeEnvelope(initialBody, key, fileOperationSchema, &initialEnvelope, &initial) != nil {
 		return false
 	}
+	if initial.SchemaVersion == 2 && initial.State == storageformat.FileOperationPreparing && initial.IntentFingerprint != "" {
+		return current.SchemaVersion == 2 && current.OperationID == initial.OperationID && current.UserID == initial.UserID && current.Kind == initial.Kind && current.IntentFingerprint == initial.IntentFingerprint && current.StartedAt.Equal(initial.StartedAt)
+	}
 	current.State = initial.State
 	current.Attempt = initial.Attempt
 	current.Fence = initial.Fence

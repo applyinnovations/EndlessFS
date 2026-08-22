@@ -371,8 +371,25 @@ type Checkpoint struct {
 	KeyFormatVersion      int                `json:"keyFormatVersion"`
 	WriterProtocolVersion int                `json:"writerProtocolVersion"`
 	CreatedAt             time.Time          `json:"createdAt"`
-	Objects               []CheckpointObject `json:"objects"`
+	Objects               []CheckpointObject `json:"objects,omitempty"`
+	InventoryPageCount    uint64             `json:"inventoryPageCount,omitempty"`
+	StateObjectCount      uint64             `json:"stateObjectCount,omitempty"`
+	FileObjectCount       uint64             `json:"fileObjectCount,omitempty"`
 	InventoryDigest       string             `json:"inventoryDigest"`
+}
+
+type CheckpointInventoryEntry struct {
+	FileData bool             `json:"fileData"`
+	Object   CheckpointObject `json:"object"`
+}
+
+type CheckpointInventoryPage struct {
+	SchemaVersion  int                        `json:"schemaVersion"`
+	CheckpointID   string                     `json:"checkpointID"`
+	GateEpoch      uint64                     `json:"gateEpoch"`
+	Index          uint64                     `json:"index"`
+	PreviousDigest string                     `json:"previousDigest"`
+	Entries        []CheckpointInventoryEntry `json:"entries"`
 }
 
 // CheckpointWork records one completed provider-independent inventory digest.

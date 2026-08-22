@@ -428,6 +428,20 @@ type interruptingInventoryBackend struct {
 }
 
 func (backend *interruptingInventoryBackend) Get(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
+	if err := backend.beforeInventoryRead(key); err != nil {
+		return objectstore.Object{}, err
+	}
+	return backend.Backend.Get(ctx, key)
+}
+
+func (backend *interruptingInventoryBackend) Open(ctx context.Context, key objectstore.Key) (objectstore.ObjectReader, error) {
+	if err := backend.beforeInventoryRead(key); err != nil {
+		return objectstore.ObjectReader{}, err
+	}
+	return backend.Backend.Open(ctx, key)
+}
+
+func (backend *interruptingInventoryBackend) beforeInventoryRead(key objectstore.Key) error {
 	backend.mu.Lock()
 	backend.attempts[key.String()]++
 	total := 0
@@ -437,10 +451,10 @@ func (backend *interruptingInventoryBackend) Get(ctx context.Context, key object
 	if backend.failAfter >= 0 && !backend.failed && total > backend.failAfter {
 		backend.failed = true
 		backend.mu.Unlock()
-		return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "injected checkpoint inventory interruption")
+		return domain.NewError(domain.ErrorUnavailable, "injected checkpoint inventory interruption")
 	}
 	backend.mu.Unlock()
-	return backend.Backend.Get(ctx, key)
+	return nil
 }
 
 func (backend *interruptingInventoryBackend) disableFailure() {

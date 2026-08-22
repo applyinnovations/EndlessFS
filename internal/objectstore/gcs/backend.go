@@ -152,36 +152,61 @@ func (b *Backend) Verify(ctx context.Context, key objectstore.Key, expected obje
 }
 
 func (b *Backend) Get(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
-	if err := objectstore.ContextError(ctx); err != nil {
+	stream, err := b.Open(ctx, key)
+	if err != nil {
 		return objectstore.Object{}, err
 	}
+	body, readErr := io.ReadAll(stream.Body)
+	closeErr := stream.Body.Close()
+	if readErr != nil {
+		return objectstore.Object{}, readErr
+	}
+	if closeErr != nil {
+		return objectstore.Object{}, closeErr
+	}
+	if int64(len(body)) != stream.Size {
+		return objectstore.Object{}, domain.NewError(domain.ErrorInternal, "GCS object size mismatch")
+	}
+	return objectstore.Object{Key: key, Body: body, Version: stream.Version, Size: stream.Size}, nil
+}
+
+func (b *Backend) Open(ctx context.Context, key objectstore.Key) (objectstore.ObjectReader, error) {
+	if err := objectstore.ContextError(ctx); err != nil {
+		return objectstore.ObjectReader{}, err
+	}
 	if !key.Valid() {
-		return objectstore.Object{}, domain.NewError(domain.ErrorInvalid, "invalid object key")
+		return objectstore.ObjectReader{}, domain.NewError(domain.ErrorInvalid, "invalid object key")
 	}
 	info, err := b.Head(ctx, key)
 	if err != nil {
-		return objectstore.Object{}, err
+		return objectstore.ObjectReader{}, err
 	}
 	generation, err := decodeVersion(info.Version)
 	if err != nil {
-		return objectstore.Object{}, err
+		return objectstore.ObjectReader{}, err
 	}
 	reader, err := b.bucket.Object(key.String()).Generation(generation).NewReader(ctx)
 	if err != nil {
-		return objectstore.Object{}, classify("GCS object read failed", err)
+		return objectstore.ObjectReader{}, classify("GCS object read failed", err)
 	}
-	body, readErr := io.ReadAll(reader)
-	closeErr := reader.Close()
-	if readErr != nil {
-		return objectstore.Object{}, classify("GCS object body read failed", readErr)
+	return objectstore.ObjectReader{Key: key, Body: &classifiedObjectReader{ReadCloser: reader}, Version: info.Version, Size: info.Size}, nil
+}
+
+type classifiedObjectReader struct{ io.ReadCloser }
+
+func (reader *classifiedObjectReader) Read(buffer []byte) (int, error) {
+	count, err := reader.ReadCloser.Read(buffer)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return count, classify("GCS object body read failed", err)
 	}
-	if closeErr != nil {
-		return objectstore.Object{}, classify("GCS object body close failed", closeErr)
+	return count, err
+}
+
+func (reader *classifiedObjectReader) Close() error {
+	if err := reader.ReadCloser.Close(); err != nil {
+		return classify("GCS object body close failed", err)
 	}
-	if int64(len(body)) != info.Size {
-		return objectstore.Object{}, domain.NewError(domain.ErrorInternal, "GCS object size mismatch")
-	}
-	return objectstore.Object{Key: key, Body: body, Version: info.Version, Size: info.Size}, nil
+	return nil
 }
 
 func (b *Backend) List(ctx context.Context, request objectstore.ListRequest) (objectstore.ListPage, error) {

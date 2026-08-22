@@ -2,7 +2,9 @@
 package memory
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"sort"
 	"strings"
 	"sync"
@@ -94,23 +96,39 @@ func (b *Backend) Verify(ctx context.Context, key objectstore.Key, expected obje
 }
 
 func (b *Backend) Get(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
-	if err := objectstore.ContextError(ctx); err != nil {
+	reader, err := b.Open(ctx, key)
+	if err != nil {
 		return objectstore.Object{}, err
 	}
+	body, readErr := io.ReadAll(reader.Body)
+	closeErr := reader.Body.Close()
+	if readErr != nil {
+		return objectstore.Object{}, readErr
+	}
+	if closeErr != nil {
+		return objectstore.Object{}, closeErr
+	}
+	return objectstore.Object{Key: key, Body: body, Version: reader.Version, Size: reader.Size}, nil
+}
+
+func (b *Backend) Open(ctx context.Context, key objectstore.Key) (objectstore.ObjectReader, error) {
+	if err := objectstore.ContextError(ctx); err != nil {
+		return objectstore.ObjectReader{}, err
+	}
 	if !key.Valid() {
-		return objectstore.Object{}, domain.NewError(domain.ErrorInvalid, "invalid object key")
+		return objectstore.ObjectReader{}, domain.NewError(domain.ErrorInvalid, "invalid object key")
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	record, found := b.records[key.String()]
 	if !found {
-		return objectstore.Object{}, domain.NewError(domain.ErrorNotFound, "object not found")
+		return objectstore.ObjectReader{}, domain.NewError(domain.ErrorNotFound, "object not found")
 	}
 	body := append([]byte(nil), record.body...)
 	if !record.materialized && record.size > int64(len(body)) {
-		return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "logical object body is not materialized")
+		return objectstore.ObjectReader{}, domain.NewError(domain.ErrorUnavailable, "logical object body is not materialized")
 	}
-	return objectstore.Object{Key: key, Body: body, Version: record.version, Size: record.size}, nil
+	return objectstore.ObjectReader{Key: key, Body: io.NopCloser(bytes.NewReader(body)), Version: record.version, Size: record.size}, nil
 }
 
 func (b *Backend) List(ctx context.Context, request objectstore.ListRequest) (objectstore.ListPage, error) {

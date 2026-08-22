@@ -4,6 +4,7 @@ package objectstore
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
@@ -58,6 +59,16 @@ type NativeVersion string
 type Object struct {
 	Key     Key
 	Body    []byte
+	Version NativeVersion
+	Size    int64
+}
+
+// ObjectReader streams one immutable object at a fixed native version. Large
+// file bodies must not be materialized in process memory merely to hash or
+// verify them.
+type ObjectReader struct {
+	Key     Key
+	Body    io.ReadCloser
 	Version NativeVersion
 	Size    int64
 }
@@ -148,6 +159,7 @@ type Backend interface {
 	Head(context.Context, Key) (ObjectInfo, error)
 	Verify(context.Context, Key, ExpectedIntegrity) (ObjectInfo, error)
 	Get(context.Context, Key) (Object, error)
+	Open(context.Context, Key) (ObjectReader, error)
 	List(context.Context, ListRequest) (ListPage, error)
 	Put(context.Context, Key, []byte, PutCondition) (NativeVersion, error)
 	Delete(context.Context, Key, DeleteCondition) error

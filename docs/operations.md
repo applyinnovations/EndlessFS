@@ -57,7 +57,7 @@ Canonical state deliberately contains no bucket/account identifier, GCS generati
 
 1. Close the canonical write gate. Every replica stops admitting new mutations.
 2. Allow fenced recovery to finish admitted operations and drain or abort live data-plane capabilities and native leases. A crashed operation may delay closure; do not delete its lock or force the gate closed.
-3. Create the closed-gate checkpoint and copy exactly its sorted authoritative key/body inventory plus the state-bucket checkpoint object. Do not copy admissions, staging garbage, or backend leases.
+3. Create the closed-gate checkpoint and copy exactly its paged authoritative key/body inventory plus the state-bucket checkpoint root and every inventory page. The root and each page remain independently bounded; their count may grow with the storage set. Do not copy admissions, staging garbage, backend leases, or transient checkpoint-work records.
 4. Copy each key and body unchanged to its destination role: blob keys to the file bucket and all other authoritative keys to the state bucket. In single-bucket mode both roles name the same destination. Destination-native versions and metadata may differ and are not preserved.
 5. Run the read-only destination verifier against both configured roles. Missing, extra-authoritative, misplaced, corrupt, mixed-version, or unsupported objects fail closed.
 6. Reconfigure compatible replicas to the destination while retaining the same provider-independent application secrets and writer-set identity. Verify the checkpoint, increment/open the destination gate epoch, and continue mutations.

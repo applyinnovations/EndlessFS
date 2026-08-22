@@ -22,8 +22,32 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 
 	for _, target := range []string{"state", "file"} {
 		t.Run(target, func(t *testing.T) {
+			baselineState := objectmemory.New()
+			baselineFile := objectmemory.New()
+			if err := baselineState.Import(fixture.StateObjects); err != nil {
+				t.Fatal(err)
+			}
+			if err := baselineFile.Import(fixture.FileObjects); err != nil {
+				t.Fatal(err)
+			}
+			baselineClock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
+			baselineFaults := &failNthBackend{}
+			baselineOptions := schemaSplitMigrationOptions(baselineState, baselineFile, baselineClock, 19, nil)
+			baselineOptions.Writer = currentWriterForSchemaFixture(t, fixture)
+			if target == "state" {
+				baselineFaults.backend = baselineState
+				baselineOptions.Backend = baselineFaults
+			} else {
+				baselineFaults.backend = baselineFile
+				baselineOptions.FileBackend = baselineFaults
+			}
+			baselineFaults.arm(0)
+			if _, err := portable.Open(context.Background(), baselineOptions); err != nil {
+				t.Fatal(err)
+			}
+			boundaryCalls := baselineFaults.calls
 			consecutiveCompleted := 0
-			for failAt := 1; failAt <= 512 && consecutiveCompleted < 3; failAt++ {
+			for failAt := 1; failAt <= boundaryCalls+3 && consecutiveCompleted < 3; failAt++ {
 				stateBackend := objectmemory.New()
 				fileBackend := objectmemory.New()
 				if err := stateBackend.Import(fixture.StateObjects); err != nil {

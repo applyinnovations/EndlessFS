@@ -54,6 +54,13 @@ func (backend *failNthBackend) Get(ctx context.Context, key objectstore.Key) (ob
 	return backend.backend.Get(ctx, key)
 }
 
+func (backend *failNthBackend) Open(ctx context.Context, key objectstore.Key) (objectstore.ObjectReader, error) {
+	if err := backend.fault(); err != nil {
+		return objectstore.ObjectReader{}, err
+	}
+	return backend.backend.Open(ctx, key)
+}
+
 func (backend *failNthBackend) List(ctx context.Context, request objectstore.ListRequest) (objectstore.ListPage, error) {
 	if err := backend.fault(); err != nil {
 		return objectstore.ListPage{}, err
@@ -782,8 +789,20 @@ func TestObjectFailureAtEveryPreparedFileOperationRecoveryBoundaryIsRetrySafe(t 
 		t.Fatalf("crashed Move() error = %v", err)
 	}
 	fixture := fixtureBackend.Export()
+	baselineBackend := objectmemory.New()
+	if err := baselineBackend.Import(fixture); err != nil {
+		t.Fatal(err)
+	}
+	baselineClock := domain.NewFixedClock(fixtureClock.Now().Add(2 * time.Minute))
+	baselineFaults := &failNthBackend{backend: baselineBackend}
+	baselineEngine := openFaultEngine(t, baselineFaults, baselineClock, 253)
+	baselineFaults.arm(0)
+	if _, err := baselineEngine.CreateCheckpoint(context.Background(), "prepared-recovery-fault-baseline"); err != nil {
+		t.Fatal(err)
+	}
+	boundaryCalls := baselineFaults.calls
 	consecutiveSuccesses := 0
-	for failAt := 1; failAt <= 180 && consecutiveSuccesses < 3; failAt++ {
+	for failAt := 1; failAt <= boundaryCalls+3 && consecutiveSuccesses < 3; failAt++ {
 		backend := objectmemory.New()
 		if err := backend.Import(fixture); err != nil {
 			t.Fatal(err)

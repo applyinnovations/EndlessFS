@@ -18,6 +18,7 @@ type hookedBackend struct {
 	objectstore.Backend
 	head   func(context.Context, objectstore.Key) (objectstore.ObjectInfo, error)
 	get    func(context.Context, objectstore.Key) (objectstore.Object, error)
+	open   func(context.Context, objectstore.Key) (objectstore.ObjectReader, error)
 	list   func(context.Context, objectstore.ListRequest) (objectstore.ListPage, error)
 	put    func(context.Context, objectstore.Key, []byte, objectstore.PutCondition) (objectstore.NativeVersion, error)
 	delete func(context.Context, objectstore.Key, objectstore.DeleteCondition) error
@@ -36,6 +37,13 @@ func (backend *hookedBackend) Get(ctx context.Context, key objectstore.Key) (obj
 		return backend.get(ctx, key)
 	}
 	return backend.Backend.Get(ctx, key)
+}
+
+func (backend *hookedBackend) Open(ctx context.Context, key objectstore.Key) (objectstore.ObjectReader, error) {
+	if backend.open != nil {
+		return backend.open(ctx, key)
+	}
+	return backend.Backend.Open(ctx, key)
 }
 
 func (backend *hookedBackend) List(ctx context.Context, request objectstore.ListRequest) (objectstore.ListPage, error) {

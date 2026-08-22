@@ -906,6 +906,39 @@ func TestMigrationWinnerValidationRejectsEveryInconsistentResult(t *testing.T) {
 		}
 	})
 
+	t.Run("schema-004-content-index-read-failure", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		entry := withCurrentTestFingerprint(migrationFileEntry(t, "file", 1))
+		prepared, err := engine.Files().prepareDirectory(t.Context(), scope, directoryID, []storageformat.DirectoryEntry{entry}, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, prerequisite := range prepared.prerequisites {
+			migrationPut(t, backend, objectstore.MustKey(prerequisite.Key), prerequisite.Body)
+		}
+		migrationPut(t, backend, storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), directoryID), prepared.rootBody)
+		root, err := engine.readMigrationDirectoryRoot(t.Context(), scope, directoryID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifest, err := engine.readMigrationDirectoryManifest(t.Context(), scope, directoryID, root.manifestID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		indexKey := storageformat.DirectoryContentIndexNodeKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifest.manifest.ContentIndexRootID)
+		index, err := backend.Get(t.Context(), indexKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := backend.Delete(t.Context(), indexKey, objectstore.DeleteCondition{Version: index.Version}); err != nil {
+			t.Fatal(err)
+		}
+		want := migrationAggregate{bytes: root.recursiveBytes, files: root.recursiveFileCount, directories: 1, accumulator: root.contentAccumulator, digest: root.contentDigest}
+		if _, err := engine.migrationWinnerMatchesTarget(t.Context(), scope, directoryID, want, schemaMigration003To004); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("missing winner content index error = %v", err)
+		}
+	})
+
 	t.Run("schema-004-rejects-sha-entry", func(t *testing.T) {
 		backend := objectmemory.New()
 		entry := migrationFileEntry(t, "file", 1)

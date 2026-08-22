@@ -1097,20 +1097,13 @@ func (e *Engine) migrationWinnerMatchesTarget(ctx context.Context, scope domain.
 	case storageSchema003:
 		return root.current && manifest.current && root.recursiveFileCount == want.files && manifest.manifest.RecursiveFileCount == want.files, nil
 	case storageSchema004:
-		if !root.current || !manifest.current || root.recursiveFileCount != want.files || manifest.manifest.RecursiveFileCount != want.files || root.contentAccumulator != want.accumulator || manifest.manifest.ContentAccumulator != want.accumulator || root.contentDigest != want.digest || manifest.manifest.ContentDigest != want.digest || want.digest == "" {
+		if !root.current || !manifest.current || manifest.manifest.SchemaVersion != 2 || root.recursiveFileCount != want.files || manifest.manifest.RecursiveFileCount != want.files || root.contentAccumulator != want.accumulator || manifest.manifest.ContentAccumulator != want.accumulator || root.contentDigest != want.digest || manifest.manifest.ContentDigest != want.digest || want.digest == "" {
 			return false, nil
 		}
-		entries, err := e.Files().readManifestPageEntries(ctx, scope, directoryID, manifest.manifest)
-		if err != nil {
+		if err := e.Files().verifyDirectoryContentIndex(ctx, scope, directoryID, manifest.manifest); err != nil {
 			return false, err
 		}
-		for _, entry := range entries {
-			if entry.Kind == domain.EntryFile && (entry.SHA256 != "" || !objectstore.ContentFingerprint{MD5: entry.MD5, CRC32C: entry.CRC32C}.Complete()) {
-				return false, nil
-			}
-		}
-		accumulator, digest, err := directoryContentIdentity(entries)
-		return err == nil && accumulator == want.accumulator && digest == want.digest, err
+		return true, nil
 	default:
 		return false, domain.NewError(domain.ErrorPreconditionFailed, "aggregate migration has no target-schema reconciliation rule")
 	}

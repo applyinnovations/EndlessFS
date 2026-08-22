@@ -193,6 +193,7 @@ func TestCanonicalKeyLayoutAndBounds(t *testing.T) {
 		"idempotency":     IdempotencyKey("user-id", "request-key"),
 		"checkpoint":      CheckpointKey("checkpoint-id"),
 		"checkpoint work": CheckpointWorkKey("checkpoint-id", "endlessfs/v1/superblock.json"),
+		"checkpoint page": CheckpointInventoryPageKey("checkpoint-id", 42),
 		"lease":           LeaseKey("gcs", "lease-id"),
 	} {
 		if !key.Valid() || len(key.String()) > objectstore.MaxKeyBytes {

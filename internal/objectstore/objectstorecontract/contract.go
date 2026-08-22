@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,15 @@ func Run(t *testing.T, factory Factory) {
 		again, _ := backend.Get(context.Background(), key)
 		if string(again.Body) != "one" {
 			t.Fatal("Get exposed mutable backend data")
+		}
+		stream, err := backend.Open(context.Background(), key)
+		if err != nil || stream.Key != key || stream.Version != version || stream.Size != 3 || stream.Body == nil {
+			t.Fatalf("Open() = %+v, %v", stream, err)
+		}
+		streamed, readErr := io.ReadAll(stream.Body)
+		closeErr := stream.Body.Close()
+		if readErr != nil || closeErr != nil || string(streamed) != "one" {
+			t.Fatalf("Open body = %q, read %v, close %v", streamed, readErr, closeErr)
 		}
 		if _, err := backend.Put(context.Background(), key, []byte("two"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); !errors.Is(err, domain.ErrConflict) {
 			t.Fatalf("duplicate create error = %v", err)

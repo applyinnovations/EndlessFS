@@ -152,6 +152,14 @@ func CheckpointWorkPrefix(checkpointID string) string {
 	return root + "checkpoints/" + encodedPart(checkpointID) + "/work/"
 }
 
+func CheckpointInventoryPageKey(checkpointID string, index uint64) objectstore.Key {
+	return fixedKey("checkpoints/" + encodedPart(checkpointID) + "/inventory/" + fmt.Sprintf("%016x.json", index))
+}
+
+func CheckpointInventoryPagePrefix(checkpointID string) string {
+	return root + "checkpoints/" + encodedPart(checkpointID) + "/inventory/"
+}
+
 func LeaseKey(backendKind, leaseID string) objectstore.Key {
 	if err := ValidateNamespace(backendKind); err != nil {
 		panic(err)

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -76,7 +78,7 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 	if err := destination.ConfigureDataPlane(destinationServer.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(82, 1<<20)))); err != nil {
 		t.Fatal(err)
 	}
-	if err := destination.Import(authoritativeCopy(t, source.Export(), checkpoint)); err != nil {
+	if err := destination.Import(authoritativeCopy(t, sourceEngine, source.Export(), checkpoint)); err != nil {
 		t.Fatal(err)
 	}
 	destinationEngine := openEngine(t, destination, clock, 83, nil)
@@ -127,7 +129,7 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 	}
 
 	returned := objectmemory.New()
-	if err := returned.Import(authoritativeCopy(t, destination.Export(), returnCheckpoint)); err != nil {
+	if err := returned.Import(authoritativeCopy(t, destinationEngine, destination.Export(), returnCheckpoint)); err != nil {
 		t.Fatal(err)
 	}
 	returnedEngine := openEngine(t, returned, clock, 84, nil)
@@ -183,15 +185,22 @@ func TestPortabilityRawCopyPreservesSplitStateAndFileBackends(t *testing.T) {
 	fileCopy := make(map[string][]byte)
 	sourceStateObjects := sourceState.Export()
 	sourceFileObjects := sourceFiles.Export()
-	for _, object := range checkpoint.Objects {
+	if err := source.VisitCheckpointObjects(context.Background(), checkpoint.CheckpointID, func(object storageformat.CheckpointObject) error {
 		if strings.Contains(object.Key, "/blobs/") {
 			fileCopy[object.Key] = append([]byte(nil), sourceFileObjects[object.Key]...)
 		} else {
 			stateCopy[object.Key] = append([]byte(nil), sourceStateObjects[object.Key]...)
 		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 	checkpointKey := storageformat.CheckpointKey(checkpoint.CheckpointID).String()
 	stateCopy[checkpointKey] = append([]byte(nil), sourceStateObjects[checkpointKey]...)
+	for index := uint64(0); index < checkpoint.InventoryPageCount; index++ {
+		pageKey := storageformat.CheckpointInventoryPageKey(checkpoint.CheckpointID, index).String()
+		stateCopy[pageKey] = append([]byte(nil), sourceStateObjects[pageKey]...)
+	}
 	if err := destinationState.Import(stateCopy); err != nil {
 		t.Fatal(err)
 	}
@@ -240,15 +249,115 @@ func TestPortabilityRawCopyPreservesSplitStateAndFileBackends(t *testing.T) {
 	}
 }
 
-func authoritativeCopy(t *testing.T, source map[string][]byte, checkpoint storageformat.Checkpoint) map[string][]byte {
+func TestCheckpointSupportsInventoryBeyondCanonicalRecordLimit(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2037, 2, 5, 4, 5, 6, 0, time.UTC))
+	engine := openEngine(t, backend, clock, 155, nil)
+	objects := make(map[string][]byte, 12_080)
+	for index := range 12_080 {
+		objects[fmt.Sprintf("endlessfs/v1/test/large-checkpoint/%05d", index)] = []byte{byte(index)}
+	}
+	if err := backend.Import(objects); err != nil {
+		t.Fatal(err)
+	}
+
+	checkpoint, err := engine.CreateCheckpoint(context.Background(), "large-checkpoint")
+	if err != nil {
+		t.Fatalf("CreateCheckpoint() large inventory error = %v", err)
+	}
+	if checkpoint.SchemaVersion != 2 || checkpoint.StateObjectCount+checkpoint.FileObjectCount < uint64(len(objects)) || checkpoint.InventoryPageCount < 2 {
+		t.Fatalf("checkpoint root = %+v; want paged inventory for at least %d objects", checkpoint, len(objects))
+	}
+	checkpointBody := backend.Export()[storageformat.CheckpointKey(checkpoint.CheckpointID).String()]
+	if len(checkpointBody) == 0 || len(checkpointBody) > storageformat.MaxCanonicalBytes {
+		t.Fatalf("checkpoint root body size = %d; want bounded non-empty root", len(checkpointBody))
+	}
+	visited := 0
+	if err := engine.VisitCheckpointObjects(context.Background(), checkpoint.CheckpointID, func(storageformat.CheckpointObject) error {
+		visited++
+		return nil
+	}); err != nil {
+		t.Fatalf("VisitCheckpointObjects() large inventory error = %v", err)
+	}
+	if visited != int(checkpoint.StateObjectCount+checkpoint.FileObjectCount) {
+		t.Fatalf("visited checkpoint objects = %d; want %d", visited, checkpoint.StateObjectCount+checkpoint.FileObjectCount)
+	}
+	if err := engine.VerifyCheckpoint(context.Background(), checkpoint.CheckpointID); err != nil {
+		t.Fatalf("VerifyCheckpoint() large inventory error = %v", err)
+	}
+}
+
+func TestCheckpointV1RemainsReadable(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2037, 2, 6, 4, 5, 6, 0, time.UTC))
+	engine := openEngine(t, backend, clock, 156, nil)
+	const checkpointID = "legacy-v1-checkpoint"
+	if err := engine.CloseWrites(context.Background(), checkpointID); err != nil {
+		t.Fatal(err)
+	}
+	gateObject, err := backend.Get(context.Background(), storageformat.WriteGateKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gateEnvelope storageformat.Envelope
+	var gate storageformat.WriteGate
+	if err := storageformat.DecodeEnvelope(gateObject.Body, storageformat.WriteGateKey(), "write-gate-v1", &gateEnvelope, &gate); err != nil {
+		t.Fatal(err)
+	}
+	superblockObject, err := backend.Get(context.Background(), storageformat.SuperblockKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var superblock storageformat.Superblock
+	if err := state.DecodeJSONWithLimit(superblockObject.Body, &superblock, storageformat.MaxCanonicalBytes); err != nil {
+		t.Fatal(err)
+	}
+	var inventory []storageformat.CheckpointObject
+	for key, body := range backend.Export() {
+		if !strings.HasPrefix(key, "endlessfs/v1/") || strings.HasPrefix(key, "endlessfs/v1/admissions/") || strings.HasPrefix(key, "endlessfs/v1/staging/") || strings.HasPrefix(key, "endlessfs/v1/leases/") || strings.HasPrefix(key, "endlessfs/v1/checkpoints/") {
+			continue
+		}
+		inventory = append(inventory, storageformat.CheckpointObject{Key: key, Size: int64(len(body)), SHA256: storageformat.Digest(body)})
+	}
+	sort.Slice(inventory, func(i, j int) bool { return inventory[i].Key < inventory[j].Key })
+	inventoryBody, err := storageformat.EncodeCanonical(inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := storageformat.Checkpoint{
+		SchemaVersion: 1, CheckpointID: checkpointID, BucketID: superblock.BucketID,
+		WriterSetID: "d3JpdGVyLXNldC0wMDAx", GateEpoch: gate.Epoch,
+		KeyFormatVersion: storageformat.KeyFormatVersion, WriterProtocolVersion: storageformat.WriterProtocolVersion,
+		CreatedAt: clock.Now(), Objects: inventory, InventoryDigest: storageformat.Digest(inventoryBody),
+	}
+	key := storageformat.CheckpointKey(checkpointID)
+	body, err := storageformat.EncodeEnvelope("checkpoint-v1", key, 1, checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Put(context.Background(), key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.VerifyCheckpoint(context.Background(), checkpointID); err != nil {
+		t.Fatalf("VerifyCheckpoint() v1 error = %v", err)
+	}
+	if got := len(checkpointObjects(t, engine, checkpointID)); got != len(inventory) {
+		t.Fatalf("v1 checkpoint objects = %d; want %d", got, len(inventory))
+	}
+}
+
+func authoritativeCopy(t *testing.T, engine *portable.Engine, source map[string][]byte, checkpoint storageformat.Checkpoint) map[string][]byte {
 	t.Helper()
-	result := make(map[string][]byte, len(checkpoint.Objects)+1)
-	for _, object := range checkpoint.Objects {
+	result := make(map[string][]byte)
+	if err := engine.VisitCheckpointObjects(context.Background(), checkpoint.CheckpointID, func(object storageformat.CheckpointObject) error {
 		body, found := source[object.Key]
 		if !found {
 			t.Fatalf("checkpoint object %q is absent from source", object.Key)
 		}
 		result[object.Key] = append([]byte(nil), body...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 	checkpointKey := storageformat.CheckpointKey(checkpoint.CheckpointID).String()
 	body, found := source[checkpointKey]
@@ -256,7 +365,27 @@ func authoritativeCopy(t *testing.T, source map[string][]byte, checkpoint storag
 		t.Fatalf("checkpoint record %q is absent from source", checkpointKey)
 	}
 	result[checkpointKey] = append([]byte(nil), body...)
+	for index := uint64(0); index < checkpoint.InventoryPageCount; index++ {
+		pageKey := storageformat.CheckpointInventoryPageKey(checkpoint.CheckpointID, index).String()
+		pageBody, found := source[pageKey]
+		if !found {
+			t.Fatalf("checkpoint inventory page %q is absent from source", pageKey)
+		}
+		result[pageKey] = append([]byte(nil), pageBody...)
+	}
 	return result
+}
+
+func checkpointObjects(t *testing.T, engine *portable.Engine, checkpointID string) []storageformat.CheckpointObject {
+	t.Helper()
+	var objects []storageformat.CheckpointObject
+	if err := engine.VisitCheckpointObjects(context.Background(), checkpointID, func(object storageformat.CheckpointObject) error {
+		objects = append(objects, object)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return objects
 }
 
 func TestCheckpointDetectsAuthoritativeCorruption(t *testing.T) {
@@ -375,6 +504,39 @@ func TestCheckpointVerifierRejectsInvalidBootstrapAndCheckpointRecords(t *testin
 			assertRejected(t, verify(t, objects, writer, checkpoint.CheckpointID))
 		})
 	}
+	t.Run("missing checkpoint inventory page", func(t *testing.T) {
+		objects := cloneObjects(base)
+		delete(objects, storageformat.CheckpointInventoryPageKey(checkpoint.CheckpointID, 0).String())
+		assertRejected(t, verify(t, objects, writer, checkpoint.CheckpointID))
+	})
+	t.Run("malformed checkpoint inventory page", func(t *testing.T) {
+		objects := cloneObjects(base)
+		objects[storageformat.CheckpointInventoryPageKey(checkpoint.CheckpointID, 0).String()] = []byte("{")
+		assertRejected(t, verify(t, objects, writer, checkpoint.CheckpointID))
+	})
+	t.Run("checkpoint inventory chain mismatch", func(t *testing.T) {
+		objects := cloneObjects(base)
+		key := storageformat.CheckpointInventoryPageKey(checkpoint.CheckpointID, 0)
+		var envelope storageformat.Envelope
+		var page storageformat.CheckpointInventoryPage
+		if err := storageformat.DecodeEnvelope(objects[key.String()], key, "checkpoint-inventory-page-v1", &envelope, &page); err != nil {
+			t.Fatal(err)
+		}
+		page.PreviousDigest = storageformat.Digest([]byte("different predecessor"))
+		body, err := storageformat.EncodeEnvelope("checkpoint-inventory-page-v1", key, envelope.Revision, page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		objects[key.String()] = body
+		assertRejected(t, verify(t, objects, writer, checkpoint.CheckpointID))
+	})
+	t.Run("extra checkpoint inventory page", func(t *testing.T) {
+		objects := cloneObjects(base)
+		first := storageformat.CheckpointInventoryPageKey(checkpoint.CheckpointID, 0).String()
+		extra := storageformat.CheckpointInventoryPageKey(checkpoint.CheckpointID, checkpoint.InventoryPageCount).String()
+		objects[extra] = append([]byte(nil), objects[first]...)
+		assertRejected(t, verify(t, objects, writer, checkpoint.CheckpointID))
+	})
 	t.Run("incompatible writer set", func(t *testing.T) {
 		configuration := writer
 		configuration.ConfigurationDigest = "different-config"
@@ -385,11 +547,11 @@ func TestCheckpointVerifierRejectsInvalidBootstrapAndCheckpointRecords(t *testin
 		key := storageformat.CheckpointKey(checkpoint.CheckpointID)
 		var envelope storageformat.Envelope
 		var stored storageformat.Checkpoint
-		if err := storageformat.DecodeEnvelope(objects[key.String()], key, "checkpoint-v1", &envelope, &stored); err != nil {
+		if err := storageformat.DecodeEnvelope(objects[key.String()], key, "checkpoint-v2", &envelope, &stored); err != nil {
 			t.Fatal(err)
 		}
 		stored.SchemaVersion++
-		objects[key.String()], err = storageformat.EncodeEnvelope("checkpoint-v1", key, envelope.Revision, stored)
+		objects[key.String()], err = storageformat.EncodeEnvelope("checkpoint-v2", key, envelope.Revision, stored)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -449,7 +611,8 @@ func TestCheckpointVerifierRejectsMissingExtraAndUnsupportedState(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := authoritativeCopy(t, backend.Export(), checkpoint)
+	base := authoritativeCopy(t, engine, backend.Export(), checkpoint)
+	checkpointInventory := checkpointObjects(t, engine, checkpoint.CheckpointID)
 	writer := portable.WriterConfiguration{
 		WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1",
 		KeyringIdentifiers: []string{"session-v1"},
@@ -463,7 +626,7 @@ func TestCheckpointVerifierRejectsMissingExtraAndUnsupportedState(t *testing.T) 
 	}
 	t.Run("missing authoritative object", func(t *testing.T) {
 		objects := cloneObjects(base)
-		delete(objects, checkpoint.Objects[len(checkpoint.Objects)-1].Key)
+		delete(objects, checkpointInventory[len(checkpointInventory)-1].Key)
 		if err := verify(objects); !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrNotFound) {
 			t.Fatalf("verification error = %v", err)
 		}

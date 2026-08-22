@@ -198,7 +198,7 @@ func TestPortableSeparateFileBackendIsolatesBytesAndSharesOneCheckpoint(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !checkpointContains(checkpoint, blobKey) {
+	if !checkpointContains(t, engine, checkpoint.CheckpointID, blobKey) {
 		t.Fatalf("checkpoint does not include file-backend blob %q", blobKey)
 	}
 	if err := portable.VerifyCheckpointReadOnlyWithFileBackend(context.Background(), stateBackend, fileBackend, writer, checkpoint.CheckpointID); err != nil {
@@ -230,13 +230,16 @@ func TestPortableSeparateFileBackendIsolatesBytesAndSharesOneCheckpoint(t *testi
 	}
 }
 
-func checkpointContains(checkpoint storageformat.Checkpoint, key string) bool {
-	for _, object := range checkpoint.Objects {
-		if object.Key == key {
-			return true
-		}
+func checkpointContains(t *testing.T, engine *portable.Engine, checkpointID, key string) bool {
+	t.Helper()
+	found := false
+	if err := engine.VisitCheckpointObjects(context.Background(), checkpointID, func(object storageformat.CheckpointObject) error {
+		found = found || object.Key == key
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
-	return false
+	return found
 }
 
 func TestPortableUploadInitiationIsIdempotentAcrossReplicas(t *testing.T) {

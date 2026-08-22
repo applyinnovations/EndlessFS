@@ -3,6 +3,7 @@ package portable
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -121,5 +122,61 @@ func TestPreparingFileOperationSealsBoundedRunsBeforeVisibility(t *testing.T) {
 	object, err := backend.Get(ctx, target)
 	if err != nil || strings.Compare(string(object.Body), "final") != 0 {
 		t.Fatalf("prepared root = %q, %v; want final", object.Body, err)
+	}
+}
+
+func TestCloneTreeStreamEmitsWithoutSubtreeCollections(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2047, 3, 4, 5, 6, 7, 0, time.UTC))
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("stream-clone-entropy", 1<<16)))
+	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
+	from, _ := domain.NewScope(user, domain.AreaLive)
+	to, _ := domain.NewScope(user, domain.AreaTrash)
+	entries := make([]storageformat.DirectoryEntry, maxDirectoryIndexItems*4+1)
+	for index := range entries {
+		name := fmt.Sprintf("file-%05d.bin", index)
+		entries[index] = withCurrentTestFingerprint(storageformat.DirectoryEntry{
+			Name: name, NameDigest: storageformat.NameDigest(name), Kind: domain.EntryFile,
+			BlobID: fmt.Sprintf("blob-%05d", index), Size: int64(index + 1), MediaType: "application/octet-stream", ModifiedAt: clock.Now(),
+		})
+	}
+	sort.Slice(entries, func(left, right int) bool { return entries[left].NameDigest < entries[right].NameDigest })
+	prepared, err := engine.Files().prepareDirectory(ctx, from, storageformat.RootDirectoryID, entries, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prerequisite := range prepared.prerequisites {
+		if _, err := backend.Put(ctx, objectstore.MustKey(prerequisite.Key), prerequisite.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rootKey := storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID)
+	if _, err := backend.Put(ctx, rootKey, prepared.rootBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	source := storageformat.DirectoryEntry{
+		Name: "source", NameDigest: storageformat.NameDigest("source"), Kind: domain.EntryDirectory,
+		DirectoryID: storageformat.RootDirectoryID, Size: prepared.recursiveBytes, FileCount: prepared.recursiveFileCount,
+		ContentDigest: prepared.contentDigest, ModifiedAt: clock.Now(),
+	}
+	source.LogicalVersion, err = directoryEntryVersion(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects, copies, occurrences := 0, 0, 0
+	result, err := engine.Files().cloneTreeStream(ctx, "stable-clone-operation", from, to, source, true,
+		func(storageformat.MutationObject) error { objects++; return nil },
+		func(storageformat.MutationCopy) error { copies++; return nil },
+		func(relativeCatalogEntry) error { occurrences++; return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.entry.DirectoryID == source.DirectoryID || result.entry.Size != source.Size || result.entry.FileCount != source.FileCount || result.entry.ContentDigest != source.ContentDigest {
+		t.Fatalf("stream clone result = %+v; source = %+v", result.entry, source)
+	}
+	if copies != len(entries) || occurrences != len(entries)+1 || objects <= len(entries)/maxDirectoryIndexItems {
+		t.Fatalf("stream clone emissions = objects:%d copies:%d occurrences:%d", objects, copies, occurrences)
 	}
 }

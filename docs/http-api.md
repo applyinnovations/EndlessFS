@@ -68,7 +68,7 @@ Each successful `GET /api/v1/trash` row preserves the prior trash-record fields 
 
 ## Duplicate reconciliation foundation
 
-These authenticated owner routes expose the schema-004 duplicate catalog for the separate Part 2 browser workflow. They return only virtual paths, portable logical versions, counts, and opaque group/cursor/plan values. Provider keys, provider-native versions, and raw checksums are never public fields.
+These authenticated owner routes expose the duplicate catalog introduced by schema 004 and consumed by the current schema-005 backend foundation for the separate Part 2 browser workflow. They return only virtual paths, portable logical versions, counts, and opaque group/cursor/plan values. Provider keys, provider-native versions, and raw checksums are never public fields.
 
 | Method | Route | Request or query |
 |---|---|---|

@@ -108,7 +108,7 @@ func buildSchema004MigrationFixture(t *testing.T, commit string, seed byte, writ
 		t.Fatal(err)
 	}
 	live, _ := domain.NewScope(user, domain.AreaLive)
-	for _, path := range []string{"/project-a", "/project-a/empty", "/parent", "/parent/project-a", "/parent/project-a/empty"} {
+	for _, path := range []string{"/projects", "/project-a", "/project-a/empty", "/parent", "/parent/project-a", "/parent/project-a/empty"} {
 		if _, err := engine.Files().CreateDirectory(ctx, live, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
 			t.Fatalf("create fixture directory %s: %v", path, err)
 		}

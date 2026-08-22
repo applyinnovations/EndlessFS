@@ -504,14 +504,39 @@ const (
 	FileOperationPreparationRoot         FileOperationPreparationItemKind = "root"
 	FileOperationPreparationPrerequisite FileOperationPreparationItemKind = "prerequisite"
 	FileOperationPreparationCopy         FileOperationPreparationItemKind = "copy"
+	FileOperationPreparationOccurrence   FileOperationPreparationItemKind = "occurrence"
+	FileOperationPreparationSummary      FileOperationPreparationItemKind = "summary"
+	FileOperationPreparationSimilarity   FileOperationPreparationItemKind = "similarity"
 )
 
+type FileOperationPreparationOccurrenceChange struct {
+	Before bool                `json:"before"`
+	Value  DuplicateOccurrence `json:"value"`
+}
+
+type FileOperationPreparationSummaryDelta struct {
+	GroupID   string               `json:"groupID"`
+	Kind      domain.DuplicateKind `json:"kind"`
+	Shard     string               `json:"shard"`
+	Size      int64                `json:"size"`
+	FileCount int64                `json:"fileCount"`
+	Delta     int64                `json:"delta"`
+}
+
+type FileOperationPreparationSimilarityChange struct {
+	Before bool                       `json:"before"`
+	Value  DuplicateSimilarityPosting `json:"value"`
+}
+
 type FileOperationPreparationItem struct {
-	SortKey      string                           `json:"sortKey"`
-	Kind         FileOperationPreparationItemKind `json:"kind"`
-	Root         *FileOperationRoot               `json:"root,omitempty"`
-	Prerequisite *MutationObjectReference         `json:"prerequisite,omitempty"`
-	Copy         *MutationCopy                    `json:"copy,omitempty"`
+	SortKey      string                                    `json:"sortKey"`
+	Kind         FileOperationPreparationItemKind          `json:"kind"`
+	Root         *FileOperationRoot                        `json:"root,omitempty"`
+	Prerequisite *MutationObjectReference                  `json:"prerequisite,omitempty"`
+	Copy         *MutationCopy                             `json:"copy,omitempty"`
+	Occurrence   *FileOperationPreparationOccurrenceChange `json:"occurrence,omitempty"`
+	Summary      *FileOperationPreparationSummaryDelta     `json:"summary,omitempty"`
+	Similarity   *FileOperationPreparationSimilarityChange `json:"similarity,omitempty"`
 }
 
 type FileOperationPreparationPage struct {

@@ -190,3 +190,63 @@ func TestCloneTreeStreamEmitsWithoutSubtreeCollections(t *testing.T) {
 		t.Fatalf("streamed source occurrences = %d; want %d", collected, len(entries)+1)
 	}
 }
+
+func TestOperationPreparationReducesCatalogChangesWithoutGrowingMaps(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2047, 4, 5, 6, 7, 8, 0, time.UTC))
+	engine := &Engine{backend: backend, clock: clock, leaseTTL: time.Minute}
+	store := &FileStore{engine: engine}
+	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	entry := withCurrentTestFingerprint(storageformat.DirectoryEntry{
+		Name: "duplicate.bin", NameDigest: storageformat.NameDigest("duplicate.bin"), Kind: domain.EntryFile,
+		BlobID: "duplicate-blob", Size: 12, MediaType: "application/octet-stream", ModifiedAt: clock.Now(),
+	})
+	occurrence, err := catalogOccurrence(scope, domain.MustParseUserPath("/duplicate.bin"), entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := storageformat.FileOperation{
+		SchemaVersion: 2, OperationID: "catalog-reduction", UserID: user.String(), Kind: operationMove,
+		State: storageformat.FileOperationPreparing, Attempt: 1, Fence: 1, ReplicaAttemptID: "catalog-attempt",
+		ExpiresAt: clock.Now().Add(time.Minute), StartedAt: clock.Now(), UpdatedAt: clock.Now(),
+		Preparation: &storageformat.FileOperationPreparation{SchemaVersion: 1, RunSetID: "catalog-raw-set", Phase: "seal"},
+	}
+	collector, err := newOperationPreparationRunCollector(store, operation, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.addCatalogChangePreparationItems(ctx, collector, user, catalogChange{post: &occurrence}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := catalogOccurrence(scope, domain.MustParseUserPath("/copy/duplicate.bin"), entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.addCatalogChangePreparationItems(ctx, collector, user, catalogChange{post: &second}); err != nil {
+		t.Fatal(err)
+	}
+	operation.Preparation.RunCount, err = collector.Close(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := storageformat.OperationKey(user.String(), operation.OperationID)
+	body, err := storageformat.EncodeEnvelope(fileOperationSchema, key, 1, operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.executeFileOperation(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := store.ListDuplicateGroups(ctx, user, domain.DuplicateGroupRequest{Kind: domain.DuplicateFile, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups.Groups) != 1 || groups.Groups[0].OccurrenceCount != 2 {
+		t.Fatalf("reduced duplicate groups = %+v", groups.Groups)
+	}
+}

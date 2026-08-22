@@ -769,8 +769,9 @@ func TestObjectFailureAtEveryPreparedFileOperationRecoveryBoundaryIsRetrySafe(t 
 		t.Fatal(err)
 	}
 	crashed := false
+	crashPreparedOperation := false
 	crasher := portable.SchedulerFunc(func(_ context.Context, step string) error {
-		if step == portable.StepOperationAfterPrepared && !crashed {
+		if crashPreparedOperation && step == portable.StepOperationAfterPrepared && !crashed {
 			crashed = true
 			return domain.NewError(domain.ErrorUnavailable, "injected replica loss")
 		}
@@ -785,6 +786,7 @@ func TestObjectFailureAtEveryPreparedFileOperationRecoveryBoundaryIsRetrySafe(t 
 		}
 	}
 	uploadPortableFile(t, fixtureServer.Client(), fixtureEngine.Files(), scope, domain.MustParseUserPath("/source/value.txt"), []byte("recovery"))
+	crashPreparedOperation = true
 	if _, err := fixtureEngine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{Source: domain.MustParseUserPath("/source/value.txt"), Destination: domain.MustParseUserPath("/destination/value.txt"), IdempotencyKey: "prepared-recovery"}); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("crashed Move() error = %v", err)
 	}

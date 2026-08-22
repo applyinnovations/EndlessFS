@@ -643,6 +643,15 @@
             exec go run ./tools/generate-secret
           '';
 
+          generate-migration-fixture = goTask "endlessfs-generate-migration-fixture" ''
+            if [ "$#" -ne 1 ] || ! [[ "$1" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "usage: nix run .#generate-migration-fixture -- PRODUCER_COMMIT" >&2
+              exit 2
+            fi
+            export ENDLESSFS_MIGRATION_FIXTURE_PRODUCER_COMMIT="$1"
+            exec go test ./cmd/endlessfs -run '^TestGenerateSchema004MigrationFixtures$' -count=1
+          '';
+
           fmt =
             mkTask "endlessfs-fmt"
               [
@@ -675,6 +684,7 @@
             ${pipelinePolicyCommand}
             go vet ./...
             staticcheck ./...
+            go run ./tools/check-source .
           '';
 
           test = goTask "endlessfs-test" ''
@@ -1082,6 +1092,7 @@
               ''
                 go vet ./...
                 ${sandboxedStaticcheck}
+                go run ./tools/check-source .
               ''
               [
                 pkgs.go-tools

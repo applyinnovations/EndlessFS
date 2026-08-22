@@ -18,6 +18,7 @@ type record struct {
 	version      objectstore.NativeVersion
 	size         int64
 	materialized bool
+	fingerprint  objectstore.ContentFingerprint
 }
 
 type snapshot struct {
@@ -66,7 +67,7 @@ func (b *Backend) Head(ctx context.Context, key objectstore.Key) (objectstore.Ob
 	if !found {
 		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorNotFound, "object not found")
 	}
-	return objectstore.ObjectInfo{Key: key, Version: record.version, Size: record.size}, nil
+	return objectstore.ObjectInfo{Key: key, Version: record.version, Size: record.size, Fingerprint: record.fingerprint}, nil
 }
 
 func (b *Backend) Verify(ctx context.Context, key objectstore.Key, expected objectstore.ExpectedIntegrity) (objectstore.ObjectInfo, error) {
@@ -92,7 +93,7 @@ func (b *Backend) Verify(ctx context.Context, key objectstore.Key, expected obje
 	if record.size != expected.Size || actual.Checksum != expected.Checksum {
 		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorPreconditionFailed, "object integrity does not match")
 	}
-	return objectstore.ObjectInfo{Key: key, Version: record.version, Size: record.size}, nil
+	return objectstore.ObjectInfo{Key: key, Version: record.version, Size: record.size, Fingerprint: record.fingerprint}, nil
 }
 
 func (b *Backend) Get(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
@@ -135,7 +136,7 @@ func (b *Backend) List(ctx context.Context, request objectstore.ListRequest) (ob
 	if err := objectstore.ContextError(ctx); err != nil {
 		return objectstore.ListPage{}, err
 	}
-	if err := objectstore.ValidatePrefix(request.Prefix); err != nil {
+	if err := request.Validate(); err != nil {
 		return objectstore.ListPage{}, err
 	}
 	limit := request.Limit
@@ -156,7 +157,7 @@ func (b *Backend) List(ctx context.Context, request objectstore.ListRequest) (ob
 	}
 	keys := make([]string, 0)
 	for key := range b.records {
-		if strings.HasPrefix(key, request.Prefix) {
+		if strings.HasPrefix(key, request.Prefix) && key > request.After {
 			keys = append(keys, key)
 		}
 	}
@@ -164,7 +165,7 @@ func (b *Backend) List(ctx context.Context, request objectstore.ListRequest) (ob
 	objects := make([]objectstore.ObjectInfo, 0, len(keys))
 	for _, value := range keys {
 		record := b.records[value]
-		objects = append(objects, objectstore.ObjectInfo{Key: objectstore.MustKey(value), Version: record.version, Size: record.size})
+		objects = append(objects, objectstore.ObjectInfo{Key: objectstore.MustKey(value), Version: record.version, Size: record.size, Fingerprint: record.fingerprint})
 	}
 	if len(objects) <= limit {
 		return objectstore.ListPage{Objects: objects}, nil
@@ -215,7 +216,7 @@ func (b *Backend) Put(ctx context.Context, key objectstore.Key, body []byte, con
 	}
 	b.versions++
 	version := objectstore.VersionString("m", b.versions)
-	b.records[key.String()] = record{body: append([]byte(nil), body...), version: version, size: int64(len(body)), materialized: true}
+	b.records[key.String()] = record{body: append([]byte(nil), body...), version: version, size: int64(len(body)), materialized: true, fingerprint: objectstore.FingerprintFor(body)}
 	return version, nil
 }
 
@@ -275,7 +276,7 @@ func (b *Backend) Copy(ctx context.Context, source, destination objectstore.Key,
 	b.versions++
 	version := objectstore.VersionString("m", b.versions)
 	body := append([]byte(nil), sourceRecord.body...)
-	b.records[destination.String()] = record{body: body, version: version, size: sourceRecord.size, materialized: sourceRecord.materialized}
+	b.records[destination.String()] = record{body: body, version: version, size: sourceRecord.size, materialized: sourceRecord.materialized, fingerprint: sourceRecord.fingerprint}
 	return objectstore.CopyResult{Version: version, Size: sourceRecord.size}, nil
 }
 

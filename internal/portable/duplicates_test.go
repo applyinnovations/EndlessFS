@@ -1,0 +1,292 @@
+package portable_test
+
+import (
+	"bytes"
+	"context"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/applyinnovations/endlessfs/internal/domain"
+	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
+	"github.com/applyinnovations/endlessfs/internal/portable"
+)
+
+func TestDuplicateCatalogTracksFileAndExactDirectoryGroupsIncrementally(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2048, 1, 2, 3, 4, 5, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(141, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engine := openEngine(t, backend, clock, 142, nil)
+	user, _ := domain.ParseUserID("aGhoaGhoaGhoaGhoaGhoaA")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	for _, path := range []string{"/project-a", "/backup/project-a"} {
+		parent := domain.MustParseUserPath(path).Parent()
+		if !parent.IsRoot() {
+			if _, err := engine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: parent}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := engine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
+			t.Fatal(err)
+		}
+		uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath(path+"/same.txt"), []byte("same bytes"))
+	}
+
+	page, err := engine.Files().ListDuplicateGroups(context.Background(), user, domain.DuplicateGroupRequest{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileGroup := duplicateGroupByKind(t, page.Groups, domain.DuplicateFile)
+	if fileGroup.OccurrenceCount != 2 || fileGroup.Size != 10 || fileGroup.ReclaimableBytes != 10 || fileGroup.Ignored {
+		t.Fatalf("file duplicate group = %+v", fileGroup)
+	}
+	directoryGroup := duplicateGroupByKind(t, page.Groups, domain.DuplicateDirectory)
+	if directoryGroup.OccurrenceCount != 2 || directoryGroup.FileCount != 1 || directoryGroup.Size != 10 || directoryGroup.ReclaimableBytes != 10 {
+		t.Fatalf("directory duplicate group = %+v", directoryGroup)
+	}
+
+	occurrences, err := engine.Files().ListDuplicateOccurrences(context.Background(), user, domain.DuplicateOccurrenceRequest{GroupID: directoryGroup.ID, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !duplicateOccurrencePathsEqual(occurrences.Occurrences, "/backup/project-a", "/project-a") {
+		t.Fatalf("directory occurrences = %+v", occurrences.Occurrences)
+	}
+	exactPreview, err := engine.Files().PreviewDuplicateReconciliation(context.Background(), user, domain.DuplicateReconciliationPreviewRequest{
+		Left:       domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/project-a")},
+		Right:      domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/backup/project-a")},
+		RemoveFrom: domain.DuplicateSideRight,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exactPreview.Comparison.Exact || len(exactPreview.Items) != 1 || exactPreview.Items[0].Remove.Path.String() != "/backup/project-a" || exactPreview.Items[0].Keep.Path.String() != "/project-a" || exactPreview.PlanToken == "" {
+		t.Fatalf("exact reconciliation preview = %+v", exactPreview)
+	}
+	if selection, err := engine.Files().ValidateDuplicateReconciliation(context.Background(), user, exactPreview.PlanToken); err != nil || len(selection.Items) != 1 {
+		t.Fatalf("exact reconciliation validation = %+v, %v", selection, err)
+	}
+
+	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/backup/project-a/unique.txt"), []byte("unique"))
+	page, err = engine.Files().ListDuplicateGroups(context.Background(), user, domain.DuplicateGroupRequest{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countDuplicateGroups(page.Groups, domain.DuplicateDirectory) != 0 {
+		t.Fatalf("stale exact directory duplicate remained: %+v", page.Groups)
+	}
+	comparison, err := engine.Files().CompareDuplicateDirectories(context.Background(), user, domain.DuplicateDirectoryComparisonRequest{
+		Left:  domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/project-a")},
+		Right: domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/backup/project-a")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if comparison.Exact || comparison.CommonFiles != 1 || comparison.CommonBytes != 10 || comparison.LeftOnlyFiles != 0 || comparison.RightOnlyFiles != 1 || comparison.RightOnlyBytes != 6 {
+		t.Fatalf("directory comparison = %+v", comparison)
+	}
+	partialPreview, err := engine.Files().PreviewDuplicateReconciliation(context.Background(), user, domain.DuplicateReconciliationPreviewRequest{
+		Left:       domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/project-a")},
+		Right:      domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/backup/project-a")},
+		RemoveFrom: domain.DuplicateSideRight, Limit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partialPreview.Comparison.Exact || len(partialPreview.Items) != 1 || partialPreview.Items[0].Remove.Path.String() != "/backup/project-a/same.txt" || partialPreview.Items[0].Keep.Path.String() != "/project-a/same.txt" || partialPreview.ReclaimableBytes != 10 || partialPreview.PlanToken == "" {
+		t.Fatalf("partial reconciliation preview = %+v", partialPreview)
+	}
+	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/backup/project-a/later.txt"), []byte("later"))
+	if _, err := engine.Files().ValidateDuplicateReconciliation(context.Background(), user, partialPreview.PlanToken); err == nil {
+		t.Fatal("stale reconciliation plan was accepted after its directory changed")
+	}
+
+	fileGroup = duplicateGroupByKind(t, page.Groups, domain.DuplicateFile)
+	ignored, err := engine.Files().SetDuplicateGroupIgnored(context.Background(), user, domain.SetDuplicateIgnoredRequest{GroupID: fileGroup.ID, Ignored: true})
+	if err != nil || !ignored.Ignored || ignored.Revision != 1 {
+		t.Fatalf("ignore result = %+v, %v", ignored, err)
+	}
+	visible, err := engine.Files().ListDuplicateGroups(context.Background(), user, domain.DuplicateGroupRequest{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countDuplicateGroups(visible.Groups, domain.DuplicateFile) != 0 {
+		t.Fatalf("ignored file group remained visible: %+v", visible.Groups)
+	}
+	withIgnored, err := engine.Files().ListDuplicateGroups(context.Background(), user, domain.DuplicateGroupRequest{Limit: 20, IncludeIgnored: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileGroup = duplicateGroupByKind(t, withIgnored.Groups, domain.DuplicateFile)
+	if !fileGroup.Ignored || fileGroup.IgnoreRevision != ignored.Revision {
+		t.Fatalf("included ignored group = %+v", fileGroup)
+	}
+	ignoredPreview, err := engine.Files().PreviewDuplicateReconciliation(context.Background(), user, domain.DuplicateReconciliationPreviewRequest{
+		Left:       domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/project-a")},
+		Right:      domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/backup/project-a")},
+		RemoveFrom: domain.DuplicateSideRight,
+	})
+	if err != nil || len(ignoredPreview.Items) != 0 || ignoredPreview.PlanToken != "" {
+		t.Fatalf("ignored reconciliation preview = %+v, %v", ignoredPreview, err)
+	}
+}
+
+func TestDuplicateCatalogFollowsSubtreeCopyMoveAndDelete(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2048, 2, 3, 4, 5, 6, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(143, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engine := openEngine(t, backend, clock, 144, nil)
+	user, _ := domain.ParseUserID("aWlpaWlpaWlpaWlpaWlpaQ")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	for _, path := range []string{"/source", "/source/nested"} {
+		if _, err := engine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/source/nested/value.bin"), []byte("catalog"))
+	if _, err := engine.Files().Copy(context.Background(), scope, scope, domain.CopyRequest{Source: domain.MustParseUserPath("/source"), Destination: domain.MustParseUserPath("/copy"), IdempotencyKey: "duplicate-copy-0001"}); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := engine.Files().ListDuplicateGroups(context.Background(), user, domain.DuplicateGroupRequest{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duplicateGroupByKind(t, groups.Groups, domain.DuplicateFile).OccurrenceCount != 2 || countDuplicateGroups(groups.Groups, domain.DuplicateDirectory) != 2 {
+		t.Fatalf("copied subtree groups = %+v", groups.Groups)
+	}
+	if _, err := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{Source: domain.MustParseUserPath("/copy"), Destination: domain.MustParseUserPath("/moved"), IdempotencyKey: "duplicate-move-0001"}); err != nil {
+		t.Fatal(err)
+	}
+	fileGroup := duplicateGroupByKind(t, groups.Groups, domain.DuplicateFile)
+	occurrences, err := engine.Files().ListDuplicateOccurrences(context.Background(), user, domain.DuplicateOccurrenceRequest{GroupID: fileGroup.ID, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !duplicateOccurrencePathsEqual(occurrences.Occurrences, "/moved/nested/value.bin", "/source/nested/value.bin") {
+		t.Fatalf("moved occurrences = %+v", occurrences.Occurrences)
+	}
+	if _, err := engine.Files().Delete(context.Background(), scope, domain.DeleteRequest{Path: domain.MustParseUserPath("/moved"), IdempotencyKey: "duplicate-delete-01"}); err != nil {
+		t.Fatal(err)
+	}
+	groups, err = engine.Files().ListDuplicateGroups(context.Background(), user, domain.DuplicateGroupRequest{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups.Groups) != 0 {
+		t.Fatalf("deleted subtree left duplicates: %+v", groups.Groups)
+	}
+}
+
+func TestDuplicateCatalogUsesBoundedAuthenticatedPagination(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2048, 2, 4, 4, 5, 6, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(145, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engine := openEngine(t, backend, clock, 146, nil)
+	user, _ := domain.ParseUserID("ampqampqampqampqampqag")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/a-1", "alpha"}, {"/a-2", "alpha"}, {"/a-3", "alpha"},
+		{"/b-1", "bravo"}, {"/b-2", "bravo"},
+	} {
+		uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath(item.path), []byte(item.body))
+	}
+	var groups []domain.DuplicateGroup
+	cursor := ""
+	for {
+		page, err := engine.Files().ListDuplicateGroups(context.Background(), user, domain.DuplicateGroupRequest{Kind: domain.DuplicateFile, Limit: 1, Cursor: cursor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		groups = append(groups, page.Groups...)
+		cursor = page.NextCursor
+		if cursor == "" {
+			break
+		}
+	}
+	if len(groups) != 2 || groups[0].ID == groups[1].ID {
+		t.Fatalf("paged groups = %+v", groups)
+	}
+	group := groups[0]
+	var occurrences []domain.DuplicateOccurrence
+	cursor = ""
+	for {
+		page, err := engine.Files().ListDuplicateOccurrences(context.Background(), user, domain.DuplicateOccurrenceRequest{GroupID: group.ID, Limit: 1, Cursor: cursor})
+		if err != nil {
+			t.Fatal(err)
+		}
+		occurrences = append(occurrences, page.Occurrences...)
+		cursor = page.NextCursor
+		if cursor == "" {
+			break
+		}
+	}
+	if int64(len(occurrences)) != group.OccurrenceCount {
+		t.Fatalf("paged occurrences = %d; want %d", len(occurrences), group.OccurrenceCount)
+	}
+	other, _ := domain.ParseUserID("a2tra2tra2tra2tra2traw")
+	if _, err := engine.Files().ListDuplicateGroups(context.Background(), other, domain.DuplicateGroupRequest{Kind: domain.DuplicateFile, Limit: 1, Cursor: groupsCursorForTest(t, engine.Files(), user)}); err == nil {
+		t.Fatal("cross-owner duplicate cursor was accepted")
+	}
+}
+
+func groupsCursorForTest(t *testing.T, files *portable.FileStore, user domain.UserID) string {
+	t.Helper()
+	page, err := files.ListDuplicateGroups(context.Background(), user, domain.DuplicateGroupRequest{Kind: domain.DuplicateFile, Limit: 1})
+	if err != nil || page.NextCursor == "" {
+		t.Fatalf("duplicate cursor setup = %+v, %v", page, err)
+	}
+	return page.NextCursor
+}
+
+func duplicateGroupByKind(t *testing.T, groups []domain.DuplicateGroup, kind domain.DuplicateKind) domain.DuplicateGroup {
+	t.Helper()
+	for _, group := range groups {
+		if group.Kind == kind {
+			return group
+		}
+	}
+	t.Fatalf("duplicate group %q not found in %+v", kind, groups)
+	return domain.DuplicateGroup{}
+}
+
+func countDuplicateGroups(groups []domain.DuplicateGroup, kind domain.DuplicateKind) int {
+	count := 0
+	for _, group := range groups {
+		if group.Kind == kind {
+			count++
+		}
+	}
+	return count
+}
+
+func duplicateOccurrencePathsEqual(occurrences []domain.DuplicateOccurrence, paths ...string) bool {
+	if len(occurrences) != len(paths) {
+		return false
+	}
+	want := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		want[path] = struct{}{}
+	}
+	for _, occurrence := range occurrences {
+		if _, found := want[occurrence.Path.String()]; !found {
+			return false
+		}
+		delete(want, occurrence.Path.String())
+	}
+	return len(want) == 0
+}

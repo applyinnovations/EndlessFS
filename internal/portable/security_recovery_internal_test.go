@@ -869,7 +869,7 @@ func TestFileOperationValidationAndRecoveryMatrix(t *testing.T) {
 		operationID := "operation"
 		operationKey := storageformat.OperationKey(user.String(), operationID)
 		rootKey := storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID)
-		pending := encodeInternalEnvelope(t, directoryRootSchema, rootKey, 1, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: storageformat.RootDirectoryID, Pending: &storageformat.DirectoryTransition{OperationID: operationID, Fence: 1, PostManifestID: "post"}})
+		pending := encodeInternalEnvelope(t, directoryRootSchema, rootKey, 1, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: storageformat.RootDirectoryID, Pending: &storageformat.DirectoryTransition{OperationID: operationID, Fence: 1, PostManifestID: "post", PostContentAccumulator: encodeDirectoryContentAccumulator([directoryContentAccumulatorBytes]byte{}), PostContentDigest: "post-digest"}})
 		final := encodeInternalEnvelope(t, directoryRootSchema, rootKey, 2, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: storageformat.RootDirectoryID, ManifestID: "post"})
 		root := storageformat.FileOperationRoot{Key: rootKey.String(), PendingBody: pending, FinalBody: final}
 		operation := storageformat.FileOperation{
@@ -1100,7 +1100,7 @@ func TestFileOperationValidationAndRecoveryMatrix(t *testing.T) {
 			t.Fatalf("buildFileOperation(invalid prerequisite) error = %v", err)
 		}
 		invalidEntries := map[string]directoryUpdate{rootKey: {
-			scope: scope, directoryID: storageformat.RootDirectoryID, entries: []storageformat.DirectoryEntry{{}},
+			scope: scope, directoryID: storageformat.RootDirectoryID, changes: map[string]directoryEntryMutation{"": {}},
 		}}
 		if _, _, err := engine.Files().buildFileOperation(ctx, user, "operation", "owner", operationDelete, invalidEntries, nil, nil); !errors.Is(err, domain.ErrInvalid) {
 			t.Fatalf("buildFileOperation(invalid directory entry) error = %v", err)
@@ -1195,7 +1195,7 @@ func TestFileOperationValidationAndRecoveryMatrix(t *testing.T) {
 			if err := storageformat.DecodeEnvelope(object.Body, key, directoryRootSchema, &envelope, &root); err != nil {
 				t.Fatal(err)
 			}
-			root.Pending = &storageformat.DirectoryTransition{OperationID: "pending", Fence: 1, PreManifestID: root.ManifestID, PostManifestID: root.ManifestID}
+			root.Pending = &storageformat.DirectoryTransition{OperationID: "pending", Fence: 1, PreManifestID: root.ManifestID, PostManifestID: root.ManifestID, PostRecursiveBytes: root.RecursiveBytes, PostRecursiveFileCount: root.RecursiveFileCount, PostContentAccumulator: root.ContentAccumulator, PostContentDigest: root.ContentDigest}
 			body := encodeInternalEnvelope(t, directoryRootSchema, key, envelope.Revision+1, root)
 			replaceInternalObject(t, memory, key, object.Version, body)
 			operationKey := storageformat.OperationKey(user.String(), "pending")

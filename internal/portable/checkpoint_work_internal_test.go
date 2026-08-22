@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"math"
 	"strings"
 	"testing"
@@ -253,11 +252,11 @@ func TestCheckpointWorkRestartRejectsMissingAndMisplacedObjects(t *testing.T) {
 		}
 	})
 
-	t.Run("stream-open-interruption", func(t *testing.T) {
+	t.Run("metadata-head-interruption", func(t *testing.T) {
 		backend := &hookedBackend{
 			Backend: objectmemory.New(),
-			open: func(context.Context, objectstore.Key) (objectstore.ObjectReader, error) {
-				return objectstore.ObjectReader{}, domain.NewError(domain.ErrorUnavailable, "checkpoint open interrupted")
+			head: func(context.Context, objectstore.Key) (objectstore.ObjectInfo, error) {
+				return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorUnavailable, "checkpoint metadata interrupted")
 			},
 		}
 		if _, _, err := streamCheckpointObject(ctx, backend, objectstore.ObjectInfo{Key: objectKey, Size: int64(len(body))}); !errors.Is(err, domain.ErrUnavailable) {
@@ -265,35 +264,35 @@ func TestCheckpointWorkRestartRejectsMissingAndMisplacedObjects(t *testing.T) {
 		}
 	})
 
-	t.Run("stream-read-interruption", func(t *testing.T) {
+	t.Run("metadata-size-changed", func(t *testing.T) {
 		backend := &hookedBackend{
 			Backend: objectmemory.New(),
-			open: func(context.Context, objectstore.Key) (objectstore.ObjectReader, error) {
-				return objectstore.ObjectReader{Key: objectKey, Size: int64(len(body)), Body: &checkpointFaultReader{readErr: domain.NewError(domain.ErrorUnavailable, "checkpoint read interrupted")}}, nil
+			head: func(context.Context, objectstore.Key) (objectstore.ObjectInfo, error) {
+				return objectstore.ObjectInfo{Key: objectKey, Size: int64(len(body)) + 1, Fingerprint: objectstore.FingerprintFor(body)}, nil
 			},
 		}
-		if _, _, err := streamCheckpointObject(ctx, backend, objectstore.ObjectInfo{Key: objectKey, Size: int64(len(body))}); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("streamCheckpointObject() error = %v; want unavailable", err)
+		if _, _, err := streamCheckpointObject(ctx, backend, objectstore.ObjectInfo{Key: objectKey, Size: int64(len(body))}); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("streamCheckpointObject() error = %v; want precondition failed", err)
 		}
 	})
 
-	t.Run("stream-close-interruption", func(t *testing.T) {
+	t.Run("metadata-missing-fingerprint", func(t *testing.T) {
 		backend := &hookedBackend{
 			Backend: objectmemory.New(),
-			open: func(context.Context, objectstore.Key) (objectstore.ObjectReader, error) {
-				return objectstore.ObjectReader{Key: objectKey, Size: int64(len(body)), Body: &checkpointFaultReader{Reader: bytes.NewReader(body), closeErr: domain.NewError(domain.ErrorUnavailable, "checkpoint close interrupted")}}, nil
+			head: func(context.Context, objectstore.Key) (objectstore.ObjectInfo, error) {
+				return objectstore.ObjectInfo{Key: objectKey, Size: int64(len(body))}, nil
 			},
 		}
-		if _, _, err := streamCheckpointObject(ctx, backend, objectstore.ObjectInfo{Key: objectKey, Size: int64(len(body))}); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("streamCheckpointObject() error = %v; want unavailable", err)
+		if _, _, err := streamCheckpointObject(ctx, backend, objectstore.ObjectInfo{Key: objectKey, Size: int64(len(body))}); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("streamCheckpointObject() error = %v; want precondition failed", err)
 		}
 	})
 
-	t.Run("stream-version-changed", func(t *testing.T) {
+	t.Run("metadata-version-changed", func(t *testing.T) {
 		backend := &hookedBackend{
 			Backend: objectmemory.New(),
-			open: func(context.Context, objectstore.Key) (objectstore.ObjectReader, error) {
-				return objectstore.ObjectReader{Key: objectKey, Size: int64(len(body)), Version: "changed", Body: io.NopCloser(bytes.NewReader(body))}, nil
+			head: func(context.Context, objectstore.Key) (objectstore.ObjectInfo, error) {
+				return objectstore.ObjectInfo{Key: objectKey, Size: int64(len(body)), Version: "changed", Fingerprint: objectstore.FingerprintFor(body)}, nil
 			},
 		}
 		if _, _, err := streamCheckpointObject(ctx, backend, objectstore.ObjectInfo{Key: objectKey, Size: int64(len(body)), Version: "expected"}); !errors.Is(err, domain.ErrPreconditionFailed) {
@@ -522,7 +521,7 @@ func TestCheckpointRecordAndStreamingDenials(t *testing.T) {
 		backend := objectmemory.New()
 		clock := domain.NewFixedClock(time.Date(2044, 2, 3, 4, 5, 6, 0, time.UTC))
 		engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat(t.Name(), 1<<14)))
-		key := storageformat.BlobKey("owner", "mutable-record")
+		key := objectstore.MustKey("endlessfs/v1/test/mutable-record.json")
 		original := []byte("original")
 		if _, err := backend.Put(ctx, key, original, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
 			t.Fatal(err)
@@ -551,8 +550,8 @@ func TestCheckpointRecordAndStreamingDenials(t *testing.T) {
 		if _, err := backend.Put(ctx, key, []byte("changed!"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
 			t.Fatal(err)
 		}
-		if err := engine.verifyCheckpointV2(ctx, checkpoint, storageformat.WriteGate{Mode: storageformat.GateClosed, CheckpointID: checkpointID, Epoch: checkpoint.GateEpoch}); !errors.Is(err, domain.ErrPreconditionFailed) {
-			t.Fatalf("verifyCheckpointV2() error = %v; want precondition failed", err)
+		if err := engine.verifyCheckpointV3(ctx, checkpoint, storageformat.WriteGate{Mode: storageformat.GateClosed, CheckpointID: checkpointID, Epoch: checkpoint.GateEpoch}); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("verifyCheckpointV3() error = %v; want precondition failed", err)
 		}
 	})
 }
@@ -581,18 +580,3 @@ type checkpointVerifyUnavailableBackend struct {
 func (*checkpointVerifyUnavailableBackend) Verify(context.Context, objectstore.Key, objectstore.ExpectedIntegrity) (objectstore.ObjectInfo, error) {
 	return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorUnavailable, "checkpoint integrity verification interrupted")
 }
-
-type checkpointFaultReader struct {
-	io.Reader
-	readErr  error
-	closeErr error
-}
-
-func (reader *checkpointFaultReader) Read(buffer []byte) (int, error) {
-	if reader.readErr != nil {
-		return 0, reader.readErr
-	}
-	return reader.Reader.Read(buffer)
-}
-
-func (reader *checkpointFaultReader) Close() error { return reader.closeErr }

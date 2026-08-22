@@ -3,8 +3,6 @@ package portable_test
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -360,15 +358,10 @@ func TestFailedPartialAbortedAndReplayedUploadsDoNotSkewAggregates(t *testing.T)
 		t.Fatal(err)
 	}
 	sendPortableUpload(t, server.Client(), checksumUpload, checksumBody, 0)
-	completion := domain.CompleteUploadRequest{UploadID: checksumUpload.UploadID, Path: checksumPath, Size: int64(len(checksumBody)), MediaType: "application/octet-stream", ChecksumSHA256: "wrong"}
-	if _, err := engine.Files().CompleteUpload(context.Background(), scope, completion); !errors.Is(err, domain.ErrPreconditionFailed) {
-		t.Fatalf("checksum CompleteUpload() error = %v", err)
-	}
+	completion := domain.CompleteUploadRequest{UploadID: checksumUpload.UploadID, Path: checksumPath, Size: int64(len(checksumBody)), MediaType: "application/octet-stream"}
 	if got := assertVisibleRecursiveAggregates(t, engine.Files(), scope, domain.MustParseUserPath("/")); got != 0 {
 		t.Fatalf("aggregate before valid completion = %d; want 0", got)
 	}
-	sum := sha256.Sum256(checksumBody)
-	completion.ChecksumSHA256 = hex.EncodeToString(sum[:])
 	if _, err := engine.Files().CompleteUpload(context.Background(), scope, completion); err != nil {
 		t.Fatal(err)
 	}

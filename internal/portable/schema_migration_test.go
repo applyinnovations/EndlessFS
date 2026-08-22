@@ -54,42 +54,42 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 		profile:  "portable-minimal",
 		file:     "pre-aggregate-v0.1.4.json", digest: "24111f7739207b53fad5c4e1cf0ca106982b40fce33850f045d7430150260258",
 		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86",
-		wantEpoch: 3, wantSize: 26, wantFiles: 2,
+		wantEpoch: 4, wantSize: 26, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-002",
 		profile:  "portable-minimal",
 		file:     "schema-002-recursive-bytes.json", digest: "c7fc6a6924e62f99e9fdd99a35343385c17088d36bcac5f47b6abfe8776ee854",
 		producer: "schema-002", commit: "b70f6361497d45f20049279bb5381a4fbb1005f1",
-		wantEpoch: 2, wantSize: 10, wantFiles: 2,
+		wantEpoch: 3, wantSize: 10, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-003",
 		profile:  "portable-minimal",
 		file:     "recursive-aggregates-v0.1.7.json", digest: "0e2ce0a0853cba6e29730346b69e3c829240f617b1f277949f394b9a54786a51",
 		producer: "v0.1.7", commit: "1548dafa30ea3fbf0340b3b32381e885a110ef5e",
-		wantEpoch: 1, wantSize: 26, wantFiles: 2,
+		wantEpoch: 2, wantSize: 26, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-001",
 		profile:  "application-preview-disabled",
 		file:     "pre-aggregate-v0.1.4-application-disabled.json", digest: "b6932210f53e927bf0543153290674579e50f0004bdad1e1e474256fbea8e15a",
 		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86",
-		wantEpoch: 3, wantSize: 22, wantFiles: 2,
+		wantEpoch: 4, wantSize: 22, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-001",
 		profile:  "application-preview-gcs",
 		file:     "pre-aggregate-v0.1.4-application-gcs.json", digest: "8e508619ffb77850403f2e83de9d1ce98dabfe330334ffee9c2e87f6c250cab8",
 		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86",
-		wantEpoch: 3, wantSize: 22, wantFiles: 2,
+		wantEpoch: 4, wantSize: 22, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-001",
 		profile:  "application-preview-gcs-v0.1.7-interrupted",
 		file:     "schema-001-v0.1.7-interrupted-application-gcs.json", digest: "998cbd744dce60cdf59400903c0de950a0f96915cdb0e7f0225b5260882e28e9",
 		producer: "v0.1.7-interrupted", commit: "1548dafa30ea3fbf0340b3b32381e885a110ef5e",
-		wantEpoch: 3, wantSize: 22, wantFiles: 2,
+		wantEpoch: 4, wantSize: 22, wantFiles: 2,
 	},
 }
 
@@ -196,7 +196,7 @@ func TestEveryHistoricalReleaseMapsToRegisteredStorageSchemaFixture(t *testing.T
 	}
 }
 
-func TestMigrationCheckpointInventoryResumesWithoutReReadingCompletedFileObjects(t *testing.T) {
+func TestMigrationCheckpointInventoryResumesFromBoundedPagesWithoutReadingFileBodies(t *testing.T) {
 	family := storageSchemaFixtures[1]
 	fixture := loadStorageSchemaFixture(t, family)
 	stateBackend := objectmemory.New()
@@ -207,14 +207,14 @@ func TestMigrationCheckpointInventoryResumesWithoutReReadingCompletedFileObjects
 	if err := fileBackend.Import(fixture.FileObjects); err != nil {
 		t.Fatal(err)
 	}
-	for index := range 32 {
+	for index := range 1_200 {
 		key := storageformat.BlobKey(fixture.UserID, "restartable-blob-"+fmt.Sprint(index))
-		if _, err := fileBackend.Put(context.Background(), key, bytes.Repeat([]byte{byte(index + 1)}, 1024), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		if _, err := fileBackend.Put(context.Background(), key, []byte{byte(index + 1)}, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	interrupted := &interruptingInventoryBackend{Backend: fileBackend, failAfter: 7, attempts: make(map[string]int)}
+	interrupted := &interruptingInventoryBackend{Backend: fileBackend, failAfter: 1}
 	clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
 	options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 214, nil)
 	options.FileBackend = interrupted
@@ -227,22 +227,28 @@ func TestMigrationCheckpointInventoryResumesWithoutReReadingCompletedFileObjects
 		t.Fatalf("resumed large-inventory migration error = %v", err)
 	}
 
-	wantAttempts := len(fixture.FileObjects) + 32 + 1
-	if got := interrupted.totalAttempts(); got != wantAttempts {
-		t.Fatalf("file object reads across interrupted migration = %d; want %d (one per object plus the interrupted read)", got, wantAttempts)
+	if got := interrupted.totalBodyReads(); got != 0 {
+		t.Fatalf("file body reads across interrupted migration = %d; want 0", got)
+	}
+	if got := interrupted.totalAttempts(); got < 4 || got > 6 {
+		t.Fatalf("file metadata list calls across interrupted migration = %d; want bounded restart traversal", got)
 	}
 	progressRecords := 0
+	inventoryPages := 0
 	for key := range stateBackend.Export() {
 		if strings.Contains(key, "/checkpoints/") && strings.Contains(key, "/work/") {
 			progressRecords++
 		}
+		if strings.Contains(key, "/checkpoints/") && strings.Contains(key, "/inventory/") {
+			inventoryPages++
+		}
 	}
-	if progressRecords == 0 {
-		t.Fatal("interrupted checkpoint inventory did not leave durable restart progress")
+	if progressRecords != 0 || inventoryPages == 0 {
+		t.Fatalf("checkpoint artifacts = %d work records, %d bounded pages; want 0 work and pages", progressRecords, inventoryPages)
 	}
 }
 
-func TestMigrationCheckpointInventoryRejectsForgedRestartProgress(t *testing.T) {
+func TestMigrationCheckpointInventoryRejectsForgedRestartPage(t *testing.T) {
 	family := storageSchemaFixtures[1]
 	fixture := loadStorageSchemaFixture(t, family)
 	stateBackend := objectmemory.New()
@@ -253,7 +259,13 @@ func TestMigrationCheckpointInventoryRejectsForgedRestartProgress(t *testing.T) 
 	if err := fileBackend.Import(fixture.FileObjects); err != nil {
 		t.Fatal(err)
 	}
-	interrupted := &interruptingInventoryBackend{Backend: fileBackend, failAfter: 1, attempts: make(map[string]int)}
+	for index := range 1_200 {
+		key := storageformat.BlobKey(fixture.UserID, "forged-page-blob-"+fmt.Sprint(index))
+		if _, err := fileBackend.Put(context.Background(), key, []byte{byte(index + 1)}, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	interrupted := &interruptingInventoryBackend{Backend: fileBackend, failAfter: 1}
 	clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
 	options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 217, nil)
 	options.FileBackend = interrupted
@@ -264,25 +276,25 @@ func TestMigrationCheckpointInventoryRejectsForgedRestartProgress(t *testing.T) 
 
 	var progressKey objectstore.Key
 	for keyValue := range stateBackend.Export() {
-		if strings.Contains(keyValue, "/checkpoints/") && strings.Contains(keyValue, "/work/") {
+		if strings.Contains(keyValue, "/checkpoints/") && strings.Contains(keyValue, "/inventory/") {
 			progressKey = storageformatKey(t, keyValue)
 			break
 		}
 	}
 	if !progressKey.Valid() {
-		t.Fatal("interrupted checkpoint inventory did not persist progress")
+		t.Fatal("interrupted checkpoint inventory did not persist a bounded page")
 	}
 	object, err := stateBackend.Get(context.Background(), progressKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var envelope storageformat.Envelope
-	var progress storageformat.CheckpointWork
-	if err := storageformat.DecodeEnvelope(object.Body, progressKey, "checkpoint-work-v1", &envelope, &progress); err != nil {
+	var progress storageformat.CheckpointInventoryPage
+	if err := storageformat.DecodeEnvelope(object.Body, progressKey, "checkpoint-inventory-page-v2", &envelope, &progress); err != nil {
 		t.Fatal(err)
 	}
-	progress.Object.SHA256 = "forged-provider-independent-digest"
-	forged := mustEnvelope(t, "checkpoint-work-v1", progressKey, envelope.Revision+1, progress)
+	progress.Entries[0].Object.MD5 = objectstore.FingerprintFor([]byte("forged")).MD5
+	forged := mustEnvelope(t, "checkpoint-inventory-page-v2", progressKey, envelope.Revision+1, progress)
 	if _, err := stateBackend.Put(context.Background(), progressKey, forged, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
 		t.Fatal(err)
 	}
@@ -303,13 +315,13 @@ func TestMigrationCheckpointInventoryRejectsSameSizeBodyChangeAfterProgress(t *t
 	if err := fileBackend.Import(fixture.FileObjects); err != nil {
 		t.Fatal(err)
 	}
-	for index := range 4 {
+	for index := range 1_200 {
 		key := storageformat.BlobKey(fixture.UserID, "integrity-blob-"+fmt.Sprint(index))
 		if _, err := fileBackend.Put(context.Background(), key, []byte("body-"+fmt.Sprint(index)), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	interrupted := &interruptingInventoryBackend{Backend: fileBackend, failAfter: len(fixture.FileObjects) + 3, attempts: make(map[string]int)}
+	interrupted := &interruptingInventoryBackend{Backend: fileBackend, failAfter: 1}
 	clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
 	options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 218, nil)
 	options.FileBackend = interrupted
@@ -318,17 +330,24 @@ func TestMigrationCheckpointInventoryRejectsSameSizeBodyChangeAfterProgress(t *t
 		t.Fatalf("interrupted migration error = %v; want unavailable", err)
 	}
 
-	var progressed storageformat.CheckpointWork
+	var progressed storageformat.CheckpointInventoryEntry
 	for keyValue, body := range stateBackend.Export() {
-		if !strings.Contains(keyValue, "/checkpoints/") || !strings.Contains(keyValue, "/work/") {
+		if !strings.Contains(keyValue, "/checkpoints/") || !strings.Contains(keyValue, "/inventory/") {
 			continue
 		}
 		key := storageformatKey(t, keyValue)
 		var envelope storageformat.Envelope
-		if err := storageformat.DecodeEnvelope(body, key, "checkpoint-work-v1", &envelope, &progressed); err != nil {
+		var page storageformat.CheckpointInventoryPage
+		if err := storageformat.DecodeEnvelope(body, key, "checkpoint-inventory-page-v2", &envelope, &page); err != nil {
 			t.Fatal(err)
 		}
-		if progressed.FileData && progressed.Object.Size > 0 {
+		for _, entry := range page.Entries {
+			if entry.FileData && entry.Object.Size > 0 {
+				progressed = entry
+				break
+			}
+		}
+		if progressed.Object.Key != "" {
 			break
 		}
 	}
@@ -362,7 +381,7 @@ func TestMigrationDoesNotReadFileBodiesAgainImmediatelyBeforeOpeningWrites(t *te
 	if err := fileBackend.Import(fixture.FileObjects); err != nil {
 		t.Fatal(err)
 	}
-	counting := &interruptingInventoryBackend{Backend: fileBackend, failAfter: -1, attempts: make(map[string]int)}
+	counting := &interruptingInventoryBackend{Backend: fileBackend, failAfter: -1}
 	clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
 	options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 215, nil)
 	options.FileBackend = counting
@@ -370,8 +389,11 @@ func TestMigrationDoesNotReadFileBodiesAgainImmediatelyBeforeOpeningWrites(t *te
 	if _, err := portable.Open(context.Background(), options); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := counting.totalAttempts(), len(fixture.FileObjects); got != want {
-		t.Fatalf("file body reads during one migration checkpoint = %d; want %d", got, want)
+	if got := counting.totalBodyReads(); got != 0 {
+		t.Fatalf("file body reads during migration = %d; want 0", got)
+	}
+	if got := counting.totalAttempts(); got != 2 {
+		t.Fatalf("file metadata listing calls across two adjacent migration checkpoints = %d; want 2", got)
 	}
 }
 
@@ -408,7 +430,7 @@ func TestMigrationReportsStageAndProviderIndependentInventoryProgress(t *testing
 		if _, found := wantStages[event.Stage]; found {
 			wantStages[event.Stage] = true
 		}
-		if event.CompletedObjects < 0 || event.TotalObjects < event.CompletedObjects || event.CompletedBytes < 0 || event.TotalBytes < event.CompletedBytes {
+		if event.CompletedObjects < 0 || (event.TotalObjects != 0 && event.TotalObjects < event.CompletedObjects) || event.CompletedBytes < 0 || (event.TotalBytes != 0 && event.TotalBytes < event.CompletedBytes) {
 			t.Fatalf("invalid migration progress event: %+v", event)
 		}
 	}
@@ -424,37 +446,34 @@ type interruptingInventoryBackend struct {
 	mu        sync.Mutex
 	failAfter int
 	failed    bool
-	attempts  map[string]int
+	listCalls int
+	bodyReads int
 }
 
 func (backend *interruptingInventoryBackend) Get(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
-	if err := backend.beforeInventoryRead(key); err != nil {
-		return objectstore.Object{}, err
-	}
+	backend.mu.Lock()
+	backend.bodyReads++
+	backend.mu.Unlock()
 	return backend.Backend.Get(ctx, key)
 }
 
 func (backend *interruptingInventoryBackend) Open(ctx context.Context, key objectstore.Key) (objectstore.ObjectReader, error) {
-	if err := backend.beforeInventoryRead(key); err != nil {
-		return objectstore.ObjectReader{}, err
-	}
+	backend.mu.Lock()
+	backend.bodyReads++
+	backend.mu.Unlock()
 	return backend.Backend.Open(ctx, key)
 }
 
-func (backend *interruptingInventoryBackend) beforeInventoryRead(key objectstore.Key) error {
+func (backend *interruptingInventoryBackend) List(ctx context.Context, request objectstore.ListRequest) (objectstore.ListPage, error) {
 	backend.mu.Lock()
-	backend.attempts[key.String()]++
-	total := 0
-	for _, attempts := range backend.attempts {
-		total += attempts
-	}
-	if backend.failAfter >= 0 && !backend.failed && total > backend.failAfter {
+	backend.listCalls++
+	if backend.failAfter >= 0 && !backend.failed && backend.listCalls > backend.failAfter {
 		backend.failed = true
 		backend.mu.Unlock()
-		return domain.NewError(domain.ErrorUnavailable, "injected checkpoint inventory interruption")
+		return objectstore.ListPage{}, domain.NewError(domain.ErrorUnavailable, "injected checkpoint metadata-list interruption")
 	}
 	backend.mu.Unlock()
-	return nil
+	return backend.Backend.List(ctx, request)
 }
 
 func (backend *interruptingInventoryBackend) disableFailure() {
@@ -466,11 +485,13 @@ func (backend *interruptingInventoryBackend) disableFailure() {
 func (backend *interruptingInventoryBackend) totalAttempts() int {
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
-	total := 0
-	for _, attempts := range backend.attempts {
-		total += attempts
-	}
-	return total
+	return backend.listCalls
+}
+
+func (backend *interruptingInventoryBackend) totalBodyReads() int {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	return backend.bodyReads
 }
 
 func TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary(t *testing.T) {

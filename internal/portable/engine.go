@@ -35,7 +35,7 @@ type WriterConfiguration struct {
 
 type Options struct {
 	Backend           objectstore.Backend
-	FileBackend       objectstore.Backend
+	FileBackend       objectstore.FileControlBackend
 	Clock             domain.Clock
 	IDs               *domain.IDGenerator
 	Writer            WriterConfiguration
@@ -87,7 +87,7 @@ const (
 
 type Engine struct {
 	backend             objectstore.Backend
-	fileBackend         objectstore.Backend
+	fileBackend         objectstore.FileControlBackend
 	separateFileBackend bool
 	clock               domain.Clock
 	ids                 *domain.IDGenerator
@@ -150,21 +150,14 @@ func canonicalWriterConfiguration(configuration WriterConfiguration) (storagefor
 	}
 	keyrings := append([]string(nil), configuration.KeyringIdentifiers...)
 	features := append([]string(nil), configuration.RequiredFeatures...)
-	foundRecursiveBytes := false
-	foundRecursiveFileCounts := false
+	present := make(map[string]struct{}, len(features))
 	for _, feature := range features {
-		if feature == storageformat.FeatureRecursiveBytes {
-			foundRecursiveBytes = true
-		}
-		if feature == storageformat.FeatureRecursiveFileCounts {
-			foundRecursiveFileCounts = true
-		}
+		present[feature] = struct{}{}
 	}
-	if !foundRecursiveBytes {
-		features = append(features, storageformat.FeatureRecursiveBytes)
-	}
-	if !foundRecursiveFileCounts {
-		features = append(features, storageformat.FeatureRecursiveFileCounts)
+	for _, required := range currentStorageSchema().features {
+		if _, found := present[required]; !found {
+			features = append(features, required)
+		}
 	}
 	sort.Strings(keyrings)
 	sort.Strings(features)
@@ -314,10 +307,4 @@ func (e *Engine) createOrVerifyEnvelope(ctx context.Context, key objectstore.Key
 		}
 	}
 	return nil
-}
-
-func envelopeVersion(body []byte) state.Version {
-	var envelope storageformat.Envelope
-	_ = state.DecodeJSONWithLimit(body, &envelope, storageformat.MaxCanonicalBytes)
-	return state.Version(envelope.LogicalVersion)
 }

@@ -92,6 +92,38 @@ type lookupOnlyStorage struct {
 	statCalls       int
 }
 
+type reconciliationStorage struct {
+	provider.Storage
+	selection domain.DuplicateReconciliationSelection
+}
+
+func (s *reconciliationStorage) ListDuplicateGroups(context.Context, domain.UserID, domain.DuplicateGroupRequest) (domain.DuplicateGroupPage, error) {
+	return domain.DuplicateGroupPage{}, nil
+}
+
+func (s *reconciliationStorage) ListDuplicateOccurrences(context.Context, domain.UserID, domain.DuplicateOccurrenceRequest) (domain.DuplicateOccurrencePage, error) {
+	return domain.DuplicateOccurrencePage{}, nil
+}
+
+func (s *reconciliationStorage) SetDuplicateGroupIgnored(context.Context, domain.UserID, domain.SetDuplicateIgnoredRequest) (domain.DuplicateIgnore, error) {
+	return domain.DuplicateIgnore{}, nil
+}
+
+func (s *reconciliationStorage) CompareDuplicateDirectories(context.Context, domain.UserID, domain.DuplicateDirectoryComparisonRequest) (domain.DuplicateDirectoryComparison, error) {
+	return domain.DuplicateDirectoryComparison{}, nil
+}
+
+func (s *reconciliationStorage) PreviewDuplicateReconciliation(context.Context, domain.UserID, domain.DuplicateReconciliationPreviewRequest) (domain.DuplicateReconciliationPreview, error) {
+	return domain.DuplicateReconciliationPreview{}, nil
+}
+
+func (s *reconciliationStorage) ValidateDuplicateReconciliation(_ context.Context, _ domain.UserID, token string) (domain.DuplicateReconciliationSelection, error) {
+	if token != "valid-plan-token" {
+		return domain.DuplicateReconciliationSelection{}, domain.NewError(domain.ErrorInvalid, "invalid plan")
+	}
+	return s.selection, nil
+}
+
 func (s *lookupOnlyStorage) LookupChildren(_ context.Context, _ domain.Scope, request domain.ChildLookupRequest) (domain.ChildLookup, error) {
 	s.lookupCalls++
 	if s.lookupErr != nil {
@@ -211,6 +243,56 @@ func TestIntegrationDirectTransfersAndIsolation(t *testing.T) {
 	metrics := env.storage.Instrumentation()
 	if metrics.ControlPlaneBytes != 0 || metrics.UploadBytes != 11 || metrics.DownloadBytes != 11 {
 		t.Fatalf("instrumentation = %+v", metrics)
+	}
+}
+
+func TestDuplicateReconciliationAppliesPinnedTrashPlanAndRecordsAudit(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	for _, path := range []string{"/left", "/right"} {
+		if _, err := env.service.CreateDirectory(ctx, env.owner, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	remove := upload(t, env, env.owner, "/left/same.bin", []byte("same"), "application/octet-stream", "reconcile-remove-upload")
+	keep := upload(t, env, env.owner, "/right/same.bin", []byte("same"), "application/octet-stream", "reconcile-keep-upload")
+	groupID := secret.Hash("same-content-group")
+	wrapped := &reconciliationStorage{Storage: env.storage, selection: domain.DuplicateReconciliationSelection{
+		Left:       domain.DuplicateOccurrence{GroupID: groupID, Kind: domain.DuplicateDirectory, Area: domain.AreaLive, AreaName: "live", Path: domain.MustParseUserPath("/left"), Version: "left-version"},
+		Right:      domain.DuplicateOccurrence{GroupID: groupID, Kind: domain.DuplicateDirectory, Area: domain.AreaLive, AreaName: "live", Path: domain.MustParseUserPath("/right"), Version: "right-version"},
+		RemoveFrom: domain.DuplicateSideLeft,
+		Items: []domain.DuplicateReconciliationItem{{
+			GroupID: groupID,
+			Remove:  domain.DuplicateOccurrence{GroupID: groupID, Kind: domain.DuplicateFile, Area: domain.AreaLive, AreaName: "live", Path: remove.Path, Size: remove.Size, FileCount: 1, Version: remove.Version},
+			Keep:    domain.DuplicateOccurrence{GroupID: groupID, Kind: domain.DuplicateFile, Area: domain.AreaLive, AreaName: "live", Path: keep.Path, Size: keep.Size, FileCount: 1, Version: keep.Version},
+		}},
+	}}
+	ids := domain.NewIDGenerator(&hashReader{})
+	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, 32)))
+	service, err := drive.NewService(wrapped, env.store, env.repo, ids, env.clock, key, "http://127.0.0.1:8080", "http://127.0.0.1:8081", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.ApplyDuplicateReconciliation(ctx, env.owner, "valid-plan-token", "duplicate-reconcile-apply-001")
+	if err != nil || len(result.Items) != 1 || result.Items[0].State != domain.OperationSucceeded || result.Items[0].TrashID == "" {
+		t.Fatalf("ApplyDuplicateReconciliation() = %+v, %v", result, err)
+	}
+	if _, err := service.Stat(ctx, env.owner, remove.Path); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("reconciled source remains live: %v", err)
+	}
+	if current, err := service.Stat(ctx, env.owner, keep.Path); err != nil || current.Version != keep.Version {
+		t.Fatalf("preserved occurrence = %+v, %v", current, err)
+	}
+	page, err := env.store.List(ctx, statememory.MustPrefix(statememory.NamespaceOperations, "batch", env.owner.String()), statememory.PageRequest{Limit: 10})
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("reconciliation audit page = %+v, %v", page, err)
+	}
+	var audit model.BatchOperation
+	if err := statememory.DecodeJSON(page.Items[0].Value.Data, &audit); err != nil {
+		t.Fatal(err)
+	}
+	if audit.Kind != "duplicate_reconciliation" || audit.ItemCount != 1 || audit.SucceededCount != 1 || audit.ReclaimableBytes != remove.Size || audit.RequestDigest == "" {
+		t.Fatalf("reconciliation audit = %+v", audit)
 	}
 }
 

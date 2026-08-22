@@ -17,13 +17,20 @@ import (
 )
 
 const (
-	FormatID                   = "endlessfs-portable-bucket-v1"
-	CanonicalEncoder           = "canonical-json-v1"
-	KeyFormatVersion           = 1
-	WriterProtocolVersion      = 1
-	MaxCanonicalBytes          = 1 << 20
-	FeatureRecursiveBytes      = "recursive-byte-aggregates-v1"
-	FeatureRecursiveFileCounts = "recursive-file-count-aggregates-v1"
+	FormatID                    = "endlessfs-portable-bucket-v1"
+	CanonicalEncoder            = "canonical-json-v1"
+	KeyFormatVersion            = 1
+	WriterProtocolVersion       = 1
+	MaxCanonicalBytes           = 1 << 20
+	FeatureRecursiveBytes       = "recursive-byte-aggregates-v1"
+	FeatureRecursiveFileCounts  = "recursive-file-count-aggregates-v1"
+	FeatureProviderFingerprints = "provider-content-fingerprints-v1"
+	FeatureDuplicateCatalog     = "duplicate-catalog-v1"
+	FeatureDirectoryDigests     = "directory-content-digests-v1"
+	FeatureMetadataCheckpoints  = "metadata-only-checkpoints-v1"
+	FeaturePagedOperations      = "paged-operation-steps-v1"
+	FeatureStateIndexes         = "persistent-state-indexes-v1"
+	FeatureDirectoryIndexes     = "persistent-directory-indexes-v1"
 )
 
 type Envelope struct {
@@ -186,15 +193,16 @@ const (
 )
 
 type MutationIntent struct {
-	Action                 MutationAction   `json:"action"`
-	TargetKey              string           `json:"targetKey"`
-	ExpectedLogicalVersion string           `json:"expectedLogicalVersion,omitempty"`
-	TargetBody             []byte           `json:"targetBody,omitempty"`
-	Prerequisites          []MutationObject `json:"prerequisites,omitempty"`
-	Copies                 []MutationCopy   `json:"copies,omitempty"`
-	AbortUploads           []string         `json:"abortUploads,omitempty"`
-	RecoverOperationKey    string           `json:"recoverOperationKey,omitempty"`
-	RecoverUploadKey       string           `json:"recoverUploadKey,omitempty"`
+	Action                 MutationAction            `json:"action"`
+	TargetKey              string                    `json:"targetKey"`
+	ExpectedLogicalVersion string                    `json:"expectedLogicalVersion,omitempty"`
+	TargetBody             []byte                    `json:"targetBody,omitempty"`
+	Prerequisites          []MutationObject          `json:"prerequisites,omitempty"`
+	PrerequisiteRefs       []MutationObjectReference `json:"prerequisiteRefs,omitempty"`
+	Copies                 []MutationCopy            `json:"copies,omitempty"`
+	AbortUploads           []string                  `json:"abortUploads,omitempty"`
+	RecoverOperationKey    string                    `json:"recoverOperationKey,omitempty"`
+	RecoverUploadKey       string                    `json:"recoverUploadKey,omitempty"`
 }
 
 type MutationObject struct {
@@ -206,7 +214,11 @@ type MutationCopy struct {
 	SourceKey      string `json:"sourceKey"`
 	DestinationKey string `json:"destinationKey"`
 	Size           int64  `json:"size"`
-	SHA256         string `json:"sha256,omitempty"`
+	MD5            string `json:"md5,omitempty"`
+	CRC32C         string `json:"crc32c,omitempty"`
+	// SHA256 remains decodable only for historical epoch migrations. Current
+	// writers use normalized provider-backed checksums and leave it empty.
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 type StateRecord struct {
@@ -222,12 +234,44 @@ type StateVersionRecord struct {
 	Data           []byte `json:"data"`
 }
 
+type StateIndexRoot struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	Namespace     string `json:"namespace"`
+	NodeID        string `json:"nodeID,omitempty"`
+	NodeDigest    string `json:"nodeDigest,omitempty"`
+	EntryCount    uint64 `json:"entryCount"`
+}
+
+type StateIndexEntry struct {
+	LogicalKey     string `json:"logicalKey"`
+	LogicalVersion string `json:"logicalVersion"`
+}
+
+type StateIndexChild struct {
+	NodeID     string `json:"nodeID"`
+	NodeDigest string `json:"nodeDigest"`
+	FirstKey   string `json:"firstKey"`
+	LastKey    string `json:"lastKey"`
+	EntryCount uint64 `json:"entryCount"`
+}
+
+type StateIndexNode struct {
+	SchemaVersion int               `json:"schemaVersion"`
+	Namespace     string            `json:"namespace"`
+	NodeID        string            `json:"nodeID"`
+	Leaf          bool              `json:"leaf"`
+	Entries       []StateIndexEntry `json:"entries,omitempty"`
+	Children      []StateIndexChild `json:"children,omitempty"`
+}
+
 type DirectoryRoot struct {
 	SchemaVersion      int                  `json:"schemaVersion"`
 	DirectoryID        string               `json:"directoryID"`
 	ManifestID         string               `json:"manifestID"`
 	RecursiveBytes     int64                `json:"recursiveBytes"`
 	RecursiveFileCount int64                `json:"recursiveFileCount"`
+	ContentAccumulator string               `json:"contentAccumulator,omitempty"`
+	ContentDigest      string               `json:"contentDigest,omitempty"`
 	Pending            *DirectoryTransition `json:"pending,omitempty"`
 }
 
@@ -238,17 +282,43 @@ type DirectoryTransition struct {
 	PostManifestID         string `json:"postManifestID"`
 	PostRecursiveBytes     int64  `json:"postRecursiveBytes"`
 	PostRecursiveFileCount int64  `json:"postRecursiveFileCount"`
+	PostContentAccumulator string `json:"postContentAccumulator,omitempty"`
+	PostContentDigest      string `json:"postContentDigest,omitempty"`
 }
 
 type DirectoryManifest struct {
-	SchemaVersion      int       `json:"schemaVersion"`
-	DirectoryID        string    `json:"directoryID"`
-	ManifestID         string    `json:"manifestID"`
-	PageIDs            []string  `json:"pageIDs"`
+	SchemaVersion int    `json:"schemaVersion"`
+	DirectoryID   string `json:"directoryID"`
+	ManifestID    string `json:"manifestID"`
+	// PageIDs is retained only for migration decoding of schemas 001-003.
+	PageIDs            []string  `json:"pageIDs,omitempty"`
+	IndexRootID        string    `json:"indexRootID,omitempty"`
+	IndexRootDigest    string    `json:"indexRootDigest,omitempty"`
 	EntryCount         int       `json:"entryCount"`
 	RecursiveBytes     int64     `json:"recursiveBytes"`
 	RecursiveFileCount int64     `json:"recursiveFileCount"`
+	ContentAccumulator string    `json:"contentAccumulator,omitempty"`
+	ContentDigest      string    `json:"contentDigest,omitempty"`
 	CreatedAt          time.Time `json:"createdAt"`
+}
+
+type DirectoryIndexChild struct {
+	NodeID             string `json:"nodeID"`
+	NodeDigest         string `json:"nodeDigest"`
+	FirstName          string `json:"firstName"`
+	LastName           string `json:"lastName"`
+	EntryCount         uint64 `json:"entryCount"`
+	RecursiveBytes     int64  `json:"recursiveBytes"`
+	RecursiveFileCount int64  `json:"recursiveFileCount"`
+}
+
+type DirectoryIndexNode struct {
+	SchemaVersion int                   `json:"schemaVersion"`
+	DirectoryID   string                `json:"directoryID"`
+	NodeID        string                `json:"nodeID"`
+	Leaf          bool                  `json:"leaf"`
+	Entries       []DirectoryEntry      `json:"entries,omitempty"`
+	Children      []DirectoryIndexChild `json:"children,omitempty"`
 }
 
 type DirectoryPage struct {
@@ -259,17 +329,24 @@ type DirectoryPage struct {
 }
 
 type DirectoryEntry struct {
-	Name           string           `json:"name"`
-	NameDigest     string           `json:"nameDigest"`
-	Kind           domain.EntryKind `json:"kind"`
-	DirectoryID    string           `json:"directoryID,omitempty"`
-	BlobID         string           `json:"blobID,omitempty"`
-	Size           int64            `json:"size"`
-	FileCount      int64            `json:"fileCount,omitempty"`
-	MediaType      string           `json:"mediaType,omitempty"`
-	SHA256         string           `json:"sha256,omitempty"`
-	ModifiedAt     time.Time        `json:"modifiedAt"`
-	LogicalVersion string           `json:"logicalVersion"`
+	Name        string           `json:"name"`
+	NameDigest  string           `json:"nameDigest"`
+	Kind        domain.EntryKind `json:"kind"`
+	DirectoryID string           `json:"directoryID,omitempty"`
+	BlobID      string           `json:"blobID,omitempty"`
+	Size        int64            `json:"size"`
+	FileCount   int64            `json:"fileCount,omitempty"`
+	MediaType   string           `json:"mediaType,omitempty"`
+	MD5         string           `json:"md5,omitempty"`
+	CRC32C      string           `json:"crc32c,omitempty"`
+	// ContentDigest is present only for directories and identifies the exact
+	// relative subtree content independently of the directory's own name.
+	ContentDigest string `json:"contentDigest,omitempty"`
+	// SHA256 remains decodable only for historical epoch migrations. Current
+	// writers use normalized provider-backed checksums and leave it empty.
+	SHA256         string    `json:"sha256,omitempty"`
+	ModifiedAt     time.Time `json:"modifiedAt"`
+	LogicalVersion string    `json:"logicalVersion"`
 }
 
 type UploadState string
@@ -345,6 +422,85 @@ type FileOperation struct {
 	Roots            []FileOperationRoot `json:"roots"`
 	Prerequisites    []MutationObject    `json:"prerequisites,omitempty"`
 	Copies           []MutationCopy      `json:"copies,omitempty"`
+	StepPageCount    uint64              `json:"stepPageCount,omitempty"`
+	StepSetID        string              `json:"stepSetID,omitempty"`
+	StepDigest       string              `json:"stepDigest,omitempty"`
+	StepsStaged      bool                `json:"stepsStaged,omitempty"`
+}
+
+type MutationObjectReference struct {
+	Key        string `json:"key"`
+	BodyDigest string `json:"bodyDigest"`
+	StagingKey string `json:"stagingKey,omitempty"`
+}
+
+type FileOperationStepPage struct {
+	SchemaVersion  int                       `json:"schemaVersion"`
+	UserID         string                    `json:"userID"`
+	OperationID    string                    `json:"operationID"`
+	StepSetID      string                    `json:"stepSetID"`
+	Index          uint64                    `json:"index"`
+	PreviousDigest string                    `json:"previousDigest"`
+	Roots          []FileOperationRoot       `json:"roots,omitempty"`
+	Prerequisites  []MutationObjectReference `json:"prerequisites,omitempty"`
+	Copies         []MutationCopy            `json:"copies,omitempty"`
+}
+
+type DuplicateOccurrence struct {
+	GroupID   string               `json:"groupID"`
+	Kind      domain.DuplicateKind `json:"kind"`
+	Area      string               `json:"area"`
+	Path      string               `json:"path"`
+	Size      int64                `json:"size"`
+	FileCount int64                `json:"fileCount"`
+	Version   string               `json:"version"`
+}
+
+type DuplicateOccurrenceTransition struct {
+	OperationID string               `json:"operationID"`
+	Fence       uint64               `json:"fence"`
+	Pre         *DuplicateOccurrence `json:"pre,omitempty"`
+	Post        *DuplicateOccurrence `json:"post,omitempty"`
+}
+
+// DuplicateOccurrenceRoot is a small mutable visibility root. A nil Current
+// is a tombstone retained only until the bounded maintenance collector runs.
+type DuplicateOccurrenceRoot struct {
+	SchemaVersion int                            `json:"schemaVersion"`
+	UserID        string                         `json:"userID"`
+	Current       *DuplicateOccurrence           `json:"current,omitempty"`
+	Pending       *DuplicateOccurrenceTransition `json:"pending,omitempty"`
+}
+
+type DuplicateSummary struct {
+	GroupID         string               `json:"groupID"`
+	Kind            domain.DuplicateKind `json:"kind"`
+	Shard           string               `json:"shard"`
+	OccurrenceCount int64                `json:"occurrenceCount"`
+	Size            int64                `json:"size"`
+	FileCount       int64                `json:"fileCount"`
+}
+
+type DuplicateSummaryTransition struct {
+	OperationID string            `json:"operationID"`
+	Fence       uint64            `json:"fence"`
+	Pre         *DuplicateSummary `json:"pre,omitempty"`
+	Post        *DuplicateSummary `json:"post,omitempty"`
+}
+
+type DuplicateSummaryRoot struct {
+	SchemaVersion int                         `json:"schemaVersion"`
+	UserID        string                      `json:"userID"`
+	Current       *DuplicateSummary           `json:"current,omitempty"`
+	Pending       *DuplicateSummaryTransition `json:"pending,omitempty"`
+}
+
+type DuplicateIgnore struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	UserID        string `json:"userID"`
+	GroupID       string `json:"groupID"`
+	Ignored       bool   `json:"ignored"`
+	Revision      uint64 `json:"revision"`
 }
 
 type IdempotencyRecord struct {
@@ -359,7 +515,9 @@ type IdempotencyRecord struct {
 type CheckpointObject struct {
 	Key    string `json:"key"`
 	Size   int64  `json:"size"`
-	SHA256 string `json:"sha256"`
+	SHA256 string `json:"sha256,omitempty"`
+	MD5    string `json:"md5,omitempty"`
+	CRC32C string `json:"crc32c,omitempty"`
 }
 
 type Checkpoint struct {
@@ -403,6 +561,45 @@ type CheckpointWork struct {
 	Object        CheckpointObject `json:"object"`
 	CRC32C        string           `json:"crc32c"`
 	Proof         string           `json:"proof"`
+}
+
+type GarbageCollectionSession struct {
+	SchemaVersion int       `json:"schemaVersion"`
+	CheckpointID  string    `json:"checkpointID"`
+	GateEpoch     uint64    `json:"gateEpoch"`
+	GateVersion   string    `json:"gateVersion"`
+	Phase         string    `json:"phase"`
+	SweepIndex    int       `json:"sweepIndex"`
+	After         string    `json:"after,omitempty"`
+	UpdatedAt     time.Time `json:"updatedAt"`
+}
+
+type GarbageCollectionMark struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	CheckpointID  string `json:"checkpointID"`
+	GateEpoch     uint64 `json:"gateEpoch"`
+	GateVersion   string `json:"gateVersion"`
+	Role          string `json:"role"`
+	TargetKey     string `json:"targetKey"`
+}
+
+type MigrationDirectoryMark struct {
+	SchemaVersion      int    `json:"schemaVersion"`
+	CheckpointID       string `json:"checkpointID"`
+	Phase              string `json:"phase"`
+	UserID             string `json:"userID"`
+	Area               string `json:"area"`
+	DirectoryID        string `json:"directoryID"`
+	ParentDirectoryID  string `json:"parentDirectoryID,omitempty"`
+	ParentEntryName    string `json:"parentEntryName,omitempty"`
+	ManifestID         string `json:"manifestID"`
+	RootLogicalVersion string `json:"rootLogicalVersion"`
+	ManifestVersion    string `json:"manifestLogicalVersion"`
+	RecursiveBytes     int64  `json:"recursiveBytes"`
+	RecursiveFileCount int64  `json:"recursiveFileCount"`
+	DirectoryCount     int64  `json:"directoryCount"`
+	ContentAccumulator string `json:"contentAccumulator,omitempty"`
+	ContentDigest      string `json:"contentDigest,omitempty"`
 }
 
 func Digest(data []byte) string {

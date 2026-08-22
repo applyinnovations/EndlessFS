@@ -74,9 +74,36 @@ type ObjectReader struct {
 }
 
 type ObjectInfo struct {
-	Key     Key
-	Version NativeVersion
-	Size    int64
+	Key         Key
+	Version     NativeVersion
+	Size        int64
+	Fingerprint ContentFingerprint
+}
+
+// ContentFingerprint is normalized provider-attested content metadata. It
+// contains algorithm results only; provider encodings, ETags, generations,
+// multipart identifiers, and other native values never cross this boundary.
+type ContentFingerprint struct {
+	MD5    string
+	CRC32C string
+}
+
+func (f ContentFingerprint) Validate() error {
+	if _, ok := integrity.ParseMD5(f.MD5); !ok {
+		return domain.NewError(domain.ErrorInvalid, "invalid MD5 content fingerprint")
+	}
+	if _, ok := integrity.ParseCRC32C(f.CRC32C); !ok {
+		return domain.NewError(domain.ErrorInvalid, "invalid CRC32C content fingerprint")
+	}
+	return nil
+}
+
+func (f ContentFingerprint) Complete() bool { return f.Validate() == nil }
+
+// FingerprintFor is for deterministic local backends and tests. Production
+// services obtain stored-file fingerprints from provider metadata.
+func FingerprintFor(body []byte) ContentFingerprint {
+	return ContentFingerprint{MD5: integrity.MD5(body), CRC32C: integrity.CRC32C(body)}
 }
 
 // ExpectedIntegrity is a provider-independent assertion about one immutable
@@ -148,6 +175,26 @@ type ListRequest struct {
 	Prefix string
 	Limit  int
 	Cursor string
+	// After is a provider-neutral exclusive canonical-key continuation. It is
+	// used by portable indexes whose client cursor must remain constant-size
+	// and cannot durably depend on a provider page token.
+	After string
+}
+
+func (r ListRequest) Validate() error {
+	if err := ValidatePrefix(r.Prefix); err != nil {
+		return err
+	}
+	if r.Cursor != "" && r.After != "" {
+		return domain.NewError(domain.ErrorInvalid, "object list cursor and after key are mutually exclusive")
+	}
+	if r.After != "" {
+		key, err := ParseKey(r.After)
+		if err != nil || !strings.HasPrefix(key.String(), r.Prefix) {
+			return domain.NewError(domain.ErrorInvalid, "invalid object list after key")
+		}
+	}
+	return nil
 }
 
 type ListPage struct {
@@ -162,6 +209,27 @@ type Backend interface {
 	Open(context.Context, Key) (ObjectReader, error)
 	List(context.Context, ListRequest) (ListPage, error)
 	Put(context.Context, Key, []byte, PutCondition) (NativeVersion, error)
+	Delete(context.Context, Key, DeleteCondition) error
+	Copy(context.Context, Key, Key, CopyCondition) (CopyResult, error)
+}
+
+// MetadataBackend is the body-free object boundary used for file inventory
+// and integrity decisions. It intentionally cannot read an object body.
+type ListBackend interface {
+	List(context.Context, ListRequest) (ListPage, error)
+}
+
+type MetadataBackend interface {
+	ListBackend
+	Head(context.Context, Key) (ObjectInfo, error)
+	Verify(context.Context, Key, ExpectedIntegrity) (ObjectInfo, error)
+}
+
+// FileControlBackend adds only server-side file mutations to MetadataBackend.
+// Direct browser transfers are negotiated through DirectTransferBackend.
+// Neither interface exposes Get, Open, or Put to the Go file control plane.
+type FileControlBackend interface {
+	MetadataBackend
 	Delete(context.Context, Key, DeleteCondition) error
 	Copy(context.Context, Key, Key, CopyCondition) (CopyResult, error)
 }

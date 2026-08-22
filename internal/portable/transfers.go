@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
@@ -46,11 +45,12 @@ func (s *FileStore) CreateUpload(ctx context.Context, scope domain.Scope, reques
 	if err != nil {
 		return domain.UploadCapability{}, err
 	}
-	_, parent, err := s.resolveDirectory(ctx, scope, request.Path.Parent())
+	parentTrail, err := s.resolveDirectoryMetadataTrail(ctx, scope, request.Path.Parent())
 	if err != nil {
 		return domain.UploadCapability{}, err
 	}
-	resolved, existing, err := resolveDirectoryDestination(request.Path, conflict, request.ExpectedVersion, parent.entries)
+	parentNode := parentTrail[len(parentTrail)-1]
+	resolved, existing, err := s.resolveIndexedDirectoryDestination(ctx, scope, parentNode.directoryID, parentNode.snapshot.manifest, request.Path, conflict, request.ExpectedVersion)
 	if err != nil {
 		return domain.UploadCapability{}, err
 	}
@@ -376,7 +376,7 @@ func (s *FileStore) completeUpload(ctx context.Context, scope domain.Scope, requ
 			return resumed, nil
 		}
 	}
-	parentTrail, err := s.resolveDirectoryTrail(ctx, scope, resolvedPath.Parent())
+	parentTrail, err := s.resolveDirectoryMetadataTrail(ctx, scope, resolvedPath.Parent())
 	if err != nil {
 		return domain.Entry{}, err
 	}
@@ -385,7 +385,11 @@ func (s *FileStore) completeUpload(ctx context.Context, scope domain.Scope, requ
 	if parent.pending {
 		return domain.Entry{}, domain.NewError(domain.ErrorUnavailable, "upload destination has a pending operation")
 	}
-	current, exists := findDirectoryEntry(parent.entries, resolvedPath.Name())
+	current, lookupErr := s.directoryIndexEntry(ctx, scope, parentNode.directoryID, parent.manifest, resolvedPath.Name())
+	exists := lookupErr == nil
+	if lookupErr != nil && !errors.Is(lookupErr, domain.ErrNotFound) {
+		return domain.Entry{}, lookupErr
+	}
 	if record.State == storageformat.UploadCompleted {
 		if !exists || !matchesUploadEntry(record, current) {
 			return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "completed upload destination changed")
@@ -412,8 +416,8 @@ func (s *FileStore) completeUpload(ctx context.Context, scope domain.Scope, requ
 	if !progress.Complete || progress.Offset != record.Size || progress.Size != record.Size || progress.Version == "" {
 		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload is incomplete")
 	}
-	if request.ChecksumSHA256 != "" && (progress.SHA256 == "" || !strings.EqualFold(request.ChecksumSHA256, progress.SHA256)) {
-		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload checksum does not match")
+	if !progress.Fingerprint.Complete() {
+		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "provider did not return the required MD5 and CRC32C content fingerprint")
 	}
 	if record.TargetExisted {
 		if !exists || domain.Version(current.LogicalVersion) != record.ExpectedVersion {
@@ -426,7 +430,8 @@ func (s *FileStore) completeUpload(ctx context.Context, scope domain.Scope, requ
 	blobKey := storageformat.BlobKey(scope.UserID().String(), blobID)
 	entry := storageformat.DirectoryEntry{
 		Name: resolvedPath.Name(), NameDigest: storageformat.NameDigest(resolvedPath.Name()), Kind: domain.EntryFile,
-		BlobID: blobID, Size: record.Size, MediaType: mediaType, SHA256: progress.SHA256, ModifiedAt: record.CreatedAt,
+		BlobID: blobID, Size: record.Size, MediaType: mediaType,
+		MD5: progress.Fingerprint.MD5, CRC32C: progress.Fingerprint.CRC32C, ModifiedAt: record.CreatedAt,
 	}
 	entry.LogicalVersion, err = directoryEntryVersion(entry)
 	if err != nil {
@@ -436,9 +441,8 @@ func (s *FileStore) completeUpload(ctx context.Context, scope domain.Scope, requ
 	if exists {
 		existingPointer = &current
 	}
-	updated := replaceDirectoryEntry(parent.entries, existingPointer, entry)
 	updates := make(map[string]directoryUpdate)
-	if err := applyDirectoryChange(updates, parentTrail, updated); err != nil {
+	if err := applyDirectoryEntryChange(updates, parentTrail, existingPointer, &entry); err != nil {
 		return domain.Entry{}, err
 	}
 	ownerID, err := s.engine.ids.OpaqueID()
@@ -449,9 +453,27 @@ func (s *FileStore) completeUpload(ctx context.Context, scope domain.Scope, requ
 	if err != nil {
 		return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "stored staging key is invalid")
 	}
-	copyIntent := storageformat.MutationCopy{SourceKey: stagingKey.String(), DestinationKey: blobKey.String(), Size: record.Size, SHA256: progress.SHA256}
-	operation, operationBody, err := s.buildFileOperation(ctx, scope.UserID(), record.CompletionOperationID, ownerID, "upload-complete", updates, nil, []storageformat.MutationCopy{copyIntent})
+	copyIntent := storageformat.MutationCopy{
+		SourceKey: stagingKey.String(), DestinationKey: blobKey.String(), Size: record.Size,
+		MD5: progress.Fingerprint.MD5, CRC32C: progress.Fingerprint.CRC32C,
+	}
+	postOccurrence, err := catalogOccurrence(scope, resolvedPath, entry)
 	if err != nil {
+		return domain.Entry{}, err
+	}
+	catalogChanges := []catalogChange{{post: &postOccurrence}}
+	if exists {
+		preOccurrence, occurrenceErr := catalogOccurrence(scope, resolvedPath, current)
+		if occurrenceErr != nil {
+			return domain.Entry{}, occurrenceErr
+		}
+		catalogChanges[0].pre = &preOccurrence
+	}
+	operation, operationBody, err := s.buildFileOperation(ctx, scope.UserID(), record.CompletionOperationID, ownerID, "upload-complete", updates, nil, []storageformat.MutationCopy{copyIntent}, catalogChanges)
+	if err != nil {
+		if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrUnavailable) {
+			return s.retryUploadCompletion(ctx, scope, request, mediaType, transfers, operationObject, operationEnvelope, record, attemptsRemaining)
+		}
 		return domain.Entry{}, err
 	}
 	result, err := s.startFileOperation(ctx, operation, operationBody, "", "")

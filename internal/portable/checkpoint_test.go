@@ -144,6 +144,43 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 	}
 }
 
+func TestCheckpointUsesMetadataWithoutReadingFileBodiesOrWritingPerObjectJournals(t *testing.T) {
+	clock := domain.NewFixedClock(time.Date(2037, 2, 2, 4, 5, 6, 0, time.UTC))
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(78, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	seed := openEngine(t, backend, clock, 79, nil)
+	user, _ := domain.ParseUserID("U1NTU1NTU1NTU1NTU1NTUw")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	uploadPortableFile(t, server.Client(), seed.Files(), scope, domain.MustParseUserPath("/large.bin"), []byte("metadata-only-checkpoint"))
+
+	guard := &checkpointMetadataOnlyBackend{Backend: backend}
+	engine, err := portable.Open(context.Background(), portable.Options{
+		Backend: guard, Clock: clock,
+		IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(80, 1<<20))),
+		Writer: portable.WriterConfiguration{
+			WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1",
+			KeyringIdentifiers: []string{"session-v1"},
+		},
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.CreateCheckpoint(context.Background(), "metadata-only"); err != nil {
+		t.Fatal(err)
+	}
+	if guard.fileBodyReads != 0 {
+		t.Fatalf("checkpoint attempted %d file body reads", guard.fileBodyReads)
+	}
+	if guard.workWrites != 0 {
+		t.Fatalf("checkpoint wrote %d per-object work records", guard.workWrites)
+	}
+}
+
 func TestPortabilityRawCopyPreservesSplitStateAndFileBackends(t *testing.T) {
 	clock := domain.NewFixedClock(time.Date(2037, 2, 4, 4, 5, 6, 0, time.UTC))
 	writer := portable.WriterConfiguration{
@@ -265,7 +302,7 @@ func TestCheckpointSupportsInventoryBeyondCanonicalRecordLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateCheckpoint() large inventory error = %v", err)
 	}
-	if checkpoint.SchemaVersion != 2 || checkpoint.StateObjectCount+checkpoint.FileObjectCount < uint64(len(objects)) || checkpoint.InventoryPageCount < 2 {
+	if checkpoint.SchemaVersion != 3 || checkpoint.StateObjectCount+checkpoint.FileObjectCount < uint64(len(objects)) || checkpoint.InventoryPageCount < 2 {
 		t.Fatalf("checkpoint root = %+v; want paged inventory for at least %d objects", checkpoint, len(objects))
 	}
 	checkpointBody := backend.Export()[storageformat.CheckpointKey(checkpoint.CheckpointID).String()]
@@ -287,7 +324,7 @@ func TestCheckpointSupportsInventoryBeyondCanonicalRecordLimit(t *testing.T) {
 	}
 }
 
-func TestCheckpointV1RemainsReadable(t *testing.T) {
+func TestCheckpointV1IsRejectedThenReplacedWithoutReadingFileBodies(t *testing.T) {
 	backend := objectmemory.New()
 	clock := domain.NewFixedClock(time.Date(2037, 2, 6, 4, 5, 6, 0, time.UTC))
 	engine := openEngine(t, backend, clock, 156, nil)
@@ -338,11 +375,15 @@ func TestCheckpointV1RemainsReadable(t *testing.T) {
 	if _, err := backend.Put(context.Background(), key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
 		t.Fatal(err)
 	}
-	if err := engine.VerifyCheckpoint(context.Background(), checkpointID); err != nil {
-		t.Fatalf("VerifyCheckpoint() v1 error = %v", err)
+	if err := engine.VerifyCheckpoint(context.Background(), checkpointID); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("VerifyCheckpoint() v1 error = %v; want precondition failed", err)
 	}
-	if got := len(checkpointObjects(t, engine, checkpointID)); got != len(inventory) {
-		t.Fatalf("v1 checkpoint objects = %d; want %d", got, len(inventory))
+	replacement, err := engine.CreateCheckpoint(context.Background(), checkpointID)
+	if err != nil || replacement.SchemaVersion != 3 {
+		t.Fatalf("CreateCheckpoint() replacement = %+v, %v; want checkpoint v3", replacement, err)
+	}
+	if err := engine.VerifyCheckpoint(context.Background(), checkpointID); err != nil {
+		t.Fatalf("VerifyCheckpoint() replacement error = %v", err)
 	}
 }
 
@@ -405,7 +446,7 @@ func TestCheckpointDetectsAuthoritativeCorruption(t *testing.T) {
 	objects := backend.Export()
 	var target string
 	for objectKey := range objects {
-		if len(objectKey) > len("endlessfs/v1/state/") && objectKey[:len("endlessfs/v1/state/")] == "endlessfs/v1/state/" {
+		if strings.HasPrefix(objectKey, storageformat.StateIndexRootPrefix()) {
 			target = objectKey
 			break
 		}
@@ -519,11 +560,11 @@ func TestCheckpointVerifierRejectsInvalidBootstrapAndCheckpointRecords(t *testin
 		key := storageformat.CheckpointInventoryPageKey(checkpoint.CheckpointID, 0)
 		var envelope storageformat.Envelope
 		var page storageformat.CheckpointInventoryPage
-		if err := storageformat.DecodeEnvelope(objects[key.String()], key, "checkpoint-inventory-page-v1", &envelope, &page); err != nil {
+		if err := storageformat.DecodeEnvelope(objects[key.String()], key, "checkpoint-inventory-page-v2", &envelope, &page); err != nil {
 			t.Fatal(err)
 		}
 		page.PreviousDigest = storageformat.Digest([]byte("different predecessor"))
-		body, err := storageformat.EncodeEnvelope("checkpoint-inventory-page-v1", key, envelope.Revision, page)
+		body, err := storageformat.EncodeEnvelope("checkpoint-inventory-page-v2", key, envelope.Revision, page)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -547,11 +588,11 @@ func TestCheckpointVerifierRejectsInvalidBootstrapAndCheckpointRecords(t *testin
 		key := storageformat.CheckpointKey(checkpoint.CheckpointID)
 		var envelope storageformat.Envelope
 		var stored storageformat.Checkpoint
-		if err := storageformat.DecodeEnvelope(objects[key.String()], key, "checkpoint-v2", &envelope, &stored); err != nil {
+		if err := storageformat.DecodeEnvelope(objects[key.String()], key, "checkpoint-v3", &envelope, &stored); err != nil {
 			t.Fatal(err)
 		}
 		stored.SchemaVersion++
-		objects[key.String()], err = storageformat.EncodeEnvelope("checkpoint-v2", key, envelope.Revision, stored)
+		objects[key.String()], err = storageformat.EncodeEnvelope("checkpoint-v3", key, envelope.Revision, stored)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -696,6 +737,27 @@ func cloneObjects(source map[string][]byte) map[string][]byte {
 type readOnlyBackend struct {
 	objectstore.Backend
 	writes int
+}
+
+type checkpointMetadataOnlyBackend struct {
+	objectstore.Backend
+	fileBodyReads int
+	workWrites    int
+}
+
+func (backend *checkpointMetadataOnlyBackend) Open(ctx context.Context, key objectstore.Key) (objectstore.ObjectReader, error) {
+	if strings.Contains(key.String(), "/blobs/") || strings.Contains(key.String(), "/staging/") {
+		backend.fileBodyReads++
+		return objectstore.ObjectReader{}, domain.NewError(domain.ErrorPreconditionFailed, "file body read denied by test")
+	}
+	return backend.Backend.Open(ctx, key)
+}
+
+func (backend *checkpointMetadataOnlyBackend) Put(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+	if strings.HasPrefix(key.String(), storageformat.CheckpointWorkPrefix("metadata-only")) {
+		backend.workWrites++
+	}
+	return backend.Backend.Put(ctx, key, body, condition)
 }
 
 func (backend *readOnlyBackend) Put(context.Context, objectstore.Key, []byte, objectstore.PutCondition) (objectstore.NativeVersion, error) {

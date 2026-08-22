@@ -3,6 +3,7 @@ package drive
 import (
 	"context"
 	"errors"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,6 +65,122 @@ func (s *Service) Stat(ctx context.Context, userID domain.UserID, path domain.Us
 		return domain.Entry{}, err
 	}
 	return s.storage.Stat(ctx, scope, path)
+}
+
+func (s *Service) duplicateStorage() (provider.DuplicateStorage, error) {
+	storage, ok := s.storage.(provider.DuplicateStorage)
+	if !ok {
+		return nil, domain.NewError(domain.ErrorUnavailable, "duplicate catalog is not available")
+	}
+	return storage, nil
+}
+
+func (s *Service) DuplicateGroups(ctx context.Context, userID domain.UserID, request domain.DuplicateGroupRequest) (domain.DuplicateGroupPage, error) {
+	storage, err := s.duplicateStorage()
+	if err != nil {
+		return domain.DuplicateGroupPage{}, err
+	}
+	return storage.ListDuplicateGroups(ctx, userID, request)
+}
+
+func (s *Service) DuplicateOccurrences(ctx context.Context, userID domain.UserID, request domain.DuplicateOccurrenceRequest) (domain.DuplicateOccurrencePage, error) {
+	storage, err := s.duplicateStorage()
+	if err != nil {
+		return domain.DuplicateOccurrencePage{}, err
+	}
+	return storage.ListDuplicateOccurrences(ctx, userID, request)
+}
+
+func (s *Service) SetDuplicateIgnored(ctx context.Context, userID domain.UserID, request domain.SetDuplicateIgnoredRequest) (domain.DuplicateIgnore, error) {
+	storage, err := s.duplicateStorage()
+	if err != nil {
+		return domain.DuplicateIgnore{}, err
+	}
+	return storage.SetDuplicateGroupIgnored(ctx, userID, request)
+}
+
+func (s *Service) CompareDuplicateDirectories(ctx context.Context, userID domain.UserID, request domain.DuplicateDirectoryComparisonRequest) (domain.DuplicateDirectoryComparison, error) {
+	storage, err := s.duplicateStorage()
+	if err != nil {
+		return domain.DuplicateDirectoryComparison{}, err
+	}
+	return storage.CompareDuplicateDirectories(ctx, userID, request)
+}
+
+func (s *Service) PreviewDuplicateReconciliation(ctx context.Context, userID domain.UserID, request domain.DuplicateReconciliationPreviewRequest) (domain.DuplicateReconciliationPreview, error) {
+	storage, err := s.duplicateStorage()
+	if err != nil {
+		return domain.DuplicateReconciliationPreview{}, err
+	}
+	return storage.PreviewDuplicateReconciliation(ctx, userID, request)
+}
+
+func (s *Service) ApplyDuplicateReconciliation(ctx context.Context, userID domain.UserID, planToken, idempotencyKey string) (BatchResult, error) {
+	if err := validateIdempotencyKey(idempotencyKey); err != nil {
+		return BatchResult{}, err
+	}
+	storage, err := s.duplicateStorage()
+	if err != nil {
+		return BatchResult{}, err
+	}
+	selection, err := storage.ValidateDuplicateReconciliation(ctx, userID, planToken)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	if len(selection.Items) < 1 || len(selection.Items) > MaxBatchItems {
+		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "duplicate reconciliation plan has no bounded selection")
+	}
+	live, err := liveScope(userID)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	trash, err := trashScope(userID)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	result := BatchResult{OperationID: domain.OperationID(s.derivedID("duplicate-reconciliation", userID, idempotencyKey)), Items: make([]ItemResult, 0, len(selection.Items))}
+	for index, planned := range selection.Items {
+		keep, keepErr := s.storage.Stat(ctx, live, planned.Keep.Path)
+		if keepErr != nil || keep.Version != planned.Keep.Version {
+			if keepErr == nil {
+				keepErr = domain.NewError(domain.ErrorPreconditionFailed, "duplicate keep occurrence changed")
+			}
+			result.Items = append(result.Items, ItemResult{Path: planned.Remove.Path, State: domain.OperationFailed, ErrorKind: domain.KindOf(keepErr)})
+			continue
+		}
+		item, itemErr := s.trashOneExpected(ctx, userID, live, trash, planned.Remove.Path, planned.Remove.Version, idempotencyKey+":"+strconv.Itoa(index))
+		if itemErr != nil {
+			item = ItemResult{Path: planned.Remove.Path, State: domain.OperationFailed, ErrorKind: domain.KindOf(itemErr)}
+		}
+		result.Items = append(result.Items, item)
+	}
+	if err := s.recordDuplicateReconciliationAudit(ctx, userID, planToken, selection, result); err != nil {
+		return BatchResult{}, err
+	}
+	return result, nil
+}
+
+func (s *Service) recordDuplicateReconciliationAudit(ctx context.Context, userID domain.UserID, planToken string, selection domain.DuplicateReconciliationSelection, result BatchResult) error {
+	stateValue := domain.OperationSucceeded
+	succeeded := 0
+	reclaimable := int64(0)
+	for index, item := range result.Items {
+		if item.State != domain.OperationSucceeded {
+			stateValue = domain.OperationFailed
+			continue
+		}
+		succeeded++
+		if index < len(selection.Items) && selection.Items[index].Remove.Size <= math.MaxInt64-reclaimable {
+			reclaimable += selection.Items[index].Remove.Size
+		}
+	}
+	now := s.clock.Now()
+	record := model.BatchOperation{
+		SchemaVersion: model.SchemaVersion, OwnerUserID: userID, OperationID: result.OperationID,
+		Kind: "duplicate_reconciliation", RequestDigest: secret.Hash(planToken), ItemCount: len(result.Items),
+		SucceededCount: succeeded, ReclaimableBytes: reclaimable, State: stateValue, StartedAt: now, UpdatedAt: now,
+	}
+	return createOrMatch(s.repository.createBatchOperation(ctx, record))
 }
 
 func (s *Service) CreateDirectory(ctx context.Context, userID domain.UserID, request domain.CreateDirectoryRequest) (domain.Entry, error) {
@@ -272,7 +389,7 @@ func (s *Service) Trash(ctx context.Context, userID domain.UserID, paths []domai
 		seen[path.String()] = struct{}{}
 	}
 	for index, path := range paths {
-		item, itemErr := s.trashOne(ctx, userID, live, trash, path, idempotencyKey+":"+strconv.Itoa(index))
+		item, itemErr := s.trashOneExpected(ctx, userID, live, trash, path, "", idempotencyKey+":"+strconv.Itoa(index))
 		if itemErr != nil {
 			item = ItemResult{Path: path, State: domain.OperationFailed, ErrorKind: domain.KindOf(itemErr)}
 		}
@@ -297,7 +414,7 @@ func (s *Service) recordBatchOperation(ctx context.Context, userID domain.UserID
 	return createOrMatch(s.repository.createBatchOperation(ctx, record))
 }
 
-func (s *Service) trashOne(ctx context.Context, userID domain.UserID, live, trash domain.Scope, path domain.UserPath, key string) (ItemResult, error) {
+func (s *Service) trashOneExpected(ctx context.Context, userID domain.UserID, live, trash domain.Scope, path domain.UserPath, expected domain.Version, key string) (ItemResult, error) {
 	trashID := s.derivedID("trash", userID, key)
 	if existing, _, err := s.repository.trash(ctx, userID, trashID); err == nil {
 		if existing.OriginalPath != path {
@@ -310,6 +427,9 @@ func (s *Service) trashOne(ctx context.Context, userID domain.UserID, live, tras
 	entry, err := s.storage.Stat(ctx, live, path)
 	if err != nil {
 		return ItemResult{}, err
+	}
+	if expected != "" && entry.Version != expected {
+		return ItemResult{}, domain.NewError(domain.ErrorPreconditionFailed, "trash source version changed")
 	}
 	trashedPath := domain.MustParseUserPath("/" + trashID)
 	operation, err := s.storage.Move(ctx, live, trash, domain.MoveRequest{Source: path, Destination: trashedPath, Conflict: domain.ConflictFail, ExpectedSource: entry.Version, IdempotencyKey: key})

@@ -33,7 +33,7 @@ type UploadProgress struct {
 	ExpiresAt    time.Time
 	Complete     bool
 	Version      NativeVersion
-	SHA256       string
+	Fingerprint  ContentFingerprint
 	Materialized bool
 }
 

@@ -3,7 +3,9 @@ package portable
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -43,6 +45,8 @@ type directorySnapshot struct {
 	entries            []storageformat.DirectoryEntry
 	recursiveBytes     int64
 	recursiveFileCount int64
+	contentAccumulator string
+	contentDigest      string
 	pending            bool
 	transitionState    storageformat.FileOperationState
 	transitionFence    uint64
@@ -52,6 +56,8 @@ type preparedDirectory struct {
 	manifestID         string
 	recursiveBytes     int64
 	recursiveFileCount int64
+	contentAccumulator string
+	contentDigest      string
 	rootBody           []byte
 	prerequisites      []storageformat.MutationObject
 }
@@ -60,14 +66,22 @@ type directoryTrailNode struct {
 	scope       domain.Scope
 	path        domain.UserPath
 	directoryID string
+	entry       storageformat.DirectoryEntry
 	snapshot    directorySnapshot
 }
 
 type directoryUpdate struct {
-	scope       domain.Scope
-	directoryID string
-	snapshot    directorySnapshot
-	entries     []storageformat.DirectoryEntry
+	scope              domain.Scope
+	path               domain.UserPath
+	directoryID        string
+	entry              storageformat.DirectoryEntry
+	snapshot           directorySnapshot
+	changes            map[string]directoryEntryMutation
+	entryCount         int
+	recursiveBytes     int64
+	recursiveFileCount int64
+	contentAccumulator string
+	contentDigest      string
 }
 
 type directoryView struct {
@@ -90,7 +104,12 @@ type listCursor struct {
 	PageSize       int              `json:"pageSize"`
 	Sort           domain.SortField `json:"sort"`
 	Descending     bool             `json:"descending"`
-	Index          int              `json:"index"`
+	// Index is retained for the materialized secondary-sort cursor.
+	Index       int       `json:"index,omitempty"`
+	AfterName   string    `json:"afterName,omitempty"`
+	GateEpoch   uint64    `json:"gateEpoch"`
+	GateVersion string    `json:"gateVersion"`
+	ExpiresAt   time.Time `json:"expiresAt"`
 }
 
 func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain.ListRequest) (domain.ListPage, error) {
@@ -110,13 +129,21 @@ func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain
 	if !validSort(request.Sort) {
 		return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "invalid list sort")
 	}
+	_, gateEnvelope, gate, err := s.engine.readGate(ctx)
+	if err != nil {
+		return domain.ListPage{}, err
+	}
 	start := 0
+	afterName := ""
 	var directoryID, manifestID, parentID, parentManifest string
+	var manifest storageformat.DirectoryManifest
 	var current domain.Entry
 	var entries []storageformat.DirectoryEntry
 	if request.Cursor != "" {
-		cursor, decodeErr := decodeListCursor(request.Cursor)
-		if decodeErr != nil || cursor.UserID != scope.UserID().String() || cursor.Area != areaName(scope.Area()) || cursor.DirectoryPath != request.Directory.String() || cursor.DirectoryID == "" || cursor.PageSize != pageSize || cursor.Sort != request.Sort || cursor.Descending != request.Descending || cursor.Index < 1 || cursor.ManifestID == "" || (request.Directory.IsRoot() && (cursor.ParentID != "" || cursor.ParentManifest != "")) || (!request.Directory.IsRoot() && (cursor.ParentID == "" || cursor.ParentManifest == "")) {
+		cursor, decodeErr := s.decodeListCursor(request.Cursor)
+		nameCursor := request.Sort == domain.SortName && cursor.SchemaVersion == 3 && cursor.AfterName != "" && cursor.Index == 0
+		secondaryCursor := request.Sort != domain.SortName && cursor.SchemaVersion == 2 && cursor.Index >= 1 && cursor.AfterName == ""
+		if decodeErr != nil || cursor.UserID != scope.UserID().String() || cursor.Area != areaName(scope.Area()) || cursor.DirectoryPath != request.Directory.String() || cursor.DirectoryID == "" || cursor.PageSize != pageSize || cursor.Sort != request.Sort || cursor.Descending != request.Descending || (!nameCursor && !secondaryCursor) || cursor.ManifestID == "" || cursor.GateEpoch != gate.Epoch || cursor.GateVersion != gateEnvelope.LogicalVersion || !s.engine.clock.Now().Before(cursor.ExpiresAt) || (request.Directory.IsRoot() && (cursor.ParentID != "" || cursor.ParentManifest != "")) || (!request.Directory.IsRoot() && (cursor.ParentID == "" || cursor.ParentManifest == "")) {
 			return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "invalid or out-of-scope list cursor")
 		}
 		if request.Directory.IsRoot() {
@@ -132,27 +159,68 @@ func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain
 				return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "list cursor directory was replaced")
 			}
 		}
-		manifest, historicalEntries, err := s.readManifestSnapshot(ctx, scope, cursor.DirectoryID, cursor.ManifestID)
+		manifest, err = s.readDirectoryManifest(ctx, scope, cursor.DirectoryID, cursor.ManifestID)
 		if err != nil {
 			return domain.ListPage{}, err
 		}
 		directoryID, manifestID, parentID, parentManifest = cursor.DirectoryID, cursor.ManifestID, cursor.ParentID, cursor.ParentManifest
-		entries = historicalEntries
-		current, err = s.historicalCurrentDirectory(ctx, scope, request.Directory, directoryID, parentID, parentManifest, manifest.RecursiveBytes, manifest.RecursiveFileCount)
+		current, err = s.historicalCurrentDirectory(ctx, scope, request.Directory, directoryID, parentID, parentManifest, manifest.RecursiveBytes, manifest.RecursiveFileCount, manifest.ContentDigest)
 		if err != nil {
 			return domain.ListPage{}, err
 		}
-		start = cursor.Index
-		if start > len(entries) {
-			return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "invalid list cursor offset")
+		if request.Sort == domain.SortName {
+			afterName = cursor.AfterName
+		} else {
+			entries, err = s.readManifestPageEntries(ctx, scope, directoryID, manifest)
+			if err != nil {
+				return domain.ListPage{}, err
+			}
+			start = cursor.Index
+			if start > len(entries) {
+				return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "invalid list cursor offset")
+			}
 		}
 	} else {
-		view, err := s.resolveDirectoryView(ctx, scope, request.Directory)
+		view, err := s.resolveDirectoryMetadataView(ctx, scope, request.Directory)
 		if err != nil {
 			return domain.ListPage{}, err
 		}
 		directoryID, manifestID, parentID, parentManifest = view.directoryID, view.snapshot.manifestID, view.parentID, view.parentManifest
-		entries, current = view.snapshot.entries, view.current
+		manifest, current = view.snapshot.manifest, view.current
+		if request.Sort != domain.SortName {
+			entries, err = s.readManifestPageEntries(ctx, scope, directoryID, manifest)
+			if err != nil {
+				return domain.ListPage{}, err
+			}
+		}
+	}
+	if request.Sort == domain.SortName {
+		entries, err = s.collectDirectoryIndexEntries(ctx, scope, directoryID, manifest, afterName, request.Descending, pageSize+1)
+		if err != nil {
+			return domain.ListPage{}, err
+		}
+		result := make([]domain.Entry, 0, min(pageSize, len(entries)))
+		for _, entry := range entries[:min(pageSize, len(entries))] {
+			path, joinErr := request.Directory.Join(entry.Name)
+			if joinErr != nil {
+				return domain.ListPage{}, domain.NewError(domain.ErrorInvalid, "stored directory name is invalid")
+			}
+			result = append(result, domainEntry(path, entry))
+		}
+		page := domain.ListPage{Current: current, Entries: result}
+		if len(entries) > pageSize {
+			page.NextCursor, err = s.encodeListCursor(listCursor{
+				SchemaVersion: 3, UserID: scope.UserID().String(), Area: areaName(scope.Area()),
+				DirectoryPath: request.Directory.String(), DirectoryID: directoryID, ManifestID: manifestID,
+				ParentID: parentID, ParentManifest: parentManifest,
+				PageSize: pageSize, Sort: request.Sort, Descending: request.Descending, AfterName: entries[pageSize-1].Name,
+				GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion, ExpiresAt: s.engine.clock.Now().UTC().Add(s.engine.cursorTTL),
+			})
+			if err != nil {
+				return domain.ListPage{}, err
+			}
+		}
+		return page, nil
 	}
 	result := make([]domain.Entry, 0, len(entries))
 	for _, entry := range entries {
@@ -169,11 +237,12 @@ func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain
 	end := min(start+pageSize, len(result))
 	page := domain.ListPage{Current: current, Entries: append([]domain.Entry(nil), result[start:end]...)}
 	if end < len(result) {
-		page.NextCursor, err = encodeListCursor(listCursor{
+		page.NextCursor, err = s.encodeListCursor(listCursor{
 			SchemaVersion: 2, UserID: scope.UserID().String(), Area: areaName(scope.Area()),
 			DirectoryPath: request.Directory.String(), DirectoryID: directoryID, ManifestID: manifestID,
 			ParentID: parentID, ParentManifest: parentManifest,
 			PageSize: pageSize, Sort: request.Sort, Descending: request.Descending, Index: end,
+			GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion, ExpiresAt: s.engine.clock.Now().UTC().Add(s.engine.cursorTTL),
 		})
 		if err != nil {
 			return domain.ListPage{}, err
@@ -202,19 +271,15 @@ func (s *FileStore) LookupChildren(ctx context.Context, scope domain.Scope, requ
 		seen[name] = struct{}{}
 		paths = append(paths, path)
 	}
-	view, err := s.resolveDirectoryView(ctx, scope, request.Directory)
+	view, err := s.resolveDirectoryMetadataView(ctx, scope, request.Directory)
 	if err != nil {
 		return domain.ChildLookup{}, err
 	}
-	byName := make(map[string]storageformat.DirectoryEntry, len(view.snapshot.entries))
-	for _, entry := range view.snapshot.entries {
-		byName[entry.Name] = entry
-	}
 	result := domain.ChildLookup{Current: view.current, Entries: make([]domain.Entry, 0, len(paths))}
 	for index, name := range request.Names {
-		entry, found := byName[name]
-		if !found {
-			return domain.ChildLookup{}, domain.NewError(domain.ErrorNotFound, "entry not found")
+		entry, err := s.directoryIndexEntry(ctx, scope, view.directoryID, view.snapshot.manifest, name)
+		if err != nil {
+			return domain.ChildLookup{}, err
 		}
 		result.Entries = append(result.Entries, domainEntry(paths[index], entry))
 	}
@@ -244,7 +309,7 @@ func (s *FileStore) Stat(ctx context.Context, scope domain.Scope, path domain.Us
 		if err != nil {
 			return domain.Entry{}, err
 		}
-		if snapshot.recursiveBytes != entry.Size || snapshot.recursiveFileCount != entry.FileCount {
+		if snapshot.recursiveBytes != entry.Size || snapshot.recursiveFileCount != entry.FileCount || snapshot.contentDigest != entry.ContentDigest {
 			return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "directory recursive aggregate mismatch")
 		}
 	}
@@ -263,14 +328,16 @@ func (s *FileStore) CreateDirectory(ctx context.Context, scope domain.Scope, req
 		return domain.Entry{}, err
 	}
 	for range 64 {
-		parentID, parent, err := s.resolveDirectory(ctx, scope, request.Path.Parent())
+		parentTrail, err := s.resolveDirectoryMetadataTrail(ctx, scope, request.Path.Parent())
 		if err != nil {
 			return domain.Entry{}, err
 		}
+		parentNode := parentTrail[len(parentTrail)-1]
+		parent := parentNode.snapshot
 		if parent.pending {
-			return domain.Entry{}, domain.NewError(domain.ErrorUnavailable, "directory has a pending operation")
+			continue
 		}
-		path, existing, err := resolveDirectoryDestination(request.Path, conflict, request.ExpectedVersion, parent.entries)
+		path, existing, err := s.resolveIndexedDirectoryDestination(ctx, scope, parentNode.directoryID, parent.manifest, request.Path, conflict, request.ExpectedVersion)
 		if err != nil {
 			return domain.Entry{}, err
 		}
@@ -278,21 +345,20 @@ func (s *FileStore) CreateDirectory(ctx context.Context, scope domain.Scope, req
 		if err != nil {
 			return domain.Entry{}, err
 		}
+		emptyDigest, err := directoryContentDigest(nil)
+		if err != nil {
+			return domain.Entry{}, err
+		}
 		entry := storageformat.DirectoryEntry{
 			Name: path.Name(), NameDigest: storageformat.NameDigest(path.Name()), Kind: domain.EntryDirectory,
-			DirectoryID: childID, ModifiedAt: s.engine.clock.Now().UTC(),
+			DirectoryID: childID, ContentDigest: emptyDigest, ModifiedAt: s.engine.clock.Now().UTC(),
 		}
 		entry.LogicalVersion, err = directoryEntryVersion(entry)
 		if err != nil {
 			return domain.Entry{}, err
 		}
-		updated := replaceDirectoryEntry(parent.entries, existing, entry)
-		parentRevision := uint64(1)
-		if parent.exists {
-			parentRevision = parent.envelope.Revision + 1
-		}
-		preparedParent, err := s.prepareDirectory(ctx, scope, parentID, updated, parentRevision)
-		if err != nil {
+		updates := make(map[string]directoryUpdate)
+		if err := applyDirectoryEntryChange(updates, parentTrail, existing, &entry); err != nil {
 			return domain.Entry{}, err
 		}
 		preparedChild, err := s.prepareDirectory(ctx, scope, childID, nil, 1)
@@ -300,30 +366,59 @@ func (s *FileStore) CreateDirectory(ctx context.Context, scope domain.Scope, req
 			return domain.Entry{}, err
 		}
 		childRootKey := storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), childID)
-		prerequisites := append(preparedParent.prerequisites, preparedChild.prerequisites...)
+		prerequisites := append([]storageformat.MutationObject(nil), preparedChild.prerequisites...)
 		prerequisites = append(prerequisites, storageformat.MutationObject{Key: childRootKey.String(), Body: preparedChild.rootBody})
-		sort.Slice(prerequisites, func(i, j int) bool { return prerequisites[i].Key < prerequisites[j].Key })
-		parentKey := storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), parentID)
-		action := storageformat.MutationCreate
-		expected := ""
-		condition := objectstore.PutCondition{Mode: objectstore.PutCreateOnly}
-		if parent.exists {
-			action = storageformat.MutationCAS
-			expected = parent.envelope.LogicalVersion
-			condition = objectstore.PutCondition{Mode: objectstore.PutMatch, Version: parent.object.Version}
+		operationID, err := s.engine.ids.OpaqueID()
+		if err != nil {
+			return domain.Entry{}, err
 		}
-		intent := storageformat.MutationIntent{Action: action, TargetKey: parentKey.String(), ExpectedLogicalVersion: expected, TargetBody: preparedParent.rootBody, Prerequisites: prerequisites}
-		err = s.engine.withAdmission(ctx, intent, func() error {
-			if err := s.engine.ensureMutationPrerequisites(ctx, prerequisites); err != nil {
-				return err
+		ownerID, err := s.engine.ids.OpaqueID()
+		if err != nil {
+			return domain.Entry{}, err
+		}
+		occurrence, err := catalogOccurrence(scope, path, entry)
+		if err != nil {
+			return domain.Entry{}, err
+		}
+		catalogChanges := []catalogChange{{post: &occurrence}}
+		if existing != nil {
+			existingEntries, collectErr := s.collectCatalogTree(ctx, scope, *existing)
+			if collectErr != nil {
+				return domain.Entry{}, collectErr
 			}
-			_, putErr := s.engine.backend.Put(ctx, parentKey, preparedParent.rootBody, condition)
-			return putErr
-		})
-		if err == nil {
+			for _, item := range existingEntries {
+				existingPath := path
+				for _, segment := range item.segments {
+					existingPath, collectErr = existingPath.Join(segment)
+					if collectErr != nil {
+						return domain.Entry{}, collectErr
+					}
+				}
+				removed, collectErr := catalogOccurrence(scope, existingPath, item.entry)
+				if collectErr != nil {
+					return domain.Entry{}, collectErr
+				}
+				catalogChanges = append(catalogChanges, catalogChange{pre: &removed})
+			}
+		}
+		operation, operationBody, err := s.buildFileOperation(ctx, scope.UserID(), operationID, ownerID, operationCreateDirectory, updates, prerequisites, nil, catalogChanges)
+		if err != nil {
+			if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrUnavailable) {
+				continue
+			}
+			return domain.Entry{}, err
+		}
+		result, err := s.startFileOperation(ctx, operation, operationBody, "", "")
+		if err == nil && result.State == domain.OperationSucceeded {
 			return domainEntry(path, entry), nil
 		}
-		if !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
+		if err == nil {
+			err = domain.NewError(domain.ErrorConflict, "directory changed during creation")
+		}
+		if errors.Is(err, domain.ErrUnavailable) {
+			return domain.Entry{}, err
+		}
+		if !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrUnavailable) {
 			return domain.Entry{}, err
 		}
 		// A root race is retried from authoritative state. The next pass turns
@@ -335,13 +430,13 @@ func (s *FileStore) CreateDirectory(ctx context.Context, scope domain.Scope, req
 func (s *FileStore) resolveEntry(ctx context.Context, scope domain.Scope, path domain.UserPath) (storageformat.DirectoryEntry, error) {
 	directoryID := storageformat.RootDirectoryID
 	for index, segment := range path.Segments() {
-		snapshot, err := s.readDirectory(ctx, scope, directoryID, directoryID == storageformat.RootDirectoryID)
+		snapshot, err := s.readDirectoryMetadata(ctx, scope, directoryID, directoryID == storageformat.RootDirectoryID)
 		if err != nil {
 			return storageformat.DirectoryEntry{}, err
 		}
-		entry, found := findDirectoryEntry(snapshot.entries, segment)
-		if !found {
-			return storageformat.DirectoryEntry{}, domain.NewError(domain.ErrorNotFound, "entry not found")
+		entry, err := s.directoryIndexEntry(ctx, scope, directoryID, snapshot.manifest, segment)
+		if err != nil {
+			return storageformat.DirectoryEntry{}, err
 		}
 		if index == len(path.Segments())-1 {
 			return entry, nil
@@ -367,45 +462,60 @@ func (s *FileStore) resolveDirectory(ctx context.Context, scope domain.Scope, pa
 		return "", directorySnapshot{}, domain.NewError(domain.ErrorNotFound, "directory not found")
 	}
 	snapshot, err := s.readDirectory(ctx, scope, entry.DirectoryID, false)
-	if err == nil && (snapshot.recursiveBytes != entry.Size || snapshot.recursiveFileCount != entry.FileCount) {
+	if err == nil && (snapshot.recursiveBytes != entry.Size || snapshot.recursiveFileCount != entry.FileCount || snapshot.contentDigest != entry.ContentDigest) {
 		return "", directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "directory recursive aggregate mismatch")
 	}
 	return entry.DirectoryID, snapshot, err
 }
 
-func (s *FileStore) resolveDirectoryView(ctx context.Context, scope domain.Scope, path domain.UserPath) (directoryView, error) {
-	trail, err := s.resolveDirectoryTrail(ctx, scope, path)
+func (s *FileStore) resolveDirectoryMetadataView(ctx context.Context, scope domain.Scope, path domain.UserPath) (directoryView, error) {
+	current, err := s.readDirectoryMetadata(ctx, scope, storageformat.RootDirectoryID, true)
 	if err != nil {
 		return directoryView{}, err
 	}
-	current := trail[len(trail)-1]
 	if path.IsRoot() {
 		return directoryView{
-			directoryID: current.directoryID, snapshot: current.snapshot,
-			current: rootDirectoryEntry(path, current.snapshot.recursiveBytes, current.snapshot.recursiveFileCount),
+			directoryID: storageformat.RootDirectoryID, snapshot: current,
+			current: rootDirectoryEntry(path, current.recursiveBytes, current.recursiveFileCount),
 		}, nil
 	}
-	parent := trail[len(trail)-2]
-	entry, found := findDirectoryEntry(parent.snapshot.entries, path.Name())
-	if !found || entry.Kind != domain.EntryDirectory || entry.DirectoryID != current.directoryID || entry.Size != current.snapshot.recursiveBytes || entry.FileCount != current.snapshot.recursiveFileCount {
-		return directoryView{}, domain.NewError(domain.ErrorInvalid, "directory snapshot aggregate mismatch")
+	directoryID := storageformat.RootDirectoryID
+	parentID, parentManifest := "", ""
+	var currentEntry storageformat.DirectoryEntry
+	for _, segment := range path.Segments() {
+		entry, lookupErr := s.directoryIndexEntry(ctx, scope, directoryID, current.manifest, segment)
+		if lookupErr != nil || entry.Kind != domain.EntryDirectory || entry.DirectoryID == "" {
+			if lookupErr != nil {
+				return directoryView{}, lookupErr
+			}
+			return directoryView{}, domain.NewError(domain.ErrorNotFound, "directory not found")
+		}
+		parentID, parentManifest = directoryID, current.manifestID
+		next, readErr := s.readDirectoryMetadata(ctx, scope, entry.DirectoryID, false)
+		if readErr != nil {
+			return directoryView{}, readErr
+		}
+		if next.recursiveBytes != entry.Size || next.recursiveFileCount != entry.FileCount || next.contentDigest != entry.ContentDigest {
+			return directoryView{}, domain.NewError(domain.ErrorInvalid, "directory trail recursive aggregate mismatch")
+		}
+		directoryID, current, currentEntry = entry.DirectoryID, next, entry
 	}
 	return directoryView{
-		directoryID: current.directoryID, snapshot: current.snapshot, current: domainEntry(path, entry),
-		parentID: parent.directoryID, parentManifest: parent.snapshot.manifestID,
+		directoryID: directoryID, snapshot: current, current: domainEntry(path, currentEntry),
+		parentID: parentID, parentManifest: parentManifest,
 	}, nil
 }
 
-func (s *FileStore) historicalCurrentDirectory(ctx context.Context, scope domain.Scope, path domain.UserPath, directoryID, parentID, parentManifest string, recursiveBytes, recursiveFileCount int64) (domain.Entry, error) {
+func (s *FileStore) historicalCurrentDirectory(ctx context.Context, scope domain.Scope, path domain.UserPath, directoryID, parentID, parentManifest string, recursiveBytes, recursiveFileCount int64, contentDigest string) (domain.Entry, error) {
 	if path.IsRoot() {
 		return rootDirectoryEntry(path, recursiveBytes, recursiveFileCount), nil
 	}
-	_, entries, err := s.readManifestSnapshot(ctx, scope, parentID, parentManifest)
+	manifest, err := s.readDirectoryManifest(ctx, scope, parentID, parentManifest)
 	if err != nil {
 		return domain.Entry{}, err
 	}
-	entry, found := findDirectoryEntry(entries, path.Name())
-	if !found || entry.Kind != domain.EntryDirectory || entry.DirectoryID != directoryID || entry.Size != recursiveBytes || entry.FileCount != recursiveFileCount {
+	entry, err := s.directoryIndexEntry(ctx, scope, parentID, manifest, path.Name())
+	if err != nil || entry.Kind != domain.EntryDirectory || entry.DirectoryID != directoryID || entry.Size != recursiveBytes || entry.FileCount != recursiveFileCount || entry.ContentDigest != contentDigest {
 		return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "list cursor directory aggregate mismatch")
 	}
 	return domainEntry(path, entry), nil
@@ -436,10 +546,43 @@ func (s *FileStore) resolveDirectoryTrail(ctx context.Context, scope domain.Scop
 		if err != nil {
 			return nil, err
 		}
-		if current.recursiveBytes != entry.Size || current.recursiveFileCount != entry.FileCount {
+		if current.recursiveBytes != entry.Size || current.recursiveFileCount != entry.FileCount || current.contentDigest != entry.ContentDigest {
 			return nil, s.classifyDirectoryTrailMismatch(ctx, trail[len(trail)-1], entry, current)
 		}
-		trail = append(trail, directoryTrailNode{scope: scope, path: currentPath, directoryID: entry.DirectoryID, snapshot: current})
+		trail = append(trail, directoryTrailNode{scope: scope, path: currentPath, directoryID: entry.DirectoryID, entry: entry, snapshot: current})
+	}
+	return trail, nil
+}
+
+func (s *FileStore) resolveDirectoryMetadataTrail(ctx context.Context, scope domain.Scope, path domain.UserPath) ([]directoryTrailNode, error) {
+	root, err := s.readDirectoryMetadata(ctx, scope, storageformat.RootDirectoryID, true)
+	if err != nil {
+		return nil, err
+	}
+	trail := []directoryTrailNode{{scope: scope, path: domain.MustParseUserPath("/"), directoryID: storageformat.RootDirectoryID, snapshot: root}}
+	current := root
+	currentPath := domain.MustParseUserPath("/")
+	for _, segment := range path.Segments() {
+		entry, err := s.directoryIndexEntry(ctx, scope, trail[len(trail)-1].directoryID, current.manifest, segment)
+		if err != nil {
+			return nil, err
+		}
+		if entry.Kind != domain.EntryDirectory || entry.DirectoryID == "" {
+			return nil, domain.NewError(domain.ErrorNotFound, "directory not found")
+		}
+		currentPath, err = currentPath.Join(segment)
+		if err != nil {
+			return nil, err
+		}
+		next, err := s.readDirectoryMetadata(ctx, scope, entry.DirectoryID, false)
+		if err != nil {
+			return nil, err
+		}
+		if next.recursiveBytes != entry.Size || next.recursiveFileCount != entry.FileCount || next.contentDigest != entry.ContentDigest {
+			return nil, s.classifyDirectoryTrailMismatch(ctx, trail[len(trail)-1], entry, next)
+		}
+		trail = append(trail, directoryTrailNode{scope: scope, path: currentPath, directoryID: entry.DirectoryID, entry: entry, snapshot: next})
+		current = next
 	}
 	return trail, nil
 }
@@ -471,6 +614,8 @@ func sameDirectoryVisibility(first, second directorySnapshot) bool {
 		first.manifestID == second.manifestID &&
 		first.recursiveBytes == second.recursiveBytes &&
 		first.recursiveFileCount == second.recursiveFileCount &&
+		first.contentAccumulator == second.contentAccumulator &&
+		first.contentDigest == second.contentDigest &&
 		first.pending == second.pending &&
 		first.transitionState == second.transitionState &&
 		first.transitionFence == second.transitionFence
@@ -492,6 +637,10 @@ func (s *FileStore) readDirectory(ctx context.Context, scope domain.Scope, direc
 	computedFiles, err := recursiveFileCount(entries)
 	if err != nil || computedFiles != snapshot.recursiveFileCount {
 		return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "directory manifest entries recursive file count mismatch")
+	}
+	computedAccumulator, computedDigest, err := directoryContentIdentity(entries)
+	if err != nil || computedAccumulator != snapshot.contentAccumulator || computedDigest != snapshot.contentDigest {
+		return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "directory manifest entries content digest mismatch")
 	}
 	snapshot.entries = entries
 	return snapshot, nil
@@ -520,11 +669,13 @@ func (s *FileStore) readDirectoryMetadata(ctx context.Context, scope domain.Scop
 	manifestID := root.ManifestID
 	recursiveBytes := root.RecursiveBytes
 	recursiveFileCount := root.RecursiveFileCount
+	contentAccumulator := root.ContentAccumulator
+	contentDigest := root.ContentDigest
 	pending := root.Pending != nil
 	transitionState := storageformat.FileOperationState("")
 	var transitionFence uint64
 	if pending {
-		if root.Pending.OperationID == "" || root.Pending.Fence == 0 || root.Pending.PostManifestID == "" || root.Pending.PreManifestID != root.ManifestID || root.Pending.PostRecursiveBytes < 0 || root.Pending.PostRecursiveFileCount < 0 {
+		if root.Pending.OperationID == "" || root.Pending.Fence == 0 || root.Pending.PostManifestID == "" || root.Pending.PreManifestID != root.ManifestID || root.Pending.PostRecursiveBytes < 0 || root.Pending.PostRecursiveFileCount < 0 || root.Pending.PostContentAccumulator == "" || root.Pending.PostContentDigest == "" {
 			return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "invalid pending directory transition")
 		}
 		operation, operationErr := s.readFileOperation(ctx, scope.UserID(), root.Pending.OperationID)
@@ -540,22 +691,24 @@ func (s *FileStore) readDirectoryMetadata(ctx context.Context, scope domain.Scop
 			manifestID = root.Pending.PostManifestID
 			recursiveBytes = root.Pending.PostRecursiveBytes
 			recursiveFileCount = root.Pending.PostRecursiveFileCount
+			contentAccumulator = root.Pending.PostContentAccumulator
+			contentDigest = root.Pending.PostContentDigest
 		}
 	}
 	if manifestID == "" {
 		if recursiveBytes != 0 || recursiveFileCount != 0 {
 			return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "empty directory root recursive aggregate mismatch")
 		}
-		return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, recursiveBytes: recursiveBytes, recursiveFileCount: recursiveFileCount, pending: pending, transitionState: transitionState, transitionFence: transitionFence}, nil
+		return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, recursiveBytes: recursiveBytes, recursiveFileCount: recursiveFileCount, contentAccumulator: contentAccumulator, contentDigest: contentDigest, pending: pending, transitionState: transitionState, transitionFence: transitionFence}, nil
 	}
 	manifest, err := s.readDirectoryManifest(ctx, scope, directoryID, manifestID)
 	if err != nil {
 		return directorySnapshot{}, err
 	}
-	if manifest.RecursiveBytes != recursiveBytes || manifest.RecursiveFileCount != recursiveFileCount {
+	if manifest.RecursiveBytes != recursiveBytes || manifest.RecursiveFileCount != recursiveFileCount || manifest.ContentAccumulator != contentAccumulator || manifest.ContentDigest != contentDigest {
 		return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "directory root and manifest recursive aggregate mismatch")
 	}
-	return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, manifestID: manifestID, manifest: manifest, recursiveBytes: recursiveBytes, recursiveFileCount: recursiveFileCount, pending: pending, transitionState: transitionState, transitionFence: transitionFence}, nil
+	return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, manifestID: manifestID, manifest: manifest, recursiveBytes: recursiveBytes, recursiveFileCount: recursiveFileCount, contentAccumulator: contentAccumulator, contentDigest: contentDigest, pending: pending, transitionState: transitionState, transitionFence: transitionFence}, nil
 }
 
 func (s *FileStore) readManifestSnapshot(ctx context.Context, scope domain.Scope, directoryID, manifestID string) (storageformat.DirectoryManifest, []storageformat.DirectoryEntry, error) {
@@ -575,6 +728,10 @@ func (s *FileStore) readManifestSnapshot(ctx context.Context, scope domain.Scope
 	if err != nil || computedFiles != manifest.RecursiveFileCount {
 		return storageformat.DirectoryManifest{}, nil, domain.NewError(domain.ErrorInvalid, "directory manifest entries recursive file count mismatch")
 	}
+	computedAccumulator, computedDigest, err := directoryContentIdentity(entries)
+	if err != nil || computedAccumulator != manifest.ContentAccumulator || computedDigest != manifest.ContentDigest {
+		return storageformat.DirectoryManifest{}, nil, domain.NewError(domain.ErrorInvalid, "directory manifest content digest mismatch")
+	}
 	return manifest, entries, nil
 }
 
@@ -589,13 +746,34 @@ func (s *FileStore) readDirectoryManifest(ctx context.Context, scope domain.Scop
 	if err := storageformat.DecodeEnvelope(object.Body, key, directoryManifestSchema, &envelope, &manifest); err != nil {
 		return storageformat.DirectoryManifest{}, err
 	}
-	if manifest.SchemaVersion != 1 || manifest.DirectoryID != directoryID || manifest.ManifestID != manifestID || manifest.EntryCount < 0 || manifest.RecursiveBytes < 0 || manifest.RecursiveFileCount < 0 || len(manifest.PageIDs) == 0 {
+	accumulator, accumulatorErr := decodeDirectoryContentAccumulator(manifest.ContentAccumulator)
+	expectedDigest, digestErr := directoryContentAccumulatorDigest(accumulator, manifest.EntryCount)
+	if manifest.SchemaVersion != 2 || manifest.DirectoryID != directoryID || manifest.ManifestID != manifestID || manifest.EntryCount < 0 || manifest.RecursiveBytes < 0 || manifest.RecursiveFileCount < 0 || accumulatorErr != nil || digestErr != nil || manifest.ContentDigest == "" || expectedDigest != manifest.ContentDigest || len(manifest.PageIDs) != 0 || manifest.EntryCount == 0 && (manifest.IndexRootID != "" || manifest.IndexRootDigest != "") || manifest.EntryCount > 0 && (manifest.IndexRootID == "" || manifest.IndexRootDigest == "") {
 		return storageformat.DirectoryManifest{}, domain.NewError(domain.ErrorInvalid, "invalid directory manifest")
 	}
 	return manifest, nil
 }
 
 func (s *FileStore) readManifestPageEntries(ctx context.Context, scope domain.Scope, directoryID string, manifest storageformat.DirectoryManifest) ([]storageformat.DirectoryEntry, error) {
+	if manifest.SchemaVersion == 2 {
+		entries, err := s.collectDirectoryIndexEntries(ctx, scope, directoryID, manifest, "", false, manifest.EntryCount)
+		if err != nil {
+			return nil, err
+		}
+		if len(entries) != manifest.EntryCount {
+			return nil, domain.NewError(domain.ErrorInvalid, "directory index entry count mismatch")
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].NameDigest == entries[j].NameDigest {
+				return entries[i].Name < entries[j].Name
+			}
+			return entries[i].NameDigest < entries[j].NameDigest
+		})
+		if err := validateDirectoryEntries(entries); err != nil {
+			return nil, err
+		}
+		return entries, nil
+	}
 	entries := make([]storageformat.DirectoryEntry, 0, manifest.EntryCount)
 	for _, pageID := range manifest.PageIDs {
 		pageKey := storageformat.DirectoryPageKey(scope.UserID().String(), areaName(scope.Area()), directoryID, pageID)
@@ -626,6 +804,68 @@ func (s *FileStore) prepareDirectory(ctx context.Context, scope domain.Scope, di
 	if err := validateDirectoryEntries(entries); err != nil {
 		return preparedDirectory{}, err
 	}
+	indexRoot, nodes, err := s.buildDirectoryIndex(scope, directoryID, entries)
+	if err != nil {
+		return preparedDirectory{}, err
+	}
+	contentAccumulator, contentDigest, err := directoryContentIdentity(entries)
+	if err != nil {
+		return preparedDirectory{}, err
+	}
+	return s.prepareDirectoryWithIndex(scope, directoryID, entries, revision, indexRoot, nodes, contentAccumulator, contentDigest)
+}
+
+func (s *FileStore) prepareDirectoryUpdate(ctx context.Context, scope domain.Scope, directoryID string, snapshot directorySnapshot, entries []storageformat.DirectoryEntry, revision uint64) (preparedDirectory, error) {
+	if err := validateDirectoryEntries(entries); err != nil {
+		return preparedDirectory{}, err
+	}
+	if snapshot.manifestID == "" && len(snapshot.entries) == 0 {
+		indexRoot, nodes, err := s.buildDirectoryIndex(scope, directoryID, entries)
+		if err != nil {
+			return preparedDirectory{}, err
+		}
+		contentAccumulator, contentDigest, err := directoryContentIdentity(entries)
+		if err != nil {
+			return preparedDirectory{}, err
+		}
+		return s.prepareDirectoryWithIndex(scope, directoryID, entries, revision, indexRoot, nodes, contentAccumulator, contentDigest)
+	}
+	if !snapshot.exists || snapshot.manifest.SchemaVersion != 2 || snapshot.manifest.EntryCount != len(snapshot.entries) {
+		return preparedDirectory{}, domain.NewError(domain.ErrorInvalid, "directory update has no current index snapshot")
+	}
+	indexRoot, nodes, err := s.mutateDirectoryIndex(ctx, scope, directoryID, snapshot.manifest, snapshot.entries, entries)
+	if err != nil {
+		return preparedDirectory{}, err
+	}
+	contentAccumulator, contentDigest, err := updateDirectoryContentIdentity(snapshot.contentAccumulator, snapshot.entries, entries)
+	if err != nil {
+		return preparedDirectory{}, err
+	}
+	return s.prepareDirectoryWithIndex(scope, directoryID, entries, revision, indexRoot, nodes, contentAccumulator, contentDigest)
+}
+
+func (s *FileStore) prepareDirectoryMutation(ctx context.Context, update directoryUpdate, revision uint64) (preparedDirectory, error) {
+	if !update.scope.Valid() || update.directoryID == "" || !update.snapshot.exists && update.directoryID != storageformat.RootDirectoryID || update.entryCount < 0 || update.recursiveBytes < 0 || update.recursiveFileCount < 0 || len(update.changes) == 0 {
+		return preparedDirectory{}, domain.NewError(domain.ErrorInvalid, "invalid directory mutation")
+	}
+	manifest := update.snapshot.manifest
+	if update.snapshot.manifestID == "" {
+		if update.snapshot.recursiveBytes != 0 || update.snapshot.recursiveFileCount != 0 || manifest.EntryCount != 0 {
+			return preparedDirectory{}, domain.NewError(domain.ErrorInvalid, "invalid empty directory mutation source")
+		}
+		manifest = storageformat.DirectoryManifest{SchemaVersion: 2, DirectoryID: update.directoryID, EntryCount: 0, RecursiveBytes: 0, RecursiveFileCount: 0, ContentAccumulator: update.snapshot.contentAccumulator, ContentDigest: update.snapshot.contentDigest}
+	}
+	indexRoot, nodes, err := s.mutateDirectoryIndexChanges(ctx, update.scope, update.directoryID, manifest, update.changes)
+	if err != nil {
+		return preparedDirectory{}, err
+	}
+	if update.entryCount > 0 && (indexRoot.EntryCount != uint64(update.entryCount) || indexRoot.RecursiveBytes != update.recursiveBytes || indexRoot.RecursiveFileCount != update.recursiveFileCount) {
+		return preparedDirectory{}, domain.NewError(domain.ErrorInvalid, "directory mutation index aggregate mismatch")
+	}
+	return s.prepareDirectoryWithIndexAggregates(update.scope, update.directoryID, update.entryCount, update.recursiveBytes, update.recursiveFileCount, revision, indexRoot, nodes, update.contentAccumulator, update.contentDigest)
+}
+
+func (s *FileStore) prepareDirectoryWithIndex(scope domain.Scope, directoryID string, entries []storageformat.DirectoryEntry, revision uint64, indexRoot storageformat.DirectoryIndexChild, nodes []storageformat.MutationObject, contentAccumulator, contentDigest string) (preparedDirectory, error) {
 	recursiveBytes, err := recursiveByteSize(entries)
 	if err != nil {
 		return preparedDirectory{}, err
@@ -634,46 +874,41 @@ func (s *FileStore) prepareDirectory(ctx context.Context, scope domain.Scope, di
 	if err != nil {
 		return preparedDirectory{}, err
 	}
+	return s.prepareDirectoryWithIndexAggregates(scope, directoryID, len(entries), recursiveBytes, fileCount, revision, indexRoot, nodes, contentAccumulator, contentDigest)
+}
+
+func (s *FileStore) prepareDirectoryWithIndexAggregates(scope domain.Scope, directoryID string, entryCount int, recursiveBytes, fileCount int64, revision uint64, indexRoot storageformat.DirectoryIndexChild, nodes []storageformat.MutationObject, contentAccumulator, contentDigest string) (preparedDirectory, error) {
+	if entryCount < 0 || recursiveBytes < 0 || fileCount < 0 || entryCount == 0 && (indexRoot.NodeID != "" || indexRoot.NodeDigest != "") || entryCount > 0 && (indexRoot.NodeID == "" || indexRoot.NodeDigest == "") {
+		return preparedDirectory{}, domain.NewError(domain.ErrorInvalid, "invalid directory index aggregates")
+	}
+	accumulator, err := decodeDirectoryContentAccumulator(contentAccumulator)
+	if err != nil {
+		return preparedDirectory{}, err
+	}
+	expectedDigest, err := directoryContentAccumulatorDigest(accumulator, entryCount)
+	if err != nil || expectedDigest != contentDigest {
+		return preparedDirectory{}, domain.NewError(domain.ErrorInvalid, "directory content identity mismatch")
+	}
 	manifestID, err := s.engine.ids.OpaqueID()
 	if err != nil {
 		return preparedDirectory{}, err
 	}
-	pages := make([]storageformat.MutationObject, 0, max(1, (len(entries)+maxEntriesPerPage-1)/maxEntriesPerPage))
-	pageIDs := make([]string, 0, cap(pages))
-	for start := 0; start < max(1, len(entries)); start += maxEntriesPerPage {
-		end := min(start+maxEntriesPerPage, len(entries))
-		pageEntries := entries[start:end]
-		pageID, idErr := s.engine.ids.OpaqueID()
-		if idErr != nil {
-			return preparedDirectory{}, idErr
-		}
-		pageKey := storageformat.DirectoryPageKey(scope.UserID().String(), areaName(scope.Area()), directoryID, pageID)
-		body, encodeErr := storageformat.EncodeEnvelope(directoryPageSchema, pageKey, 1, storageformat.DirectoryPage{SchemaVersion: 1, DirectoryID: directoryID, PageID: pageID, Entries: append([]storageformat.DirectoryEntry(nil), pageEntries...)})
-		if encodeErr != nil {
-			return preparedDirectory{}, encodeErr
-		}
-		pages = append(pages, storageformat.MutationObject{Key: pageKey.String(), Body: body})
-		pageIDs = append(pageIDs, pageID)
-		if len(entries) == 0 {
-			break
-		}
-	}
 	manifestKey := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifestID)
 	manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, storageformat.DirectoryManifest{
-		SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID, PageIDs: pageIDs,
-		EntryCount: len(entries), RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount, CreatedAt: s.engine.clock.Now().UTC(),
+		SchemaVersion: 2, DirectoryID: directoryID, ManifestID: manifestID, IndexRootID: indexRoot.NodeID, IndexRootDigest: indexRoot.NodeDigest,
+		EntryCount: entryCount, RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount, ContentAccumulator: contentAccumulator, ContentDigest: contentDigest, CreatedAt: s.engine.clock.Now().UTC(),
 	})
 	if err != nil {
 		return preparedDirectory{}, err
 	}
-	prerequisites := append(pages, storageformat.MutationObject{Key: manifestKey.String(), Body: manifestBody})
+	prerequisites := append(nodes, storageformat.MutationObject{Key: manifestKey.String(), Body: manifestBody})
 	sort.Slice(prerequisites, func(i, j int) bool { return prerequisites[i].Key < prerequisites[j].Key })
 	rootKey := storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), directoryID)
-	rootBody, err := storageformat.EncodeEnvelope(directoryRootSchema, rootKey, revision, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID, RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount})
+	rootBody, err := storageformat.EncodeEnvelope(directoryRootSchema, rootKey, revision, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID, RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount, ContentAccumulator: contentAccumulator, ContentDigest: contentDigest})
 	if err != nil {
 		return preparedDirectory{}, err
 	}
-	return preparedDirectory{manifestID: manifestID, recursiveBytes: recursiveBytes, recursiveFileCount: fileCount, rootBody: rootBody, prerequisites: prerequisites}, nil
+	return preparedDirectory{manifestID: manifestID, recursiveBytes: recursiveBytes, recursiveFileCount: fileCount, contentAccumulator: contentAccumulator, contentDigest: contentDigest, rootBody: rootBody, prerequisites: prerequisites}, nil
 }
 
 func validateDirectoryEntries(entries []storageformat.DirectoryEntry) error {
@@ -734,12 +969,176 @@ func recursiveFileCount(entries []storageformat.DirectoryEntry) (int64, error) {
 	return total, nil
 }
 
-func currentDirectoryEntries(updates map[string]directoryUpdate, node directoryTrailNode) []storageformat.DirectoryEntry {
+type directoryContentItem struct {
+	Name          string           `json:"name"`
+	Kind          domain.EntryKind `json:"kind"`
+	Size          int64            `json:"size"`
+	FileCount     int64            `json:"fileCount,omitempty"`
+	MD5           string           `json:"md5,omitempty"`
+	CRC32C        string           `json:"crc32c,omitempty"`
+	ContentDigest string           `json:"contentDigest,omitempty"`
+}
+
+func directoryContentDigest(entries []storageformat.DirectoryEntry) (string, error) {
+	_, digest, err := directoryContentIdentity(entries)
+	return digest, err
+}
+
+const directoryContentAccumulatorBytes = 64
+
+func directoryContentItemFor(entry storageformat.DirectoryEntry) (directoryContentItem, error) {
+	item := directoryContentItem{Name: entry.Name, Kind: entry.Kind, Size: entry.Size, FileCount: entry.FileCount}
+	switch entry.Kind {
+	case domain.EntryFile:
+		fingerprint := objectstore.ContentFingerprint{MD5: entry.MD5, CRC32C: entry.CRC32C}
+		if entry.SHA256 != "" || !fingerprint.Complete() || entry.ContentDigest != "" {
+			return directoryContentItem{}, domain.NewError(domain.ErrorInvalid, "file entry has no current provider content fingerprint")
+		}
+		item.MD5, item.CRC32C = entry.MD5, entry.CRC32C
+	case domain.EntryDirectory:
+		if entry.ContentDigest == "" || entry.MD5 != "" || entry.CRC32C != "" || entry.SHA256 != "" {
+			return directoryContentItem{}, domain.NewError(domain.ErrorInvalid, "directory entry has no subtree content digest")
+		}
+		item.ContentDigest = entry.ContentDigest
+	default:
+		return directoryContentItem{}, domain.NewError(domain.ErrorInvalid, "invalid directory entry kind")
+	}
+	return item, nil
+}
+
+func directoryContentContribution(entry storageformat.DirectoryEntry) ([32]byte, error) {
+	item, err := directoryContentItemFor(entry)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	body, err := storageformat.EncodeCanonical(item)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(append([]byte("endlessfs-directory-content-item-v2\x00"), body...)), nil
+}
+
+func applyDirectoryContentContribution(accumulator *[directoryContentAccumulatorBytes]byte, contribution [32]byte, remove bool) {
+	for index := range contribution {
+		accumulator[index] ^= contribution[index]
+	}
+	carry := 0
+	for index := len(contribution) - 1; index >= 0; index-- {
+		position := 32 + index
+		if remove {
+			value := int(accumulator[position]) - int(contribution[index]) - carry
+			if value < 0 {
+				value += 256
+				carry = 1
+			} else {
+				carry = 0
+			}
+			accumulator[position] = byte(value)
+			continue
+		}
+		value := int(accumulator[position]) + int(contribution[index]) + carry
+		accumulator[position] = byte(value)
+		carry = value >> 8
+	}
+}
+
+func encodeDirectoryContentAccumulator(accumulator [directoryContentAccumulatorBytes]byte) string {
+	return base64.RawURLEncoding.EncodeToString(accumulator[:])
+}
+
+func decodeDirectoryContentAccumulator(value string) ([directoryContentAccumulatorBytes]byte, error) {
+	var accumulator [directoryContentAccumulatorBytes]byte
+	body, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(body) != len(accumulator) || base64.RawURLEncoding.EncodeToString(body) != value {
+		return accumulator, domain.NewError(domain.ErrorInvalid, "invalid directory content accumulator")
+	}
+	copy(accumulator[:], body)
+	return accumulator, nil
+}
+
+func directoryContentAccumulatorDigest(accumulator [directoryContentAccumulatorBytes]byte, entryCount int) (string, error) {
+	if entryCount < 0 {
+		return "", domain.NewError(domain.ErrorInvalid, "invalid directory content entry count")
+	}
+	count := make([]byte, 8)
+	binary.BigEndian.PutUint64(count, uint64(entryCount))
+	body := append([]byte("endlessfs-directory-content-v2\x00"), accumulator[:]...)
+	body = append(body, count...)
+	return storageformat.Digest(body), nil
+}
+
+func directoryContentIdentity(entries []storageformat.DirectoryEntry) (string, string, error) {
+	var accumulator [directoryContentAccumulatorBytes]byte
+	for _, entry := range entries {
+		contribution, err := directoryContentContribution(entry)
+		if err != nil {
+			return "", "", err
+		}
+		applyDirectoryContentContribution(&accumulator, contribution, false)
+	}
+	digest, err := directoryContentAccumulatorDigest(accumulator, len(entries))
+	return encodeDirectoryContentAccumulator(accumulator), digest, err
+}
+
+func updateDirectoryContentIdentity(encoded string, before, after []storageformat.DirectoryEntry) (string, string, error) {
+	return updateDirectoryContentIdentityAtCount(encoded, before, after, len(after))
+}
+
+func updateDirectoryContentIdentityAtCount(encoded string, before, after []storageformat.DirectoryEntry, finalCount int) (string, string, error) {
+	accumulator, err := decodeDirectoryContentAccumulator(encoded)
+	if err != nil {
+		return "", "", err
+	}
+	oldByName := make(map[string]storageformat.DirectoryEntry, len(before))
+	for _, entry := range before {
+		oldByName[entry.Name] = entry
+	}
+	names, changes := directoryEntryChanges(before, after)
+	for _, name := range names {
+		if old, exists := oldByName[name]; exists {
+			contribution, contributionErr := directoryContentContribution(old)
+			if contributionErr != nil {
+				return "", "", contributionErr
+			}
+			applyDirectoryContentContribution(&accumulator, contribution, true)
+		}
+		if replacement := changes[name]; replacement != nil {
+			contribution, contributionErr := directoryContentContribution(*replacement)
+			if contributionErr != nil {
+				return "", "", contributionErr
+			}
+			applyDirectoryContentContribution(&accumulator, contribution, false)
+		}
+	}
+	digest, err := directoryContentAccumulatorDigest(accumulator, finalCount)
+	return encodeDirectoryContentAccumulator(accumulator), digest, err
+}
+
+func currentDirectoryUpdate(updates map[string]directoryUpdate, node directoryTrailNode) directoryUpdate {
 	key := storageformat.DirectoryRootKey(node.scope.UserID().String(), areaName(node.scope.Area()), node.directoryID).String()
 	if update, exists := updates[key]; exists {
-		return append([]storageformat.DirectoryEntry(nil), update.entries...)
+		return update
 	}
-	return append([]storageformat.DirectoryEntry(nil), node.snapshot.entries...)
+	accumulator := node.snapshot.contentAccumulator
+	digest := node.snapshot.contentDigest
+	entryCount := node.snapshot.manifest.EntryCount
+	if entryCount == 0 && len(node.snapshot.entries) != 0 {
+		entryCount = len(node.snapshot.entries)
+	}
+	if accumulator == "" && len(node.snapshot.entries) != 0 {
+		accumulator, digest, _ = directoryContentIdentity(node.snapshot.entries)
+	}
+	if accumulator == "" && entryCount == 0 {
+		accumulator = encodeDirectoryContentAccumulator([directoryContentAccumulatorBytes]byte{})
+		decoded, _ := decodeDirectoryContentAccumulator(accumulator)
+		digest, _ = directoryContentAccumulatorDigest(decoded, 0)
+	}
+	return directoryUpdate{
+		scope: node.scope, path: node.path, directoryID: node.directoryID, entry: node.entry, snapshot: node.snapshot,
+		changes: make(map[string]directoryEntryMutation), entryCount: entryCount,
+		recursiveBytes: node.snapshot.recursiveBytes, recursiveFileCount: node.snapshot.recursiveFileCount,
+		contentAccumulator: accumulator, contentDigest: digest,
+	}
 }
 
 func applyDirectoryChange(updates map[string]directoryUpdate, trail []directoryTrailNode, entries []storageformat.DirectoryEntry) error {
@@ -747,55 +1146,164 @@ func applyDirectoryChange(updates map[string]directoryUpdate, trail []directoryT
 		return domain.NewError(domain.ErrorInvalid, "directory aggregate trail is empty")
 	}
 	leaf := trail[len(trail)-1]
-	before := currentDirectoryEntries(updates, leaf)
-	beforeBytes, err := recursiveByteSize(before)
-	if err != nil {
-		return err
+	before := append([]storageformat.DirectoryEntry(nil), leaf.snapshot.entries...)
+	names, replacements := directoryEntryChanges(before, entries)
+	old := make(map[string]storageformat.DirectoryEntry, len(before))
+	for _, entry := range before {
+		old[entry.Name] = entry
 	}
-	afterBytes, err := recursiveByteSize(entries)
-	if err != nil {
-		return err
-	}
-	beforeFiles, err := recursiveFileCount(before)
-	if err != nil {
-		return err
-	}
-	afterFiles, err := recursiveFileCount(entries)
-	if err != nil {
-		return err
-	}
-	byteDelta := afterBytes - beforeBytes
-	fileDelta := afterFiles - beforeFiles
-	leafKey := storageformat.DirectoryRootKey(leaf.scope.UserID().String(), areaName(leaf.scope.Area()), leaf.directoryID).String()
-	updates[leafKey] = directoryUpdate{scope: leaf.scope, directoryID: leaf.directoryID, snapshot: leaf.snapshot, entries: append([]storageformat.DirectoryEntry(nil), entries...)}
-	if byteDelta == 0 && fileDelta == 0 {
-		return nil
-	}
-	for index := len(trail) - 2; index >= 0; index-- {
-		parent := trail[index]
-		parentEntries := currentDirectoryEntries(updates, parent)
-		childName := trail[index+1].path.Name()
-		child, found := findDirectoryEntry(parentEntries, childName)
-		if !found || child.Kind != domain.EntryDirectory || child.DirectoryID != trail[index+1].directoryID {
-			return domain.NewError(domain.ErrorInvalid, "directory aggregate ancestor is invalid")
+	for _, name := range names {
+		var beforeEntry *storageformat.DirectoryEntry
+		if value, ok := old[name]; ok {
+			copy := value
+			beforeEntry = &copy
 		}
-		if byteDelta > 0 && child.Size > math.MaxInt64-byteDelta || byteDelta < 0 && child.Size < -byteDelta {
-			return domain.NewError(domain.ErrorInvalid, "directory recursive byte aggregate overflows")
+		if err := applyDirectoryEntryChange(updates, trail, beforeEntry, replacements[name]); err != nil {
+			return err
 		}
-		if fileDelta > 0 && child.FileCount > math.MaxInt64-fileDelta || fileDelta < 0 && child.FileCount < -fileDelta {
-			return domain.NewError(domain.ErrorInvalid, "directory recursive file count overflows")
+	}
+	return nil
+}
+
+func applyDirectoryEntryChange(updates map[string]directoryUpdate, trail []directoryTrailNode, before, after *storageformat.DirectoryEntry) error {
+	if len(trail) == 0 || before == nil && after == nil {
+		return domain.NewError(domain.ErrorInvalid, "directory entry mutation is empty")
+	}
+	name := ""
+	if before != nil {
+		name = before.Name
+	}
+	if after != nil {
+		if name != "" && after.Name != name {
+			return domain.NewError(domain.ErrorInvalid, "directory entry mutation changes its key")
 		}
-		child.Size += byteDelta
-		child.FileCount += fileDelta
-		child.LogicalVersion, err = directoryEntryVersion(child)
+		name = after.Name
+	}
+	currentBefore, currentAfter := before, after
+	for index := len(trail) - 1; index >= 0; index-- {
+		node := trail[index]
+		update := currentDirectoryUpdate(updates, node)
+		priorBytes, priorFiles, priorDigest := update.recursiveBytes, update.recursiveFileCount, update.contentDigest
+		if existing, ok := update.changes[name]; ok {
+			if !sameOptionalDirectoryEntry(existing.after, currentBefore) {
+				return domain.NewError(domain.ErrorPreconditionFailed, "directory entry changed while composing mutation")
+			}
+			currentBefore = existing.after
+		} else if currentBefore == nil {
+			// A creation is valid only when the caller performed the indexed
+			// absence check against this exact manifest.
+		} else if currentBefore.Name != name {
+			return domain.NewError(domain.ErrorInvalid, "directory entry mutation key mismatch")
+		}
+		beforeBytes, beforeFiles, err := directoryEntryAggregates(currentBefore)
 		if err != nil {
 			return err
 		}
-		parentEntries = replaceDirectoryEntry(parentEntries, &child, child)
-		parentKey := storageformat.DirectoryRootKey(parent.scope.UserID().String(), areaName(parent.scope.Area()), parent.directoryID).String()
-		updates[parentKey] = directoryUpdate{scope: parent.scope, directoryID: parent.directoryID, snapshot: parent.snapshot, entries: parentEntries}
+		afterBytes, afterFiles, err := directoryEntryAggregates(currentAfter)
+		if err != nil {
+			return err
+		}
+		update.recursiveBytes, err = addAggregateDelta(update.recursiveBytes, afterBytes-beforeBytes, "directory recursive byte aggregate")
+		if err != nil {
+			return err
+		}
+		update.recursiveFileCount, err = addAggregateDelta(update.recursiveFileCount, afterFiles-beforeFiles, "directory recursive file count")
+		if err != nil {
+			return err
+		}
+		if currentBefore == nil {
+			update.entryCount++
+		} else if currentAfter == nil {
+			update.entryCount--
+		}
+		if update.entryCount < 0 {
+			return domain.NewError(domain.ErrorInvalid, "directory entry count underflows")
+		}
+		var beforeValues, afterValues []storageformat.DirectoryEntry
+		if currentBefore != nil {
+			beforeValues = []storageformat.DirectoryEntry{*currentBefore}
+		}
+		if currentAfter != nil {
+			afterValues = []storageformat.DirectoryEntry{*currentAfter}
+		}
+		update.contentAccumulator, update.contentDigest, err = updateDirectoryContentIdentityAtCount(update.contentAccumulator, beforeValues, afterValues, update.entryCount)
+		if err != nil {
+			return err
+		}
+		change, exists := update.changes[name]
+		if !exists {
+			change.before = cloneDirectoryEntry(currentBefore)
+		}
+		change.after = cloneDirectoryEntry(currentAfter)
+		if sameOptionalDirectoryEntry(change.before, change.after) {
+			delete(update.changes, name)
+		} else {
+			update.changes[name] = change
+		}
+		key := storageformat.DirectoryRootKey(node.scope.UserID().String(), areaName(node.scope.Area()), node.directoryID).String()
+		if len(update.changes) == 0 && update.entryCount == node.snapshot.manifest.EntryCount && update.recursiveBytes == node.snapshot.recursiveBytes && update.recursiveFileCount == node.snapshot.recursiveFileCount && update.contentAccumulator == node.snapshot.contentAccumulator && update.contentDigest == node.snapshot.contentDigest {
+			delete(updates, key)
+		} else {
+			updates[key] = update
+		}
+		if index == 0 {
+			break
+		}
+		child := trail[index].entry
+		if child.Kind != domain.EntryDirectory || child.DirectoryID != node.directoryID || child.Name == "" {
+			return domain.NewError(domain.ErrorInvalid, "directory aggregate ancestor is invalid")
+		}
+		oldChild := child
+		oldChild.Size, oldChild.FileCount, oldChild.ContentDigest = priorBytes, priorFiles, priorDigest
+		oldChild.LogicalVersion, err = directoryEntryVersion(oldChild)
+		if err != nil {
+			return err
+		}
+		newChild := oldChild
+		newChild.Size, newChild.FileCount, newChild.ContentDigest = update.recursiveBytes, update.recursiveFileCount, update.contentDigest
+		newChild.LogicalVersion, err = directoryEntryVersion(newChild)
+		if err != nil {
+			return err
+		}
+		name, currentBefore, currentAfter = child.Name, &oldChild, &newChild
 	}
 	return nil
+}
+
+func cloneDirectoryEntry(entry *storageformat.DirectoryEntry) *storageformat.DirectoryEntry {
+	if entry == nil {
+		return nil
+	}
+	copy := *entry
+	return &copy
+}
+
+func sameOptionalDirectoryEntry(left, right *storageformat.DirectoryEntry) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
+}
+
+func directoryEntryAggregates(entry *storageformat.DirectoryEntry) (int64, int64, error) {
+	if entry == nil {
+		return 0, 0, nil
+	}
+	if err := validateDirectoryIndexEntry(*entry); err != nil {
+		return 0, 0, err
+	}
+	files := entry.FileCount
+	if entry.Kind == domain.EntryFile {
+		files = 1
+	}
+	return entry.Size, files, nil
+}
+
+func addAggregateDelta(value, delta int64, label string) (int64, error) {
+	if delta > 0 && value > math.MaxInt64-delta || delta < 0 && value < -delta {
+		return 0, domain.NewError(domain.ErrorInvalid, label+" overflows")
+	}
+	return value + delta, nil
 }
 
 func directoryEntryVersion(entry storageformat.DirectoryEntry) (string, error) {
@@ -823,6 +1331,52 @@ func resolveDirectoryDestination(requested domain.UserPath, conflict domain.Conf
 	case domain.ConflictRename:
 		path, err := availableDirectoryName(requested, entries)
 		return path, nil, err
+	default:
+		return domain.UserPath{}, nil, domain.NewError(domain.ErrorInvalid, "invalid conflict mode")
+	}
+}
+
+func (s *FileStore) resolveIndexedDirectoryDestination(ctx context.Context, scope domain.Scope, directoryID string, manifest storageformat.DirectoryManifest, requested domain.UserPath, conflict domain.ConflictMode, expected domain.Version) (domain.UserPath, *storageformat.DirectoryEntry, error) {
+	existing, err := s.directoryIndexEntry(ctx, scope, directoryID, manifest, requested.Name())
+	if errors.Is(err, domain.ErrNotFound) {
+		return requested, nil, nil
+	}
+	if err != nil {
+		return domain.UserPath{}, nil, err
+	}
+	switch conflict {
+	case domain.ConflictFail:
+		return domain.UserPath{}, nil, domain.NewError(domain.ErrorConflict, "destination already exists")
+	case domain.ConflictReplace:
+		if expected == "" || expected != domain.Version(existing.LogicalVersion) {
+			return domain.UserPath{}, nil, domain.NewError(domain.ErrorPreconditionFailed, "destination version does not match")
+		}
+		return requested, &existing, nil
+	case domain.ConflictRename:
+		name := requested.Name()
+		extensionIndex := strings.LastIndexByte(name, '.')
+		base, extension := name, ""
+		if extensionIndex > 0 {
+			base, extension = name[:extensionIndex], name[extensionIndex:]
+		}
+		for index := 1; index <= 10_000; index++ {
+			suffix := fmt.Sprintf(" (%d)", index)
+			candidateBase := base
+			for len(candidateBase)+len(suffix)+len(extension) > 255 && candidateBase != "" {
+				_, size := utf8.DecodeLastRuneInString(candidateBase)
+				candidateBase = candidateBase[:len(candidateBase)-size]
+			}
+			candidate, joinErr := requested.Parent().Join(candidateBase + suffix + extension)
+			if joinErr != nil {
+				return domain.UserPath{}, nil, joinErr
+			}
+			if _, lookupErr := s.directoryIndexEntry(ctx, scope, directoryID, manifest, candidate.Name()); errors.Is(lookupErr, domain.ErrNotFound) {
+				return candidate, nil, nil
+			} else if lookupErr != nil {
+				return domain.UserPath{}, nil, lookupErr
+			}
+		}
+		return domain.UserPath{}, nil, domain.NewError(domain.ErrorConflict, "unable to generate a conflict-free name")
 	default:
 		return domain.UserPath{}, nil, domain.NewError(domain.ErrorInvalid, "invalid conflict mode")
 	}
@@ -911,8 +1465,8 @@ func previewContentIdentity(entry storageformat.DirectoryEntry) domain.PreviewCo
 	}
 	contentID := storageformat.Digest([]byte("endlessfs-preview-content-id-v1\x00" + entry.BlobID))
 	contentVersion := storageformat.Digest([]byte(fmt.Sprintf(
-		"endlessfs-preview-content-version-v1\x00%s\x00%s\x00%d\x00%s",
-		entry.BlobID, entry.SHA256, entry.Size, entry.MediaType,
+		"endlessfs-preview-content-version-v2\x00%s\x00%s\x00%s\x00%d\x00%s",
+		entry.BlobID, entry.MD5, entry.CRC32C, entry.Size, entry.MediaType,
 	)))
 	return domain.PreviewContentIdentity{
 		ContentID: domain.ContentID(contentID), ContentVersion: domain.ContentVersion(contentVersion), ContentModifiedAt: entry.ModifiedAt.UTC(),
@@ -994,10 +1548,41 @@ func decodeListCursor(value string) (listCursor, error) {
 	if err := decodeCanonicalValue(body, &cursor); err != nil {
 		return listCursor{}, err
 	}
-	if cursor.SchemaVersion != 2 {
+	if cursor.SchemaVersion != 2 && cursor.SchemaVersion != 3 {
 		return listCursor{}, domain.NewError(domain.ErrorInvalid, "invalid list cursor schema")
 	}
 	return cursor, nil
+}
+
+func (s *FileStore) encodeListCursor(cursor listCursor) (string, error) {
+	body, err := storageformat.EncodeCanonical(cursor)
+	if err != nil {
+		return "", err
+	}
+	random, err := s.engine.ids.BearerToken()
+	if err != nil {
+		return "", err
+	}
+	nonceMaterial, err := base64.RawURLEncoding.DecodeString(random)
+	if err != nil || len(nonceMaterial) < s.engine.cursorAEAD.NonceSize() {
+		return "", domain.NewError(domain.ErrorInternal, "secure file cursor randomness unavailable")
+	}
+	nonce := nonceMaterial[:s.engine.cursorAEAD.NonceSize()]
+	sealed := s.engine.cursorAEAD.Seal(append([]byte(nil), nonce...), nonce, body, []byte("endlessfs-file-list-cursor-v3"))
+	return base64.RawURLEncoding.EncodeToString(sealed), nil
+}
+
+func (s *FileStore) decodeListCursor(value string) (listCursor, error) {
+	sealed, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(sealed) <= s.engine.cursorAEAD.NonceSize() {
+		return listCursor{}, domain.NewError(domain.ErrorInvalid, "invalid file list cursor")
+	}
+	nonceSize := s.engine.cursorAEAD.NonceSize()
+	body, err := s.engine.cursorAEAD.Open(nil, sealed[:nonceSize], sealed[nonceSize:], []byte("endlessfs-file-list-cursor-v3"))
+	if err != nil {
+		return listCursor{}, domain.NewError(domain.ErrorInvalid, "invalid file list cursor")
+	}
+	return decodeListCursor(base64.RawURLEncoding.EncodeToString(body))
 }
 
 func decodeCanonicalValue(body []byte, destination any) error {

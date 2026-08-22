@@ -467,12 +467,17 @@ type Trash struct {
 // BatchOperation persists the aggregate state returned for bounded multi-item
 // control requests. Provider operation details remain provider-neutral.
 type BatchOperation struct {
-	SchemaVersion int                   `json:"schemaVersion"`
-	OwnerUserID   domain.UserID         `json:"ownerUserID"`
-	OperationID   domain.OperationID    `json:"operationID"`
-	State         domain.OperationState `json:"state"`
-	StartedAt     time.Time             `json:"startedAt"`
-	UpdatedAt     time.Time             `json:"updatedAt"`
+	SchemaVersion    int                   `json:"schemaVersion"`
+	OwnerUserID      domain.UserID         `json:"ownerUserID"`
+	OperationID      domain.OperationID    `json:"operationID"`
+	Kind             string                `json:"kind,omitempty"`
+	RequestDigest    string                `json:"requestDigest,omitempty"`
+	ItemCount        int                   `json:"itemCount,omitempty"`
+	SucceededCount   int                   `json:"succeededCount,omitempty"`
+	ReclaimableBytes int64                 `json:"reclaimableBytes,omitempty"`
+	State            domain.OperationState `json:"state"`
+	StartedAt        time.Time             `json:"startedAt"`
+	UpdatedAt        time.Time             `json:"updatedAt"`
 }
 
 type MutationOutcome struct {
@@ -501,8 +506,15 @@ func (r *BatchOperation) Validate() error {
 	if err := validateSchema(r.SchemaVersion); err != nil {
 		return err
 	}
-	if !r.OwnerUserID.Valid() || r.OperationID == "" || (r.State != domain.OperationSucceeded && r.State != domain.OperationFailed && r.State != domain.OperationRunning && r.State != domain.OperationPending) {
+	if !r.OwnerUserID.Valid() || r.OperationID == "" || (r.State != domain.OperationSucceeded && r.State != domain.OperationFailed && r.State != domain.OperationRunning && r.State != domain.OperationPending) || r.ItemCount < 0 || r.SucceededCount < 0 || r.SucceededCount > r.ItemCount || r.ReclaimableBytes < 0 {
 		return domain.NewError(domain.ErrorInvalid, "invalid batch operation")
+	}
+	if r.Kind == "" {
+		if r.RequestDigest != "" || r.ItemCount != 0 || r.SucceededCount != 0 || r.ReclaimableBytes != 0 {
+			return domain.NewError(domain.ErrorInvalid, "invalid legacy batch operation metadata")
+		}
+	} else if r.Kind != "duplicate_reconciliation" || !validHash(r.RequestDigest) || r.ItemCount == 0 {
+		return domain.NewError(domain.ErrorInvalid, "invalid batch operation audit metadata")
 	}
 	return validateTimes(r.StartedAt, r.UpdatedAt)
 }

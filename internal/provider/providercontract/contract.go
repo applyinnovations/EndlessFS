@@ -4,9 +4,7 @@ package providercontract
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -44,7 +42,6 @@ type Harness struct {
 	UploadOffset   func(context.Context, domain.Scope, domain.UploadID) (int64, error)
 	SimulateOffset func(context.Context, domain.Scope, domain.UploadID, int64) error
 	ByteCounts     func() ByteCounts
-	ChecksumSHA256 bool
 }
 
 type Factory func(t *testing.T) Harness
@@ -247,15 +244,6 @@ func Run(t *testing.T, factory Factory) {
 			}
 		}
 		completion := domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: 8, MediaType: "application/octet-stream"}
-		if harness.ChecksumSHA256 {
-			if _, err := harness.Storage.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{
-				UploadID: capability.UploadID, Path: path, Size: 8, MediaType: "application/octet-stream", ChecksumSHA256: "wrong",
-			}); !errors.Is(err, domain.ErrPreconditionFailed) {
-				t.Fatalf("checksum mismatch error = %v", err)
-			}
-			sum := sha256.Sum256([]byte("abcdefgh"))
-			completion.ChecksumSHA256 = hex.EncodeToString(sum[:])
-		}
 		if _, err := harness.Storage.CompleteUpload(context.Background(), scope, completion); err != nil {
 			t.Fatalf("CompleteUpload() error = %v", err)
 		}
@@ -574,13 +562,8 @@ func uploadFile(t *testing.T, harness Harness, scope domain.Scope, path domain.U
 	if !successfulUploadStatus(response.StatusCode) {
 		t.Fatalf("upload status = %d", response.StatusCode)
 	}
-	sum := sha256.Sum256(data)
-	checksum := ""
-	if harness.ChecksumSHA256 {
-		checksum = hex.EncodeToString(sum[:])
-	}
 	entry, err := harness.Storage.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{
-		UploadID: capability.UploadID, Path: path, Size: int64(len(data)), MediaType: "text/plain", ChecksumSHA256: checksum,
+		UploadID: capability.UploadID, Path: path, Size: int64(len(data)), MediaType: "text/plain",
 	})
 	if err != nil {
 		t.Fatalf("CompleteUpload() error = %v", err)

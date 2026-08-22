@@ -108,6 +108,65 @@ func TestMigrationGraphValidationRejectsEveryStructuralAmbiguity(t *testing.T) {
 	}
 }
 
+func TestMigrationDirectoryMarksResumeWithoutRewalkingCompletedSubtree(t *testing.T) {
+	backend, engine, scope, _, _ := emptyPhysicalMigrationRoot(t)
+	ctx := context.Background()
+	plan := aggregateMigrationPlan{writeProviderFingerprints: true}
+	if err := engine.migrateAllDirectoryAggregatesPhase(ctx, schemaMigration003To004, plan, migrationPhaseTransform); err != nil {
+		t.Fatal(err)
+	}
+	key := storageformat.MigrationDirectoryMarkKey(schemaMigration003To004.checkpointID, migrationPhaseTransform, scope.UserID().String(), areaName(scope.Area()), storageformat.RootDirectoryID)
+	before, err := backend.Get(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexReads := 0
+	hooks := &hookedBackend{Backend: backend}
+	hooks.get = func(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
+		if strings.Contains(key.String(), "/index-nodes/") || strings.Contains(key.String(), "/pages/") {
+			indexReads++
+		}
+		return backend.Get(ctx, key)
+	}
+	engine.backend = hooks
+	if err := engine.migrateAllDirectoryAggregatesPhase(ctx, schemaMigration003To004, plan, migrationPhaseTransform); err != nil {
+		t.Fatal(err)
+	}
+	after, err := backend.Get(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if indexReads != 0 || before.Version != after.Version {
+		t.Fatalf("completed subtree resume read %d entry nodes and changed mark %q -> %q", indexReads, before.Version, after.Version)
+	}
+}
+
+func TestMigrationDirectoryMarksFailClosedAndCleanUp(t *testing.T) {
+	backend, engine, scope, _, _ := emptyPhysicalMigrationRoot(t)
+	ctx := context.Background()
+	plan := aggregateMigrationPlan{writeProviderFingerprints: true}
+	if err := engine.migrateAllDirectoryAggregatesPhase(ctx, schemaMigration003To004, plan, migrationPhaseVerify); err != nil {
+		t.Fatal(err)
+	}
+	key := storageformat.MigrationDirectoryMarkKey(schemaMigration003To004.checkpointID, migrationPhaseVerify, scope.UserID().String(), areaName(scope.Area()), storageformat.RootDirectoryID)
+	object, err := backend.Get(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Put(ctx, key, []byte("{}"), objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.migrateAllDirectoryAggregatesPhase(ctx, schemaMigration003To004, plan, migrationPhaseVerify); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("corrupt migration mark error = %v; want invalid", err)
+	}
+	if err := engine.cleanupMigrationDirectoryMarks(ctx, schemaMigration003To004.checkpointID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Get(ctx, key); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("migration mark after cleanup error = %v; want not found", err)
+	}
+}
+
 func TestMigrationManifestValidationRejectsMalformedCanonicalState(t *testing.T) {
 	valid := storageformat.DirectoryManifest{
 		SchemaVersion: 1,
@@ -966,9 +1025,13 @@ func migrationFileEntry(t *testing.T, name string, size int64) storageformat.Dir
 
 func migrationDirectoryEntry(t *testing.T, name, directoryID string, size, files int64) storageformat.DirectoryEntry {
 	t.Helper()
+	emptyDigest, err := directoryContentDigest(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	entry := storageformat.DirectoryEntry{
 		Name: name, NameDigest: storageformat.NameDigest(name), Kind: domain.EntryDirectory, DirectoryID: directoryID,
-		Size: size, FileCount: files, ModifiedAt: time.Date(2042, 1, 2, 3, 4, 5, 0, time.UTC),
+		Size: size, FileCount: files, ContentDigest: emptyDigest, ModifiedAt: time.Date(2042, 1, 2, 3, 4, 5, 0, time.UTC),
 	}
 	entry.LogicalVersion, _ = directoryEntryVersion(entry)
 	return entry

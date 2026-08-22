@@ -1,6 +1,7 @@
 package gcs_test
 
 import (
+	"crypto/md5"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -520,6 +521,9 @@ func (f *fakeGCS) list(writer http.ResponseWriter, request *http.Request) {
 		limit = parsed
 	}
 	startAfter := ""
+	if startOffset := request.URL.Query().Get("startOffset"); startOffset != "" {
+		startAfter = strings.TrimSuffix(startOffset, "\x00")
+	}
 	if token := request.URL.Query().Get("pageToken"); token != "" {
 		decoded, err := base64.RawURLEncoding.DecodeString(token)
 		if err != nil {
@@ -612,9 +616,14 @@ func objectJSON(name string, object fakeObject) map[string]any {
 	return map[string]any{
 		"kind": "storage#object", "bucket": "endlessfs-test", "name": name,
 		"size": strconv.FormatInt(fakeObjectSize(object), 10), "generation": strconv.FormatInt(object.generation, 10),
-		"metageneration": strconv.FormatInt(object.metageneration, 10), "crc32c": crc32c(object.body),
+		"metageneration": strconv.FormatInt(object.metageneration, 10), "crc32c": crc32c(object.body), "md5Hash": md5Hash(object.body),
 		"contentType": "application/octet-stream",
 	}
+}
+
+func md5Hash(body []byte) string {
+	digest := md5.Sum(body)
+	return base64.StdEncoding.EncodeToString(digest[:])
 }
 
 func fakeObjectSize(object fakeObject) int64 {

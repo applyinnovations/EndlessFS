@@ -24,9 +24,11 @@ const (
 	storageSchema001 storageSchemaID = "endlessfs-portable-v1/schema-001"
 	storageSchema002 storageSchemaID = "endlessfs-portable-v1/schema-002"
 	storageSchema003 storageSchemaID = "endlessfs-portable-v1/schema-003"
+	storageSchema004 storageSchemaID = "endlessfs-portable-v1/schema-004"
 
 	storageMigration001To002 storageMigrationID = "schema-001-to-002"
 	storageMigration002To003 storageMigrationID = "schema-002-to-003"
+	storageMigration003To004 storageMigrationID = "schema-003-to-004"
 )
 
 type storageSchemaReleaseBoundary struct {
@@ -95,6 +97,11 @@ var schemaMigration002To003 = storageMigration{
 	checkpointID: "automatic-storage-schema-002-to-003",
 }
 
+var schemaMigration003To004 = storageMigration{
+	id: storageMigration003To004, from: storageSchema003, to: storageSchema004,
+	checkpointID: "automatic-storage-schema-003-to-004",
+}
+
 // storageSchemaLedger is append-only. Extend it by adding one definition whose
 // migrationFromPrevious connects the prior terminal epoch to the new epoch;
 // never insert, reorder, or rewrite an existing entry.
@@ -110,6 +117,22 @@ var storageSchemaLedger = []storageSchemaDefinition{
 		gateBinding:           storageGateFeatureBound,
 		migrationFromPrevious: &schemaMigration002To003,
 	},
+	{
+		id: storageSchema004,
+		features: []string{
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration003To004,
+	},
 }
 
 // storageSchemaReleaseLedger is also append-only. A boundary is the first
@@ -118,6 +141,7 @@ var storageSchemaLedger = []storageSchemaDefinition{
 var storageSchemaReleaseLedger = []storageSchemaReleaseBoundary{
 	{first: "v0.1.0", schema: storageSchema001},
 	{first: "v0.1.5", schema: storageSchema003},
+	{first: "v0.1.15", schema: storageSchema004},
 }
 
 func init() {
@@ -127,6 +151,7 @@ func init() {
 	// cycle.
 	schemaMigration001To002.run = (*Engine).runStorageMigration001To002
 	schemaMigration002To003.run = (*Engine).runStorageMigration002To003
+	schemaMigration003To004.run = (*Engine).runStorageMigration003To004
 }
 
 func currentStorageSchema() storageSchemaDefinition {

@@ -1,6 +1,6 @@
 # Part 1: scalable state and duplicate-reconciliation foundation
 
-**Status:** implementation complete; pull-request gate verification in progress
+**Status:** implementation and pull-request gate verification complete
 **Input:** production migration review dated 2026-08-22  
 **Primary objective:** make authoritative state management and maintenance materially faster, cheaper, and bounded before adding the duplicate-management UI.
 

@@ -140,8 +140,11 @@ func (s *FileStore) collectCatalogTreeStreamAt(ctx context.Context, scope domain
 	if err != nil {
 		return err
 	}
-	if directory.pending || directory.recursiveBytes != source.Size || directory.recursiveFileCount != source.FileCount || directory.contentDigest != source.ContentDigest {
+	if directory.pending {
 		return domain.NewError(domain.ErrorUnavailable, "source tree changed during streaming duplicate catalog preparation")
+	}
+	if directory.recursiveBytes != source.Size || directory.recursiveFileCount != source.FileCount || directory.contentDigest != source.ContentDigest {
+		return domain.NewError(domain.ErrorInvalid, "source tree aggregate is inconsistent during streaming duplicate catalog preparation")
 	}
 	item.manifestID = directory.manifestID
 	item.contentSketch = append([]string(nil), directory.manifest.ContentSketch...)
@@ -199,8 +202,11 @@ func (s *FileStore) cloneTreeStreamAt(
 	if err != nil {
 		return streamedTreePreparation{}, err
 	}
-	if sourceDirectory.pending || sourceDirectory.recursiveBytes != source.Size || sourceDirectory.recursiveFileCount != source.FileCount || sourceDirectory.contentDigest != source.ContentDigest {
+	if sourceDirectory.pending {
 		return streamedTreePreparation{}, domain.NewError(domain.ErrorUnavailable, "source tree changed during streaming clone preparation")
+	}
+	if sourceDirectory.recursiveBytes != source.Size || sourceDirectory.recursiveFileCount != source.FileCount || sourceDirectory.contentDigest != source.ContentDigest {
+		return streamedTreePreparation{}, domain.NewError(domain.ErrorInvalid, "source tree aggregate is inconsistent during streaming clone preparation")
 	}
 	directoryID := entry.DirectoryID
 	transform := func(value storageformat.DirectoryEntry) (storageformat.DirectoryEntry, error) {

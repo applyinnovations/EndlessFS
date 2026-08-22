@@ -142,7 +142,7 @@ func (s *FileStore) buildRecursiveFileOperationPreparation(ctx context.Context, 
 		return err
 	}
 	to := from
-	if operation.Kind != operationDelete {
+	if operation.Kind != operationDelete && operation.Kind != operationCreateDirectory {
 		to, err = storedOperationScope(userID, request.ToArea)
 		if err != nil {
 			return err
@@ -179,6 +179,9 @@ func (s *FileStore) buildRecursiveFileOperationPreparation(ctx context.Context, 
 	}
 	emitCopy := func(value storageformat.MutationCopy) error {
 		return s.addPreparedOperationCopy(ctx, collector, value)
+	}
+	if operation.Kind == operationCreateDirectory {
+		return s.buildCreateDirectoryReplacementPreparation(ctx, operationKey, operation, userID, from, sourcePath, sourceTrail, sourceEntry, collector, emitObject)
 	}
 
 	updates := make(map[string]directoryUpdate)
@@ -309,6 +312,84 @@ func (s *FileStore) buildRecursiveFileOperationPreparation(ctx context.Context, 
 		}
 	}
 
+	return s.finishRecursiveFileOperationPreparation(ctx, operationKey, operation, userID, collector, updates, contentDeltas, emitObject)
+}
+
+func (s *FileStore) buildCreateDirectoryReplacementPreparation(
+	ctx context.Context,
+	operationKey objectstore.Key,
+	operation storageformat.FileOperation,
+	userID domain.UserID,
+	scope domain.Scope,
+	path domain.UserPath,
+	parentTrail []directoryTrailNode,
+	existing storageformat.DirectoryEntry,
+	collector *operationPreparationRunCollector,
+	emitObject func(storageformat.MutationObject) error,
+) error {
+	if existing.Kind != domain.EntryDirectory || operation.Kind != operationCreateDirectory || collector == nil || emitObject == nil {
+		return domain.NewError(domain.ErrorInvalid, "invalid create-directory replacement preparation")
+	}
+	emptyAccumulator, emptyDigest, err := directoryContentIdentity(nil)
+	if err != nil {
+		return err
+	}
+	directoryID := deterministicCloneID(operation.OperationID, "directory-create", path.String())
+	manifestID := deterministicCloneID(operation.OperationID, "manifest-create", path.String())
+	preparedChild, err := s.prepareClonedDirectoryRoots(scope, directoryID, manifestID, operation.StartedAt, directorySnapshot{
+		manifest:           storageformat.DirectoryManifest{SchemaVersion: 2, DirectoryID: directoryID},
+		contentAccumulator: emptyAccumulator,
+		contentDigest:      emptyDigest,
+	}, storageformat.DirectoryIndexChild{}, nil, storageformat.DirectoryContentIndexChild{}, emitObject)
+	if err != nil {
+		return err
+	}
+	entry := storageformat.DirectoryEntry{
+		Name: path.Name(), NameDigest: storageformat.NameDigest(path.Name()), Kind: domain.EntryDirectory,
+		DirectoryID: directoryID, ContentDigest: emptyDigest, ModifiedAt: operation.StartedAt.UTC(),
+	}
+	entry.LogicalVersion, err = directoryEntryVersion(entry)
+	if err != nil {
+		return err
+	}
+	if err := s.collectCatalogTreeStream(ctx, scope, existing, func(item relativeCatalogEntry) error {
+		return s.addPreparedCatalogOccurrence(ctx, collector, userID, scope, path, item, true)
+	}); err != nil {
+		return err
+	}
+	if err := s.addPreparedCatalogOccurrence(ctx, collector, userID, scope, path, relativeCatalogEntry{
+		entry: entry, manifestID: preparedChild.manifestID, contentSketch: append([]string(nil), preparedChild.contentSketch...),
+	}, false); err != nil {
+		return err
+	}
+	updates := make(map[string]directoryUpdate)
+	if err := applyDirectoryEntryChangeWithContent(updates, parentTrail, &existing, &entry, nil, nil); err != nil {
+		return err
+	}
+	delta, err := s.contentDeltaForEntry(ctx, scope, existing, []string{existing.Name}, true)
+	if err != nil {
+		return err
+	}
+	contentDeltas := make(map[string][]directoryContentDelta)
+	if err := appendDirectoryContentDelta(contentDeltas, parentTrail, delta); err != nil {
+		return err
+	}
+	return s.finishRecursiveFileOperationPreparation(ctx, operationKey, operation, userID, collector, updates, contentDeltas, emitObject)
+}
+
+func (s *FileStore) finishRecursiveFileOperationPreparation(
+	ctx context.Context,
+	operationKey objectstore.Key,
+	operation storageformat.FileOperation,
+	userID domain.UserID,
+	collector *operationPreparationRunCollector,
+	updates map[string]directoryUpdate,
+	contentDeltas map[string][]directoryContentDelta,
+	emitObject func(storageformat.MutationObject) error,
+) error {
+	if collector == nil || emitObject == nil || len(updates) == 0 {
+		return domain.NewError(domain.ErrorInvalid, "invalid recursive operation visibility preparation")
+	}
 	keys := make([]string, 0, len(updates))
 	for key := range updates {
 		keys = append(keys, key)

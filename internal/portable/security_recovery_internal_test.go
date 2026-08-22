@@ -1110,7 +1110,7 @@ func TestFileOperationValidationAndRecoveryMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("directory-clone-owner-loss", func(t *testing.T) {
+	t.Run("directory-stream-clone-guards", func(t *testing.T) {
 		_, _, engine := newEngine(t)
 		if _, err := engine.Files().CreateDirectory(ctx, scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/source")}); err != nil {
 			t.Fatal(err)
@@ -1125,12 +1125,10 @@ func TestFileOperationValidationAndRecoveryMatrix(t *testing.T) {
 		}
 		mismatched := source
 		mismatched.Size++
-		if _, err := engine.Files().cloneTree(ctx, scope, scope, mismatched, false); !errors.Is(err, domain.ErrInvalid) {
-			t.Fatalf("cloneTree(aggregate mismatch) error = %v", err)
-		}
-		engine.ids = domain.NewIDGenerator(strings.NewReader(""))
-		if _, err := engine.Files().cloneTree(ctx, scope, scope, source, false); !errors.Is(err, domain.ErrInternal) {
-			t.Fatalf("cloneTree() error = %v", err)
+		if _, err := engine.Files().cloneTreeStream(ctx, "security-clone", engine.clock.Now(), scope, scope, mismatched, false,
+			func(storageformat.MutationObject) error { return nil }, func(storageformat.MutationCopy) error { return nil }, func(relativeCatalogEntry) error { return nil },
+		); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("cloneTreeStream(aggregate mismatch) error = %v", err)
 		}
 	})
 
@@ -1283,13 +1281,13 @@ func TestFileOperationValidationAndRecoveryMatrix(t *testing.T) {
 
 		t.Run("clone-guards", func(t *testing.T) {
 			memory, _, engine := newEngine(t)
-			engine.ids = domain.NewIDGenerator(strings.NewReader(""))
 			file := storageformat.DirectoryEntry{Kind: domain.EntryFile, BlobID: "blob", Size: 1}
-			if _, err := engine.Files().cloneTree(ctx, scope, scope, file, true); !errors.Is(err, domain.ErrInternal) {
-				t.Fatalf("cloneTree(file) error = %v", err)
+			if _, err := engine.Files().cloneTreeStream(ctx, "security-file-clone", engine.clock.Now(), scope, scope, file, true,
+				func(storageformat.MutationObject) error { return nil }, func(storageformat.MutationCopy) error { return nil }, func(relativeCatalogEntry) error { return nil },
+			); !errors.Is(err, domain.ErrInvalid) {
+				t.Fatalf("cloneTreeStream(file) error = %v", err)
 			}
 
-			engine.ids = domain.NewIDGenerator(strings.NewReader(strings.Repeat("clone", 1<<16)))
 			if _, err := engine.Files().CreateDirectory(ctx, scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/source")}); err != nil {
 				t.Fatal(err)
 			}
@@ -1302,8 +1300,10 @@ func TestFileOperationValidationAndRecoveryMatrix(t *testing.T) {
 				t.Fatal("source directory missing")
 			}
 			markPending(t, memory, source.DirectoryID)
-			if _, err := engine.Files().cloneTree(ctx, scope, scope, source, false); !errors.Is(err, domain.ErrUnavailable) {
-				t.Fatalf("cloneTree(pending) error = %v", err)
+			if _, err := engine.Files().cloneTreeStream(ctx, "security-directory-clone", engine.clock.Now(), scope, scope, source, false,
+				func(storageformat.MutationObject) error { return nil }, func(storageformat.MutationCopy) error { return nil }, func(relativeCatalogEntry) error { return nil },
+			); !errors.Is(err, domain.ErrUnavailable) {
+				t.Fatalf("cloneTreeStream(pending) error = %v", err)
 			}
 		})
 	})

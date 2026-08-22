@@ -334,6 +334,22 @@ func (s *FileStore) CreateDirectory(ctx context.Context, scope domain.Scope, req
 		if err != nil {
 			return domain.Entry{}, err
 		}
+		if existing != nil && existing.Kind == domain.EntryDirectory {
+			entry, result, prepareErr := s.startPreparingCreateDirectoryReplacement(ctx, scope, path, request, parentTrail, *existing)
+			if prepareErr == nil && result.State == domain.OperationSucceeded {
+				return domainEntry(path, entry), nil
+			}
+			if prepareErr == nil {
+				prepareErr = domain.NewError(domain.ErrorConflict, "directory changed during creation")
+			}
+			if errors.Is(prepareErr, domain.ErrUnavailable) {
+				return domain.Entry{}, prepareErr
+			}
+			if !errors.Is(prepareErr, domain.ErrPreconditionFailed) && !errors.Is(prepareErr, domain.ErrConflict) {
+				return domain.Entry{}, prepareErr
+			}
+			continue
+		}
 		childID, err := s.engine.ids.OpaqueID()
 		if err != nil {
 			return domain.Entry{}, err
@@ -351,14 +367,13 @@ func (s *FileStore) CreateDirectory(ctx context.Context, scope domain.Scope, req
 			return domain.Entry{}, err
 		}
 		var existingCatalog []relativeCatalogEntry
+		var existingContentFiles []relativeDirectoryContentFile
 		if existing != nil {
-			existingCatalog, err = s.collectCatalogTree(ctx, scope, *existing)
-			if err != nil {
-				return domain.Entry{}, err
-			}
+			existingCatalog = []relativeCatalogEntry{{entry: *existing}}
+			existingContentFiles = []relativeDirectoryContentFile{{entry: *existing}}
 		}
 		updates := make(map[string]directoryUpdate)
-		if err := applyDirectoryEntryChangeWithContent(updates, parentTrail, existing, &entry, relativeDirectoryContentFiles(existingCatalog), nil); err != nil {
+		if err := applyDirectoryEntryChangeWithContent(updates, parentTrail, existing, &entry, existingContentFiles, nil); err != nil {
 			return domain.Entry{}, err
 		}
 		preparedChild, err := s.prepareDirectory(ctx, scope, childID, nil, 1)
@@ -428,6 +443,67 @@ func (s *FileStore) CreateDirectory(ctx context.Context, scope domain.Scope, req
 		// a same-name winner into Conflict while preserving unrelated updates.
 	}
 	return domain.Entry{}, domain.NewError(domain.ErrorConflict, "directory changed too frequently")
+}
+
+func (s *FileStore) startPreparingCreateDirectoryReplacement(
+	ctx context.Context,
+	scope domain.Scope,
+	path domain.UserPath,
+	request domain.CreateDirectoryRequest,
+	parentTrail []directoryTrailNode,
+	existing storageformat.DirectoryEntry,
+) (storageformat.DirectoryEntry, domain.Operation, error) {
+	if existing.Kind != domain.EntryDirectory || len(parentTrail) == 0 {
+		return storageformat.DirectoryEntry{}, domain.Operation{}, domain.NewError(domain.ErrorInvalid, "invalid create-directory replacement source")
+	}
+	operationID, err := s.engine.ids.OpaqueID()
+	if err != nil {
+		return storageformat.DirectoryEntry{}, domain.Operation{}, err
+	}
+	ownerID, err := s.engine.ids.OpaqueID()
+	if err != nil {
+		return storageformat.DirectoryEntry{}, domain.Operation{}, err
+	}
+	_, gateEnvelope, gate, err := s.engine.readGate(ctx)
+	if err != nil {
+		return storageformat.DirectoryEntry{}, domain.Operation{}, err
+	}
+	now := s.engine.clock.Now().UTC()
+	directoryID := deterministicCloneID(operationID, "directory-create", path.String())
+	emptyDigest, err := directoryContentDigest(nil)
+	if err != nil {
+		return storageformat.DirectoryEntry{}, domain.Operation{}, err
+	}
+	entry := storageformat.DirectoryEntry{
+		Name: path.Name(), NameDigest: storageformat.NameDigest(path.Name()), Kind: domain.EntryDirectory,
+		DirectoryID: directoryID, ContentDigest: emptyDigest, ModifiedAt: now,
+	}
+	entry.LogicalVersion, err = directoryEntryVersion(entry)
+	if err != nil {
+		return storageformat.DirectoryEntry{}, domain.Operation{}, err
+	}
+	fingerprint := storageformat.Digest([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%s\x00%s", operationCreateDirectory, areaName(scope.Area()), path.String(), request.Conflict, request.ExpectedVersion, existing.LogicalVersion)))
+	parent := parentTrail[len(parentTrail)-1]
+	operation := storageformat.FileOperation{
+		SchemaVersion: 2, OperationID: operationID, UserID: scope.UserID().String(), Kind: operationCreateDirectory,
+		IntentFingerprint: fingerprint,
+		State:             storageformat.FileOperationPreparing, Attempt: 1, Fence: 1, ReplicaAttemptID: ownerID,
+		ExpiresAt: now.Add(s.engine.leaseTTL), StartedAt: now, UpdatedAt: now,
+		Preparation: &storageformat.FileOperationPreparation{
+			SchemaVersion: 1, RunSetID: deterministicCloneID(operationID, "run-set", "raw"), Phase: "build",
+			GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion,
+			Request: &storageformat.FileOperationPreparationRequest{
+				FromArea: areaName(scope.Area()), Source: path.String(), Conflict: request.Conflict,
+				ExpectedSource: request.ExpectedVersion, Fingerprint: fingerprint, SourceEntry: existing,
+				SourceParent: storageformat.FileOperationDirectoryPin{
+					DirectoryID: parent.directoryID, ManifestID: parent.snapshot.manifestID,
+					LogicalVersion: parent.snapshot.envelope.LogicalVersion, PreExisted: parent.snapshot.exists,
+				},
+			},
+		},
+	}
+	result, err := s.startPreparingFileOperation(ctx, operation, "", fingerprint)
+	return entry, result, err
 }
 
 func (s *FileStore) resolveEntry(ctx context.Context, scope domain.Scope, path domain.UserPath) (storageformat.DirectoryEntry, error) {

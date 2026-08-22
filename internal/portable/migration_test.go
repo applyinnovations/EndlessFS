@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -92,11 +93,20 @@ func TestStartupMigratesSchema001ThroughCurrent(t *testing.T) {
 		t.Fatalf("migrated legacy trash lookup = %+v, %v; want directory size/count 5/1", lookup, err)
 	}
 	gate, err := engine.GateStatus(context.Background())
-	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 3 {
-		t.Fatalf("migrated gate = %+v, %v; want open epoch 3 after two schema migrations", gate, err)
+	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 5 {
+		t.Fatalf("migrated gate = %+v, %v; want open epoch 5 after four schema migrations", gate, err)
 	}
 	assertRecursiveFeatureActivated(t, backend.Export())
 	assertLegacyWriterCannotDecodeMigratedGate(t, backend.Export())
+	duplicateRecords := 0
+	for key := range backend.Export() {
+		if strings.HasPrefix(key, storageformat.DuplicateRecordsPrefix()) {
+			duplicateRecords++
+		}
+	}
+	if duplicateRecords == 0 {
+		t.Fatal("schema migration did not construct the duplicate catalog")
+	}
 	uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath("/photos/third.txt"), []byte("new"))
 	if got := assertVisibleRecursiveAggregates(t, engine.Files(), live, domain.MustParseUserPath("/")); got != 15 {
 		t.Fatalf("post-migration live aggregate = %d; want 15", got)
@@ -203,7 +213,7 @@ func TestEightReplicasConcurrentlyMigrateSchema002(t *testing.T) {
 		t.Fatalf("migrated byte-only trash root = %+v, %v; want 2 bytes/1 file", trashRoot, err)
 	}
 	gate, err := engines[1].GateStatus(context.Background())
-	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 2 {
+	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 4 {
 		t.Fatalf("migrated byte-only gate = %+v, %v", gate, err)
 	}
 	assertRecursiveFeatureActivated(t, predecessor.Export())
@@ -243,7 +253,7 @@ func TestEightReplicasConcurrentlyMigrateSchema001AggregateTree(t *testing.T) {
 		t.Fatalf("concurrently migrated aggregate = %d; want 12", got)
 	}
 	gate, err := engines[0].GateStatus(context.Background())
-	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 3 {
+	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 5 {
 		t.Fatalf("concurrently migrated gate = %+v, %v", gate, err)
 	}
 	assertRecursiveFeatureActivated(t, backend.Export())
@@ -340,7 +350,12 @@ func schema001AggregateFixtureState(t *testing.T, clock *domain.FixedClock, acti
 
 func encodeSchema001Fixture(t *testing.T, objects map[string][]byte) map[string][]byte {
 	t.Helper()
+	downgradeDirectoryIndexes(t, objects)
 	for key, body := range objects {
+		if strings.HasPrefix(key, storageformat.DuplicateRecordsPrefix()) {
+			delete(objects, key)
+			continue
+		}
 		parsed := storageformatKey(t, key)
 		switch {
 		case key == storageformat.SuperblockKey().String():
@@ -410,16 +425,21 @@ func encodeSchema001Fixture(t *testing.T, objects map[string][]byte) map[string]
 
 func encodeSchema002Fixture(t *testing.T, objects map[string][]byte) map[string][]byte {
 	t.Helper()
+	downgradeDirectoryIndexes(t, objects)
 	withoutCount := func(features []string) []string {
 		result := make([]string, 0, len(features))
 		for _, feature := range features {
-			if feature != storageformat.FeatureRecursiveFileCounts {
+			if feature != storageformat.FeatureRecursiveFileCounts && feature != storageformat.FeatureProviderFingerprints && feature != storageformat.FeatureDuplicateCatalog && feature != storageformat.FeatureDirectoryDigests && feature != storageformat.FeatureMetadataCheckpoints && feature != storageformat.FeaturePagedOperations && feature != storageformat.FeatureDirectoryIndexes && feature != storageformat.FeatureStateIndexes && feature != storageformat.FeatureResumableOperations {
 				result = append(result, feature)
 			}
 		}
 		return result
 	}
 	for key, body := range objects {
+		if strings.HasPrefix(key, storageformat.DuplicateRecordsPrefix()) {
+			delete(objects, key)
+			continue
+		}
 		parsed := storageformatKey(t, key)
 		switch {
 		case key == storageformat.SuperblockKey().String():
@@ -486,6 +506,80 @@ func encodeSchema002Fixture(t *testing.T, objects map[string][]byte) map[string]
 	return objects
 }
 
+func downgradeDirectoryIndexes(t *testing.T, objects map[string][]byte) {
+	t.Helper()
+	nodes := make(map[string]storageformat.DirectoryIndexNode)
+	for key, body := range objects {
+		if !strings.Contains(key, "/index/") || !strings.HasSuffix(key, ".json") {
+			continue
+		}
+		parsed := storageformatKey(t, key)
+		var envelope storageformat.Envelope
+		var node storageformat.DirectoryIndexNode
+		if err := storageformat.DecodeEnvelope(body, parsed, "directory-index-node-v1", &envelope, &node); err != nil {
+			t.Fatal(err)
+		}
+		nodes[node.DirectoryID+"\x00"+node.NodeID] = node
+	}
+	var collect func(string, string) []storageformat.DirectoryEntry
+	collect = func(directoryID, nodeID string) []storageformat.DirectoryEntry {
+		node, ok := nodes[directoryID+"\x00"+nodeID]
+		if !ok {
+			t.Fatalf("missing directory index node %q while constructing predecessor fixture", nodeID)
+		}
+		if node.Leaf {
+			return append([]storageformat.DirectoryEntry(nil), node.Entries...)
+		}
+		var entries []storageformat.DirectoryEntry
+		for _, child := range node.Children {
+			entries = append(entries, collect(directoryID, child.NodeID)...)
+		}
+		return entries
+	}
+	for key, body := range objects {
+		if !strings.Contains(key, "/manifests/") || !strings.HasSuffix(key, ".json") {
+			continue
+		}
+		parsed := storageformatKey(t, key)
+		var envelope storageformat.Envelope
+		var manifest storageformat.DirectoryManifest
+		if err := storageformat.DecodeEnvelope(body, parsed, "directory-manifest-v1", &envelope, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		if manifest.SchemaVersion != 2 {
+			continue
+		}
+		var entries []storageformat.DirectoryEntry
+		if manifest.EntryCount > 0 {
+			entries = collect(manifest.DirectoryID, manifest.IndexRootID)
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].NameDigest == entries[j].NameDigest {
+				return entries[i].Name < entries[j].Name
+			}
+			return entries[i].NameDigest < entries[j].NameDigest
+		})
+		if len(entries) > 200 {
+			t.Fatal("predecessor test fixture exceeds the legacy directory page bound")
+		}
+		manifestPrefix := strings.Split(key, "/manifests/")[0]
+		pageID := manifest.ManifestID
+		pageKey := objectstore.MustKey(manifestPrefix + "/pages/" + strings.Split(key, "/manifests/")[1])
+		page := storageformat.DirectoryPage{SchemaVersion: 1, DirectoryID: manifest.DirectoryID, PageID: pageID, Entries: entries}
+		objects[pageKey.String()] = mustEnvelope(t, "directory-page-v1", pageKey, 1, page)
+		manifest.SchemaVersion = 1
+		manifest.PageIDs = []string{pageID}
+		manifest.IndexRootID = ""
+		manifest.IndexRootDigest = ""
+		objects[key] = mustEnvelope(t, "directory-manifest-v1", parsed, envelope.Revision, manifest)
+	}
+	for key := range objects {
+		if strings.Contains(key, "/index/") && strings.HasSuffix(key, ".json") {
+			delete(objects, key)
+		}
+	}
+}
+
 func assertRecursiveFeatureActivated(t *testing.T, objects map[string][]byte) {
 	t.Helper()
 	var superblock storageformat.Superblock
@@ -498,6 +592,9 @@ func assertRecursiveFeatureActivated(t *testing.T, objects map[string][]byte) {
 	if !containsFeature(superblock.RequiredFeatures, storageformat.FeatureRecursiveFileCounts) {
 		t.Fatalf("superblock features lack recursive file counts = %v", superblock.RequiredFeatures)
 	}
+	if !containsFeature(superblock.RequiredFeatures, storageformat.FeatureProviderFingerprints) || !containsFeature(superblock.RequiredFeatures, storageformat.FeatureDuplicateCatalog) {
+		t.Fatalf("superblock features lack provider duplicate catalog support = %v", superblock.RequiredFeatures)
+	}
 	key := storageformat.WriterSetKey()
 	var envelope storageformat.Envelope
 	var writer storageformat.WriterSet
@@ -509,6 +606,9 @@ func assertRecursiveFeatureActivated(t *testing.T, objects map[string][]byte) {
 	}
 	if !containsFeature(writer.RequiredFeatures, storageformat.FeatureRecursiveFileCounts) {
 		t.Fatalf("writer features lack recursive file counts = %v", writer.RequiredFeatures)
+	}
+	if !containsFeature(writer.RequiredFeatures, storageformat.FeatureProviderFingerprints) || !containsFeature(writer.RequiredFeatures, storageformat.FeatureDuplicateCatalog) {
+		t.Fatalf("writer features lack provider duplicate catalog support = %v", writer.RequiredFeatures)
 	}
 }
 
@@ -542,7 +642,7 @@ func assertLegacyWriterCannotDecodeMigratedGate(t *testing.T, objects map[string
 	}
 }
 
-func schemaMigrationOptions(backend *objectmemory.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) portable.Options {
+func schemaMigrationOptions(backend objectstore.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) portable.Options {
 	return portable.Options{
 		Backend: backend, Clock: clock, IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(seed, 1<<20))),
 		Writer: portable.WriterConfiguration{
@@ -553,7 +653,7 @@ func schemaMigrationOptions(backend *objectmemory.Backend, clock *domain.FixedCl
 	}
 }
 
-func schemaSplitMigrationOptions(stateBackend, fileBackend *objectmemory.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) portable.Options {
+func schemaSplitMigrationOptions(stateBackend, fileBackend objectstore.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) portable.Options {
 	options := schemaMigrationOptions(stateBackend, clock, seed, scheduler)
 	options.FileBackend = fileBackend
 	return options
@@ -642,7 +742,7 @@ func decodeStoredGate(t *testing.T, objects map[string][]byte) storageformat.Wri
 func withoutRecursiveFeature(features []string) []string {
 	result := make([]string, 0, len(features))
 	for _, feature := range features {
-		if feature != storageformat.FeatureRecursiveBytes && feature != storageformat.FeatureRecursiveFileCounts {
+		if feature != storageformat.FeatureRecursiveBytes && feature != storageformat.FeatureRecursiveFileCounts && feature != storageformat.FeatureProviderFingerprints && feature != storageformat.FeatureDuplicateCatalog && feature != storageformat.FeatureDirectoryDigests && feature != storageformat.FeatureMetadataCheckpoints && feature != storageformat.FeaturePagedOperations && feature != storageformat.FeatureDirectoryIndexes && feature != storageformat.FeatureStateIndexes && feature != storageformat.FeatureResumableOperations {
 			result = append(result, feature)
 		}
 	}

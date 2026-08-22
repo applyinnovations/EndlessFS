@@ -52,11 +52,34 @@ func StatePrefix(namespace string) string {
 func StateRecordsPrefix() string  { return root + "state/" }
 func StateVersionsPrefix() string { return root + "state-versions/" }
 
+func StateIndexRootKey(namespace string) objectstore.Key {
+	if err := ValidateNamespace(namespace); err != nil {
+		panic(err)
+	}
+	return fixedKey("state-indexes/" + namespace + "/root.json")
+}
+
+func StateIndexNodeKey(namespace, nodeID string) objectstore.Key {
+	if err := ValidateNamespace(namespace); err != nil {
+		panic(err)
+	}
+	return fixedKey("state-indexes/" + namespace + "/nodes/" + encodedPart(nodeID) + ".json")
+}
+
+func StateIndexRootPrefix() string { return root + "state-indexes/" }
+
 func StateVersionKey(namespace, logicalKey, logicalVersion string) objectstore.Key {
 	if err := ValidateNamespace(namespace); err != nil {
 		panic(err)
 	}
 	return fixedKey("state-versions/" + namespace + "/" + digestPart(logicalKey) + "/" + digestPart(logicalVersion) + ".json")
+}
+
+func StateVersionLogicalPrefix(namespace, logicalKey string) string {
+	if err := ValidateNamespace(namespace); err != nil {
+		panic(err)
+	}
+	return root + "state-versions/" + namespace + "/" + digestPart(logicalKey) + "/"
 }
 
 func AdmissionKey(epoch uint64, operationID string) objectstore.Key {
@@ -87,7 +110,57 @@ func DirectoryPageKey(userID, area, directoryID, pageID string) objectstore.Key 
 	return fixedKey(strings.Join([]string{"fs", encodedPart(userID), area, "dirs", encodedPart(directoryID), "pages", encodedPart(pageID) + ".json"}, "/"))
 }
 
+func DirectoryIndexNodeKey(userID, area, directoryID, nodeID string) objectstore.Key {
+	return fixedKey(strings.Join([]string{"fs", encodedPart(userID), area, "dirs", encodedPart(directoryID), "index", encodedPart(nodeID) + ".json"}, "/"))
+}
+
+func DirectorySortIndexNodeKey(userID, area, directoryID string, sort domain.SortField, nodeID string) objectstore.Key {
+	return fixedKey(strings.Join([]string{"fs", encodedPart(userID), area, "dirs", encodedPart(directoryID), "sort-index", string(sort), encodedPart(nodeID) + ".json"}, "/"))
+}
+
+func DirectoryContentIndexNodeKey(userID, area, directoryID, nodeID string) objectstore.Key {
+	return fixedKey(strings.Join([]string{"fs", encodedPart(userID), area, "dirs", encodedPart(directoryID), "content-index", encodedPart(nodeID) + ".json"}, "/"))
+}
+
 func FilesystemPrefix() string { return root + "fs/" }
+
+func DuplicateOccurrenceKey(userID, kind, groupID, area, path string) objectstore.Key {
+	return fixedKey(strings.Join([]string{"duplicates", encodedPart(userID), kind, "occurrences", encodedPart(groupID), digestPart(area+"\x00"+path) + ".json"}, "/"))
+}
+
+func DuplicateOccurrenceGroupPrefix(userID, kind, groupID string) string {
+	return root + strings.Join([]string{"duplicates", encodedPart(userID), kind, "occurrences", encodedPart(groupID), ""}, "/")
+}
+
+func DuplicateOccurrenceOwnerPrefix(userID string) string {
+	return root + strings.Join([]string{"duplicates", encodedPart(userID), ""}, "/")
+}
+
+func DuplicateSummaryKey(userID, kind, groupID, shard string) objectstore.Key {
+	return fixedKey(strings.Join([]string{"duplicates", encodedPart(userID), kind, "summaries", encodedPart(groupID), shard + ".json"}, "/"))
+}
+
+func DuplicateSummaryPrefix(userID, kind string) string {
+	return root + strings.Join([]string{"duplicates", encodedPart(userID), kind, "summaries", ""}, "/")
+}
+
+func DuplicateIgnoreKey(userID, groupID string) objectstore.Key {
+	return fixedKey(strings.Join([]string{"duplicates", encodedPart(userID), "ignores", encodedPart(groupID) + ".json"}, "/"))
+}
+
+func DuplicateDirectoryIgnoreKey(userID, pairID string) objectstore.Key {
+	return fixedKey(strings.Join([]string{"duplicates", encodedPart(userID), "directory-ignores", encodedPart(pairID) + ".json"}, "/"))
+}
+
+func DuplicateSimilarityPostingKey(userID string, position int, sketchValue, area, directoryID string) objectstore.Key {
+	return fixedKey(strings.Join([]string{"duplicates", encodedPart(userID), "similarity", fmt.Sprintf("%02x", position), encodedPart(sketchValue), area, encodedPart(directoryID) + ".json"}, "/"))
+}
+
+func DuplicateSimilarityPostingPrefix(userID string, position int, sketchValue string) string {
+	return root + strings.Join([]string{"duplicates", encodedPart(userID), "similarity", fmt.Sprintf("%02x", position), encodedPart(sketchValue), ""}, "/")
+}
+
+func DuplicateRecordsPrefix() string { return root + "duplicates/" }
 
 // ParseDirectoryRootKey validates and decodes a canonical directory-root key.
 // The boolean is false for canonical filesystem objects of another kind.
@@ -136,13 +209,47 @@ func OperationKey(userID, operationID string) objectstore.Key {
 
 func OperationPrefix() string { return root + "operations/" }
 
+func FileOperationStepPageKey(userID, operationID, stepSetID string, index uint64) objectstore.Key {
+	return fixedKey("operation-steps/" + encodedPart(userID) + "/" + encodedPart(operationID) + "/" + encodedPart(stepSetID) + "/" + fmt.Sprintf("%016x.json", index))
+}
+
+func FileOperationStepPagePrefix(userID, operationID string) string {
+	return root + "operation-steps/" + encodedPart(userID) + "/" + encodedPart(operationID) + "/"
+}
+
+func FileOperationStepPageSetPrefix(userID, operationID, stepSetID string) string {
+	return FileOperationStepPagePrefix(userID, operationID) + encodedPart(stepSetID) + "/"
+}
+
+func FileOperationStepsPrefix() string { return root + "operation-steps/" }
+
+func FileOperationPreparationPageKey(userID, operationID, runSetID string, generation, run, page uint64) objectstore.Key {
+	return fixedKey("operation-preparation/" + encodedPart(userID) + "/" + encodedPart(operationID) + "/" + encodedPart(runSetID) + "/" + fmt.Sprintf("%016x/%016x/%016x.json", generation, run, page))
+}
+
+func FileOperationPreparationPrefix(userID, operationID string) string {
+	return root + "operation-preparation/" + encodedPart(userID) + "/" + encodedPart(operationID) + "/"
+}
+
+func FileOperationPreparationsPrefix() string { return root + "operation-preparation/" }
+
+func OperationStagingKey(userID, operationID, artifactID string) objectstore.Key {
+	return fixedKey("operation-staging/" + encodedPart(userID) + "/" + encodedPart(operationID) + "/" + encodedPart(artifactID))
+}
+
+func OperationStagingPrefix() string { return root + "operation-staging/" }
+
 func IdempotencyKey(userID, key string) objectstore.Key {
 	return fixedKey("idempotency/" + encodedPart(userID) + "/" + digestPart(key) + ".json")
 }
 
+func IdempotencyPrefix() string { return root + "idempotency/" }
+
 func CheckpointKey(checkpointID string) objectstore.Key {
 	return fixedKey("checkpoints/" + encodedPart(checkpointID) + ".json")
 }
+
+func CheckpointPrefix() string { return root + "checkpoints/" }
 
 func CheckpointWorkKey(checkpointID, objectKey string) objectstore.Key {
 	return fixedKey("checkpoints/" + encodedPart(checkpointID) + "/work/" + digestPart(objectKey) + ".json")
@@ -160,9 +267,35 @@ func CheckpointInventoryPagePrefix(checkpointID string) string {
 	return root + "checkpoints/" + encodedPart(checkpointID) + "/inventory/"
 }
 
+func GarbageCollectionSessionKey(checkpointID string) objectstore.Key {
+	return fixedKey("maintenance/gc/" + encodedPart(checkpointID) + "/session.json")
+}
+
+func GarbageCollectionMarkKey(checkpointID, role, targetKey string) objectstore.Key {
+	return fixedKey("maintenance/gc/" + encodedPart(checkpointID) + "/marks/" + role + "/" + digestPart(targetKey) + ".json")
+}
+
+func GarbageCollectionMarkPrefix(checkpointID string) string {
+	return root + "maintenance/gc/" + encodedPart(checkpointID) + "/marks/"
+}
+
+func MigrationDirectoryMarkKey(checkpointID, phase, userID, area, directoryID string) objectstore.Key {
+	return fixedKey(strings.Join([]string{"maintenance", "migration", encodedPart(checkpointID), phase, encodedPart(userID), area, encodedPart(directoryID) + ".json"}, "/"))
+}
+
+func MigrationDirectoryMarkScopePrefix(checkpointID, phase, userID, area string) string {
+	return root + strings.Join([]string{"maintenance", "migration", encodedPart(checkpointID), phase, encodedPart(userID), area, ""}, "/")
+}
+
+func MigrationDirectoryMarkPrefix(checkpointID string) string {
+	return root + strings.Join([]string{"maintenance", "migration", encodedPart(checkpointID), ""}, "/")
+}
+
 func LeaseKey(backendKind, leaseID string) objectstore.Key {
 	if err := ValidateNamespace(backendKind); err != nil {
 		panic(err)
 	}
 	return fixedKey(fmt.Sprintf("leases/%s/%s.json", backendKind, encodedPart(leaseID)))
 }
+
+func LeasePrefix() string { return root + "leases/" }

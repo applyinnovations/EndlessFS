@@ -17,6 +17,7 @@ import (
 )
 
 func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
+	t.Parallel()
 	family := storageSchemaFixtures[0]
 	fixture := loadStorageSchemaFixture(t, family)
 

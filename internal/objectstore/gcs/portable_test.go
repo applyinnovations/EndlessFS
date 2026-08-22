@@ -263,7 +263,7 @@ func TestGCSLostMutationSuccessIsRecoveredByAnotherReplica(t *testing.T) {
 	first, second := open(71), open(72)
 	key := state.MustKey(state.NamespaceAccounts, "lost-success")
 	fake.mu.Lock()
-	fake.failUploadAfterCommitName = storageformat.StateKey("accounts", key.String()).String()
+	fake.failUploadAfterCommitName = storageformat.StateIndexRootKey("accounts").String()
 	fake.mu.Unlock()
 	if _, err := first.Create(context.Background(), key, []byte("durable")); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("Create() lost-success error = %v", err)

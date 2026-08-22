@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"hash"
 	"math"
 	"net"
 	"net/http"
@@ -90,7 +89,6 @@ type upload struct {
 	offset          int64
 	data            []byte
 	materialized    bool
-	hasher          hash.Hash
 	state           domain.UploadState
 	capabilityHash  [sha256.Size]byte
 }

@@ -19,6 +19,19 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
+const (
+	testProviderMD5    = "AAAAAAAAAAAAAAAAAAAAAA"
+	testProviderCRC32C = "AAAAAA"
+)
+
+func withCurrentTestFingerprint(entry storageformat.DirectoryEntry) storageformat.DirectoryEntry {
+	entry.MD5 = testProviderMD5
+	entry.CRC32C = testProviderCRC32C
+	entry.SHA256 = ""
+	entry.LogicalVersion, _ = directoryEntryVersion(entry)
+	return entry
+}
+
 func TestPortableDirectoryEntryValidationMatrix(t *testing.T) {
 	now := time.Date(2043, 1, 2, 3, 4, 5, 0, time.UTC)
 	validDirectory := storageformat.DirectoryEntry{Name: "dir", NameDigest: storageformat.NameDigest("dir"), Kind: domain.EntryDirectory, DirectoryID: "directory", Size: 4, ModifiedAt: now}
@@ -164,17 +177,19 @@ func TestPortableRecursiveAggregateChangeValidation(t *testing.T) {
 	backend := objectmemory.New()
 	clock := domain.NewFixedClock(time.Date(2043, 1, 2, 3, 4, 5, 0, time.UTC))
 	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("aggregate-validation", 1<<14)))
-	first := storageformat.DirectoryEntry{Name: "a", NameDigest: storageformat.NameDigest("a"), Kind: domain.EntryFile, BlobID: "a", Size: math.MaxInt64, MediaType: "application/octet-stream", ModifiedAt: clock.Now()}
-	second := storageformat.DirectoryEntry{Name: "b", NameDigest: storageformat.NameDigest("b"), Kind: domain.EntryFile, BlobID: "b", Size: 1, MediaType: "application/octet-stream", ModifiedAt: clock.Now()}
-	first.LogicalVersion, _ = directoryEntryVersion(first)
-	second.LogicalVersion, _ = directoryEntryVersion(second)
+	first := withCurrentTestFingerprint(storageformat.DirectoryEntry{Name: "a", NameDigest: storageformat.NameDigest("a"), Kind: domain.EntryFile, BlobID: "a", Size: math.MaxInt64, MediaType: "application/octet-stream", ModifiedAt: clock.Now()})
+	second := withCurrentTestFingerprint(storageformat.DirectoryEntry{Name: "b", NameDigest: storageformat.NameDigest("b"), Kind: domain.EntryFile, BlobID: "b", Size: 1, MediaType: "application/octet-stream", ModifiedAt: clock.Now()})
 	if _, err := engine.Files().prepareDirectory(context.Background(), scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{first, second}, 1); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("prepareDirectory(overflow) error = %v", err)
 	}
 
 	const operationID = "empty-root-transition"
 	rootKey := storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID)
-	root := storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: storageformat.RootDirectoryID, Pending: &storageformat.DirectoryTransition{OperationID: operationID, Fence: 1, PostManifestID: "post"}}
+	emptyAccumulator, emptyDigest, err := directoryContentIdentity(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: storageformat.RootDirectoryID, Pending: &storageformat.DirectoryTransition{OperationID: operationID, Fence: 1, PostManifestID: "post", PostContentAccumulator: emptyAccumulator, PostContentDigest: emptyDigest}}
 	if _, err := backend.Put(context.Background(), rootKey, encodeInternalEnvelope(t, directoryRootSchema, rootKey, 1, root), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
 		t.Fatal(err)
 	}
@@ -200,15 +215,14 @@ func TestPortableRecursiveAggregateChangeValidation(t *testing.T) {
 	}
 }
 
-func TestPortableRecursiveAggregateStatDoesNotReadManifestPages(t *testing.T) {
+func TestPortableRecursiveAggregateStatDoesNotReadDirectoryIndex(t *testing.T) {
 	ctx := context.Background()
 	backend := objectmemory.New()
 	clock := domain.NewFixedClock(time.Date(2043, 1, 2, 3, 4, 6, 0, time.UTC))
 	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("constant-time-stat", 1<<14)))
 	user, _ := domain.ParseUserID("ZmZmZmZmZmZmZmZmZmZmZg")
 	scope, _ := domain.NewScope(user, domain.AreaLive)
-	entry := storageformat.DirectoryEntry{Name: "file.bin", NameDigest: storageformat.NameDigest("file.bin"), Kind: domain.EntryFile, BlobID: "blob", Size: 7, MediaType: "application/octet-stream", ModifiedAt: clock.Now()}
-	entry.LogicalVersion, _ = directoryEntryVersion(entry)
+	entry := withCurrentTestFingerprint(storageformat.DirectoryEntry{Name: "file.bin", NameDigest: storageformat.NameDigest("file.bin"), Kind: domain.EntryFile, BlobID: "blob", Size: 7, MediaType: "application/octet-stream", ModifiedAt: clock.Now()})
 	prepared, err := engine.Files().prepareDirectory(ctx, scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{entry}, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -224,8 +238,8 @@ func TestPortableRecursiveAggregateStatDoesNotReadManifestPages(t *testing.T) {
 	}
 	hooks := &hookedBackend{Backend: backend}
 	hooks.get = func(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
-		if strings.Contains(key.String(), "/pages/") {
-			return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "page read denied")
+		if strings.Contains(key.String(), "/index/") {
+			return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "directory index read denied")
 		}
 		return backend.Get(ctx, key)
 	}
@@ -235,7 +249,7 @@ func TestPortableRecursiveAggregateStatDoesNotReadManifestPages(t *testing.T) {
 		t.Fatalf("Stat(root) = %+v, %v", root, err)
 	}
 	if _, err := engine.Files().List(ctx, scope, domain.ListRequest{Directory: domain.MustParseUserPath("/")}); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("List(root) page denial error = %v", err)
+		t.Fatalf("List(root) directory index denial error = %v", err)
 	}
 }
 
@@ -284,7 +298,7 @@ func TestPortableDirectoryAndCursorHelpers(t *testing.T) {
 	if err != nil || decoded != cursor {
 		t.Fatalf("cursor round trip = %+v, %v", decoded, err)
 	}
-	for _, invalid := range []string{"%", base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":2} `)), base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":3}`))} {
+	for _, invalid := range []string{"%", base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":2} `)), base64.RawURLEncoding.EncodeToString([]byte(`{"schemaVersion":4}`))} {
 		if _, err := decodeListCursor(invalid); err == nil {
 			t.Fatalf("decodeListCursor(%q) unexpectedly succeeded", invalid)
 		}
@@ -482,93 +496,20 @@ func TestPortableStateCorruptionAndCursorMatrixFailsClosed(t *testing.T) {
 	clock := domain.NewFixedClock(time.Date(2045, 1, 2, 3, 4, 5, 0, time.UTC))
 	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("r", 1<<20)))
 	key := state.MustKey(state.NamespaceAccounts, "corruption")
-	version, err := engine.Create(context.Background(), key, []byte("value"))
+	if _, err := engine.Create(context.Background(), key, []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Create(context.Background(), state.MustKey(state.NamespaceAccounts, "second"), []byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	page, err := engine.List(context.Background(), state.MustPrefix(state.NamespaceAccounts), state.PageRequest{Limit: 1})
+	if err != nil || page.NextCursor == "" {
+		t.Fatalf("state cursor setup = %+v, %v", page, err)
+	}
+	baseCursor, err := engine.decodeStateListCursor(page.NextCursor)
 	if err != nil {
 		t.Fatal(err)
 	}
-	objectKey := canonicalStateKey(key)
-	original, err := backend.Get(context.Background(), objectKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	replaceInternalObject(t, backend, objectKey, original.Version, []byte("not-json"))
-	if _, err := engine.Get(context.Background(), key); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("Get(corrupt) error = %v", err)
-	}
-	if _, err := engine.CompareAndSwap(context.Background(), key, version, []byte("updated")); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("CompareAndSwap(corrupt) error = %v", err)
-	}
-	if err := engine.Delete(context.Background(), key, version); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("Delete(corrupt) error = %v", err)
-	}
-	if _, err := engine.List(context.Background(), state.MustPrefix(state.NamespaceAccounts), state.PageRequest{}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("List(corrupt) error = %v", err)
-	}
-
-	backend = objectmemory.New()
-	engine = openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("s", 1<<20)))
-	key = state.MustKey(state.NamespaceAccounts, "collision")
-	objectKey = canonicalStateKey(key)
-	body, err := storageformat.EncodeEnvelope(stateRecordSchema, objectKey, 1, storageformat.StateRecord{SchemaVersion: 1, LogicalKey: state.MustKey(state.NamespaceAccounts, "other").String(), Data: []byte("value")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := backend.Put(context.Background(), objectKey, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := engine.Get(context.Background(), key); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("Get(collision) error = %v", err)
-	}
-	if _, err := engine.List(context.Background(), state.MustPrefix(state.NamespaceAccounts), state.PageRequest{}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("List(collision) error = %v", err)
-	}
-
-	validRecord := storageformat.StateVersionRecord{SchemaVersion: 1, LogicalKey: key.String(), LogicalVersion: "version", Data: []byte("snapshot")}
-	validSnapshotKey := storageformat.StateVersionKey("accounts", key.String(), validRecord.LogicalVersion)
-	validSnapshotBody, err := storageformat.EncodeEnvelope(stateVersionSchema, validSnapshotKey, 1, validRecord)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := backend.Put(context.Background(), validSnapshotKey, validSnapshotBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-		t.Fatal(err)
-	}
-	baseCursor := stateListCursor{SchemaVersion: 1, Prefix: "accounts/", Limit: 1, Index: 0, GateEpoch: 1, GateVersion: "gate", ExpiresAt: clock.Now().Add(time.Minute), Snapshots: []string{validSnapshotKey.String()}}
-	for name, cursor := range map[string]stateListCursor{
-		"invalid-key": withStateCursor(baseCursor, func(value *stateListCursor) { value.Snapshots[0] = "INVALID" }),
-		"missing": withStateCursor(baseCursor, func(value *stateListCursor) {
-			value.Snapshots[0] = storageformat.StateVersionKey("accounts", "accounts/bWlzc2luZw", "version").String()
-		}),
-		"bad-envelope": withStateCursor(baseCursor, func(value *stateListCursor) {
-			value.Snapshots[0] = storageformat.StateVersionKey("accounts", "accounts/YmFk", "version").String()
-		}),
-	} {
-		t.Run(name, func(t *testing.T) {
-			if name == "bad-envelope" {
-				badKey := objectstore.MustKey(cursor.Snapshots[0])
-				if _, err := backend.Put(context.Background(), badKey, []byte("not-json"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if _, err := engine.stateCursorPage(context.Background(), cursor); !errors.Is(err, domain.ErrInvalid) && !errors.Is(err, domain.ErrNotFound) {
-				t.Fatalf("stateCursorPage() error = %v", err)
-			}
-		})
-	}
-
-	invalidRecordKey := storageformat.StateVersionKey("accounts", key.String(), "invalid")
-	invalidRecordBody, err := storageformat.EncodeEnvelope(stateVersionSchema, invalidRecordKey, 1, storageformat.StateVersionRecord{SchemaVersion: 2, LogicalKey: key.String(), LogicalVersion: "invalid", Data: []byte("snapshot")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := backend.Put(context.Background(), invalidRecordKey, invalidRecordBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-		t.Fatal(err)
-	}
-	invalidCursor := baseCursor
-	invalidCursor.Snapshots = []string{invalidRecordKey.String()}
-	if _, err := engine.stateCursorPage(context.Background(), invalidCursor); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid snapshot error = %v", err)
-	}
-
 	encoded, err := engine.encodeStateListCursor(baseCursor)
 	if err != nil {
 		t.Fatal(err)
@@ -587,14 +528,30 @@ func TestPortableStateCorruptionAndCursorMatrixFailsClosed(t *testing.T) {
 	if _, err := engine.decodeStateListCursor("%"); err == nil {
 		t.Fatal("invalid base64 cursor succeeded")
 	}
-	invalidCursorBody, err := storageformat.EncodeCanonical(withStateCursor(baseCursor, func(value *stateListCursor) { value.SchemaVersion = 2 }))
+	invalid := baseCursor
+	invalid.SchemaVersion = 1
+	invalidBody, err := storageformat.EncodeCanonical(invalid)
 	if err != nil {
 		t.Fatal(err)
 	}
 	nonce := bytes.Repeat([]byte{0x33}, engine.cursorAEAD.NonceSize())
-	invalidCursorSealed := engine.cursorAEAD.Seal(append([]byte(nil), nonce...), nonce, invalidCursorBody, []byte("endlessfs-state-cursor-v1"))
-	if _, err := engine.decodeStateListCursor(base64.RawURLEncoding.EncodeToString(invalidCursorSealed)); !errors.Is(err, domain.ErrInvalid) {
+	invalidSealed := engine.cursorAEAD.Seal(append([]byte(nil), nonce...), nonce, invalidBody, []byte("endlessfs-state-cursor-v2"))
+	if _, err := engine.decodeStateListCursor(base64.RawURLEncoding.EncodeToString(invalidSealed)); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid cursor schema error = %v", err)
+	}
+
+	entry, err := engine.stateIndexEntry(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotKey := storageformat.StateVersionKey("accounts", key.String(), entry.LogicalVersion)
+	snapshot, err := backend.Get(context.Background(), snapshotKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceInternalObject(t, backend, snapshotKey, snapshot.Version, []byte("not-json"))
+	if _, err := engine.Get(context.Background(), key); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Get(corrupt snapshot) error = %v", err)
 	}
 	engine.ids = domain.NewIDGenerator(strings.NewReader("short"))
 	if _, err := engine.encodeStateListCursor(baseCursor); !errors.Is(err, domain.ErrInternal) {
@@ -630,11 +587,18 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 	if err := storageformat.DecodeEnvelope(fixture[manifestKey.String()], manifestKey, directoryManifestSchema, &manifestEnvelope, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	pageKey := storageformat.DirectoryPageKey(user.String(), "live", storageformat.RootDirectoryID, manifest.PageIDs[0])
-	var pageEnvelope storageformat.Envelope
-	var page storageformat.DirectoryPage
-	if err := storageformat.DecodeEnvelope(fixture[pageKey.String()], pageKey, directoryPageSchema, &pageEnvelope, &page); err != nil {
+	indexKey := storageformat.DirectoryIndexNodeKey(user.String(), "live", storageformat.RootDirectoryID, manifest.IndexRootID)
+	var indexEnvelope storageformat.Envelope
+	var indexNode storageformat.DirectoryIndexNode
+	if err := storageformat.DecodeEnvelope(fixture[indexKey.String()], indexKey, directoryIndexNodeSchema, &indexEnvelope, &indexNode); err != nil {
 		t.Fatal(err)
+	}
+	replaceIndexNode := func(objects map[string][]byte, invalid storageformat.DirectoryIndexNode) {
+		body := encodeInternalEnvelope(t, directoryIndexNodeSchema, indexKey, indexEnvelope.Revision, invalid)
+		objects[indexKey.String()] = body
+		invalidManifest := manifest
+		invalidManifest.IndexRootDigest = storageformat.Digest(body)
+		objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, invalidManifest)
 	}
 	putOperation := func(objects map[string][]byte, operationID string, fence uint64) {
 		operationKey := storageformat.OperationKey(user.String(), operationID)
@@ -723,12 +687,17 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 			invalid.EntryCount = -1
 			objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, invalid)
 		},
-		"missing-page":  func(objects map[string][]byte) { delete(objects, pageKey.String()) },
-		"page-envelope": func(objects map[string][]byte) { objects[pageKey.String()] = []byte("not-json") },
-		"page-fields": func(objects map[string][]byte) {
-			invalid := page
+		"missing-index-node":  func(objects map[string][]byte) { delete(objects, indexKey.String()) },
+		"index-node-envelope": func(objects map[string][]byte) { objects[indexKey.String()] = []byte("not-json") },
+		"index-root-digest": func(objects map[string][]byte) {
+			invalid := manifest
+			invalid.IndexRootDigest = "wrong"
+			objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, invalid)
+		},
+		"index-node-fields": func(objects map[string][]byte) {
+			invalid := indexNode
 			invalid.DirectoryID = "other"
-			objects[pageKey.String()] = encodeInternalEnvelope(t, directoryPageSchema, pageKey, pageEnvelope.Revision, invalid)
+			replaceIndexNode(objects, invalid)
 		},
 		"entry-count": func(objects map[string][]byte) {
 			invalid := manifest
@@ -736,18 +705,18 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 			objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, invalid)
 		},
 		"entry-value": func(objects map[string][]byte) {
-			invalid := page
-			invalid.Entries = append([]storageformat.DirectoryEntry(nil), page.Entries...)
+			invalid := indexNode
+			invalid.Entries = append([]storageformat.DirectoryEntry(nil), indexNode.Entries...)
 			invalid.Entries[0].LogicalVersion = "wrong"
-			objects[pageKey.String()] = encodeInternalEnvelope(t, directoryPageSchema, pageKey, pageEnvelope.Revision, invalid)
+			replaceIndexNode(objects, invalid)
 		},
 		"entry-name": func(objects map[string][]byte) {
-			invalid := page
-			invalid.Entries = append([]storageformat.DirectoryEntry(nil), page.Entries...)
+			invalid := indexNode
+			invalid.Entries = append([]storageformat.DirectoryEntry(nil), indexNode.Entries...)
 			invalid.Entries[0].Name = "/"
 			invalid.Entries[0].NameDigest = storageformat.NameDigest("/")
 			invalid.Entries[0].LogicalVersion, _ = directoryEntryVersion(invalid.Entries[0])
-			objects[pageKey.String()] = encodeInternalEnvelope(t, directoryPageSchema, pageKey, pageEnvelope.Revision, invalid)
+			replaceIndexNode(objects, invalid)
 		},
 	}
 	for name, corrupt := range corruptions {
@@ -786,14 +755,19 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 		t.Fatalf("readManifestSnapshot(recursive file count mismatch) error = %v", err)
 	}
 
-	missingManifestCursor, err := encodeListCursor(listCursor{SchemaVersion: 2, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: "missing", PageSize: 200, Sort: domain.SortName, Index: 1})
+	_, gateEnvelope, gate, err := engine.readGate(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiresAt := clock.Now().Add(time.Minute)
+	missingManifestCursor, err := engine.Files().encodeListCursor(listCursor{SchemaVersion: 3, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: "missing", PageSize: 200, Sort: domain.SortName, AfterName: "child", GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion, ExpiresAt: expiresAt})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := engine.Files().List(context.Background(), scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), Cursor: missingManifestCursor}); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("missing cursor manifest error = %v", err)
 	}
-	replacedRootCursor, err := encodeListCursor(listCursor{SchemaVersion: 2, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: "replaced", ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 1})
+	replacedRootCursor, err := engine.Files().encodeListCursor(listCursor{SchemaVersion: 3, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: "replaced", ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, AfterName: "child", GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion, ExpiresAt: expiresAt})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -807,14 +781,14 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 	if _, err := decodeListCursor(legacySchemaCursor); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("legacy cursor schema error = %v", err)
 	}
-	offsetCursor, err := encodeListCursor(listCursor{SchemaVersion: 2, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 2})
+	offsetCursor, err := engine.Files().encodeListCursor(listCursor{SchemaVersion: 2, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 2, GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion, ExpiresAt: expiresAt})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := engine.Files().List(context.Background(), scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), Cursor: offsetCursor}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("cursor offset error = %v", err)
 	}
-	endCursor, err := encodeListCursor(listCursor{SchemaVersion: 2, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, Index: 1})
+	endCursor, err := engine.Files().encodeListCursor(listCursor{SchemaVersion: 3, UserID: user.String(), Area: "live", DirectoryPath: "/", DirectoryID: storageformat.RootDirectoryID, ManifestID: root.ManifestID, PageSize: 200, Sort: domain.SortName, AfterName: "child", GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion, ExpiresAt: expiresAt})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -857,8 +831,7 @@ func TestPortableDirectoryManifestCorruptionMatrixFailsClosed(t *testing.T) {
 
 	fileBackend := objectmemory.New()
 	fileEngine := openInternalTestEngine(t, fileBackend, clock, strings.NewReader(strings.Repeat("f", 1<<20)))
-	fileEntry := storageformat.DirectoryEntry{Name: "file", NameDigest: storageformat.NameDigest("file"), Kind: domain.EntryFile, BlobID: "blob", Size: 1, MediaType: "text/plain", ModifiedAt: clock.Now()}
-	fileEntry.LogicalVersion, _ = directoryEntryVersion(fileEntry)
+	fileEntry := withCurrentTestFingerprint(storageformat.DirectoryEntry{Name: "file", NameDigest: storageformat.NameDigest("file"), Kind: domain.EntryFile, BlobID: "blob", Size: 1, MediaType: "text/plain", ModifiedAt: clock.Now()})
 	prepared, err := fileEngine.Files().prepareDirectory(context.Background(), scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{fileEntry}, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -935,7 +908,7 @@ func TestPortableRecursiveAggregateBoundaryFailuresAreDenied(t *testing.T) {
 	ctx := context.Background()
 	backend := objectmemory.New()
 	clock := domain.NewFixedClock(time.Date(2045, 2, 4, 4, 5, 6, 0, time.UTC))
-	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("aggregate", 1<<16)))
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("aggregate-boundary-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ", 1<<16)))
 	user, _ := domain.ParseUserID("YmJiYmJiYmJiYmJiYmJiYg")
 	live, _ := domain.NewScope(user, domain.AreaLive)
 	trash, _ := domain.NewScope(user, domain.AreaTrash)
@@ -947,7 +920,7 @@ func TestPortableRecursiveAggregateBoundaryFailuresAreDenied(t *testing.T) {
 	}
 	fixture := backend.Export()
 
-	loadDirectory := func(area, name string) (objectstore.Key, storageformat.Envelope, storageformat.DirectoryRoot, objectstore.Key, storageformat.Envelope, storageformat.DirectoryPage, objectstore.Key, storageformat.Envelope, storageformat.DirectoryRoot) {
+	loadDirectory := func(area, name string) (objectstore.Key, storageformat.Envelope, storageformat.DirectoryRoot, objectstore.Key, storageformat.Envelope, storageformat.DirectoryIndexNode, objectstore.Key, storageformat.Envelope, storageformat.DirectoryRoot) {
 		t.Helper()
 		rootKey := storageformat.DirectoryRootKey(user.String(), area, storageformat.RootDirectoryID)
 		var rootEnvelope storageformat.Envelope
@@ -961,13 +934,13 @@ func TestPortableRecursiveAggregateBoundaryFailuresAreDenied(t *testing.T) {
 		if err := storageformat.DecodeEnvelope(fixture[manifestKey.String()], manifestKey, directoryManifestSchema, &manifestEnvelope, &manifest); err != nil {
 			t.Fatal(err)
 		}
-		pageKey := storageformat.DirectoryPageKey(user.String(), area, storageformat.RootDirectoryID, manifest.PageIDs[0])
-		var pageEnvelope storageformat.Envelope
-		var page storageformat.DirectoryPage
-		if err := storageformat.DecodeEnvelope(fixture[pageKey.String()], pageKey, directoryPageSchema, &pageEnvelope, &page); err != nil {
+		indexKey := storageformat.DirectoryIndexNodeKey(user.String(), area, storageformat.RootDirectoryID, manifest.IndexRootID)
+		var indexEnvelope storageformat.Envelope
+		var indexNode storageformat.DirectoryIndexNode
+		if err := storageformat.DecodeEnvelope(fixture[indexKey.String()], indexKey, directoryIndexNodeSchema, &indexEnvelope, &indexNode); err != nil {
 			t.Fatal(err)
 		}
-		entry, found := findDirectoryEntry(page.Entries, name)
+		entry, found := findDirectoryEntry(indexNode.Entries, name)
 		if !found {
 			t.Fatalf("fixture entry %q is missing", name)
 		}
@@ -977,13 +950,13 @@ func TestPortableRecursiveAggregateBoundaryFailuresAreDenied(t *testing.T) {
 		if err := storageformat.DecodeEnvelope(fixture[childRootKey.String()], childRootKey, directoryRootSchema, &childEnvelope, &childRoot); err != nil {
 			t.Fatal(err)
 		}
-		return rootKey, rootEnvelope, root, pageKey, pageEnvelope, page, childRootKey, childEnvelope, childRoot
+		return rootKey, rootEnvelope, root, indexKey, indexEnvelope, indexNode, childRootKey, childEnvelope, childRoot
 	}
 
-	liveRootKey, liveRootEnvelope, liveRoot, livePageKey, livePageEnvelope, livePage, liveChildRootKey, liveChildEnvelope, liveChildRoot := loadDirectory("live", "child")
+	liveRootKey, liveRootEnvelope, liveRoot, liveIndexKey, liveIndexEnvelope, liveIndex, liveChildRootKey, liveChildEnvelope, liveChildRoot := loadDirectory("live", "child")
 	_, _, _, _, _, _, trashChildRootKey, trashChildEnvelope, trashChildRoot := loadDirectory("trash", "dest")
 	setPending := func(objects map[string][]byte, area string, key objectstore.Key, envelope storageformat.Envelope, root storageformat.DirectoryRoot, operationID string) {
-		root.Pending = &storageformat.DirectoryTransition{OperationID: operationID, Fence: 1, PreManifestID: root.ManifestID, PostManifestID: root.ManifestID, PostRecursiveBytes: root.RecursiveBytes, PostRecursiveFileCount: root.RecursiveFileCount}
+		root.Pending = &storageformat.DirectoryTransition{OperationID: operationID, Fence: 1, PreManifestID: root.ManifestID, PostManifestID: root.ManifestID, PostRecursiveBytes: root.RecursiveBytes, PostRecursiveFileCount: root.RecursiveFileCount, PostContentAccumulator: root.ContentAccumulator, PostContentDigest: root.ContentDigest}
 		objects[key.String()] = encodeInternalEnvelope(t, directoryRootSchema, key, envelope.Revision, root)
 		operationKey := storageformat.OperationKey(user.String(), operationID)
 		operation := storageformat.FileOperation{
@@ -1006,14 +979,17 @@ func TestPortableRecursiveAggregateBoundaryFailuresAreDenied(t *testing.T) {
 		}
 		manifest.RecursiveBytes = 1
 		objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, manifest)
-		invalidPage := livePage
-		invalidPage.Entries = append([]storageformat.DirectoryEntry(nil), livePage.Entries...)
-		entry, _ := findDirectoryEntry(invalidPage.Entries, "child")
+		invalidIndex := liveIndex
+		invalidIndex.Entries = append([]storageformat.DirectoryEntry(nil), liveIndex.Entries...)
+		entry, _ := findDirectoryEntry(invalidIndex.Entries, "child")
 		original := entry
 		entry.Size = 1
 		entry.LogicalVersion, _ = directoryEntryVersion(entry)
-		invalidPage.Entries = replaceDirectoryEntry(invalidPage.Entries, &original, entry)
-		objects[livePageKey.String()] = encodeInternalEnvelope(t, directoryPageSchema, livePageKey, livePageEnvelope.Revision, invalidPage)
+		invalidIndex.Entries = replaceDirectoryEntry(invalidIndex.Entries, &original, entry)
+		indexBody := encodeInternalEnvelope(t, directoryIndexNodeSchema, liveIndexKey, liveIndexEnvelope.Revision, invalidIndex)
+		objects[liveIndexKey.String()] = indexBody
+		manifest.IndexRootDigest = storageformat.Digest(indexBody)
+		objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, manifest)
 	}
 	countMismatch := func(objects map[string][]byte) {
 		invalidRoot := liveRoot
@@ -1027,14 +1003,17 @@ func TestPortableRecursiveAggregateBoundaryFailuresAreDenied(t *testing.T) {
 		}
 		manifest.RecursiveFileCount = 1
 		objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, manifest)
-		invalidPage := livePage
-		invalidPage.Entries = append([]storageformat.DirectoryEntry(nil), livePage.Entries...)
-		entry, _ := findDirectoryEntry(invalidPage.Entries, "child")
+		invalidIndex := liveIndex
+		invalidIndex.Entries = append([]storageformat.DirectoryEntry(nil), liveIndex.Entries...)
+		entry, _ := findDirectoryEntry(invalidIndex.Entries, "child")
 		original := entry
 		entry.FileCount = 1
 		entry.LogicalVersion, _ = directoryEntryVersion(entry)
-		invalidPage.Entries = replaceDirectoryEntry(invalidPage.Entries, &original, entry)
-		objects[livePageKey.String()] = encodeInternalEnvelope(t, directoryPageSchema, livePageKey, livePageEnvelope.Revision, invalidPage)
+		invalidIndex.Entries = replaceDirectoryEntry(invalidIndex.Entries, &original, entry)
+		indexBody := encodeInternalEnvelope(t, directoryIndexNodeSchema, liveIndexKey, liveIndexEnvelope.Revision, invalidIndex)
+		objects[liveIndexKey.String()] = indexBody
+		manifest.IndexRootDigest = storageformat.Digest(indexBody)
+		objects[manifestKey.String()] = encodeInternalEnvelope(t, directoryManifestSchema, manifestKey, manifestEnvelope.Revision, manifest)
 	}
 	missing := func(objects map[string][]byte) { delete(objects, liveChildRootKey.String()) }
 	pending := func(objects map[string][]byte) {
@@ -1131,8 +1110,8 @@ func TestPortableRecursiveAggregateOperationPreparationFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		writeRoot(live, storageformat.DirectoryEntry{Name: "source.bin", NameDigest: storageformat.NameDigest("source.bin"), Kind: domain.EntryFile, BlobID: "source", Size: 1, MediaType: "application/octet-stream", ModifiedAt: clock.Now()})
-		writeRoot(trash, storageformat.DirectoryEntry{Name: "huge.bin", NameDigest: storageformat.NameDigest("huge.bin"), Kind: domain.EntryFile, BlobID: "huge", Size: math.MaxInt64, MediaType: "application/octet-stream", ModifiedAt: clock.Now()})
+		writeRoot(live, withCurrentTestFingerprint(storageformat.DirectoryEntry{Name: "source.bin", NameDigest: storageformat.NameDigest("source.bin"), Kind: domain.EntryFile, BlobID: "source", Size: 1, MediaType: "application/octet-stream", ModifiedAt: clock.Now()}))
+		writeRoot(trash, withCurrentTestFingerprint(storageformat.DirectoryEntry{Name: "huge.bin", NameDigest: storageformat.NameDigest("huge.bin"), Kind: domain.EntryFile, BlobID: "huge", Size: math.MaxInt64, MediaType: "application/octet-stream", ModifiedAt: clock.Now()}))
 		if _, err := engine.Files().Copy(ctx, live, trash, domain.CopyRequest{Source: domain.MustParseUserPath("/source.bin"), Destination: domain.MustParseUserPath("/copy.bin")}); !errors.Is(err, domain.ErrInvalid) {
 			t.Fatalf("Copy() error = %v", err)
 		}
@@ -1267,8 +1246,7 @@ func TestPortableUploadCompletionResumeValidation(t *testing.T) {
 			backend := objectmemory.New()
 			engine := newEngine(t, backend, name)
 			putOperation(t, backend, record.CompletionOperationID, storageformat.FileOperationSucceeded)
-			entry := storageformat.DirectoryEntry{Name: "file.bin", NameDigest: storageformat.NameDigest("file.bin"), Kind: domain.EntryFile, BlobID: blobID, Size: record.Size, MediaType: record.MediaType, ModifiedAt: clock.Now()}
-			entry.LogicalVersion, _ = directoryEntryVersion(entry)
+			entry := withCurrentTestFingerprint(storageformat.DirectoryEntry{Name: "file.bin", NameDigest: storageformat.NameDigest("file.bin"), Kind: domain.EntryFile, BlobID: blobID, Size: record.Size, MediaType: record.MediaType, ModifiedAt: clock.Now()})
 			prepared, err := engine.Files().prepareDirectory(ctx, scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{entry}, 1)
 			if err != nil {
 				t.Fatal(err)
@@ -1324,7 +1302,8 @@ func TestPortableUploadCompletionAggregateFailureAndRecoveryPaths(t *testing.T) 
 			t.Fatal(err)
 		}
 		engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("overflow-engine", 1<<14)))
-		huge := storageformat.DirectoryEntry{Name: "huge.bin", NameDigest: storageformat.NameDigest("huge.bin"), Kind: domain.EntryFile, BlobID: "huge", Size: math.MaxInt64, MediaType: "application/octet-stream", ModifiedAt: clock.Now()}
+		fingerprint := objectstore.FingerprintFor([]byte("huge"))
+		huge := storageformat.DirectoryEntry{Name: "huge.bin", NameDigest: storageformat.NameDigest("huge.bin"), Kind: domain.EntryFile, BlobID: "huge", Size: math.MaxInt64, MediaType: "application/octet-stream", MD5: fingerprint.MD5, CRC32C: fingerprint.CRC32C, ModifiedAt: clock.Now()}
 		huge.LogicalVersion, _ = directoryEntryVersion(huge)
 		prepared, err := engine.Files().prepareDirectory(ctx, scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{huge}, 1)
 		if err != nil {
@@ -1403,7 +1382,7 @@ func TestPortableUploadCompletionAggregateFailureAndRecoveryPaths(t *testing.T) 
 			t.Fatal(err)
 		}
 		const operationID = "pending-upload-destination"
-		snapshot.root.Pending = &storageformat.DirectoryTransition{OperationID: operationID, Fence: 1, PreManifestID: snapshot.root.ManifestID, PostManifestID: snapshot.root.ManifestID, PostRecursiveBytes: snapshot.recursiveBytes, PostRecursiveFileCount: snapshot.recursiveFileCount}
+		snapshot.root.Pending = &storageformat.DirectoryTransition{OperationID: operationID, Fence: 1, PreManifestID: snapshot.root.ManifestID, PostManifestID: snapshot.root.ManifestID, PostRecursiveBytes: snapshot.recursiveBytes, PostRecursiveFileCount: snapshot.recursiveFileCount, PostContentAccumulator: snapshot.contentAccumulator, PostContentDigest: snapshot.contentDigest}
 		rootBody := encodeInternalEnvelope(t, directoryRootSchema, snapshot.object.Key, snapshot.envelope.Revision+1, snapshot.root)
 		if _, err := backend.Put(ctx, snapshot.object.Key, rootBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: snapshot.object.Version}); err != nil {
 			t.Fatal(err)
@@ -1424,7 +1403,8 @@ func TestPortableUploadCompletionAggregateFailureAndRecoveryPaths(t *testing.T) 
 
 	t.Run("visible-entry-before-upload-record", func(t *testing.T) {
 		backend, engine, capability, completion := startUpload(t, domain.MustParseUserPath("/visible.bin"), "visible")
-		entry := storageformat.DirectoryEntry{Name: "visible.bin", NameDigest: storageformat.NameDigest("visible.bin"), Kind: domain.EntryFile, BlobID: string(capability.UploadID), Size: 1, MediaType: "application/octet-stream", ModifiedAt: clock.Now()}
+		fingerprint := objectstore.FingerprintFor([]byte("visible"))
+		entry := storageformat.DirectoryEntry{Name: "visible.bin", NameDigest: storageformat.NameDigest("visible.bin"), Kind: domain.EntryFile, BlobID: string(capability.UploadID), Size: 1, MediaType: "application/octet-stream", MD5: fingerprint.MD5, CRC32C: fingerprint.CRC32C, ModifiedAt: clock.Now()}
 		entry.LogicalVersion, _ = directoryEntryVersion(entry)
 		prepared, err := engine.Files().prepareDirectory(ctx, scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{entry}, 1)
 		if err != nil {
@@ -1792,9 +1772,6 @@ func TestPortableTransferDurableRecordAndCapabilityMatrix(t *testing.T) {
 	if err := backend.SimulateUploadOffset(context.Background(), uploadID, request.Size); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: request.Path, Size: request.Size, MediaType: request.MediaType, ChecksumSHA256: "required"}); !errors.Is(err, domain.ErrPreconditionFailed) {
-		t.Fatalf("checksum CompleteUpload() error = %v", err)
-	}
 	invalidRecord := record
 	invalidRecord.StagingKey = "INVALID"
 	updatedVersion := replaceInternalObject(t, backend, operationKey, currentOperationVersion, encodeInternalEnvelope(t, uploadRecordSchema, operationKey, operationEnvelope.Revision, invalidRecord))
@@ -1831,8 +1808,7 @@ func TestPortableTransferDurableRecordAndCapabilityMatrix(t *testing.T) {
 		t.Fatal(err)
 	}
 	downloadEngine := openInternalTestEngine(t, downloadBackend, clock, strings.NewReader(strings.Repeat("x", 1<<20)))
-	downloadEntry := storageformat.DirectoryEntry{Name: "missing.bin", NameDigest: storageformat.NameDigest("missing.bin"), Kind: domain.EntryFile, BlobID: "missing-blob", Size: 4, MediaType: "application/octet-stream", ModifiedAt: clock.Now()}
-	downloadEntry.LogicalVersion, _ = directoryEntryVersion(downloadEntry)
+	downloadEntry := withCurrentTestFingerprint(storageformat.DirectoryEntry{Name: "missing.bin", NameDigest: storageformat.NameDigest("missing.bin"), Kind: domain.EntryFile, BlobID: "missing-blob", Size: 4, MediaType: "application/octet-stream", ModifiedAt: clock.Now()})
 	prepared, err := downloadEngine.Files().prepareDirectory(context.Background(), scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{downloadEntry}, 1)
 	if err != nil {
 		t.Fatal(err)
@@ -1889,12 +1865,6 @@ func replaceInternalObject(t *testing.T, backend *objectmemory.Backend, key obje
 		t.Fatal(err)
 	}
 	return updated
-}
-
-func withStateCursor(cursor stateListCursor, mutate func(*stateListCursor)) stateListCursor {
-	cursor.Snapshots = append([]string(nil), cursor.Snapshots...)
-	mutate(&cursor)
-	return cursor
 }
 
 func cloneInternalObjects(objects map[string][]byte) map[string][]byte {

@@ -178,23 +178,30 @@ func TestCanonicalDirectoryPageRemainsReadableWithoutFormatMigration(t *testing.
 
 func TestCanonicalKeyLayoutAndBounds(t *testing.T) {
 	for name, key := range map[string]objectstore.Key{
-		"superblock":      SuperblockKey(),
-		"writer set":      WriterSetKey(),
-		"gate":            WriteGateKey(),
-		"state":           StateKey("sessions", "sessions/dXNlcg/aWQ"),
-		"state view":      StateVersionKey("sessions", "sessions/dXNlcg/aWQ", "logical-version"),
-		"admission":       AdmissionKey(42, "operation-id"),
-		"staging":         StagingKey("user-id", "operation-id", "artifact-id"),
-		"blob":            BlobKey("user-id", "blob-id"),
-		"directory":       DirectoryRootKey("user-id", "live", RootDirectoryID),
-		"manifest":        DirectoryManifestKey("user-id", "live", RootDirectoryID, "manifest-id"),
-		"page":            DirectoryPageKey("user-id", "live", RootDirectoryID, "page-id"),
-		"operation":       OperationKey("user-id", "operation-id"),
-		"idempotency":     IdempotencyKey("user-id", "request-key"),
-		"checkpoint":      CheckpointKey("checkpoint-id"),
-		"checkpoint work": CheckpointWorkKey("checkpoint-id", "endlessfs/v1/superblock.json"),
-		"checkpoint page": CheckpointInventoryPageKey("checkpoint-id", 42),
-		"lease":           LeaseKey("gcs", "lease-id"),
+		"superblock":             SuperblockKey(),
+		"writer set":             WriterSetKey(),
+		"gate":                   WriteGateKey(),
+		"state":                  StateKey("sessions", "sessions/dXNlcg/aWQ"),
+		"state view":             StateVersionKey("sessions", "sessions/dXNlcg/aWQ", "logical-version"),
+		"admission":              AdmissionKey(42, "operation-id"),
+		"staging":                StagingKey("user-id", "operation-id", "artifact-id"),
+		"blob":                   BlobKey("user-id", "blob-id"),
+		"directory":              DirectoryRootKey("user-id", "live", RootDirectoryID),
+		"manifest":               DirectoryManifestKey("user-id", "live", RootDirectoryID, "manifest-id"),
+		"page":                   DirectoryPageKey("user-id", "live", RootDirectoryID, "page-id"),
+		"sort index":             DirectorySortIndexNodeKey("user-id", "live", RootDirectoryID, domain.SortSize, "node-id"),
+		"content index":          DirectoryContentIndexNodeKey("user-id", "live", RootDirectoryID, "node-id"),
+		"duplicate occurrence":   DuplicateOccurrenceKey("user-id", "file", "group-id", "live", "/path"),
+		"duplicate summary":      DuplicateSummaryKey("user-id", "file", "group-id", "aa"),
+		"duplicate similarity":   DuplicateSimilarityPostingKey("user-id", 15, "sketch-value", "live", "directory-id"),
+		"duplicate group ignore": DuplicateIgnoreKey("user-id", "group-id"),
+		"duplicate pair ignore":  DuplicateDirectoryIgnoreKey("user-id", "pair-id"),
+		"operation":              OperationKey("user-id", "operation-id"),
+		"idempotency":            IdempotencyKey("user-id", "request-key"),
+		"checkpoint":             CheckpointKey("checkpoint-id"),
+		"checkpoint work":        CheckpointWorkKey("checkpoint-id", "endlessfs/v1/superblock.json"),
+		"checkpoint page":        CheckpointInventoryPageKey("checkpoint-id", 42),
+		"lease":                  LeaseKey("gcs", "lease-id"),
 	} {
 		if !key.Valid() || len(key.String()) > objectstore.MaxKeyBytes {
 			t.Fatalf("%s key invalid: %q", name, key.String())
@@ -327,7 +334,10 @@ func TestCanonicalKeyNamespacePanicsFailClosed(t *testing.T) {
 	for _, function := range []func(){
 		func() { StateKey("INVALID", "key") },
 		func() { StatePrefix("INVALID") },
+		func() { StateIndexRootKey("INVALID") },
+		func() { StateIndexNodeKey("INVALID", "node") },
 		func() { StateVersionKey("INVALID", "key", "version") },
+		func() { StateVersionLogicalPrefix("INVALID", "key") },
 		func() { LeaseKey("INVALID", "lease") },
 	} {
 		func() {
@@ -338,5 +348,20 @@ func TestCanonicalKeyNamespacePanicsFailClosed(t *testing.T) {
 			}()
 			function()
 		}()
+	}
+}
+
+func TestScalableStateAndOperationKeyFamiliesAreCanonical(t *testing.T) {
+	for name, value := range map[string]string{
+		"state-prefix":                 StatePrefix("accounts"),
+		"state-version-logical-prefix": StateVersionLogicalPrefix("identity", "identity/YQ"),
+		"operation-step-page":          FileOperationStepPageKey("user", "operation", "steps", 7).String(),
+		"operation-step-set-prefix":    FileOperationStepPageSetPrefix("user", "operation", "steps"),
+		"operation-preparation-prefix": FileOperationPreparationPrefix("user", "operation"),
+		"migration-directory-prefix":   MigrationDirectoryMarkScopePrefix("checkpoint", "verify", "user", "live"),
+	} {
+		if !strings.HasPrefix(value, "endlessfs/v1/") || strings.Contains(value, "//") {
+			t.Fatalf("%s key = %q", name, value)
+		}
 	}
 }

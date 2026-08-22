@@ -3,8 +3,6 @@ package portable_test
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -47,7 +45,6 @@ func TestContractPortableProviderOverMemoryBackend(t *testing.T) {
 				counts := backend.TransferByteCounts()
 				return providercontract.ByteCounts{Upload: counts.Upload, Download: counts.Download}
 			},
-			ChecksumSHA256: true,
 		}
 	})
 }
@@ -85,11 +82,11 @@ func TestPortableDirectUploadPublishesImmutableBlobAndRangeDownload(t *testing.T
 	if err != nil || status.State != domain.UploadStateActive || status.ConfirmedOffset != int64(len(content)) {
 		t.Fatalf("UploadStatus() = %+v, %v", status, err)
 	}
-	if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(content)), MediaType: "text/plain", ChecksumSHA256: "wrong"}); !errors.Is(err, domain.ErrPreconditionFailed) {
-		t.Fatalf("wrong checksum error = %v", err)
+	backend.InjectTransferFault(objectmemory.TransferUploadData, objectmemory.TransferFaultNoFingerprint)
+	if _, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(content)), MediaType: "text/plain"}); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("missing provider fingerprint error = %v", err)
 	}
-	sum := sha256.Sum256(content)
-	entry, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(content)), MediaType: "text/plain", ChecksumSHA256: hex.EncodeToString(sum[:])})
+	entry, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(content)), MediaType: "text/plain"})
 	if err != nil || entry.Version == "" {
 		t.Fatalf("CompleteUpload() = %+v, %v", entry, err)
 	}

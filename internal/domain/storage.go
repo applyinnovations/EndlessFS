@@ -186,11 +186,10 @@ type CreateUploadRequest struct {
 }
 
 type CompleteUploadRequest struct {
-	UploadID       UploadID
-	Path           UserPath
-	Size           int64
-	MediaType      string
-	ChecksumSHA256 string
+	UploadID  UploadID
+	Path      UserPath
+	Size      int64
+	MediaType string
 }
 
 type CreateDownloadRequest struct {

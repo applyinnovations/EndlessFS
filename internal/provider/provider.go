@@ -24,3 +24,17 @@ type Storage interface {
 	Delete(context.Context, domain.Scope, domain.DeleteRequest) (domain.Operation, error)
 	GetOperation(context.Context, domain.UserID, domain.OperationID) (domain.Operation, error)
 }
+
+// DuplicateStorage is the optional provider-neutral duplicate reconciliation
+// control plane introduced by the duplicate-catalog storage epoch. Keeping it
+// separate lets historical fixture providers remain deliberately minimal.
+type DuplicateStorage interface {
+	ListDuplicateGroups(context.Context, domain.UserID, domain.DuplicateGroupRequest) (domain.DuplicateGroupPage, error)
+	ListDuplicateOccurrences(context.Context, domain.UserID, domain.DuplicateOccurrenceRequest) (domain.DuplicateOccurrencePage, error)
+	SetDuplicateGroupIgnored(context.Context, domain.UserID, domain.SetDuplicateIgnoredRequest) (domain.DuplicateIgnore, error)
+	CompareDuplicateDirectories(context.Context, domain.UserID, domain.DuplicateDirectoryComparisonRequest) (domain.DuplicateDirectoryComparison, error)
+	ListDuplicateDirectoryOverlaps(context.Context, domain.UserID, domain.DuplicateDirectoryOverlapRequest) (domain.DuplicateDirectoryOverlapPage, error)
+	SetDuplicateDirectoryIgnored(context.Context, domain.UserID, domain.SetDuplicateDirectoryIgnoredRequest) (domain.DuplicateDirectoryIgnore, error)
+	PreviewDuplicateReconciliation(context.Context, domain.UserID, domain.DuplicateReconciliationPreviewRequest) (domain.DuplicateReconciliationPreview, error)
+	ValidateDuplicateReconciliation(context.Context, domain.UserID, string) (domain.DuplicateReconciliationSelection, error)
+}

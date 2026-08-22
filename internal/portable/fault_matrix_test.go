@@ -143,6 +143,7 @@ func openFaultEngine(t *testing.T, backend objectstore.Backend, clock *domain.Fi
 }
 
 func TestObjectFailureAtEveryRecursiveCopyBoundaryRecoversWithoutPartialVisibility(t *testing.T) {
+	t.Parallel()
 	fixtureBackend := objectmemory.New()
 	fixtureServer := httptest.NewServer(fixtureBackend)
 	t.Cleanup(fixtureServer.Close)
@@ -158,9 +159,23 @@ func TestObjectFailureAtEveryRecursiveCopyBoundaryRecoversWithoutPartialVisibili
 	}
 	uploadPortableFile(t, fixtureServer.Client(), fixtureEngine.Files(), scope, domain.MustParseUserPath("/source/value.txt"), []byte("fault matrix"))
 	fixture := fixtureBackend.Export()
+	countBackend := objectmemory.New()
+	if err := countBackend.Import(fixture); err != nil {
+		t.Fatal(err)
+	}
+	countFaults := &failNthBackend{backend: countBackend}
+	countEngine := openFaultEngine(t, countFaults, domain.NewFixedClock(fixtureClock.Now()), 103)
+	countFaults.arm(0)
+	if _, err := countEngine.Files().Copy(context.Background(), scope, scope, domain.CopyRequest{
+		Source: domain.MustParseUserPath("/source"), Destination: domain.MustParseUserPath("/destination"),
+		IdempotencyKey: "fault-copy",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lastBoundary := countFaults.calls + 3
 
 	consecutiveSuccesses := 0
-	for failAt := 1; failAt <= 160 && consecutiveSuccesses < 3; failAt++ {
+	for failAt := 1; failAt <= lastBoundary && consecutiveSuccesses < 3; failAt++ {
 		backend := objectmemory.New()
 		if err := backend.Import(fixture); err != nil {
 			t.Fatal(err)
@@ -294,11 +309,44 @@ func TestObjectFailureAtEveryUploadInitiationBoundaryDrainsSafely(t *testing.T) 
 }
 
 func TestObjectFailureAtEveryUploadCompletionBoundaryReconcilesOnce(t *testing.T) {
+	t.Parallel()
 	user, _ := domain.ParseUserID("W1tbW1tbW1tbW1tbW1tbWw")
 	scope, _ := domain.NewScope(user, domain.AreaLive)
 	content := []byte("complete")
+	countBackend := objectmemory.New()
+	countServer := httptest.NewServer(countBackend)
+	countClock := domain.NewFixedClock(time.Date(2041, 5, 6, 7, 8, 9, 0, time.UTC))
+	if err := countBackend.ConfigureDataPlane(countServer.URL, countClock, domain.NewIDGenerator(bytes.NewReader(deterministic(150, 1<<20)))); err != nil {
+		countServer.Close()
+		t.Fatal(err)
+	}
+	countFaults := &failNthBackend{backend: countBackend}
+	countEngine := openFaultEngine(t, countFaults, countClock, 160)
+	countPath := domain.MustParseUserPath("/complete.bin")
+	countCapability, err := countEngine.Files().CreateUpload(context.Background(), scope, domain.CreateUploadRequest{Path: countPath, Size: int64(len(content)), MediaType: "application/octet-stream"})
+	if err != nil {
+		countServer.Close()
+		t.Fatal(err)
+	}
+	countRequest, _ := http.NewRequest(countCapability.Method, countCapability.URL, bytes.NewReader(content))
+	for name, value := range countCapability.Headers {
+		countRequest.Header.Set(name, value)
+	}
+	countResponse, err := countServer.Client().Do(countRequest)
+	if err != nil {
+		countServer.Close()
+		t.Fatal(err)
+	}
+	_ = countResponse.Body.Close()
+	countFaults.arm(0)
+	if _, err := countEngine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: countCapability.UploadID, Path: countPath, Size: int64(len(content)), MediaType: "application/octet-stream"}); err != nil {
+		countServer.Close()
+		t.Fatal(err)
+	}
+	lastBoundary := countFaults.calls + 3
+	countServer.Close()
 	consecutiveSuccesses := 0
-	for failAt := 1; failAt <= 120 && consecutiveSuccesses < 3; failAt++ {
+	for failAt := 1; failAt <= lastBoundary && consecutiveSuccesses < 3; failAt++ {
 		backend := objectmemory.New()
 		server := httptest.NewServer(backend)
 		clock := domain.NewFixedClock(time.Date(2041, 5, 6, 7, 8, 9, 0, time.UTC))
@@ -538,6 +586,7 @@ func TestObjectFailureAtEveryDeleteBoundaryRecoversAtomically(t *testing.T) {
 }
 
 func TestObjectFailureAtEveryMoveBoundaryRecoversWithoutSplitVisibility(t *testing.T) {
+	t.Parallel()
 	fixtureBackend := objectmemory.New()
 	fixtureServer := httptest.NewServer(fixtureBackend)
 	t.Cleanup(fixtureServer.Close)
@@ -553,9 +602,23 @@ func TestObjectFailureAtEveryMoveBoundaryRecoversWithoutSplitVisibility(t *testi
 	}
 	uploadPortableFile(t, fixtureServer.Client(), fixtureEngine.Files(), scope, domain.MustParseUserPath("/source/value.txt"), []byte("move fault matrix"))
 	fixture := fixtureBackend.Export()
+	countBackend := objectmemory.New()
+	if err := countBackend.Import(fixture); err != nil {
+		t.Fatal(err)
+	}
+	countFaults := &failNthBackend{backend: countBackend}
+	countEngine := openFaultEngine(t, countFaults, domain.NewFixedClock(fixtureClock.Now()), 213)
+	countFaults.arm(0)
+	if _, err := countEngine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{
+		Source: domain.MustParseUserPath("/source"), Destination: domain.MustParseUserPath("/destination"),
+		IdempotencyKey: "fault-move",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lastBoundary := countFaults.calls + 3
 
 	consecutiveSuccesses := 0
-	for failAt := 1; failAt <= 180 && consecutiveSuccesses < 3; failAt++ {
+	for failAt := 1; failAt <= lastBoundary && consecutiveSuccesses < 3; failAt++ {
 		backend := objectmemory.New()
 		if err := backend.Import(fixture); err != nil {
 			t.Fatal(err)
@@ -761,6 +824,7 @@ func TestObjectFailureAtEveryAdmittedMutationRecoveryBoundaryIsRetrySafe(t *test
 }
 
 func TestObjectFailureAtEveryPreparedFileOperationRecoveryBoundaryIsRetrySafe(t *testing.T) {
+	t.Parallel()
 	fixtureBackend := objectmemory.New()
 	fixtureServer := httptest.NewServer(fixtureBackend)
 	t.Cleanup(fixtureServer.Close)
@@ -769,8 +833,9 @@ func TestObjectFailureAtEveryPreparedFileOperationRecoveryBoundaryIsRetrySafe(t 
 		t.Fatal(err)
 	}
 	crashed := false
+	crashPreparedOperation := false
 	crasher := portable.SchedulerFunc(func(_ context.Context, step string) error {
-		if step == portable.StepOperationAfterPrepared && !crashed {
+		if crashPreparedOperation && step == portable.StepOperationAfterPrepared && !crashed {
 			crashed = true
 			return domain.NewError(domain.ErrorUnavailable, "injected replica loss")
 		}
@@ -785,6 +850,7 @@ func TestObjectFailureAtEveryPreparedFileOperationRecoveryBoundaryIsRetrySafe(t 
 		}
 	}
 	uploadPortableFile(t, fixtureServer.Client(), fixtureEngine.Files(), scope, domain.MustParseUserPath("/source/value.txt"), []byte("recovery"))
+	crashPreparedOperation = true
 	if _, err := fixtureEngine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{Source: domain.MustParseUserPath("/source/value.txt"), Destination: domain.MustParseUserPath("/destination/value.txt"), IdempotencyKey: "prepared-recovery"}); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("crashed Move() error = %v", err)
 	}

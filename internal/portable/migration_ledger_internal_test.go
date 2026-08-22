@@ -11,6 +11,8 @@ func TestStorageSchemaLedgerIsLinearAndAppendOnly(t *testing.T) {
 		"endlessfs-portable-v1/schema-001",
 		"endlessfs-portable-v1/schema-002",
 		"endlessfs-portable-v1/schema-003",
+		"endlessfs-portable-v1/schema-004",
+		"endlessfs-portable-v1/schema-005",
 	}
 	if len(storageSchemaLedger) != len(wantIDs) {
 		t.Fatalf("storage schema ledger length = %d; want %d", len(storageSchemaLedger), len(wantIDs))
@@ -63,13 +65,21 @@ func TestStorageSchemaLedgerIsLinearAndAppendOnly(t *testing.T) {
 
 func TestStorageSchemaGateDetectionUsesEpochBindingRepresentation(t *testing.T) {
 	current := []string{
+		"directory-content-digests-v1",
 		"directory-manifests",
+		"duplicate-catalog-v1",
 		"fenced-operations",
 		"generated-previews-v1",
+		"metadata-only-checkpoints-v1",
+		"paged-operation-steps-v1",
+		"persistent-directory-indexes-v1",
+		"persistent-state-indexes-v1",
 		"portable-checkpoints",
 		"preview-integrity-crc32c-v1",
+		"provider-content-fingerprints-v1",
 		"recursive-byte-aggregates-v1",
 		"recursive-file-count-aggregates-v1",
+		"resumable-operation-preparation-v1",
 	}
 	legacy, found := detectWriteGateSchema(nil, current)
 	if !found || legacy.id != storageSchema001 {
@@ -78,7 +88,7 @@ func TestStorageSchemaGateDetectionUsesEpochBindingRepresentation(t *testing.T) 
 	if _, found := detectWriteGateSchema([]string{"directory-manifests"}, current); found {
 		t.Fatal("partially feature-bound legacy gate was accepted")
 	}
-	for _, schemaID := range []storageSchemaID{storageSchema002, storageSchema003} {
+	for _, schemaID := range []storageSchemaID{storageSchema002, storageSchema003, storageSchema004, "endlessfs-portable-v1/schema-005"} {
 		features, _ := schemaFeatures(schemaID, current)
 		detected, found := detectWriteGateSchema(features, current)
 		if !found || detected.id != schemaID {
@@ -91,7 +101,9 @@ func TestStorageSchemaReleaseLedgerDefinesDerivedValidityRanges(t *testing.T) {
 	want := map[storageSchemaID][]StorageSchemaReleaseRange{
 		"endlessfs-portable-v1/schema-001": {{First: "v0.1.0", Before: "v0.1.5"}},
 		"endlessfs-portable-v1/schema-002": nil,
-		"endlessfs-portable-v1/schema-003": {{First: "v0.1.5"}},
+		"endlessfs-portable-v1/schema-003": {{First: "v0.1.5", Before: "v0.2.0"}},
+		"endlessfs-portable-v1/schema-004": nil,
+		"endlessfs-portable-v1/schema-005": {{First: "v0.2.0"}},
 	}
 	for _, schema := range storageSchemaLedger {
 		got := releaseRangesForSchema(schema.id)
@@ -127,7 +139,11 @@ func TestStorageSchemaLedgerResolvesReleaseValidityRanges(t *testing.T) {
 		{release: "v0.1.0", want: storageSchema001, found: true},
 		{release: "v0.1.4", want: storageSchema001, found: true},
 		{release: "v0.1.5", want: storageSchema003, found: true},
+		{release: "v0.1.14", want: storageSchema003, found: true},
+		{release: "v0.1.15", want: storageSchema003, found: true},
 		{release: "v0.1.999", want: storageSchema003, found: true},
+		{release: "v0.2.0", want: "endlessfs-portable-v1/schema-005", found: true},
+		{release: "v0.2.999", want: "endlessfs-portable-v1/schema-005", found: true},
 		{release: "v0.0.9"},
 		{release: "0.1.7"},
 		{release: "v0.1"},
@@ -164,13 +180,15 @@ func TestStorageSchemaLedgerBuildsEveryRemainingMigrationPath(t *testing.T) {
 	}{
 		{
 			from: "endlessfs-portable-v1/schema-001",
-			want: []storageMigrationID{"schema-001-to-002", "schema-002-to-003"},
+			want: []storageMigrationID{"schema-001-to-002", "schema-002-to-003", "schema-003-to-004", "schema-004-to-005"},
 		},
 		{
 			from: "endlessfs-portable-v1/schema-002",
-			want: []storageMigrationID{"schema-002-to-003"},
+			want: []storageMigrationID{"schema-002-to-003", "schema-003-to-004", "schema-004-to-005"},
 		},
-		{from: "endlessfs-portable-v1/schema-003"},
+		{from: "endlessfs-portable-v1/schema-003", want: []storageMigrationID{"schema-003-to-004", "schema-004-to-005"}},
+		{from: "endlessfs-portable-v1/schema-004", want: []storageMigrationID{"schema-004-to-005"}},
+		{from: "endlessfs-portable-v1/schema-005"},
 	}
 	for _, test := range tests {
 		t.Run(fmt.Sprint(test.from), func(t *testing.T) {
@@ -248,7 +266,7 @@ func TestStorageSchemaHelpersFailClosedForUnknownOrBrokenLedgerState(t *testing.
 	if schemaAtLeast([]string{"unknown-feature"}, storageSchema001, nil) {
 		t.Fatal("unknown storage feature signature satisfied a minimum")
 	}
-	currentFeatures, found := schemaFeatures(storageSchema003, nil)
+	currentFeatures, found := schemaFeatures("endlessfs-portable-v1/schema-005", nil)
 	if !found {
 		t.Fatal("current schema has no features")
 	}

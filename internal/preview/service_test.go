@@ -3,9 +3,7 @@ package preview_test
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
@@ -616,8 +614,7 @@ func (e previewEnvironment) uploadBytesWithConflict(t *testing.T, pathValue stri
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatalf("upload status = %d", response.StatusCode)
 	}
-	sum := sha256.Sum256(data)
-	entry, err := e.source.CompleteUpload(context.Background(), e.scope, domain.CompleteUploadRequest{UploadID: upload.UploadID, Path: path, Size: int64(len(data)), MediaType: mediaType, ChecksumSHA256: hex.EncodeToString(sum[:])})
+	entry, err := e.source.CompleteUpload(context.Background(), e.scope, domain.CompleteUploadRequest{UploadID: upload.UploadID, Path: path, Size: int64(len(data)), MediaType: mediaType})
 	if err != nil {
 		t.Fatal(err)
 	}

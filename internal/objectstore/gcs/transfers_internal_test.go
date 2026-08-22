@@ -54,6 +54,21 @@ func TestTransferHelpersRejectMalformedProviderValues(t *testing.T) {
 	}
 }
 
+func TestObjectInfoRejectsMalformedProviderMetadata(t *testing.T) {
+	key := objectstore.MustKey("endlessfs/v1/state/users/malformed-provider-metadata.json")
+	for name, attrs := range map[string]*storage.ObjectAttrs{
+		"generation": {Generation: 0},
+		"size":       {Generation: 1, Size: -1},
+		"md5":        {Generation: 1, MD5: []byte("short")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := objectInfoFromAttrs(key, attrs); !errors.Is(err, domain.ErrInternal) {
+				t.Fatalf("objectInfoFromAttrs() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestTransferLeaseAuthenticationAndSchemaValidation(t *testing.T) {
 	configuration, err := newTransferConfiguration(TransferOptions{
 		LeaseKey: bytes.Repeat([]byte{2}, 32), Random: bytes.NewReader(bytes.Repeat([]byte{3}, 1024)),

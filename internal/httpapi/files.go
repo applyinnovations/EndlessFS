@@ -15,6 +15,14 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/files", api.listFiles)
 	mux.HandleFunc("GET /api/v1/files/storage-map", api.storageMap)
 	mux.HandleFunc("GET /api/v1/files/stat", api.statFile)
+	mux.HandleFunc("GET /api/v1/duplicates/groups", api.duplicateGroups)
+	mux.HandleFunc("GET /api/v1/duplicates/groups/{groupID}/occurrences", api.duplicateOccurrences)
+	mux.HandleFunc("PUT /api/v1/duplicates/groups/{groupID}/ignore", api.setDuplicateIgnored)
+	mux.HandleFunc("POST /api/v1/duplicates/directories/compare", api.compareDuplicateDirectories)
+	mux.HandleFunc("POST /api/v1/duplicates/directories/overlaps", api.duplicateDirectoryOverlaps)
+	mux.HandleFunc("PUT /api/v1/duplicates/directories/ignore", api.setDuplicateDirectoryIgnored)
+	mux.HandleFunc("POST /api/v1/duplicates/directories/reconciliation-preview", api.previewDuplicateReconciliation)
+	mux.HandleFunc("POST /api/v1/duplicates/directories/reconcile", api.applyDuplicateReconciliation)
 	mux.HandleFunc("POST /api/v1/directories", api.createDirectory)
 	mux.HandleFunc("POST /api/v1/uploads", api.createUpload)
 	mux.HandleFunc("POST /api/v1/uploads/batch", api.createUploadBatch)
@@ -37,6 +45,289 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/public/shares/{token}/stat", api.publicShareStat)
 	mux.HandleFunc("POST /api/v1/public/shares/{token}/downloads", api.publicShareDownload)
 	mux.HandleFunc("GET /s/{token}", api.publicShareShell)
+}
+
+func (api *identityAPI) duplicateGroups(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.authenticated(w, r)
+	if !ok {
+		return
+	}
+	limit, err := parseLimit(r.URL.Query().Get("limit"))
+	includeIgnored := false
+	if value := r.URL.Query().Get("includeIgnored"); value != "" {
+		if value != "true" && value != "false" {
+			writeProblem(w, r, domain.NewError(domain.ErrorInvalid, "includeIgnored must be true or false"))
+			return
+		}
+		includeIgnored = value == "true"
+	}
+	kind := domain.DuplicateKind(r.URL.Query().Get("kind"))
+	if err == nil && kind != "" && !kind.Valid() {
+		err = domain.NewError(domain.ErrorInvalid, "invalid duplicate kind")
+	}
+	if err == nil {
+		var page domain.DuplicateGroupPage
+		page, err = api.drive.DuplicateGroups(r.Context(), current.Record.UserID, domain.DuplicateGroupRequest{Limit: limit, Cursor: r.URL.Query().Get("cursor"), Kind: kind, IncludeIgnored: includeIgnored})
+		if err == nil {
+			writeJSON(w, http.StatusOK, page)
+			return
+		}
+	}
+	writeProblem(w, r, err)
+}
+
+func (api *identityAPI) duplicateOccurrences(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.authenticated(w, r)
+	if !ok {
+		return
+	}
+	limit, err := parseLimit(r.URL.Query().Get("limit"))
+	if err == nil {
+		var page domain.DuplicateOccurrencePage
+		page, err = api.drive.DuplicateOccurrences(r.Context(), current.Record.UserID, domain.DuplicateOccurrenceRequest{GroupID: r.PathValue("groupID"), Limit: limit, Cursor: r.URL.Query().Get("cursor")})
+		if err == nil {
+			writeJSON(w, http.StatusOK, page)
+			return
+		}
+	}
+	writeProblem(w, r, err)
+}
+
+func (api *identityAPI) setDuplicateIgnored(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.mutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Ignored          bool   `json:"ignored"`
+		ExpectedRevision uint64 `json:"expectedRevision,omitempty"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	result, err := api.drive.SetDuplicateIgnored(r.Context(), current.Record.UserID, domain.SetDuplicateIgnoredRequest{GroupID: r.PathValue("groupID"), Ignored: request.Ignored, ExpectedRevision: request.ExpectedRevision})
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func parseDuplicateArea(value string) (domain.Area, error) {
+	switch value {
+	case "live":
+		return domain.AreaLive, nil
+	case "trash":
+		return domain.AreaTrash, nil
+	default:
+		return 0, domain.NewError(domain.ErrorInvalid, "invalid duplicate location area")
+	}
+}
+
+func parseDuplicateLocation(areaValue, pathValue string) (domain.DuplicateLocation, error) {
+	area, err := parseDuplicateArea(areaValue)
+	if err != nil {
+		return domain.DuplicateLocation{}, err
+	}
+	path, err := parsePath(pathValue)
+	if err != nil {
+		return domain.DuplicateLocation{}, err
+	}
+	return domain.DuplicateLocation{Area: area, Path: path}, nil
+}
+
+func (api *identityAPI) compareDuplicateDirectories(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.mutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Left struct {
+			Area string `json:"area"`
+			Path string `json:"path"`
+		} `json:"left"`
+		Right struct {
+			Area string `json:"area"`
+			Path string `json:"path"`
+		} `json:"right"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	leftArea, err := parseDuplicateArea(request.Left.Area)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	rightArea, err := parseDuplicateArea(request.Right.Area)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	leftPath, err := parsePath(request.Left.Path)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	rightPath, err := parsePath(request.Right.Path)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	result, err := api.drive.CompareDuplicateDirectories(r.Context(), current.Record.UserID, domain.DuplicateDirectoryComparisonRequest{Left: domain.DuplicateLocation{Area: leftArea, Path: leftPath}, Right: domain.DuplicateLocation{Area: rightArea, Path: rightPath}})
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (api *identityAPI) duplicateDirectoryOverlaps(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.mutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Directory struct {
+			Area string `json:"area"`
+			Path string `json:"path"`
+		} `json:"directory"`
+		Limit          int    `json:"limit,omitempty"`
+		Cursor         string `json:"cursor,omitempty"`
+		IncludeIgnored bool   `json:"includeIgnored,omitempty"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	area, err := parseDuplicateArea(request.Directory.Area)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	path, err := parsePath(request.Directory.Path)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	result, err := api.drive.DuplicateDirectoryOverlaps(r.Context(), current.Record.UserID, domain.DuplicateDirectoryOverlapRequest{
+		Directory: domain.DuplicateLocation{Area: area, Path: path}, Limit: request.Limit, Cursor: request.Cursor, IncludeIgnored: request.IncludeIgnored,
+	})
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (api *identityAPI) setDuplicateDirectoryIgnored(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.mutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Left struct {
+			Area string `json:"area"`
+			Path string `json:"path"`
+		} `json:"left"`
+		Right struct {
+			Area string `json:"area"`
+			Path string `json:"path"`
+		} `json:"right"`
+		Ignored          bool   `json:"ignored"`
+		ExpectedRevision uint64 `json:"expectedRevision,omitempty"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	left, err := parseDuplicateLocation(request.Left.Area, request.Left.Path)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	right, err := parseDuplicateLocation(request.Right.Area, request.Right.Path)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	result, err := api.drive.SetDuplicateDirectoryIgnored(r.Context(), current.Record.UserID, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left: left, Right: right, Ignored: request.Ignored, ExpectedRevision: request.ExpectedRevision,
+	})
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (api *identityAPI) previewDuplicateReconciliation(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.mutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Left struct {
+			Area string `json:"area"`
+			Path string `json:"path"`
+		} `json:"left"`
+		Right struct {
+			Area string `json:"area"`
+			Path string `json:"path"`
+		} `json:"right"`
+		RemoveFrom domain.DuplicateSide `json:"removeFrom"`
+		Limit      int                  `json:"limit,omitempty"`
+		Cursor     string               `json:"cursor,omitempty"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	leftArea, err := parseDuplicateArea(request.Left.Area)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	rightArea, err := parseDuplicateArea(request.Right.Area)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	leftPath, err := parsePath(request.Left.Path)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	rightPath, err := parsePath(request.Right.Path)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	result, err := api.drive.PreviewDuplicateReconciliation(r.Context(), current.Record.UserID, domain.DuplicateReconciliationPreviewRequest{
+		Left: domain.DuplicateLocation{Area: leftArea, Path: leftPath}, Right: domain.DuplicateLocation{Area: rightArea, Path: rightPath},
+		RemoveFrom: request.RemoveFrom, Limit: request.Limit, Cursor: request.Cursor,
+	})
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (api *identityAPI) applyDuplicateReconciliation(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.idempotentMutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		PlanToken string `json:"planToken"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	result, err := api.drive.ApplyDuplicateReconciliation(r.Context(), current.Record.UserID, request.PlanToken, r.Header.Get("Idempotency-Key"))
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
 }
 
 func parsePath(value string) (domain.UserPath, error) { return domain.ParseUserPath(value) }
@@ -248,10 +539,9 @@ func (api *identityAPI) completeUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Path           string `json:"path"`
-		Size           int64  `json:"size"`
-		MediaType      string `json:"mediaType"`
-		ChecksumSHA256 string `json:"checksumSHA256,omitempty"`
+		Path      string `json:"path"`
+		Size      int64  `json:"size"`
+		MediaType string `json:"mediaType"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
@@ -259,7 +549,7 @@ func (api *identityAPI) completeUpload(w http.ResponseWriter, r *http.Request) {
 	path, err := parsePath(request.Path)
 	if err == nil {
 		var entry domain.Entry
-		entry, err = api.drive.CompleteUpload(r.Context(), current.Record.UserID, domain.CompleteUploadRequest{UploadID: domain.UploadID(r.PathValue("uploadID")), Path: path, Size: request.Size, MediaType: request.MediaType, ChecksumSHA256: request.ChecksumSHA256})
+		entry, err = api.drive.CompleteUpload(r.Context(), current.Record.UserID, domain.CompleteUploadRequest{UploadID: domain.UploadID(r.PathValue("uploadID")), Path: path, Size: request.Size, MediaType: request.MediaType})
 		if err == nil {
 			writeJSON(w, http.StatusOK, entry)
 			return

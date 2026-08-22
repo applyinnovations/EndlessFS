@@ -43,7 +43,7 @@ This document fixes the v1 JSON field casing and control-plane routes implemente
 | `POST` | `/api/v1/uploads` | `path` or directory `path` plus `name`, `size`, `mediaType`, `resumable`, optional conflict/version |
 | `POST` | `/api/v1/uploads/batch` | `uploads` with 1–100 upload initialization objects |
 | `GET` | `/api/v1/uploads/{uploadID}` | Owner-scoped `active`, `completed`, `aborted`, or `expired` state with the safe provider-confirmed offset; no capability or provider-native material |
-| `POST` | `/api/v1/uploads/{uploadID}/complete` | `path`, `size`, `mediaType`, optional `checksumSHA256` |
+| `POST` | `/api/v1/uploads/{uploadID}/complete` | `path`, `size`, `mediaType`; stored-object fingerprints come from provider metadata |
 | `DELETE` | `/api/v1/uploads/{uploadID}` | Abort and invalidate the upload capability |
 | `POST` | `/api/v1/downloads` | `path`, exact `version`, optional `preview` |
 | `POST` | `/api/v1/files/copy`, `/move` | Singular `source`/`destination`, or `items` with 1–100 source/destination objects; optional conflict/version fields |
@@ -65,6 +65,29 @@ Each successful `GET /api/v1/trash` row preserves the prior trash-record fields 
 `GET /api/v1/public/shares/{token}` returns safe `root`, `current`, and child entries with the same `size` and `fileCount` contract. A nested directory's `current` aggregates describe that nested target, while `root` continues to describe the original shared root. Neither response exposes an owner path or provider identity.
 
 `GET /api/v1/public/shares/{token}/stat?path=...` returns the same safe share-relative entry metadata for one exact item inside the shared root. It exists so a copied public-preview URL can restore one file without walking paginated directory listings. Invalid, escaped, stale, revoked, expired, disabled-owner, or changed-root requests all return the same not-found boundary.
+
+## Duplicate reconciliation foundation
+
+These authenticated owner routes expose the duplicate catalog introduced by schema 004 and consumed by the current schema-005 backend foundation for the separate Part 2 browser workflow. They return only virtual paths, portable logical versions, counts, and opaque group/cursor/plan values. Provider keys, provider-native versions, and raw checksums are never public fields.
+
+| Method | Route | Request or query |
+|---|---|---|
+| `GET` | `/api/v1/duplicates/groups` | Optional `kind=file|directory`, `includeIgnored=true|false`, `limit`, and owner-scoped opaque `cursor` |
+| `GET` | `/api/v1/duplicates/groups/{groupID}/occurrences` | `limit` and owner/group-scoped opaque `cursor` |
+| `PUT` | `/api/v1/duplicates/groups/{groupID}/ignore` | `{ "ignored": true|false, "expectedRevision": n }`; CSRF and exact origin required |
+| `POST` | `/api/v1/duplicates/directories/compare` | `{ "left": {"area":"live|trash","path":"/..."}, "right": {...} }`; CSRF and exact origin required |
+| `POST` | `/api/v1/duplicates/directories/overlaps` | One `directory`, optional `includeIgnored`, `limit` 1–100, and owner/manifest/gate-scoped opaque `cursor`; CSRF and exact origin required |
+| `PUT` | `/api/v1/duplicates/directories/ignore` | Two directory locations plus `ignored` and optional `expectedRevision`; the stable directory pair, not either path, is the preference identity |
+| `POST` | `/api/v1/duplicates/directories/reconciliation-preview` | Two disjoint live locations plus `removeFrom=left|right`, optional `limit` 1–100, and optional opaque `cursor`; CSRF and exact origin required |
+| `POST` | `/api/v1/duplicates/directories/reconcile` | `{ "planToken": "..." }`; CSRF, exact origin, and `Idempotency-Key` required |
+
+A group row is `{ "id", "kind", "occurrenceCount", "size", "fileCount", "reclaimableBytes", "ignored", "ignoreRevision"? }`. A file occurrence has `fileCount: 1`; a directory occurrence uses its recursive count. `reclaimableBytes` is exact for that one group and counts all but one occurrence. Directory rows and their descendant file rows overlap, so clients must not add unrelated row values into a bucket-wide total.
+
+Directory comparison returns `exact`, `commonFiles`, `commonBytes`, and both `leftOnly*` and `rightOnly*` totals. Intersection is a multiset of confirmed file identities, so repeated equal files are counted no more times than they appear on both sides. Exact directory equality additionally requires the complete name-sensitive nested structure to match.
+
+Overlap candidates return `sharedSketch`, `sketchSize`, the exact comparison, pair `ignored`/`ignoreRevision`, and independent exact-group ignore state. The sketch fraction is candidate-discovery evidence, not the reported exact overlap percentage. Default pages omit either ignored relationship; `includeIgnored` supports the Part 2 collapsed ignored section.
+
+Preview returns at most 100 removal/keep pairs, the comparison, page reclaimable bytes, an optional next cursor, and a short-lived authenticated `planToken`. Ignored groups are omitted. Reconcile revalidates the gate, selected manifests, occurrence group/version, and ignore revisions, then moves only the pinned removal paths to Trash. Stale items fail safely and no duplicate route permanently deletes data.
 
 ## Generated image previews (v1.1)
 

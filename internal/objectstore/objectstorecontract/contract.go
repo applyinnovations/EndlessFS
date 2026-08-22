@@ -25,6 +25,7 @@ func Run(t *testing.T, factory Factory) {
 		backend := factory(t)
 		key := objectstore.MustKey("endlessfs/v1/state/users/a.json")
 		input := []byte("one")
+		fingerprint := objectstore.FingerprintFor(input)
 		version, err := backend.Put(context.Background(), key, input, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
 		if err != nil || version == "" {
 			t.Fatalf("Put(create) = %q, %v", version, err)
@@ -52,7 +53,7 @@ func Run(t *testing.T, factory Factory) {
 			t.Fatalf("duplicate create error = %v", err)
 		}
 		info, err := backend.Head(context.Background(), key)
-		if err != nil || info.Key != key || info.Version != version || info.Size != 3 {
+		if err != nil || info.Key != key || info.Version != version || info.Size != 3 || info.Fingerprint != fingerprint {
 			t.Fatalf("Head() = %+v, %v", info, err)
 		}
 		verified, err := backend.Verify(context.Background(), key, objectstore.IntegrityFor([]byte("one")))
@@ -110,6 +111,9 @@ func Run(t *testing.T, factory Factory) {
 				t.Fatal(err)
 			}
 			for _, item := range page.Objects {
+				if !item.Fingerprint.Complete() {
+					t.Fatalf("List() omitted provider fingerprint for %s: %+v", item.Key, item.Fingerprint)
+				}
 				keys = append(keys, item.Key.String())
 			}
 			if page.NextCursor == "" {
@@ -119,6 +123,14 @@ func Run(t *testing.T, factory Factory) {
 		}
 		if len(keys) != 7 || !sort.StringsAreSorted(keys) {
 			t.Fatalf("listed keys = %v", keys)
+		}
+		after := objectstore.MustKey("endlessfs/v1/admissions/1/02.json")
+		page, err := backend.List(context.Background(), objectstore.ListRequest{Prefix: "endlessfs/v1/admissions/1/", Limit: 2, After: after.String()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Objects) != 2 || page.Objects[0].Key.String() != "endlessfs/v1/admissions/1/03.json" || page.Objects[1].Key.String() != "endlessfs/v1/admissions/1/04.json" {
+			t.Fatalf("List(after) = %+v", page.Objects)
 		}
 	})
 

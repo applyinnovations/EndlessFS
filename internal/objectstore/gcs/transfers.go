@@ -169,7 +169,7 @@ func (b *Backend) UploadProgress(ctx context.Context, sealed []byte) (objectstor
 		if info.Size != lease.Size {
 			return objectstore.UploadProgress{}, domain.NewError(domain.ErrorPreconditionFailed, "GCS uploaded object size mismatch")
 		}
-		return objectstore.UploadProgress{Offset: info.Size, Size: info.Size, ExpiresAt: lease.ExpiresAt, Complete: true, Version: info.Version, Materialized: true}, nil
+		return objectstore.UploadProgress{Offset: info.Size, Size: info.Size, ExpiresAt: lease.ExpiresAt, Complete: true, Version: info.Version, Fingerprint: info.Fingerprint, Materialized: true}, nil
 	}
 	if !errors.Is(headErr, domain.ErrNotFound) {
 		return objectstore.UploadProgress{}, headErr
@@ -197,7 +197,7 @@ func (b *Backend) UploadProgress(ctx context.Context, sealed []byte) (objectstor
 		if info.Size != lease.Size {
 			return objectstore.UploadProgress{}, domain.NewError(domain.ErrorPreconditionFailed, "GCS uploaded object size mismatch")
 		}
-		return objectstore.UploadProgress{Offset: info.Size, Size: info.Size, ExpiresAt: lease.ExpiresAt, Complete: true, Version: info.Version, Materialized: true}, nil
+		return objectstore.UploadProgress{Offset: info.Size, Size: info.Size, ExpiresAt: lease.ExpiresAt, Complete: true, Version: info.Version, Fingerprint: info.Fingerprint, Materialized: true}, nil
 	}
 	if response.StatusCode != http.StatusPermanentRedirect {
 		return objectstore.UploadProgress{}, classifyHTTPStatus("GCS resumable status failed", response.StatusCode)

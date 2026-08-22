@@ -24,9 +24,13 @@ const (
 	storageSchema001 storageSchemaID = "endlessfs-portable-v1/schema-001"
 	storageSchema002 storageSchemaID = "endlessfs-portable-v1/schema-002"
 	storageSchema003 storageSchemaID = "endlessfs-portable-v1/schema-003"
+	storageSchema004 storageSchemaID = "endlessfs-portable-v1/schema-004"
+	storageSchema005 storageSchemaID = "endlessfs-portable-v1/schema-005"
 
 	storageMigration001To002 storageMigrationID = "schema-001-to-002"
 	storageMigration002To003 storageMigrationID = "schema-002-to-003"
+	storageMigration003To004 storageMigrationID = "schema-003-to-004"
+	storageMigration004To005 storageMigrationID = "schema-004-to-005"
 )
 
 type storageSchemaReleaseBoundary struct {
@@ -95,6 +99,16 @@ var schemaMigration002To003 = storageMigration{
 	checkpointID: "automatic-storage-schema-002-to-003",
 }
 
+var schemaMigration003To004 = storageMigration{
+	id: storageMigration003To004, from: storageSchema003, to: storageSchema004,
+	checkpointID: "automatic-storage-schema-003-to-004",
+}
+
+var schemaMigration004To005 = storageMigration{
+	id: storageMigration004To005, from: storageSchema004, to: storageSchema005,
+	checkpointID: "automatic-storage-schema-004-to-005",
+}
+
 // storageSchemaLedger is append-only. Extend it by adding one definition whose
 // migrationFromPrevious connects the prior terminal epoch to the new epoch;
 // never insert, reorder, or rewrite an existing entry.
@@ -110,6 +124,39 @@ var storageSchemaLedger = []storageSchemaDefinition{
 		gateBinding:           storageGateFeatureBound,
 		migrationFromPrevious: &schemaMigration002To003,
 	},
+	{
+		id: storageSchema004,
+		features: []string{
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration003To004,
+	},
+	{
+		id: storageSchema005,
+		features: []string{
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+			storageformat.FeatureResumableOperations,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration004To005,
+	},
 }
 
 // storageSchemaReleaseLedger is also append-only. A boundary is the first
@@ -118,6 +165,7 @@ var storageSchemaLedger = []storageSchemaDefinition{
 var storageSchemaReleaseLedger = []storageSchemaReleaseBoundary{
 	{first: "v0.1.0", schema: storageSchema001},
 	{first: "v0.1.5", schema: storageSchema003},
+	{first: "v0.2.0", schema: storageSchema005},
 }
 
 func init() {
@@ -127,6 +175,8 @@ func init() {
 	// cycle.
 	schemaMigration001To002.run = (*Engine).runStorageMigration001To002
 	schemaMigration002To003.run = (*Engine).runStorageMigration002To003
+	schemaMigration003To004.run = (*Engine).runStorageMigration003To004
+	schemaMigration004To005.run = (*Engine).runStorageMigration004To005
 }
 
 func currentStorageSchema() storageSchemaDefinition {
@@ -406,8 +456,10 @@ func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
 			return err
 		}
 		if migration, found := migrationForCheckpoint(gate.CheckpointID); found {
-			if err := migration.run(e, ctx, migration, superblockObject, superblock); err != nil {
-				return err
+			if runErr := migration.run(e, ctx, migration, superblockObject, superblock); runErr != nil {
+				if err := e.resolveMigrationRunError(ctx, migration, runErr); err != nil {
+					return err
+				}
 			}
 			continue
 		}
@@ -431,9 +483,28 @@ func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
 			return domain.NewError(domain.ErrorPreconditionFailed, "storage schema markers disagree without a resumable migration checkpoint")
 		}
 		migration := path[0]
-		if err := migration.run(e, ctx, migration, superblockObject, superblock); err != nil {
-			return err
+		if runErr := migration.run(e, ctx, migration, superblockObject, superblock); runErr != nil {
+			if err := e.resolveMigrationRunError(ctx, migration, runErr); err != nil {
+				return err
+			}
 		}
 	}
 	return domain.NewError(domain.ErrorUnavailable, "storage schema migration chain did not converge")
+}
+
+// A replica can retain a predecessor object reference while another replica
+// completes the remaining schema suffix and collects that now-unreachable
+// immutable object. Only a not-found result is eligible for winner
+// reconciliation, and it is accepted only after all durable schema markers
+// prove that this edge (or a later edge) completed. Other errors and an
+// incomplete marker set remain fail-closed.
+func (e *Engine) resolveMigrationRunError(ctx context.Context, migration storageMigration, runErr error) error {
+	if !errors.Is(runErr, domain.ErrNotFound) {
+		return runErr
+	}
+	complete, err := e.storageMigrationComplete(ctx, migration)
+	if err == nil && complete {
+		return nil
+	}
+	return runErr
 }

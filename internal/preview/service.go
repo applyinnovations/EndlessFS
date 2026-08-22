@@ -1,3 +1,5 @@
+//endlessfs:file-body-read-exemption feature=image-preview-generation
+
 package preview
 
 import (

@@ -3,7 +3,7 @@ package portable
 import (
 	"context"
 	"encoding/base64"
-	"sort"
+	"errors"
 	"strings"
 	"time"
 
@@ -17,27 +17,25 @@ type stateListCursor struct {
 	SchemaVersion int       `json:"schemaVersion"`
 	Prefix        string    `json:"prefix"`
 	Limit         int       `json:"limit"`
-	Index         int       `json:"index"`
+	Namespace     string    `json:"namespace"`
+	RootNodeID    string    `json:"rootNodeID"`
+	RootDigest    string    `json:"rootDigest"`
+	RootCount     uint64    `json:"rootCount"`
+	After         string    `json:"after"`
 	GateEpoch     uint64    `json:"gateEpoch"`
 	GateVersion   string    `json:"gateVersion"`
 	ExpiresAt     time.Time `json:"expiresAt"`
-	Snapshots     []string  `json:"snapshots"`
 }
 
 func (e *Engine) Get(ctx context.Context, key state.Key) (state.Value, error) {
 	if err := validateStateKey(key); err != nil {
 		return state.Value{}, err
 	}
-	objectKey := canonicalStateKey(key)
-	object, err := e.backend.Get(ctx, objectKey)
+	entry, err := e.stateIndexEntry(ctx, key)
 	if err != nil {
 		return state.Value{}, err
 	}
-	record, envelope, err := decodeStateObject(object, key)
-	if err != nil {
-		return state.Value{}, err
-	}
-	return state.Value{Data: append([]byte(nil), record.Data...), Version: state.Version(envelope.LogicalVersion)}, nil
+	return e.readIndexedStateValue(ctx, entry)
 }
 
 func (e *Engine) List(ctx context.Context, prefix state.Prefix, request state.PageRequest) (state.Page, error) {
@@ -51,136 +49,73 @@ func (e *Engine) List(ctx context.Context, prefix state.Prefix, request state.Pa
 	if limit < 1 || limit > 1000 {
 		return state.Page{}, domain.NewError(domain.ErrorInvalid, "page limit must be between 1 and 1000")
 	}
-	if request.Cursor != "" {
-		cursor, err := e.decodeStateListCursor(request.Cursor)
-		if err != nil || cursor.Prefix != prefix.String() || cursor.Limit != limit || cursor.Index < 1 || cursor.Index >= len(cursor.Snapshots) || !e.clock.Now().Before(cursor.ExpiresAt) {
-			return state.Page{}, domain.NewError(domain.ErrorInvalid, "invalid or out-of-scope state cursor")
-		}
-		_, gateEnvelope, gate, err := e.readGate(ctx)
-		if err != nil || gate.Epoch != cursor.GateEpoch || gateEnvelope.LogicalVersion != cursor.GateVersion {
-			return state.Page{}, domain.NewError(domain.ErrorInvalid, "state cursor is no longer valid")
-		}
-		return e.stateCursorPage(ctx, cursor)
-	}
+	namespace := strings.SplitN(prefix.String(), "/", 2)[0]
 	_, gateEnvelope, gate, err := e.readGate(ctx)
 	if err != nil {
 		return state.Page{}, err
 	}
-	namespace := strings.SplitN(prefix.String(), "/", 2)[0]
-	objects, err := e.listAll(ctx, storageformat.StatePrefix(namespace))
+	rootSnapshot, err := e.readStateIndexRoot(ctx, namespace)
 	if err != nil {
 		return state.Page{}, err
 	}
-	items := make([]state.Item, 0, len(objects))
-	snapshots := make([]string, 0, len(objects))
-	for _, info := range objects {
-		object, getErr := e.backend.Get(ctx, info.Key)
-		if getErr != nil {
-			return state.Page{}, getErr
+	root := rootSnapshot.root
+	after := ""
+	if request.Cursor != "" {
+		cursor, err := e.decodeStateListCursor(request.Cursor)
+		if err != nil || cursor.Prefix != prefix.String() || cursor.Namespace != namespace || cursor.Limit != limit || cursor.After == "" || cursor.GateEpoch != gate.Epoch || cursor.GateVersion != gateEnvelope.LogicalVersion || !e.clock.Now().Before(cursor.ExpiresAt) {
+			return state.Page{}, domain.NewError(domain.ErrorInvalid, "invalid or out-of-scope state cursor")
 		}
-		var envelope storageformat.Envelope
-		var record storageformat.StateRecord
-		if decodeErr := storageformat.DecodeEnvelope(object.Body, info.Key, stateRecordSchema, &envelope, &record); decodeErr != nil {
-			return state.Page{}, decodeErr
-		}
-		if !strings.HasPrefix(record.LogicalKey, prefix.String()) {
-			continue
-		}
-		logical, keyErr := parseExistingStateKey(record.LogicalKey)
-		if keyErr != nil || canonicalStateKey(logical) != info.Key {
-			return state.Page{}, domain.NewError(domain.ErrorInvalid, "state key digest collision or corruption")
-		}
-		items = append(items, state.Item{Key: logical, Value: state.Value{Data: append([]byte(nil), record.Data...), Version: state.Version(envelope.LogicalVersion)}})
-		snapshots = append(snapshots, storageformat.StateVersionKey(namespace, logical.String(), envelope.LogicalVersion).String())
+		root = storageformat.StateIndexRoot{SchemaVersion: 1, Namespace: namespace, NodeID: cursor.RootNodeID, NodeDigest: cursor.RootDigest, EntryCount: cursor.RootCount}
+		after = cursor.After
 	}
-	order := make([]int, len(items))
-	for index := range order {
-		order[index] = index
-	}
-	sort.Slice(order, func(i, j int) bool { return items[order[i]].Key.String() < items[order[j]].Key.String() })
-	sortedItems := make([]state.Item, len(items))
-	sortedSnapshots := make([]string, len(items))
-	for index, original := range order {
-		sortedItems[index] = items[original]
-		sortedSnapshots[index] = snapshots[original]
-	}
-	items, snapshots = sortedItems, sortedSnapshots
-	if len(items) <= limit {
-		return state.Page{Items: items}, nil
-	}
-	cursor := stateListCursor{
-		SchemaVersion: 1, Prefix: prefix.String(), Limit: limit, Index: limit,
-		GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion,
-		ExpiresAt: e.clock.Now().UTC().Add(e.cursorTTL), Snapshots: snapshots,
-	}
-	next, err := e.encodeStateListCursor(cursor)
+	entries, err := e.collectStateIndexEntries(ctx, root, prefix.String(), after, limit+1)
 	if err != nil {
 		return state.Page{}, err
 	}
-	return state.Page{Items: append([]state.Item(nil), items[:limit]...), NextCursor: next}, nil
-}
-
-func (e *Engine) stateCursorPage(ctx context.Context, cursor stateListCursor) (state.Page, error) {
-	end := min(cursor.Index+cursor.Limit, len(cursor.Snapshots))
-	items := make([]state.Item, 0, end-cursor.Index)
-	for _, keyValue := range cursor.Snapshots[cursor.Index:end] {
-		key, err := objectstore.ParseKey(keyValue)
-		if err != nil {
-			return state.Page{}, domain.NewError(domain.ErrorInvalid, "invalid state cursor snapshot")
-		}
-		object, err := e.backend.Get(ctx, key)
-		if err != nil {
-			return state.Page{}, err
-		}
-		var envelope storageformat.Envelope
-		var record storageformat.StateVersionRecord
-		if err := storageformat.DecodeEnvelope(object.Body, key, stateVersionSchema, &envelope, &record); err != nil {
-			return state.Page{}, err
-		}
-		logical, err := parseExistingStateKey(record.LogicalKey)
-		if err != nil || record.SchemaVersion != 1 || !strings.HasPrefix(record.LogicalKey, cursor.Prefix) || record.LogicalVersion == "" || state.Version(record.LogicalVersion) == "" || storageformat.StateVersionKey(strings.SplitN(record.LogicalKey, "/", 2)[0], record.LogicalKey, record.LogicalVersion) != key {
-			return state.Page{}, domain.NewError(domain.ErrorInvalid, "invalid state cursor snapshot")
-		}
-		items = append(items, state.Item{Key: logical, Value: state.Value{Data: append([]byte(nil), record.Data...), Version: state.Version(record.LogicalVersion)}})
+	hasMore := len(entries) > limit
+	if hasMore {
+		entries = entries[:limit]
 	}
-	next := ""
-	if end < len(cursor.Snapshots) {
-		cursor.Index = end
-		var err error
-		next, err = e.encodeStateListCursor(cursor)
+	page := state.Page{Items: make([]state.Item, 0, len(entries))}
+	for _, entry := range entries {
+		logical, err := parseExistingStateKey(entry.LogicalKey)
+		if err != nil {
+			return state.Page{}, err
+		}
+		value, err := e.readIndexedStateValue(ctx, entry)
+		if err != nil {
+			return state.Page{}, err
+		}
+		page.Items = append(page.Items, state.Item{Key: logical, Value: value})
+	}
+	if hasMore {
+		cursor := stateListCursor{
+			SchemaVersion: 3, Prefix: prefix.String(), Limit: limit, Namespace: namespace,
+			RootNodeID: root.NodeID, RootDigest: root.NodeDigest, RootCount: root.EntryCount,
+			After: entries[len(entries)-1].LogicalKey, GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion, ExpiresAt: e.clock.Now().UTC().Add(e.cursorTTL),
+		}
+		page.NextCursor, err = e.encodeStateListCursor(cursor)
 		if err != nil {
 			return state.Page{}, err
 		}
 	}
-	return state.Page{Items: items, NextCursor: next}, nil
+	return page, nil
 }
 
 func (e *Engine) Create(ctx context.Context, key state.Key, data []byte) (state.Version, error) {
 	if err := validateStateMutation(key, data); err != nil {
 		return "", err
 	}
-	objectKey := canonicalStateKey(key)
-	body, err := storageformat.EncodeEnvelope(stateRecordSchema, objectKey, 1, storageformat.StateRecord{SchemaVersion: 1, LogicalKey: key.String(), Data: append([]byte(nil), data...)})
+	if _, err := e.stateIndexEntry(ctx, key); err == nil {
+		return "", domain.NewError(domain.ErrorConflict, "state key already exists")
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return "", err
+	}
+	version, err := e.newStateVersion(key, data)
 	if err != nil {
 		return "", err
 	}
-	snapshot, err := stateVersionObject(key, envelopeVersion(body), data)
-	if err != nil {
-		return "", err
-	}
-	intent := storageformat.MutationIntent{Action: storageformat.MutationCreate, TargetKey: objectKey.String(), TargetBody: body, Prerequisites: []storageformat.MutationObject{snapshot}}
-	var result state.Version
-	err = e.withAdmission(ctx, intent, func() error {
-		if err := e.ensureMutationPrerequisites(ctx, intent.Prerequisites); err != nil {
-			return err
-		}
-		if _, err := e.backend.Put(ctx, objectKey, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-			return err
-		}
-		result = envelopeVersion(body)
-		return nil
-	})
-	return result, err
+	return e.mutateIndexedState(ctx, key, "", version, data, false)
 }
 
 func (e *Engine) CompareAndSwap(ctx context.Context, key state.Key, current state.Version, data []byte) (state.Version, error) {
@@ -190,51 +125,140 @@ func (e *Engine) CompareAndSwap(ctx context.Context, key state.Key, current stat
 	if current == "" {
 		return "", domain.NewError(domain.ErrorInvalid, "current state version is required")
 	}
-	objectKey := canonicalStateKey(key)
-	object, err := e.backend.Get(ctx, objectKey)
+	entry, err := e.stateIndexEntry(ctx, key)
 	if err != nil {
 		return "", err
 	}
-	_, envelope, err := decodeStateObject(object, key)
-	if err != nil {
-		return "", err
-	}
-	if state.Version(envelope.LogicalVersion) != current {
+	if state.Version(entry.LogicalVersion) != current {
 		return "", domain.NewError(domain.ErrorPreconditionFailed, "stale state version")
 	}
-	body, err := storageformat.EncodeEnvelope(stateRecordSchema, objectKey, envelope.Revision+1, storageformat.StateRecord{SchemaVersion: 1, LogicalKey: key.String(), Data: append([]byte(nil), data...)})
+	version, err := e.newStateVersion(key, data)
 	if err != nil {
 		return "", err
 	}
-	snapshot, err := stateVersionObject(key, envelopeVersion(body), data)
+	return e.mutateIndexedState(ctx, key, current, version, data, false)
+}
+
+func (e *Engine) Delete(ctx context.Context, key state.Key, current state.Version) error {
+	if err := validateStateKey(key); err != nil {
+		return err
+	}
+	if current == "" {
+		return domain.NewError(domain.ErrorInvalid, "current state version is required")
+	}
+	entry, err := e.stateIndexEntry(ctx, key)
+	if err != nil {
+		return err
+	}
+	if state.Version(entry.LogicalVersion) != current {
+		return domain.NewError(domain.ErrorPreconditionFailed, "stale state version")
+	}
+	_, err = e.mutateIndexedState(ctx, key, current, "", nil, true)
+	return err
+}
+
+func (e *Engine) mutateIndexedState(ctx context.Context, key state.Key, expected, next state.Version, data []byte, remove bool) (state.Version, error) {
+	prepared, err := e.prepareStateIndexMutation(ctx, key, string(next), remove)
 	if err != nil {
 		return "", err
 	}
-	intent := storageformat.MutationIntent{Action: storageformat.MutationCAS, TargetKey: objectKey.String(), ExpectedLogicalVersion: string(current), TargetBody: body, Prerequisites: []storageformat.MutationObject{snapshot}}
-	var result state.Version
+	if expected == "" && !remove {
+		if _, err := e.stateIndexEntryAtRoot(ctx, prepared.snapshot.root, key.String()); err == nil {
+			return "", domain.NewError(domain.ErrorConflict, "state key already exists")
+		} else if !errors.Is(err, domain.ErrNotFound) {
+			return "", err
+		}
+	}
+	if expected != "" {
+		current, err := e.stateIndexEntryAtRoot(ctx, prepared.snapshot.root, key.String())
+		if err != nil {
+			return "", err
+		}
+		if state.Version(current.LogicalVersion) != expected {
+			return "", domain.NewError(domain.ErrorPreconditionFailed, "state index changed before mutation")
+		}
+	}
+	prerequisites := append([]storageformat.MutationObject(nil), prepared.prerequisites...)
+	if !remove {
+		snapshot, err := stateVersionObject(key, next, data)
+		if err != nil {
+			return "", err
+		}
+		prerequisites = append(prerequisites, snapshot)
+	}
+	prerequisites, err = normalizeMutationObjects(prerequisites)
+	if err != nil {
+		return "", err
+	}
+	rootKey := storageformat.StateIndexRootKey(stateNamespace(key))
+	intent := storageformat.MutationIntent{Action: storageformat.MutationCreate, TargetKey: rootKey.String(), TargetBody: prepared.rootBody, Prerequisites: prerequisites}
+	condition := objectstore.PutCondition{Mode: objectstore.PutCreateOnly}
+	if prepared.snapshot.exists {
+		intent.Action = storageformat.MutationCAS
+		intent.ExpectedLogicalVersion = prepared.snapshot.envelope.LogicalVersion
+		condition = objectstore.PutCondition{Mode: objectstore.PutMatch, Version: prepared.snapshot.object.Version}
+	}
 	err = e.withAdmission(ctx, intent, func() error {
-		if err := e.ensureMutationPrerequisites(ctx, intent.Prerequisites); err != nil {
+		if err := e.ensureMutationPrerequisites(ctx, prerequisites); err != nil {
 			return err
 		}
-		if _, err := e.backend.Put(ctx, objectKey, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
-			return err
-		}
-		result = envelopeVersion(body)
-		return nil
+		_, err := e.backend.Put(ctx, rootKey, prepared.rootBody, condition)
+		return err
 	})
-	return result, err
+	if expected == "" && !remove && (errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict)) {
+		if _, lookupErr := e.stateIndexEntry(ctx, key); lookupErr == nil {
+			return "", domain.NewError(domain.ErrorConflict, "state key was created concurrently")
+		} else if !errors.Is(lookupErr, domain.ErrNotFound) {
+			return "", lookupErr
+		}
+	}
+	return next, err
+}
+
+func (e *Engine) newStateVersion(key state.Key, data []byte) (state.Version, error) {
+	nonce, err := e.ids.OpaqueID()
+	if err != nil {
+		return "", err
+	}
+	body, err := storageformat.EncodeCanonical(struct {
+		Key   string `json:"key"`
+		Nonce string `json:"nonce"`
+		Data  []byte `json:"data"`
+	}{key.String(), nonce, data})
+	if err != nil {
+		return "", err
+	}
+	return state.Version(storageformat.Digest(append([]byte("endlessfs-state-value-v2\x00"), body...))), nil
 }
 
 func stateVersionObject(key state.Key, version state.Version, data []byte) (storageformat.MutationObject, error) {
-	namespace := strings.SplitN(key.String(), "/", 2)[0]
-	objectKey := storageformat.StateVersionKey(namespace, key.String(), string(version))
-	body, err := storageformat.EncodeEnvelope(stateVersionSchema, objectKey, 1, storageformat.StateVersionRecord{
-		SchemaVersion: 1, LogicalKey: key.String(), LogicalVersion: string(version), Data: append([]byte(nil), data...),
-	})
+	objectKey := storageformat.StateVersionKey(stateNamespace(key), key.String(), string(version))
+	body, err := storageformat.EncodeEnvelope(stateVersionSchema, objectKey, 1, storageformat.StateVersionRecord{SchemaVersion: 1, LogicalKey: key.String(), LogicalVersion: string(version), Data: append([]byte(nil), data...)})
 	if err != nil {
 		return storageformat.MutationObject{}, err
 	}
 	return storageformat.MutationObject{Key: objectKey.String(), Body: body}, nil
+}
+
+func (e *Engine) readIndexedStateValue(ctx context.Context, entry storageformat.StateIndexEntry) (state.Value, error) {
+	logical, err := parseExistingStateKey(entry.LogicalKey)
+	if err != nil || entry.LogicalVersion == "" {
+		return state.Value{}, domain.NewError(domain.ErrorInvalid, "invalid state index entry")
+	}
+	key := storageformat.StateVersionKey(stateNamespace(logical), logical.String(), entry.LogicalVersion)
+	object, err := e.backend.Get(ctx, key)
+	if err != nil {
+		return state.Value{}, err
+	}
+	var envelope storageformat.Envelope
+	var record storageformat.StateVersionRecord
+	if err := storageformat.DecodeEnvelope(object.Body, key, stateVersionSchema, &envelope, &record); err != nil {
+		return state.Value{}, err
+	}
+	if record.SchemaVersion != 1 || record.LogicalKey != logical.String() || record.LogicalVersion != entry.LogicalVersion {
+		return state.Value{}, domain.NewError(domain.ErrorInvalid, "state index snapshot mismatch")
+	}
+	return state.Value{Data: append([]byte(nil), record.Data...), Version: state.Version(record.LogicalVersion)}, nil
 }
 
 func (e *Engine) encodeStateListCursor(cursor stateListCursor) (string, error) {
@@ -251,70 +275,25 @@ func (e *Engine) encodeStateListCursor(cursor stateListCursor) (string, error) {
 		return "", domain.NewError(domain.ErrorInternal, "secure cursor randomness unavailable")
 	}
 	nonce := nonceMaterial[:e.cursorAEAD.NonceSize()]
-	sealed := e.cursorAEAD.Seal(append([]byte(nil), nonce...), nonce, body, []byte("endlessfs-state-cursor-v1"))
+	sealed := e.cursorAEAD.Seal(append([]byte(nil), nonce...), nonce, body, []byte("endlessfs-state-cursor-v3"))
 	return base64.RawURLEncoding.EncodeToString(sealed), nil
 }
 
 func (e *Engine) decodeStateListCursor(value string) (stateListCursor, error) {
 	sealed, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil || len(sealed) <= e.cursorAEAD.NonceSize() {
-		return stateListCursor{}, err
+		return stateListCursor{}, domain.NewError(domain.ErrorInvalid, "invalid state cursor")
 	}
 	nonceSize := e.cursorAEAD.NonceSize()
-	body, err := e.cursorAEAD.Open(nil, sealed[:nonceSize], sealed[nonceSize:], []byte("endlessfs-state-cursor-v1"))
+	body, err := e.cursorAEAD.Open(nil, sealed[:nonceSize], sealed[nonceSize:], []byte("endlessfs-state-cursor-v3"))
 	if err != nil {
 		return stateListCursor{}, domain.NewError(domain.ErrorInvalid, "invalid state cursor")
 	}
 	var cursor stateListCursor
-	if err := decodeCanonicalValue(body, &cursor); err != nil || cursor.SchemaVersion != 1 || cursor.GateEpoch == 0 || cursor.GateVersion == "" || cursor.ExpiresAt.IsZero() || len(cursor.Snapshots) == 0 {
+	if err := decodeCanonicalValue(body, &cursor); err != nil || cursor.SchemaVersion != 3 || cursor.Namespace == "" || cursor.RootNodeID == "" || cursor.RootDigest == "" || cursor.RootCount == 0 || cursor.GateEpoch == 0 || cursor.GateVersion == "" || cursor.ExpiresAt.IsZero() {
 		return stateListCursor{}, domain.NewError(domain.ErrorInvalid, "invalid state cursor")
 	}
 	return cursor, nil
-}
-
-func (e *Engine) Delete(ctx context.Context, key state.Key, current state.Version) error {
-	if err := validateStateKey(key); err != nil {
-		return err
-	}
-	if current == "" {
-		return domain.NewError(domain.ErrorInvalid, "current state version is required")
-	}
-	objectKey := canonicalStateKey(key)
-	object, err := e.backend.Get(ctx, objectKey)
-	if err != nil {
-		return err
-	}
-	_, envelope, err := decodeStateObject(object, key)
-	if err != nil {
-		return err
-	}
-	if state.Version(envelope.LogicalVersion) != current {
-		return domain.NewError(domain.ErrorPreconditionFailed, "stale state version")
-	}
-	intent := storageformat.MutationIntent{Action: storageformat.MutationDelete, TargetKey: objectKey.String(), ExpectedLogicalVersion: string(current)}
-	return e.withAdmission(ctx, intent, func() error {
-		return e.backend.Delete(ctx, objectKey, objectstore.DeleteCondition{Version: object.Version})
-	})
-}
-
-func (e *Engine) listAll(ctx context.Context, prefix string) ([]objectstore.ObjectInfo, error) {
-	return listAllFrom(ctx, e.backend, prefix)
-}
-
-func listAllFrom(ctx context.Context, backend objectstore.Backend, prefix string) ([]objectstore.ObjectInfo, error) {
-	request := objectstore.ListRequest{Prefix: prefix, Limit: 1000}
-	var result []objectstore.ObjectInfo
-	for {
-		page, err := backend.List(ctx, request)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, page.Objects...)
-		if page.NextCursor == "" {
-			return result, nil
-		}
-		request.Cursor = page.NextCursor
-	}
 }
 
 func validateStateKey(key state.Key) error {
@@ -335,8 +314,7 @@ func validateStateMutation(key state.Key, data []byte) error {
 }
 
 func canonicalStateKey(key state.Key) objectstore.Key {
-	namespace := strings.SplitN(key.String(), "/", 2)[0]
-	return storageformat.StateKey(namespace, key.String())
+	return storageformat.StateKey(stateNamespace(key), key.String())
 }
 
 func decodeStateObject(object objectstore.Object, key state.Key) (storageformat.StateRecord, storageformat.Envelope, error) {
@@ -358,25 +336,16 @@ func parseExistingStateKey(value string) (state.Key, error) {
 	}
 	namespace := state.Namespace(parts[0])
 	decoded := make([]string, 0, len(parts)-1)
-	for _, encoded := range parts[1:] {
-		// Reconstruct through the public constructor by decoding its base64url parts.
-		part, err := decodeStatePart(encoded)
-		if err != nil {
-			return state.Key{}, err
+	for _, part := range parts[1:] {
+		value, err := base64.RawURLEncoding.DecodeString(part)
+		if err != nil || base64.RawURLEncoding.EncodeToString(value) != part {
+			return state.Key{}, domain.NewError(domain.ErrorInvalid, "invalid stored state key")
 		}
-		decoded = append(decoded, part)
+		decoded = append(decoded, string(value))
 	}
-	return state.NewKey(namespace, decoded...)
-}
-
-func decodeStatePart(value string) (string, error) {
-	decoded, err := base64RawURLDecode(value)
-	if err != nil {
-		return "", domain.NewError(domain.ErrorInvalid, "invalid stored state key encoding")
+	key, err := state.NewKey(namespace, decoded...)
+	if err != nil || key.String() != value {
+		return state.Key{}, domain.NewError(domain.ErrorInvalid, "invalid stored state key")
 	}
-	return string(decoded), nil
-}
-
-var base64RawURLDecode = func(value string) ([]byte, error) {
-	return base64.RawURLEncoding.DecodeString(value)
+	return key, nil
 }

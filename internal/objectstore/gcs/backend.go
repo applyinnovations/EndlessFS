@@ -124,7 +124,17 @@ func (b *Backend) Head(ctx context.Context, key objectstore.Key) (objectstore.Ob
 	if attrs.Generation <= 0 || attrs.Size < 0 {
 		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorInternal, "GCS returned invalid object metadata")
 	}
-	return objectstore.ObjectInfo{Key: key, Version: encodeVersion(attrs.Generation), Size: attrs.Size}, nil
+	return objectInfoFromAttrs(key, attrs)
+}
+
+func objectInfoFromAttrs(key objectstore.Key, attrs *storage.ObjectAttrs) (objectstore.ObjectInfo, error) {
+	if attrs.Generation <= 0 || attrs.Size < 0 || (len(attrs.MD5) != 0 && len(attrs.MD5) != 16) {
+		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorInternal, "GCS returned invalid object metadata")
+	}
+	return objectstore.ObjectInfo{
+		Key: key, Version: encodeVersion(attrs.Generation), Size: attrs.Size,
+		Fingerprint: objectstore.ContentFingerprint{MD5: integrity.EncodeMD5(attrs.MD5), CRC32C: integrity.EncodeCRC32C(attrs.CRC32C)},
+	}, nil
 }
 
 func (b *Backend) Verify(ctx context.Context, key objectstore.Key, expected objectstore.ExpectedIntegrity) (objectstore.ObjectInfo, error) {
@@ -148,7 +158,7 @@ func (b *Backend) Verify(ctx context.Context, key objectstore.Key, expected obje
 	if attrs.Size != expected.Size || attrs.CRC32C != expectedCRC32C {
 		return objectstore.ObjectInfo{}, domain.NewError(domain.ErrorPreconditionFailed, "object integrity does not match")
 	}
-	return objectstore.ObjectInfo{Key: key, Version: encodeVersion(attrs.Generation), Size: attrs.Size}, nil
+	return objectInfoFromAttrs(key, attrs)
 }
 
 func (b *Backend) Get(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
@@ -177,19 +187,18 @@ func (b *Backend) Open(ctx context.Context, key objectstore.Key) (objectstore.Ob
 	if !key.Valid() {
 		return objectstore.ObjectReader{}, domain.NewError(domain.ErrorInvalid, "invalid object key")
 	}
-	info, err := b.Head(ctx, key)
-	if err != nil {
-		return objectstore.ObjectReader{}, err
-	}
-	generation, err := decodeVersion(info.Version)
-	if err != nil {
-		return objectstore.ObjectReader{}, err
-	}
-	reader, err := b.bucket.Object(key.String()).Generation(generation).NewReader(ctx)
+	reader, err := b.bucket.Object(key.String()).NewReader(ctx)
 	if err != nil {
 		return objectstore.ObjectReader{}, classify("GCS object read failed", err)
 	}
-	return objectstore.ObjectReader{Key: key, Body: &classifiedObjectReader{ReadCloser: reader}, Version: info.Version, Size: info.Size}, nil
+	if reader.Attrs.Generation <= 0 || reader.Attrs.Size < 0 {
+		_ = reader.Close()
+		return objectstore.ObjectReader{}, domain.NewError(domain.ErrorInternal, "GCS returned invalid object reader metadata")
+	}
+	return objectstore.ObjectReader{
+		Key: key, Body: &classifiedObjectReader{ReadCloser: reader},
+		Version: encodeVersion(reader.Attrs.Generation), Size: reader.Attrs.Size,
+	}, nil
 }
 
 type classifiedObjectReader struct{ io.ReadCloser }
@@ -213,7 +222,7 @@ func (b *Backend) List(ctx context.Context, request objectstore.ListRequest) (ob
 	if err := objectstore.ContextError(ctx); err != nil {
 		return objectstore.ListPage{}, err
 	}
-	if err := objectstore.ValidatePrefix(request.Prefix); err != nil {
+	if err := request.Validate(); err != nil {
 		return objectstore.ListPage{}, err
 	}
 	limit := request.Limit
@@ -224,7 +233,13 @@ func (b *Backend) List(ctx context.Context, request objectstore.ListRequest) (ob
 		return objectstore.ListPage{}, domain.NewError(domain.ErrorInvalid, "invalid object list limit")
 	}
 	values := make([]*storage.ObjectAttrs, 0, limit)
-	pager := iterator.NewPager(b.bucket.Objects(ctx, &storage.Query{Prefix: request.Prefix}), limit, request.Cursor)
+	query := &storage.Query{Prefix: request.Prefix}
+	if request.After != "" {
+		// GCS start offsets are inclusive. Appending NUL yields the smallest
+		// bytewise value strictly after an exact canonical ASCII key.
+		query.StartOffset = request.After + "\x00"
+	}
+	pager := iterator.NewPager(b.bucket.Objects(ctx, query), limit, request.Cursor)
 	next, err := pager.NextPage(&values)
 	if err != nil {
 		return objectstore.ListPage{}, classify("GCS object list failed", err)
@@ -235,7 +250,11 @@ func (b *Backend) List(ctx context.Context, request objectstore.ListRequest) (ob
 		if parseErr != nil || attrs.Generation <= 0 || attrs.Size < 0 {
 			return objectstore.ListPage{}, domain.NewError(domain.ErrorInternal, "GCS returned invalid object listing")
 		}
-		page.Objects = append(page.Objects, objectstore.ObjectInfo{Key: key, Version: encodeVersion(attrs.Generation), Size: attrs.Size})
+		info, infoErr := objectInfoFromAttrs(key, attrs)
+		if infoErr != nil {
+			return objectstore.ListPage{}, infoErr
+		}
+		page.Objects = append(page.Objects, info)
 	}
 	return page, nil
 }

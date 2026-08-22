@@ -2,10 +2,11 @@ package memory
 
 import (
 	"context"
+	"crypto/md5" // #nosec G501 -- MD5 models one provider checksum in the non-cryptographic (size, MD5, CRC32C) content fingerprint.
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"hash"
+	"hash/crc32"
 	"io"
 	"net"
 	"net/http"
@@ -15,13 +16,15 @@ import (
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/integrity"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 )
 
 const (
-	TransferUploadData       = "upload_data"
-	TransferDownloadData     = "download_data"
-	TransferFaultInterrupted = "interrupted_upload"
+	TransferUploadData         = "upload_data"
+	TransferDownloadData       = "download_data"
+	TransferFaultInterrupted   = "interrupted_upload"
+	TransferFaultNoFingerprint = "missing_provider_fingerprint"
 )
 
 type uploadSession struct {
@@ -34,7 +37,9 @@ type uploadSession struct {
 	offset       int64
 	body         []byte
 	materialized bool
-	hasher       hash.Hash
+	md5          hash.Hash
+	crc32c       hash.Hash32
+	fingerprint  objectstore.ContentFingerprint
 	tokenHash    [sha256.Size]byte
 	aborted      bool
 	version      objectstore.NativeVersion
@@ -122,7 +127,9 @@ func (b *Backend) BeginUpload(ctx context.Context, request objectstore.UploadReq
 	hash := sha256.Sum256([]byte(token))
 	session := &uploadSession{
 		id: request.UploadID, key: request.Key, size: request.Size, mediaType: request.MediaType,
-		protocol: protocol, expiresAt: request.ExpiresAt.UTC(), materialized: true, hasher: sha256.New(), tokenHash: hash,
+		protocol: protocol, expiresAt: request.ExpiresAt.UTC(), materialized: true,
+		md5:    md5.New(), // #nosec G401 -- local provider metadata only; never authentication or a standalone trust decision.
+		crc32c: crc32.New(crc32.MakeTable(crc32.Castagnoli)), tokenHash: hash,
 	}
 	b.uploads[request.UploadID] = session
 	b.uploadTokens[hash] = request.UploadID
@@ -174,14 +181,32 @@ func (b *Backend) UploadProgress(ctx context.Context, lease []byte) (objectstore
 	if !found || session.aborted {
 		return objectstore.UploadProgress{}, domain.NewError(domain.ErrorNotFound, "upload not found")
 	}
-	checksum := ""
-	if session.offset == session.size && session.materialized {
-		checksum = hex.EncodeToString(session.hasher.Sum(nil))
+	if b.consumeTransferFault(TransferUploadData, TransferFaultNoFingerprint) {
+		return objectstore.UploadProgress{
+			Offset: session.offset, Size: session.size, ExpiresAt: session.expiresAt,
+			Complete: session.offset == session.size, Version: session.version, Materialized: session.materialized,
+		}, nil
 	}
 	return objectstore.UploadProgress{
 		Offset: session.offset, Size: session.size, ExpiresAt: session.expiresAt,
-		Complete: session.offset == session.size, Version: session.version, SHA256: checksum, Materialized: session.materialized,
+		Complete: session.offset == session.size, Version: session.version,
+		Fingerprint: sessionFingerprint(session), Materialized: session.materialized,
 	}, nil
+}
+
+func sessionFingerprint(session *uploadSession) objectstore.ContentFingerprint {
+	if session.offset != session.size {
+		return objectstore.ContentFingerprint{}
+	}
+	if session.fingerprint.Complete() {
+		return session.fingerprint
+	}
+	if !session.materialized {
+		return objectstore.ContentFingerprint{}
+	}
+	return objectstore.ContentFingerprint{
+		MD5: integrity.EncodeMD5(session.md5.Sum(nil)), CRC32C: integrity.EncodeCRC32C(session.crc32c.Sum32()),
+	}
 }
 
 func (b *Backend) AbortUpload(ctx context.Context, lease []byte) error {
@@ -254,9 +279,10 @@ func (b *Backend) SimulateUploadOffset(ctx context.Context, uploadID string, off
 	session.body = nil
 	session.materialized = false
 	if offset == session.size {
+		session.fingerprint = objectstore.FingerprintFor([]byte("memory-provider-attested-unmaterialized-object"))
 		b.versions++
 		session.version = objectstore.VersionString("m", b.versions)
-		b.records[session.key.String()] = record{version: session.version, size: session.size, materialized: false}
+		b.records[session.key.String()] = record{version: session.version, size: session.size, materialized: false, fingerprint: sessionFingerprint(session)}
 	}
 	return nil
 }
@@ -336,7 +362,8 @@ func (b *Backend) serveUpload(writer http.ResponseWriter, request *http.Request,
 		accepted = max(1, accepted/2)
 	}
 	acceptedBody := body[:accepted]
-	_, _ = session.hasher.Write(acceptedBody)
+	_, _ = session.md5.Write(acceptedBody)
+	_, _ = session.crc32c.Write(acceptedBody)
 	if session.materialized && session.offset+int64(accepted) <= 16<<20 {
 		session.body = append(session.body, acceptedBody...)
 	} else {
@@ -348,7 +375,10 @@ func (b *Backend) serveUpload(writer http.ResponseWriter, request *http.Request,
 	if session.offset == session.size {
 		b.versions++
 		session.version = objectstore.VersionString("m", b.versions)
-		b.records[session.key.String()] = record{body: append([]byte(nil), session.body...), version: session.version, size: session.size, materialized: session.materialized}
+		b.records[session.key.String()] = record{
+			body: append([]byte(nil), session.body...), version: session.version, size: session.size,
+			materialized: session.materialized, fingerprint: sessionFingerprint(session),
+		}
 	}
 	if accepted != len(body) {
 		http.Error(writer, "upload interrupted", http.StatusServiceUnavailable)

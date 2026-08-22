@@ -11,7 +11,10 @@ func TestCheckAcceptsGoAndApplicationAssets(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	writeFixture(t, root, "main.go")
+	mainPath := filepath.Join(root, "main.go")
+	if err := os.WriteFile(mainPath, []byte("package main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	writeFixture(t, root, "internal/web/ui/js/files.js")
 	writeFixture(t, root, "internal/web/ui/css/files.css")
 
@@ -69,7 +72,7 @@ func TestCheckRejectsForbiddenIdentityConceptsAndMissingRoot(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte("email oauth password"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("package model\n// email oauth password\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	violations, err := check(root)
@@ -129,6 +132,86 @@ devShells = forAllSystems (system: { });
 	joined := strings.Join(violations, "\n")
 	if !strings.Contains(joined, "browser runtime gate must run outside the Nix build sandbox") {
 		t.Fatalf("violations %q do not reject sandboxed browser execution", joined)
+	}
+}
+
+func TestCheckRejectsControlPlaneFileBodyStreamingWithActionableGuidance(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "internal", "portable", "checkpoint.go")
+	content := `package portable
+
+func inventory(ctx, backend, key any) {
+	stream, _ := backend.Open(ctx, key)
+	_ = stream
+}
+`
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	violations, err := check(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(violations, "\n")
+	for _, want := range []string{
+		"internal/portable/checkpoint.go:4",
+		"stored file body",
+		"provider metadata",
+		"server-side copy",
+		"direct data-plane capability",
+		"bandwidth, memory, and CPU",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("violations %q do not contain %q", joined, want)
+		}
+	}
+}
+
+func TestCheckAllowsOnlyRegisteredOptionalFileBodyFeatureExemption(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	previewPath := filepath.Join(root, "internal", "preview", "service.go")
+	preview := `//endlessfs:file-body-read-exemption feature=image-preview-generation
+package preview
+
+func generate(ctx, backend, key any) {
+	stream, _ := backend.Open(ctx, key)
+	_ = stream
+}
+`
+	if err := os.MkdirAll(filepath.Dir(previewPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(previewPath, []byte(preview), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	violations, err := check(root)
+	if err != nil || len(violations) != 0 {
+		t.Fatalf("registered preview exemption violations = %v, %v", violations, err)
+	}
+
+	unsafePath := filepath.Join(root, "internal", "portable", "unsafe.go")
+	unsafe := strings.Replace(preview, "package preview", "package portable", 1)
+	if err := os.MkdirAll(filepath.Dir(unsafePath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unsafePath, []byte(unsafe), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	violations, err = check(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(violations, "\n")
+	if !strings.Contains(joined, "file-body-read exemption is not permitted") {
+		t.Fatalf("unregistered exemption violations = %q", joined)
 	}
 }
 

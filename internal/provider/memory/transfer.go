@@ -2,8 +2,6 @@ package memory
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"mime"
@@ -104,7 +102,7 @@ func (p *Provider) CreateUpload(ctx context.Context, scope domain.Scope, request
 	p.uploads[uploadID] = &upload{
 		id: uploadID, scope: scope, requestedPath: request.Path, path: path, size: request.Size, mediaType: mediaType,
 		conflict: conflict, expectedVersion: request.ExpectedVersion, targetExisted: targetExisted,
-		protocol: protocol, expiresAt: expiresAt, materialized: true, hasher: sha256.New(), state: domain.UploadStateActive, capabilityHash: hash,
+		protocol: protocol, expiresAt: expiresAt, materialized: true, state: domain.UploadStateActive, capabilityHash: hash,
 	}
 	p.uploadTokens[hash] = uploadID
 	headers := map[string]string{"Content-Type": mediaType}
@@ -173,8 +171,7 @@ func (p *Provider) CompleteUpload(ctx context.Context, scope domain.Scope, reque
 	if session.offset != session.size {
 		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload is incomplete")
 	}
-	checksum := hex.EncodeToString(session.hasher.Sum(nil))
-	if p.consumeSpecificFaultLocked(OperationCompleteUpload, FaultChecksumMismatch) || (request.ChecksumSHA256 != "" && !strings.EqualFold(request.ChecksumSHA256, checksum)) {
+	if p.consumeSpecificFaultLocked(OperationCompleteUpload, FaultChecksumMismatch) {
 		return domain.Entry{}, domain.NewError(domain.ErrorPreconditionFailed, "upload checksum does not match")
 	}
 	current, exists := p.scopeObjectsLocked(scope)[session.path.String()]
@@ -433,7 +430,6 @@ func (p *Provider) serveUpload(writer http.ResponseWriter, request *http.Request
 		}
 	}
 	acceptedData := data[:accepted]
-	_, _ = session.hasher.Write(acceptedData)
 	if session.materialized && session.offset+int64(accepted) <= p.maxMaterializedBytes {
 		session.data = append(session.data, acceptedData...)
 	} else {

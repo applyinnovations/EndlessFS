@@ -43,6 +43,34 @@ func TestLostUploadSuccessIsUnavailableAndNotRetried(t *testing.T) {
 	}
 }
 
+func TestGetReadsBodyVersionAndSizeInOneProviderRequest(t *testing.T) {
+	backend, fake := newProtocolBackend(t)
+	key := objectstore.MustKey("endlessfs/v1/state/users/atomic-read.json")
+	body := []byte("one atomic provider read")
+	version, err := backend.Put(context.Background(), key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	fake.metadataGetRequests = 0
+	fake.mediaGetRequests = 0
+	fake.mu.Unlock()
+
+	object, err := backend.Get(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(object.Body) != string(body) || object.Size != int64(len(body)) || object.Version != version {
+		t.Fatalf("Get() = %+v; want body, size, and version from the created object", object)
+	}
+	fake.mu.Lock()
+	metadataRequests, mediaRequests := fake.metadataGetRequests, fake.mediaGetRequests
+	fake.mu.Unlock()
+	if metadataRequests != 0 || mediaRequests != 1 {
+		t.Fatalf("Get() provider requests = metadata %d, media %d; want zero metadata and one media", metadataRequests, mediaRequests)
+	}
+}
+
 func TestServerWrittenObjectsSetNoStoreMetadata(t *testing.T) {
 	backend, fake := newProtocolBackend(t)
 	key := objectstore.MustKey("endlessfs/v1/state/users/cache-policy.json")
@@ -126,6 +154,32 @@ func TestVerifyUsesProviderIntegrityMetadataWithoutReadingObjectBytes(t *testing
 	}
 	if _, err := backend.Get(context.Background(), key); !errors.Is(err, domain.ErrInternal) {
 		t.Fatalf("Verify consumed object bytes instead of metadata; following Get() error = %v", err)
+	}
+}
+
+func TestHeadAndListReturnProviderFingerprintsWithoutReadingObjectBytes(t *testing.T) {
+	backend, fake := newProtocolBackend(t)
+	key := objectstore.MustKey("endlessfs/v1/fs/owner/blobs/provider-fingerprint")
+	body := []byte("provider-backed-content")
+	if _, err := backend.Put(context.Background(), key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := backend.Head(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := objectstore.FingerprintFor(body); info.Fingerprint != want {
+		t.Fatalf("Head fingerprint = %+v; want %+v", info.Fingerprint, want)
+	}
+	page, err := backend.List(context.Background(), objectstore.ListRequest{Prefix: "endlessfs/v1/fs/owner/blobs/"})
+	if err != nil || len(page.Objects) != 1 || page.Objects[0].Fingerprint != info.Fingerprint {
+		t.Fatalf("List() = %+v, %v; want Head fingerprint", page, err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.downloadBytes != 0 {
+		t.Fatalf("metadata queries downloaded %d object bytes", fake.downloadBytes)
 	}
 }
 

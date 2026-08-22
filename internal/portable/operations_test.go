@@ -59,6 +59,61 @@ func TestPortableRecursiveOperationsAreDurableIdempotentAndIsolated(t *testing.T
 	}
 }
 
+func TestCreateDirectoryReplacementAdmitsBeforeSubtreePreparation(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2040, 1, 2, 13, 14, 15, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(60, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	seed := openEngine(t, backend, clock, 61, nil)
+	user, _ := domain.ParseUserID("VVVVVVVVVVVVVVVVVVVVVQ")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	path := domain.MustParseUserPath("/replace")
+	if _, err := seed.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: path}); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 65; index++ {
+		uploadPortableFile(t, server.Client(), seed.Files(), scope, domain.MustParseUserPath(fmt.Sprintf("/replace/file-%03d.bin", index)), []byte{byte(index)})
+	}
+	existing, err := seed.Files().Stat(context.Background(), scope, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashed := false
+	crasher := portable.SchedulerFunc(func(_ context.Context, step string) error {
+		if step == portable.StepOperationAfterHeader && !crashed {
+			crashed = true
+			return domain.NewError(domain.ErrorUnavailable, "simulated loss after durable create-directory header")
+		}
+		return nil
+	})
+	replacing := openEngine(t, backend, clock, 62, crasher)
+	if _, err := replacing.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{
+		Path: path, Conflict: domain.ConflictReplace, ExpectedVersion: existing.Version,
+	}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("interrupted CreateDirectory() error = %v; want unavailable", err)
+	}
+	if !crashed {
+		t.Fatal("create-directory replacement traversed the subtree before admitting a durable operation header")
+	}
+	observer := openEngine(t, backend, clock, 63, nil)
+	if entry, err := observer.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/replace/file-000.bin")); err != nil || entry.Size != 1 {
+		t.Fatalf("pre-recovery descendant = %+v, %v; want original tree visible", entry, err)
+	}
+	clock.Advance(2 * time.Minute)
+	if _, err := observer.CreateCheckpoint(context.Background(), "create-directory-preparation-recovery"); err != nil {
+		t.Fatalf("checkpoint recovery error = %v", err)
+	}
+	if entry, err := observer.Files().Stat(context.Background(), scope, path); err != nil || entry.Size != 0 || entry.FileCount != 0 {
+		t.Fatalf("recovered replacement = %+v, %v; want empty directory", entry, err)
+	}
+	if _, err := observer.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/replace/file-000.bin")); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("recovered descendant remains: %v", err)
+	}
+}
+
 func TestPortableRecursiveAggregatesTrackEveryFileMutation(t *testing.T) {
 	backend := objectmemory.New()
 	server := httptest.NewServer(backend)

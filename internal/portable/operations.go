@@ -1032,16 +1032,6 @@ func domainFileOperation(operation storageformat.FileOperation) domain.Operation
 	}
 }
 
-func removeDirectoryEntry(entries []storageformat.DirectoryEntry, name string) []storageformat.DirectoryEntry {
-	result := make([]storageformat.DirectoryEntry, 0, len(entries))
-	for _, entry := range entries {
-		if entry.Name != name {
-			result = append(result, entry)
-		}
-	}
-	return result
-}
-
 func normalizeMutationObjects(objects []storageformat.MutationObject) ([]storageformat.MutationObject, error) {
 	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
 	result := objects[:0]

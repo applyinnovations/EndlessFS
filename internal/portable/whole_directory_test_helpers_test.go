@@ -13,6 +13,16 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
+func removeDirectoryEntry(entries []storageformat.DirectoryEntry, name string) []storageformat.DirectoryEntry {
+	result := make([]storageformat.DirectoryEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Name != name {
+			result = append(result, entry)
+		}
+	}
+	return result
+}
+
 func listAllFrom(ctx context.Context, backend objectstore.ListBackend, prefix string) ([]objectstore.ObjectInfo, error) {
 	request := objectstore.ListRequest{Prefix: prefix, Limit: 1000}
 	var result []objectstore.ObjectInfo

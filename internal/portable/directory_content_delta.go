@@ -151,8 +151,7 @@ func (s *FileStore) rebuildDirectoryContentIndexWithDeltas(
 		values = append(values, directoryContentDeltaHeapItem{source: index, key: key, value: value})
 	}
 	heap.Init(&values)
-	var next func() (storageformat.DirectoryContentIndexEntry, bool, error)
-	next = func() (storageformat.DirectoryContentIndexEntry, bool, error) {
+	next := func() (storageformat.DirectoryContentIndexEntry, bool, error) {
 		for len(values) != 0 {
 			key := values[0].key
 			var base, removal, addition *storageformat.DirectoryContentIndexEntry

@@ -1419,7 +1419,9 @@ func applyDirectoryContentChanges(changes map[string]directoryContentIndexMutati
 	for key, incoming := range values {
 		current, found := changes[key]
 		if !found {
-			changes[key] = incoming
+			if !sameOptionalDirectoryContentIndexEntry(incoming.before, incoming.after) {
+				changes[key] = incoming
+			}
 			continue
 		}
 		if incoming.before == nil || !sameOptionalDirectoryContentIndexEntry(current.after, incoming.before) {

@@ -28,7 +28,7 @@ func directoryContentIndexEntry(relativePath domain.UserPath, entry storageforma
 	if err != nil {
 		return storageformat.DirectoryContentIndexEntry{}, err
 	}
-	value := storageformat.DirectoryContentIndexEntry{GroupID: groupID, RelativePath: relativePath.String(), Size: entry.Size, Version: entry.LogicalVersion}
+	value := storageformat.DirectoryContentIndexEntry{GroupID: groupID, RelativePath: relativePath.String(), Size: entry.Size}
 	_, err = directoryContentIndexKey(value)
 	return value, err
 }
@@ -98,7 +98,7 @@ func (s *FileStore) directoryContentIndexEntries(ctx context.Context, scope doma
 }
 
 func directoryContentIndexKey(value storageformat.DirectoryContentIndexEntry) (string, error) {
-	if err := validateDuplicateGroupID(value.GroupID); err != nil || value.Size < 0 || value.Version == "" {
+	if err := validateDuplicateGroupID(value.GroupID); err != nil || value.Size < 0 {
 		return "", domain.NewError(domain.ErrorInvalid, "invalid directory content-index entry")
 	}
 	path, err := domain.ParseUserPath(value.RelativePath)
@@ -417,7 +417,7 @@ func (s *FileStore) verifyDirectoryContentIndex(ctx context.Context, scope domai
 				return err
 			}
 			groupID, err := duplicateFileGroupID(entry)
-			if err != nil || groupID != value.GroupID || entry.Size != value.Size || entry.LogicalVersion != value.Version {
+			if err != nil || groupID != value.GroupID || entry.Size != value.Size {
 				return domain.NewError(domain.ErrorInvalid, "directory content index disagrees with the filesystem")
 			}
 			files++

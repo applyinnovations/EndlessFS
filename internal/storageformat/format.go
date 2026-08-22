@@ -342,7 +342,6 @@ type DirectoryContentIndexEntry struct {
 	GroupID      string `json:"groupID"`
 	RelativePath string `json:"relativePath"`
 	Size         int64  `json:"size"`
-	Version      string `json:"version"`
 }
 
 type DirectoryContentIndexChild struct {

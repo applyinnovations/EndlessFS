@@ -1698,11 +1698,11 @@ func (s *FileStore) reconciliationIndexItems(ctx context.Context, userID domain.
 		if err != nil {
 			return nil, "", "", false, err
 		}
-		leftOccurrence, err := duplicateContentIndexOccurrence(left, leftValue)
+		leftOccurrence, err := s.duplicateContentIndexOccurrence(ctx, left, leftValue)
 		if err != nil {
 			return nil, "", "", false, err
 		}
-		rightOccurrence, err := duplicateContentIndexOccurrence(right, rightValue)
+		rightOccurrence, err := s.duplicateContentIndexOccurrence(ctx, right, rightValue)
 		if err != nil {
 			return nil, "", "", false, err
 		}
@@ -1714,7 +1714,7 @@ func (s *FileStore) reconciliationIndexItems(ctx context.Context, userID domain.
 	}
 }
 
-func duplicateContentIndexOccurrence(inventory duplicateDirectoryContentInventory, value storageformat.DirectoryContentIndexEntry) (domain.DuplicateOccurrence, error) {
+func (s *FileStore) duplicateContentIndexOccurrence(ctx context.Context, inventory duplicateDirectoryContentInventory, value storageformat.DirectoryContentIndexEntry) (domain.DuplicateOccurrence, error) {
 	relative, err := domain.ParseUserPath(value.RelativePath)
 	if err != nil || relative.IsRoot() {
 		return domain.DuplicateOccurrence{}, domain.NewError(domain.ErrorInvalid, "invalid duplicate content relative path")
@@ -1726,9 +1726,17 @@ func duplicateContentIndexOccurrence(inventory duplicateDirectoryContentInventor
 			return domain.DuplicateOccurrence{}, err
 		}
 	}
+	entry, err := s.resolveDirectoryContentIndexEntry(ctx, inventory.scope, inventory.directory, value.RelativePath)
+	if err != nil {
+		return domain.DuplicateOccurrence{}, err
+	}
+	groupID, err := duplicateFileGroupID(entry)
+	if err != nil || groupID != value.GroupID || entry.Size != value.Size {
+		return domain.DuplicateOccurrence{}, domain.NewError(domain.ErrorInvalid, "duplicate content index disagrees with the selected file")
+	}
 	return domain.DuplicateOccurrence{
 		GroupID: value.GroupID, Kind: domain.DuplicateFile, Area: inventory.scope.Area(), AreaName: areaName(inventory.scope.Area()),
-		Path: path, Size: value.Size, FileCount: 1, Version: domain.Version(value.Version),
+		Path: path, Size: value.Size, FileCount: 1, Version: domain.Version(entry.LogicalVersion),
 	}, nil
 }
 

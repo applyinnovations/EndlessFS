@@ -138,6 +138,67 @@ func TestDirectoryIndexSingleEntryUpdateRetainsUnchangedNodesAndReadsBoundedPage
 	}
 }
 
+func TestDirectoryContentIndexSharesRootAcrossSameContentReplacement(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2045, 3, 5, 5, 6, 7, 0, time.UTC))
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("same-content-index-entropy", 1<<17)))
+	user, _ := domain.ParseUserID("amtra2tra2tra2tra2traw")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	entry := withCurrentTestFingerprint(storageformat.DirectoryEntry{
+		Name: "same.bin", NameDigest: storageformat.NameDigest("same.bin"), Kind: domain.EntryFile,
+		BlobID: "first-blob", Size: 9, MediaType: "application/octet-stream", ModifiedAt: clock.Now(),
+	})
+	initial, err := engine.Files().prepareDirectory(ctx, scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{entry}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, prerequisite := range initial.prerequisites {
+		if _, err := backend.Put(ctx, objectstore.MustKey(prerequisite.Key), prerequisite.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rootKey := storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID)
+	if _, err := backend.Put(ctx, rootKey, initial.rootBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := engine.Files().readDirectoryMetadata(ctx, scope, storageformat.RootDirectoryID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := entry
+	replacement.BlobID = "second-blob"
+	replacement.ModifiedAt = clock.Now().Add(time.Second)
+	replacement.LogicalVersion, err = directoryEntryVersion(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates := make(map[string]directoryUpdate)
+	trail := []directoryTrailNode{{scope: scope, path: domain.MustParseUserPath("/"), directoryID: storageformat.RootDirectoryID, snapshot: snapshot}}
+	if err := applyDirectoryEntryChange(updates, trail, &entry, &replacement); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := engine.Files().prepareDirectoryMutation(ctx, updates[rootKey.String()], 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest storageformat.DirectoryManifest
+	for _, prerequisite := range updated.prerequisites {
+		if strings.Contains(prerequisite.Key, "/content-index/") {
+			t.Fatalf("same-content replacement rewrote content node %s", prerequisite.Key)
+		}
+		if strings.Contains(prerequisite.Key, "/manifests/") {
+			var envelope storageformat.Envelope
+			if err := storageformat.DecodeEnvelope(prerequisite.Body, objectstore.MustKey(prerequisite.Key), directoryManifestSchema, &envelope, &manifest); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if manifest.ContentIndexRootID != snapshot.manifest.ContentIndexRootID || manifest.ContentIndexRootDigest != snapshot.manifest.ContentIndexRootDigest {
+		t.Fatalf("same-content replacement changed content root: before=%s/%s after=%s/%s", snapshot.manifest.ContentIndexRootID, snapshot.manifest.ContentIndexRootDigest, manifest.ContentIndexRootID, manifest.ContentIndexRootDigest)
+	}
+}
+
 func TestDirectoryContentAccumulatorMatchesFullRebuildAcrossSmallChanges(t *testing.T) {
 	now := time.Date(2045, 3, 4, 5, 6, 7, 0, time.UTC)
 	entry := func(name string, size int64) storageformat.DirectoryEntry {

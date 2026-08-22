@@ -155,18 +155,18 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 	if err != nil {
 		return domain.Operation{}, err
 	}
-	if len(preparation.occurrences) != 0 {
-		preparation.occurrences[0].entry = preparation.entry
-	}
+	var sourceOccurrences []relativeCatalogEntry
 	if move && from.Area() == to.Area() {
-		preparation.occurrences, err = s.collectCatalogTree(ctx, from, sourceEntry)
+		sourceOccurrences, err = s.collectCatalogTree(ctx, from, sourceEntry)
 		if err != nil {
 			return domain.Operation{}, err
 		}
+		preparation.occurrences = append([]relativeCatalogEntry(nil), sourceOccurrences...)
+		preparation.occurrences[0].entry = preparation.entry
+	} else if len(preparation.occurrences) != 0 {
 		preparation.occurrences[0].entry = preparation.entry
 	}
-	sourceOccurrences := []relativeCatalogEntry(nil)
-	if move {
+	if move && len(sourceOccurrences) == 0 {
 		sourceOccurrences, err = s.collectCatalogTree(ctx, from, sourceEntry)
 		if err != nil {
 			return domain.Operation{}, err

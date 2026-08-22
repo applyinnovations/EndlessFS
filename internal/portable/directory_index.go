@@ -533,55 +533,6 @@ func (s *FileStore) mutateDirectoryIndexNode(ctx context.Context, scope domain.S
 	return s.splitDirectoryIndexNode(scope, directoryID, false, nil, updated, staged)
 }
 
-func directoryEntryChanges(before, after []storageformat.DirectoryEntry) ([]string, map[string]*storageformat.DirectoryEntry) {
-	old := append([]storageformat.DirectoryEntry(nil), before...)
-	current := append([]storageformat.DirectoryEntry(nil), after...)
-	sort.Slice(old, func(i, j int) bool { return old[i].Name < old[j].Name })
-	sort.Slice(current, func(i, j int) bool { return current[i].Name < current[j].Name })
-	changes := make(map[string]*storageformat.DirectoryEntry)
-	var names []string
-	for left, right := 0, 0; left < len(old) || right < len(current); {
-		switch {
-		case right == len(current) || left < len(old) && old[left].Name < current[right].Name:
-			names = append(names, old[left].Name)
-			changes[old[left].Name] = nil
-			left++
-		case left == len(old) || current[right].Name < old[left].Name:
-			entry := current[right]
-			names = append(names, entry.Name)
-			changes[entry.Name] = &entry
-			right++
-		default:
-			if old[left] != current[right] {
-				entry := current[right]
-				names = append(names, entry.Name)
-				changes[entry.Name] = &entry
-			}
-			left++
-			right++
-		}
-	}
-	return names, changes
-}
-
-func (s *FileStore) mutateDirectoryIndex(ctx context.Context, scope domain.Scope, directoryID string, manifest storageformat.DirectoryManifest, before, after []storageformat.DirectoryEntry) (storageformat.DirectoryIndexChild, []storageformat.MutationObject, error) {
-	names, replacements := directoryEntryChanges(before, after)
-	changes := make(map[string]directoryEntryMutation, len(names))
-	old := make(map[string]storageformat.DirectoryEntry, len(before))
-	for _, entry := range before {
-		old[entry.Name] = entry
-	}
-	for _, name := range names {
-		change := directoryEntryMutation{after: replacements[name]}
-		if entry, ok := old[name]; ok {
-			entryCopy := entry
-			change.before = &entryCopy
-		}
-		changes[name] = change
-	}
-	return s.mutateDirectoryIndexChanges(ctx, scope, directoryID, manifest, changes)
-}
-
 func (s *FileStore) mutateDirectoryIndexChanges(ctx context.Context, scope domain.Scope, directoryID string, manifest storageformat.DirectoryManifest, changes map[string]directoryEntryMutation) (storageformat.DirectoryIndexChild, []storageformat.MutationObject, error) {
 	var root *storageformat.DirectoryIndexChild
 	if manifest.EntryCount > 0 {

@@ -223,6 +223,16 @@ func FileOperationStepPageSetPrefix(userID, operationID, stepSetID string) strin
 
 func FileOperationStepsPrefix() string { return root + "operation-steps/" }
 
+func FileOperationPreparationPageKey(userID, operationID, runSetID string, generation, run, page uint64) objectstore.Key {
+	return fixedKey("operation-preparation/" + encodedPart(userID) + "/" + encodedPart(operationID) + "/" + encodedPart(runSetID) + "/" + fmt.Sprintf("%016x/%016x/%016x.json", generation, run, page))
+}
+
+func FileOperationPreparationPrefix(userID, operationID string) string {
+	return root + "operation-preparation/" + encodedPart(userID) + "/" + encodedPart(operationID) + "/"
+}
+
+func FileOperationPreparationsPrefix() string { return root + "operation-preparation/" }
+
 func OperationStagingKey(userID, operationID, artifactID string) objectstore.Key {
 	return fixedKey("operation-staging/" + encodedPart(userID) + "/" + encodedPart(operationID) + "/" + encodedPart(artifactID))
 }

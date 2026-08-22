@@ -450,6 +450,7 @@ type TransferLease struct {
 type FileOperationState string
 
 const (
+	FileOperationPreparing FileOperationState = "preparing"
 	FileOperationRunning   FileOperationState = "running"
 	FileOperationCommitted FileOperationState = "committed"
 	FileOperationSucceeded FileOperationState = "succeeded"
@@ -466,26 +467,61 @@ type FileOperationRoot struct {
 }
 
 type FileOperation struct {
-	SchemaVersion    int                 `json:"schemaVersion"`
-	OperationID      string              `json:"operationID"`
-	UserID           string              `json:"userID"`
-	Kind             string              `json:"kind"`
-	State            FileOperationState  `json:"state"`
-	Attempt          uint64              `json:"attempt"`
-	Fence            uint64              `json:"fence"`
-	ReplicaAttemptID string              `json:"replicaAttemptID"`
-	ExpiresAt        time.Time           `json:"expiresAt"`
-	StartedAt        time.Time           `json:"startedAt"`
-	UpdatedAt        time.Time           `json:"updatedAt"`
-	ErrorKind        domain.ErrorKind    `json:"errorKind,omitempty"`
-	Error            string              `json:"error,omitempty"`
-	Roots            []FileOperationRoot `json:"roots"`
-	Prerequisites    []MutationObject    `json:"prerequisites,omitempty"`
-	Copies           []MutationCopy      `json:"copies,omitempty"`
-	StepPageCount    uint64              `json:"stepPageCount,omitempty"`
-	StepSetID        string              `json:"stepSetID,omitempty"`
-	StepDigest       string              `json:"stepDigest,omitempty"`
-	StepsStaged      bool                `json:"stepsStaged,omitempty"`
+	SchemaVersion    int                       `json:"schemaVersion"`
+	OperationID      string                    `json:"operationID"`
+	UserID           string                    `json:"userID"`
+	Kind             string                    `json:"kind"`
+	State            FileOperationState        `json:"state"`
+	Attempt          uint64                    `json:"attempt"`
+	Fence            uint64                    `json:"fence"`
+	ReplicaAttemptID string                    `json:"replicaAttemptID"`
+	ExpiresAt        time.Time                 `json:"expiresAt"`
+	StartedAt        time.Time                 `json:"startedAt"`
+	UpdatedAt        time.Time                 `json:"updatedAt"`
+	ErrorKind        domain.ErrorKind          `json:"errorKind,omitempty"`
+	Error            string                    `json:"error,omitempty"`
+	Roots            []FileOperationRoot       `json:"roots"`
+	Prerequisites    []MutationObject          `json:"prerequisites,omitempty"`
+	Copies           []MutationCopy            `json:"copies,omitempty"`
+	StepPageCount    uint64                    `json:"stepPageCount,omitempty"`
+	StepSetID        string                    `json:"stepSetID,omitempty"`
+	StepDigest       string                    `json:"stepDigest,omitempty"`
+	StepsStaged      bool                      `json:"stepsStaged,omitempty"`
+	Preparation      *FileOperationPreparation `json:"preparation,omitempty"`
+}
+
+type FileOperationPreparation struct {
+	SchemaVersion int    `json:"schemaVersion"`
+	RunSetID      string `json:"runSetID"`
+}
+
+type FileOperationPreparationItemKind string
+
+const (
+	FileOperationPreparationRoot         FileOperationPreparationItemKind = "root"
+	FileOperationPreparationPrerequisite FileOperationPreparationItemKind = "prerequisite"
+	FileOperationPreparationCopy         FileOperationPreparationItemKind = "copy"
+)
+
+type FileOperationPreparationItem struct {
+	SortKey      string                           `json:"sortKey"`
+	Kind         FileOperationPreparationItemKind `json:"kind"`
+	Root         *FileOperationRoot               `json:"root,omitempty"`
+	Prerequisite *MutationObjectReference         `json:"prerequisite,omitempty"`
+	Copy         *MutationCopy                    `json:"copy,omitempty"`
+}
+
+type FileOperationPreparationPage struct {
+	SchemaVersion  int                            `json:"schemaVersion"`
+	UserID         string                         `json:"userID"`
+	OperationID    string                         `json:"operationID"`
+	RunSetID       string                         `json:"runSetID"`
+	Generation     uint64                         `json:"generation"`
+	Run            uint64                         `json:"run"`
+	Page           uint64                         `json:"page"`
+	PreviousDigest string                         `json:"previousDigest"`
+	Final          bool                           `json:"final"`
+	Items          []FileOperationPreparationItem `json:"items"`
 }
 
 type MutationObjectReference struct {

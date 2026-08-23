@@ -152,13 +152,6 @@ func (s *FileStore) addPreparedOperationObject(ctx context.Context, collector *o
 	})
 }
 
-func (s *FileStore) addPreparedOperationCopy(ctx context.Context, collector *operationPreparationRunCollector, copy storageformat.MutationCopy) error {
-	value := copy
-	return collector.Add(ctx, storageformat.FileOperationPreparationItem{
-		SortKey: "copy\x00" + copy.DestinationKey, Kind: storageformat.FileOperationPreparationCopy, Copy: &value,
-	})
-}
-
 func (s *FileStore) contentDeltaForEntry(ctx context.Context, scope domain.Scope, entry storageformat.DirectoryEntry, prefix []string, remove bool) (directoryContentDelta, error) {
 	delta := directoryContentDelta{scope: scope, prefix: append([]string(nil), prefix...), remove: remove}
 	if entry.Kind == domain.EntryFile {

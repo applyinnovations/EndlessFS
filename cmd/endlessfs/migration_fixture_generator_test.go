@@ -25,10 +25,10 @@ import (
 
 const migrationFixtureProducerCommitEnvironment = "ENDLESSFS_MIGRATION_FIXTURE_PRODUCER_COMMIT"
 
-// TestGenerateSchema005MigrationFixtures is invoked only through the Nix
+// TestGenerateSchema006MigrationFixtures is invoked only through the Nix
 // fixture-generation app after the epoch writer has been committed. Ordinary
 // tests skip it and never mutate the checkout.
-func TestGenerateSchema005MigrationFixtures(t *testing.T) {
+func TestGenerateSchema006MigrationFixtures(t *testing.T) {
 	commit := os.Getenv(migrationFixtureProducerCommitEnvironment)
 	if commit == "" {
 		t.Skip("schema fixture generation was not requested")
@@ -62,12 +62,12 @@ func TestGenerateSchema005MigrationFixtures(t *testing.T) {
 	}
 	for index, profile := range profiles {
 		t.Run(profile.name, func(t *testing.T) {
-			fixture := buildSchema005MigrationFixture(t, commit, byte(0x91+index*17), profile.writer(t))
+			fixture := buildSchema006MigrationFixture(t, commit, byte(0x91+index*17), profile.writer(t))
 			body, err := json.Marshal(fixture)
 			if err != nil {
 				t.Fatal(err)
 			}
-			path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-005-v0.2.0-"+profile.name+".json")
+			path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-006-v0.3.0-"+profile.name+".json")
 			if err := os.WriteFile(path, body, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -83,7 +83,7 @@ func configureSchema005PreviewProfile(cfg *config.Config) {
 	cfg.PreviewKeySecret = secret.Value(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("p", 32))))
 }
 
-func buildSchema005MigrationFixture(t *testing.T, commit string, seed byte, writer portable.WriterConfiguration) applicationMigrationFixture {
+func buildSchema006MigrationFixture(t *testing.T, commit string, seed byte, writer portable.WriterConfiguration) applicationMigrationFixture {
 	t.Helper()
 	ctx := context.Background()
 	createdAt := time.Date(2046, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -122,13 +122,14 @@ func buildSchema005MigrationFixture(t *testing.T, commit string, seed byte, writ
 		{path: "/zero.bin", body: nil},
 		{path: "/trash-me.txt", body: []byte("trash")},
 	} {
-		uploadSchema005FixtureFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath(upload.path), upload.body)
+		uploadSchema006FixtureFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath(upload.path), upload.body)
 	}
 	trashEntry, err := engine.Files().Stat(ctx, live, domain.MustParseUserPath("/trash-me.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.Files().Delete(ctx, live, domain.DeleteRequest{Path: domain.MustParseUserPath("/trash-me.txt"), ExpectedVersion: trashEntry.Version, IdempotencyKey: "fixture-trash"}); err != nil {
+	trash, _ := domain.NewScope(user, domain.AreaTrash)
+	if _, err := engine.Files().Move(ctx, live, trash, domain.MoveRequest{Source: domain.MustParseUserPath("/trash-me.txt"), Destination: domain.MustParseUserPath("/trash-me.txt"), ExpectedSource: trashEntry.Version, IdempotencyKey: "fixture-trash"}); err != nil {
 		t.Fatal(err)
 	}
 	aborted, err := engine.Files().CreateUpload(ctx, live, domain.CreateUploadRequest{Path: domain.MustParseUserPath("/aborted.bin"), Size: 3, MediaType: "application/octet-stream", Conflict: domain.ConflictFail, IdempotencyKey: "fixture-aborted"})
@@ -143,7 +144,7 @@ func buildSchema005MigrationFixture(t *testing.T, commit string, seed byte, writ
 		t.Fatal(err)
 	}
 	return applicationMigrationFixture{
-		SchemaVersion: 1, SourceRelease: "v0.2.0", SourceCommit: commit, CreatedAt: createdAt,
+		SchemaVersion: 1, SourceRelease: "v0.3.0", SourceCommit: commit, CreatedAt: createdAt,
 		UserID: user.String(), StateObjects: stateBackend.Export(), FileObjects: fileBackend.Export(),
 	}
 }
@@ -157,7 +158,7 @@ func stateKeyForFixture(t *testing.T, namespace, part string) state.Key {
 	return key
 }
 
-func uploadSchema005FixtureFile(t *testing.T, client *http.Client, files *portable.FileStore, scope domain.Scope, path domain.UserPath, body []byte) {
+func uploadSchema006FixtureFile(t *testing.T, client *http.Client, files *portable.FileStore, scope domain.Scope, path domain.UserPath, body []byte) {
 	t.Helper()
 	capability, err := files.CreateUpload(context.Background(), scope, domain.CreateUploadRequest{Path: path, Size: int64(len(body)), MediaType: "application/octet-stream", Conflict: domain.ConflictFail, IdempotencyKey: "fixture-upload-" + path.Name() + fmt.Sprint(len(path.String()))})
 	if err != nil {

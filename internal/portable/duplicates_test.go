@@ -240,7 +240,7 @@ func TestDuplicateCatalogTracksFileAndExactDirectoryGroupsIncrementally(t *testi
 	}
 }
 
-func TestDuplicateCatalogFollowsSubtreeCopyMoveAndDelete(t *testing.T) {
+func TestDuplicateCatalogFollowsSubtreeRootsWithoutWalkingDescendants(t *testing.T) {
 	backend := objectmemory.New()
 	server := httptest.NewServer(backend)
 	t.Cleanup(server.Close)
@@ -264,18 +264,24 @@ func TestDuplicateCatalogFollowsSubtreeCopyMoveAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if duplicateGroupByKind(t, groups.Groups, domain.DuplicateFile).OccurrenceCount != 2 || countDuplicateGroups(groups.Groups, domain.DuplicateDirectory) != 2 {
+	if countDuplicateGroups(groups.Groups, domain.DuplicateFile) != 0 || countDuplicateGroups(groups.Groups, domain.DuplicateDirectory) != 1 || duplicateGroupByKind(t, groups.Groups, domain.DuplicateDirectory).OccurrenceCount != 2 {
 		t.Fatalf("copied subtree groups = %+v", groups.Groups)
+	}
+	comparison, err := engine.Files().CompareDuplicateDirectories(context.Background(), user, domain.DuplicateDirectoryComparisonRequest{
+		Left: domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/source")}, Right: domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/copy")},
+	})
+	if err != nil || !comparison.Exact || comparison.CommonFiles != 1 {
+		t.Fatalf("copied immutable subtree comparison = %+v, %v", comparison, err)
 	}
 	if _, err := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{Source: domain.MustParseUserPath("/copy"), Destination: domain.MustParseUserPath("/moved"), IdempotencyKey: "duplicate-move-0001"}); err != nil {
 		t.Fatal(err)
 	}
-	fileGroup := duplicateGroupByKind(t, groups.Groups, domain.DuplicateFile)
-	occurrences, err := engine.Files().ListDuplicateOccurrences(context.Background(), user, domain.DuplicateOccurrenceRequest{GroupID: fileGroup.ID, Limit: 20})
+	directoryGroup := duplicateGroupByKind(t, groups.Groups, domain.DuplicateDirectory)
+	occurrences, err := engine.Files().ListDuplicateOccurrences(context.Background(), user, domain.DuplicateOccurrenceRequest{GroupID: directoryGroup.ID, Limit: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !duplicateOccurrencePathsEqual(occurrences.Occurrences, "/moved/nested/value.bin", "/source/nested/value.bin") {
+	if !duplicateOccurrencePathsEqual(occurrences.Occurrences, "/moved", "/source") {
 		t.Fatalf("moved occurrences = %+v", occurrences.Occurrences)
 	}
 	if _, err := engine.Files().Delete(context.Background(), scope, domain.DeleteRequest{Path: domain.MustParseUserPath("/moved"), IdempotencyKey: "duplicate-delete-01"}); err != nil {

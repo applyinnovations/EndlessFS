@@ -221,11 +221,12 @@ func (e *Engine) markGarbageCollectionRoots(ctx context.Context, session storage
 
 func (s *FileStore) markDirectoryTree(ctx context.Context, session storageformat.GarbageCollectionSession, scope domain.Scope, directoryID string, snapshot directorySnapshot, visiting map[string]struct{}) error {
 	rootKey := storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), directoryID)
-	if _, cycle := visiting[rootKey.String()]; cycle {
+	visitKey := rootKey.String() + "\x00" + snapshot.manifestID
+	if _, cycle := visiting[visitKey]; cycle {
 		return domain.NewError(domain.ErrorInvalid, "directory cycle encountered during garbage collection")
 	}
-	visiting[rootKey.String()] = struct{}{}
-	defer delete(visiting, rootKey.String())
+	visiting[visitKey] = struct{}{}
+	defer delete(visiting, visitKey)
 	if snapshot.manifestID != "" {
 		if snapshot.manifest.EntryCount > 0 {
 			reference, err := s.directoryIndexRoot(ctx, scope, directoryID, snapshot.manifest)
@@ -245,12 +246,17 @@ func (s *FileStore) markDirectoryTree(ctx context.Context, session storageformat
 				}
 			}
 		}
-		if snapshot.manifest.RecursiveFileCount > 0 {
+		if snapshot.manifest.SchemaVersion == 2 && snapshot.manifest.RecursiveFileCount > 0 {
 			contentRoot, err := s.directoryContentIndexRoot(ctx, scope, directoryID, snapshot.manifest)
 			if err != nil {
 				return err
 			}
 			if err := s.markDirectoryContentIndexTree(ctx, session, scope, directoryID, contentRoot, make(map[string]struct{})); err != nil {
+				return err
+			}
+		}
+		if snapshot.manifest.SchemaVersion == 3 {
+			if err := s.markLazyDirectoryContentSources(ctx, session, scope.UserID(), snapshot.manifest, visiting); err != nil {
 				return err
 			}
 		}
@@ -260,6 +266,33 @@ func (s *FileStore) markDirectoryTree(ctx context.Context, session storageformat
 		}
 	}
 	return s.engine.ensureGarbageCollectionMark(ctx, session, garbageCollectionStateRole, rootKey)
+}
+
+func (s *FileStore) markLazyDirectoryContentSources(ctx context.Context, session storageformat.GarbageCollectionSession, userID domain.UserID, manifest storageformat.DirectoryManifest, visiting map[string]struct{}) error {
+	mark := func(area, directoryID, manifestID string) error {
+		scope, err := storedOperationScope(userID, area)
+		if err != nil {
+			return err
+		}
+		value, err := s.readDirectoryManifest(ctx, scope, directoryID, manifestID)
+		if err != nil {
+			return err
+		}
+		return s.markDirectoryTree(ctx, session, scope, directoryID, directorySnapshot{exists: true, manifestID: manifestID, manifest: value, recursiveBytes: value.RecursiveBytes, recursiveFileCount: value.RecursiveFileCount, contentAccumulator: value.ContentAccumulator, contentDigest: value.ContentDigest}, visiting)
+	}
+	if manifest.ContentBase != nil {
+		if err := mark(manifest.ContentBase.Area, manifest.ContentBase.DirectoryID, manifest.ContentBase.ManifestID); err != nil {
+			return err
+		}
+	}
+	for _, delta := range manifest.ContentDeltas {
+		if delta.Entry == nil {
+			if err := mark(delta.Area, delta.DirectoryID, delta.ManifestID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *FileStore) markDirectoryContentIndexTree(ctx context.Context, session storageformat.GarbageCollectionSession, scope domain.Scope, directoryID string, reference storageformat.DirectoryContentIndexChild, visiting map[string]struct{}) error {
@@ -336,14 +369,18 @@ func (s *FileStore) markDirectoryIndexTree(ctx context.Context, session storagef
 			}
 			continue
 		}
-		child, err := s.readDirectoryMetadata(ctx, scope, entry.DirectoryID, false)
+		childScope, err := directoryEntryStorageScope(scope, entry)
+		if err != nil {
+			return err
+		}
+		child, err := s.readDirectoryEntryMetadata(ctx, childScope, entry)
 		if err != nil {
 			return err
 		}
 		if child.recursiveBytes != entry.Size || child.recursiveFileCount != entry.FileCount || child.contentDigest != entry.ContentDigest {
 			return domain.NewError(domain.ErrorInvalid, "directory aggregate mismatch during garbage collection")
 		}
-		if err := s.markDirectoryTree(ctx, session, scope, entry.DirectoryID, child, directoryVisiting); err != nil {
+		if err := s.markDirectoryTree(ctx, session, childScope, entry.DirectoryID, child, directoryVisiting); err != nil {
 			return err
 		}
 	}

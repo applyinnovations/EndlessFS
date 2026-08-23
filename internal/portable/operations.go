@@ -102,7 +102,7 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 	if sourceParent.pending {
 		return domain.Operation{}, domain.NewError(domain.ErrorUnavailable, "source directory has a pending operation")
 	}
-	sourceEntry, err := s.directoryIndexEntry(ctx, from, sourceParentID, sourceParent.manifest, request.Source.Name())
+	sourceEntry, err := s.directoryIndexEntry(ctx, sourceParentNode.scope, sourceParentID, sourceParent.manifest, request.Source.Name())
 	if err != nil {
 		return domain.Operation{}, err
 	}
@@ -110,7 +110,11 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 		return domain.Operation{}, domain.NewError(domain.ErrorPreconditionFailed, "source version does not match")
 	}
 	if sourceEntry.Kind == domain.EntryDirectory {
-		sourceDirectory, err := s.readDirectoryMetadata(ctx, from, sourceEntry.DirectoryID, false)
+		sourceStorageScope, scopeErr := directoryEntryStorageScope(sourceParentNode.scope, sourceEntry)
+		if scopeErr != nil {
+			return domain.Operation{}, scopeErr
+		}
+		sourceDirectory, err := s.readDirectoryEntryMetadata(ctx, sourceStorageScope, sourceEntry)
 		if err != nil {
 			return domain.Operation{}, err
 		}
@@ -130,7 +134,7 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 	if destinationParent.pending {
 		return domain.Operation{}, domain.NewError(domain.ErrorUnavailable, "destination directory has a pending operation")
 	}
-	resolved, destinationExisting, err := s.resolveIndexedDirectoryDestination(ctx, to, destinationParentID, destinationParent.manifest, request.Destination, conflict, request.ExpectedTarget)
+	resolved, destinationExisting, err := s.resolveIndexedDirectoryDestination(ctx, destinationParentNode.scope, destinationParentID, destinationParent.manifest, request.Destination, conflict, request.ExpectedTarget)
 	if err != nil {
 		return domain.Operation{}, err
 	}
@@ -192,7 +196,7 @@ func (s *FileStore) Delete(ctx context.Context, scope domain.Scope, request doma
 	if parent.pending {
 		return domain.Operation{}, domain.NewError(domain.ErrorUnavailable, "directory has a pending operation")
 	}
-	entry, err := s.directoryIndexEntry(ctx, scope, parentNode.directoryID, parent.manifest, request.Path.Name())
+	entry, err := s.directoryIndexEntry(ctx, parentNode.scope, parentNode.directoryID, parent.manifest, request.Path.Name())
 	if err != nil {
 		return domain.Operation{}, err
 	}
@@ -200,7 +204,11 @@ func (s *FileStore) Delete(ctx context.Context, scope domain.Scope, request doma
 		return domain.Operation{}, domain.NewError(domain.ErrorPreconditionFailed, "entry version does not match")
 	}
 	if entry.Kind == domain.EntryDirectory {
-		directory, err := s.readDirectoryMetadata(ctx, scope, entry.DirectoryID, false)
+		storageScope, scopeErr := directoryEntryStorageScope(parentNode.scope, entry)
+		if scopeErr != nil {
+			return domain.Operation{}, scopeErr
+		}
+		directory, err := s.readDirectoryEntryMetadata(ctx, storageScope, entry)
 		if err != nil {
 			return domain.Operation{}, err
 		}
@@ -269,7 +277,13 @@ func (s *FileStore) buildFileOperation(
 	for key := range updates {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	sort.Slice(keys, func(i, j int) bool {
+		left, right := updates[keys[i]], updates[keys[j]]
+		if len(left.path.Segments()) != len(right.path.Segments()) {
+			return len(left.path.Segments()) > len(right.path.Segments())
+		}
+		return keys[i] < keys[j]
+	})
 	roots := make([]storageformat.FileOperationRoot, 0, len(keys))
 	for _, keyValue := range keys {
 		update := updates[keyValue]
@@ -288,6 +302,22 @@ func (s *FileStore) buildFileOperation(
 			return storageformat.FileOperation{}, nil, err
 		}
 		prerequisites = append(prerequisites, prepared.prerequisites...)
+		if err := pinPreparedDirectoryInParent(updates, update, prepared); err != nil {
+			return storageformat.FileOperation{}, nil, err
+		}
+		catalogUpdate, present, err := preparedDirectoryCatalogChange(update, prepared)
+		if err != nil {
+			return storageformat.FileOperation{}, nil, err
+		}
+		if present {
+			if err := s.filterPreparedSimilarityChange(ctx, userID, &catalogUpdate); err != nil {
+				return storageformat.FileOperation{}, nil, err
+			}
+			catalogChangeSets = append(catalogChangeSets, []catalogChange{catalogUpdate})
+		}
+		if !update.path.IsRoot() {
+			continue
+		}
 		key := objectstore.MustKey(keyValue)
 		pendingRoot := storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: preManifest, RecursiveBytes: update.snapshot.recursiveBytes, RecursiveFileCount: update.snapshot.recursiveFileCount, ContentAccumulator: update.snapshot.contentAccumulator, ContentDigest: update.snapshot.contentDigest, Pending: &storageformat.DirectoryTransition{
 			OperationID: operationID, Fence: 1, PreManifestID: preManifest, PostManifestID: prepared.manifestID, PostRecursiveBytes: prepared.recursiveBytes, PostRecursiveFileCount: prepared.recursiveFileCount, PostContentAccumulator: prepared.contentAccumulator, PostContentDigest: prepared.contentDigest,
@@ -311,44 +341,6 @@ func (s *FileStore) buildFileOperation(
 			Key: keyValue, ExpectedLogicalVersion: expected, PreExisted: update.snapshot.exists,
 			PendingBody: pendingBody, FinalBody: finalBody, RollbackBody: rollbackBody,
 		})
-		if update.path.Valid() {
-			change := catalogChange{}
-			if !update.path.IsRoot() {
-				before, err := catalogOccurrence(update.scope, update.path, update.entry)
-				if err != nil {
-					return storageformat.FileOperation{}, nil, err
-				}
-				change.pre = &before
-			}
-			if update.snapshot.recursiveFileCount > 0 {
-				change.similarityPre, err = duplicateSimilarityPostings(update.scope, update.path, update.directoryID, update.snapshot.manifest.ContentSketch)
-				if err != nil {
-					return storageformat.FileOperation{}, nil, err
-				}
-			}
-			afterEntry := update.entry
-			afterEntry.Size = prepared.recursiveBytes
-			afterEntry.FileCount = prepared.recursiveFileCount
-			afterEntry.ContentDigest = prepared.contentDigest
-			afterEntry.LogicalVersion, err = directoryEntryVersion(afterEntry)
-			if err != nil {
-				return storageformat.FileOperation{}, nil, err
-			}
-			if !update.path.IsRoot() {
-				after, err := catalogOccurrence(update.scope, update.path, afterEntry)
-				if err != nil {
-					return storageformat.FileOperation{}, nil, err
-				}
-				change.post = &after
-			}
-			if prepared.recursiveFileCount > 0 {
-				change.similarityPost, err = duplicateSimilarityPostings(update.scope, update.path, update.directoryID, prepared.contentSketch)
-				if err != nil {
-					return storageformat.FileOperation{}, nil, err
-				}
-			}
-			catalogChangeSets = append(catalogChangeSets, []catalogChange{change})
-		}
 	}
 	var catalogChanges []catalogChange
 	for _, changes := range catalogChangeSets {
@@ -383,6 +375,36 @@ func (s *FileStore) buildFileOperation(
 	key := storageformat.OperationKey(userID.String(), operationID)
 	body, err := storageformat.EncodeEnvelope(fileOperationSchema, key, 1, operation)
 	return operation, body, err
+}
+
+func pinPreparedDirectoryInParent(updates map[string]directoryUpdate, child directoryUpdate, prepared preparedDirectory) error {
+	if child.path.IsRoot() {
+		return nil
+	}
+	name := child.path.Name()
+	for key, parent := range updates {
+		if parent.path != child.path.Parent() {
+			continue
+		}
+		change, ok := parent.changes[name]
+		if !ok || change.after == nil || change.after.Kind != domain.EntryDirectory || change.after.DirectoryID != child.directoryID {
+			continue
+		}
+		after := *change.after
+		after.ManifestID = prepared.manifestID
+		after.StorageArea = areaName(child.scope.Area())
+		after.Size, after.FileCount, after.ContentDigest = prepared.recursiveBytes, prepared.recursiveFileCount, prepared.contentDigest
+		version, err := directoryEntryVersion(after)
+		if err != nil {
+			return err
+		}
+		after.LogicalVersion = version
+		change.after = &after
+		parent.changes[name] = change
+		updates[key] = parent
+		return nil
+	}
+	return domain.NewError(domain.ErrorInvalid, "mutated directory has no updated namespace parent")
 }
 
 func (s *FileStore) persistFileOperationStepPages(ctx context.Context, operation *storageformat.FileOperation) error {

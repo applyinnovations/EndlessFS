@@ -60,11 +60,15 @@ func (s *FileStore) CreateUpload(ctx context.Context, scope domain.Scope, reques
 	}
 	completionOperationID := uploadID + "-complete"
 	operationKey := storageformat.OperationKey(scope.UserID().String(), uploadID)
-	stagingKey := storageformat.StagingKey(scope.UserID().String(), uploadID, "upload")
+	// The browser writes directly to its final immutable opaque blob key. The
+	// object is unreachable from the namespace until completion publishes the
+	// canonical directory entry, so a failed upload is still safe garbage while
+	// successful publication avoids a provider-side staging-to-blob rewrite.
+	stagingKey := storageformat.BlobKey(scope.UserID().String(), uploadID)
 	leaseKey := storageformat.LeaseKey(transfers.BackendKind(), uploadID)
 	now := s.engine.clock.Now().UTC()
 	record := storageformat.UploadRecord{
-		SchemaVersion: 1, UploadID: uploadID, CompletionOperationID: completionOperationID, UserID: scope.UserID().String(), Area: areaName(scope.Area()),
+		SchemaVersion: 2, UploadID: uploadID, CompletionOperationID: completionOperationID, UserID: scope.UserID().String(), Area: areaName(scope.Area()),
 		RequestedPath: request.Path.String(), ResolvedPath: resolved.String(), StagingKey: stagingKey.String(),
 		BackendKind: transfers.BackendKind(), LeaseKey: leaseKey.String(),
 		Size: request.Size, MediaType: mediaType, Conflict: conflict, ExpectedVersion: request.ExpectedVersion,
@@ -231,7 +235,7 @@ func (s *FileStore) recoverUploadLease(ctx context.Context, operationKey objects
 	if err := storageformat.DecodeEnvelope(object.Body, operationKey, uploadRecordSchema, &envelope, &record); err != nil {
 		return err
 	}
-	if record.SchemaVersion != 1 || record.State != storageformat.UploadActive || record.UploadID == "" || record.StagingKey == "" {
+	if (record.SchemaVersion != 1 && record.SchemaVersion != 2) || record.State != storageformat.UploadActive || record.UploadID == "" || record.StagingKey == "" {
 		return domain.NewError(domain.ErrorInvalid, "invalid recoverable upload")
 	}
 	transfers, err := s.transferBackend()
@@ -453,9 +457,14 @@ func (s *FileStore) completeUpload(ctx context.Context, scope domain.Scope, requ
 	if err != nil {
 		return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "stored staging key is invalid")
 	}
-	copyIntent := storageformat.MutationCopy{
-		SourceKey: stagingKey.String(), DestinationKey: blobKey.String(), Size: record.Size,
-		MD5: progress.Fingerprint.MD5, CRC32C: progress.Fingerprint.CRC32C,
+	var copies []storageformat.MutationCopy
+	if record.SchemaVersion == 1 {
+		copies = []storageformat.MutationCopy{{
+			SourceKey: stagingKey.String(), DestinationKey: blobKey.String(), Size: record.Size,
+			MD5: progress.Fingerprint.MD5, CRC32C: progress.Fingerprint.CRC32C,
+		}}
+	} else if stagingKey != blobKey {
+		return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "direct upload did not target its immutable blob")
 	}
 	postOccurrence, err := catalogOccurrence(scope, resolvedPath, entry)
 	if err != nil {
@@ -469,7 +478,7 @@ func (s *FileStore) completeUpload(ctx context.Context, scope domain.Scope, requ
 		}
 		catalogChanges[0].pre = &preOccurrence
 	}
-	operation, operationBody, err := s.buildFileOperation(ctx, scope.UserID(), record.CompletionOperationID, ownerID, "upload-complete", updates, nil, []storageformat.MutationCopy{copyIntent}, catalogChanges)
+	operation, operationBody, err := s.buildFileOperation(ctx, scope.UserID(), record.CompletionOperationID, ownerID, "upload-complete", updates, nil, copies, catalogChanges)
 	if err != nil {
 		if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrUnavailable) {
 			return s.retryUploadCompletion(ctx, scope, request, mediaType, transfers, operationObject, operationEnvelope, record, attemptsRemaining)
@@ -604,14 +613,23 @@ func (s *FileStore) finishUpload(ctx context.Context, object objectstore.Object,
 		}
 		intent := storageformat.MutationIntent{
 			Action: storageformat.MutationCAS, TargetKey: object.Key.String(), ExpectedLogicalVersion: envelope.LogicalVersion,
-			TargetBody: body, AbortUploads: []string{record.UploadID},
+			TargetBody: body,
+		}
+		if record.SchemaVersion == 1 {
+			intent.AbortUploads = []string{record.UploadID}
+		} else {
+			intent.CompleteUploads = []string{record.UploadID}
 		}
 		err = s.engine.withAdmission(ctx, intent, func() error {
-			if abortErr := s.engine.ensureUploadAborts(ctx, intent.AbortUploads); abortErr != nil {
-				return abortErr
+			if len(intent.AbortUploads) != 0 {
+				if abortErr := s.engine.ensureUploadAborts(ctx, intent.AbortUploads); abortErr != nil {
+					return abortErr
+				}
 			}
-			_, putErr := s.engine.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
-			return putErr
+			if _, putErr := s.engine.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); putErr != nil {
+				return putErr
+			}
+			return s.engine.ensureUploadCompletions(ctx, intent.CompleteUploads)
 		})
 		if err == nil {
 			return nil
@@ -718,7 +736,7 @@ func (s *FileStore) readUploadRecord(ctx context.Context, userID domain.UserID, 
 	if err := storageformat.DecodeEnvelope(object.Body, key, uploadRecordSchema, &envelope, &record); err != nil {
 		return objectstore.Object{}, storageformat.Envelope{}, storageformat.UploadRecord{}, err
 	}
-	if record.SchemaVersion != 1 || record.UploadID != uploadID || record.CompletionOperationID == "" || record.UserID != userID.String() || record.Size < 0 || record.StagingKey == "" || record.BackendKind == "" || record.LeaseKey == "" || record.ExpiresAt.IsZero() || record.CreatedAt.IsZero() || (record.State != storageformat.UploadActive && record.State != storageformat.UploadCompleted && record.State != storageformat.UploadAborted) {
+	if (record.SchemaVersion != 1 && record.SchemaVersion != 2) || record.UploadID != uploadID || record.CompletionOperationID == "" || record.UserID != userID.String() || record.Size < 0 || record.StagingKey == "" || record.BackendKind == "" || record.LeaseKey == "" || record.ExpiresAt.IsZero() || record.CreatedAt.IsZero() || (record.State != storageformat.UploadActive && record.State != storageformat.UploadCompleted && record.State != storageformat.UploadAborted) {
 		return objectstore.Object{}, storageformat.Envelope{}, storageformat.UploadRecord{}, domain.NewError(domain.ErrorInvalid, "invalid stored upload record")
 	}
 	return object, envelope, record, nil

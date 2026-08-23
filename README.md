@@ -140,7 +140,7 @@ Only settings that have validation and tests are parsed by the current binary:
 | `ENDLESSFS_LISTEN_ADDR` | `127.0.0.1:8080` | Loopback for HTTP development; non-loopback requires a coherent HTTPS base URL. |
 | `ENDLESSFS_STORAGE_PROVIDER` | `mock` | Exact `mock` or `gcs`. The mock is ephemeral; GCS uses ADC and the same portable engine. |
 | `ENDLESSFS_MOCK_PROVIDER_URL` | Ephemeral loopback origin | Optional explicit HTTP loopback origin/port for the separate capability data plane. |
-| `ENDLESSFS_GCS_FILE_BUCKET` | Unset | Required with `gcs`; private file bucket for immutable blobs and upload staging, also used for state by default. |
+| `ENDLESSFS_GCS_FILE_BUCKET` | Unset | Required with `gcs`; private file bucket for immutable blobs, unpublished direct-final uploads, and decode-only legacy upload staging; also used for state by default. |
 | `ENDLESSFS_GCS_STATE_BUCKET` | `ENDLESSFS_GCS_FILE_BUCKET` | Optional private state/metadata bucket. Set it to a distinct bucket for policy/cost isolation or to the file bucket for explicit single-bucket mode. |
 | `ENDLESSFS_GCS_PREVIEW_BUCKET` | Unset | Required when `ENDLESSFS_PREVIEW_PROVIDER=gcs`; distinct private bucket for disposable generated-preview artifacts and manifests. |
 | `ENDLESSFS_GCS_SIGNING_SERVICE_ACCOUNT` | ADC discovery | Optional lowercase service-account email used by the official client for keyless IAM `signBlob` signed URLs. |

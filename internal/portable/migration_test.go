@@ -93,8 +93,8 @@ func TestStartupMigratesSchema001ThroughCurrent(t *testing.T) {
 		t.Fatalf("migrated legacy trash lookup = %+v, %v; want directory size/count 5/1", lookup, err)
 	}
 	gate, err := engine.GateStatus(context.Background())
-	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 5 {
-		t.Fatalf("migrated gate = %+v, %v; want open epoch 5 after four schema migrations", gate, err)
+	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 6 {
+		t.Fatalf("migrated gate = %+v, %v; want open epoch 6 after five schema migrations", gate, err)
 	}
 	assertRecursiveFeatureActivated(t, backend.Export())
 	assertLegacyWriterCannotDecodeMigratedGate(t, backend.Export())
@@ -213,7 +213,7 @@ func TestEightReplicasConcurrentlyMigrateSchema002(t *testing.T) {
 		t.Fatalf("migrated byte-only trash root = %+v, %v; want 2 bytes/1 file", trashRoot, err)
 	}
 	gate, err := engines[1].GateStatus(context.Background())
-	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 4 {
+	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 5 {
 		t.Fatalf("migrated byte-only gate = %+v, %v", gate, err)
 	}
 	assertRecursiveFeatureActivated(t, predecessor.Export())
@@ -253,7 +253,7 @@ func TestEightReplicasConcurrentlyMigrateSchema001AggregateTree(t *testing.T) {
 		t.Fatalf("concurrently migrated aggregate = %d; want 12", got)
 	}
 	gate, err := engines[0].GateStatus(context.Background())
-	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 5 {
+	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 6 {
 		t.Fatalf("concurrently migrated gate = %+v, %v", gate, err)
 	}
 	assertRecursiveFeatureActivated(t, backend.Export())
@@ -429,7 +429,7 @@ func encodeSchema002Fixture(t *testing.T, objects map[string][]byte) map[string]
 	withoutCount := func(features []string) []string {
 		result := make([]string, 0, len(features))
 		for _, feature := range features {
-			if feature != storageformat.FeatureRecursiveFileCounts && feature != storageformat.FeatureProviderFingerprints && feature != storageformat.FeatureDuplicateCatalog && feature != storageformat.FeatureDirectoryDigests && feature != storageformat.FeatureMetadataCheckpoints && feature != storageformat.FeaturePagedOperations && feature != storageformat.FeatureDirectoryIndexes && feature != storageformat.FeatureStateIndexes && feature != storageformat.FeatureResumableOperations {
+			if feature != storageformat.FeatureRecursiveFileCounts && feature != storageformat.FeatureProviderFingerprints && feature != storageformat.FeatureDuplicateCatalog && feature != storageformat.FeatureDirectoryDigests && feature != storageformat.FeatureMetadataCheckpoints && feature != storageformat.FeaturePagedOperations && feature != storageformat.FeatureDirectoryIndexes && feature != storageformat.FeatureStateIndexes && feature != storageformat.FeatureResumableOperations && feature != storageformat.FeatureNamespaceSnapshots {
 				result = append(result, feature)
 			}
 		}
@@ -536,8 +536,91 @@ func downgradeDirectoryIndexes(t *testing.T, objects map[string][]byte) {
 		}
 		return entries
 	}
+	reachableManifests := make(map[string]struct{})
+	var materialize func(string, string, string, string, map[string]struct{})
+	materialize = func(userID, area, directoryID, manifestID string, visiting map[string]struct{}) {
+		visitKey := area + "\x00" + directoryID + "\x00" + manifestID
+		if _, found := visiting[visitKey]; found {
+			t.Fatalf("cycle while materializing predecessor directory %s", directoryID)
+		}
+		visiting[visitKey] = struct{}{}
+		defer delete(visiting, visitKey)
+		manifestKey := storageformat.DirectoryManifestKey(userID, area, directoryID, manifestID)
+		reachableManifests[manifestKey.String()] = struct{}{}
+		body, found := objects[manifestKey.String()]
+		if !found {
+			t.Fatalf("missing pinned manifest %s", manifestKey)
+		}
+		var manifestEnvelope storageformat.Envelope
+		var manifest storageformat.DirectoryManifest
+		if err := storageformat.DecodeEnvelope(body, manifestKey, "directory-manifest-v1", &manifestEnvelope, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		var entries []storageformat.DirectoryEntry
+		if manifest.EntryCount > 0 {
+			entries = collect(directoryID, manifest.IndexRootID)
+		}
+		for _, entry := range entries {
+			if entry.Kind != domain.EntryDirectory {
+				continue
+			}
+			childArea := area
+			if entry.StorageArea != "" {
+				childArea = entry.StorageArea
+			}
+			childRootKey := storageformat.DirectoryRootKey(userID, childArea, entry.DirectoryID)
+			childBody, found := objects[childRootKey.String()]
+			if !found {
+				t.Fatalf("missing child root %s", childRootKey)
+			}
+			var childEnvelope storageformat.Envelope
+			var childRoot storageformat.DirectoryRoot
+			if err := storageformat.DecodeEnvelope(childBody, childRootKey, "directory-root-v1", &childEnvelope, &childRoot); err != nil {
+				t.Fatal(err)
+			}
+			childManifestID := entry.ManifestID
+			if childManifestID == "" {
+				childManifestID = childRoot.ManifestID
+			}
+			childManifestKey := storageformat.DirectoryManifestKey(userID, childArea, entry.DirectoryID, childManifestID)
+			var childManifestEnvelope storageformat.Envelope
+			var childManifest storageformat.DirectoryManifest
+			if err := storageformat.DecodeEnvelope(objects[childManifestKey.String()], childManifestKey, "directory-manifest-v1", &childManifestEnvelope, &childManifest); err != nil {
+				t.Fatal(err)
+			}
+			childRoot.ManifestID = childManifestID
+			childRoot.RecursiveBytes, childRoot.RecursiveFileCount = entry.Size, entry.FileCount
+			childRoot.ContentAccumulator, childRoot.ContentDigest = childManifest.ContentAccumulator, entry.ContentDigest
+			childRoot.Pending = nil
+			objects[childRootKey.String()] = mustEnvelope(t, "directory-root-v1", childRootKey, childEnvelope.Revision, childRoot)
+			materialize(userID, childArea, entry.DirectoryID, childManifestID, visiting)
+		}
+	}
+	var areaRoots []struct{ userID, area, manifestID string }
+	for key, body := range objects {
+		userID, area, directoryID, matched, err := storageformat.ParseDirectoryRootKey(storageformatKey(t, key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !matched || directoryID != storageformat.RootDirectoryID {
+			continue
+		}
+		var envelope storageformat.Envelope
+		var root storageformat.DirectoryRoot
+		if err := storageformat.DecodeEnvelope(body, storageformatKey(t, key), "directory-root-v1", &envelope, &root); err != nil {
+			t.Fatal(err)
+		}
+		areaRoots = append(areaRoots, struct{ userID, area, manifestID string }{userID, area, root.ManifestID})
+	}
+	for _, root := range areaRoots {
+		materialize(root.userID, root.area, storageformat.RootDirectoryID, root.manifestID, make(map[string]struct{}))
+	}
 	for key, body := range objects {
 		if !strings.Contains(key, "/manifests/") || !strings.HasSuffix(key, ".json") {
+			continue
+		}
+		if _, reachable := reachableManifests[key]; !reachable {
+			delete(objects, key)
 			continue
 		}
 		parsed := storageformatKey(t, key)
@@ -546,12 +629,19 @@ func downgradeDirectoryIndexes(t *testing.T, objects map[string][]byte) {
 		if err := storageformat.DecodeEnvelope(body, parsed, "directory-manifest-v1", &envelope, &manifest); err != nil {
 			t.Fatal(err)
 		}
-		if manifest.SchemaVersion != 2 {
+		if manifest.SchemaVersion != 2 && manifest.SchemaVersion != 3 {
 			continue
 		}
 		var entries []storageformat.DirectoryEntry
 		if manifest.EntryCount > 0 {
 			entries = collect(manifest.DirectoryID, manifest.IndexRootID)
+		}
+		for index := range entries {
+			if entries[index].Kind == domain.EntryDirectory {
+				entries[index].ManifestID = ""
+				entries[index].StorageArea = ""
+				entries[index].LogicalVersion = entryLogicalVersion(t, entries[index])
+			}
 		}
 		sort.Slice(entries, func(i, j int) bool {
 			if entries[i].NameDigest == entries[j].NameDigest {
@@ -742,7 +832,7 @@ func decodeStoredGate(t *testing.T, objects map[string][]byte) storageformat.Wri
 func withoutRecursiveFeature(features []string) []string {
 	result := make([]string, 0, len(features))
 	for _, feature := range features {
-		if feature != storageformat.FeatureRecursiveBytes && feature != storageformat.FeatureRecursiveFileCounts && feature != storageformat.FeatureProviderFingerprints && feature != storageformat.FeatureDuplicateCatalog && feature != storageformat.FeatureDirectoryDigests && feature != storageformat.FeatureMetadataCheckpoints && feature != storageformat.FeaturePagedOperations && feature != storageformat.FeatureDirectoryIndexes && feature != storageformat.FeatureStateIndexes && feature != storageformat.FeatureResumableOperations {
+		if feature != storageformat.FeatureRecursiveBytes && feature != storageformat.FeatureRecursiveFileCounts && feature != storageformat.FeatureProviderFingerprints && feature != storageformat.FeatureDuplicateCatalog && feature != storageformat.FeatureDirectoryDigests && feature != storageformat.FeatureMetadataCheckpoints && feature != storageformat.FeaturePagedOperations && feature != storageformat.FeatureDirectoryIndexes && feature != storageformat.FeatureStateIndexes && feature != storageformat.FeatureResumableOperations && feature != storageformat.FeatureNamespaceSnapshots {
 			result = append(result, feature)
 		}
 	}

@@ -290,7 +290,7 @@ func TestCloneTreeStreamEmitsWithoutSubtreeCollections(t *testing.T) {
 	if result.entry.DirectoryID == source.DirectoryID || result.entry.Size != source.Size || result.entry.FileCount != source.FileCount || result.entry.ContentDigest != source.ContentDigest {
 		t.Fatalf("stream clone result = %+v; source = %+v", result.entry, source)
 	}
-	if copies != len(entries) || occurrences != len(entries)+1 || objects <= len(entries)/maxDirectoryIndexItems {
+	if copies != 0 || occurrences != len(entries)+1 || objects <= len(entries)/maxDirectoryIndexItems {
 		t.Fatalf("stream clone emissions = objects:%d copies:%d occurrences:%d", objects, copies, occurrences)
 	}
 	collected := 0

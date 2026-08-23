@@ -304,6 +304,22 @@ func TestApplicationWriterProfilesOpenSchema005Fixtures(t *testing.T) {
 	}
 }
 
+func TestApplicationWriterProfilesOpenSchema006Fixtures(t *testing.T) {
+	profiles := []struct {
+		name      string
+		fixture   string
+		configure func(*config.Config)
+	}{
+		{name: "preview-disabled", fixture: "schema-006-v0.3.0-application-disabled.json", configure: func(*config.Config) {}},
+		{name: "preview-gcs", fixture: "schema-006-v0.3.0-application-gcs.json", configure: configureSchema005PreviewProfile},
+	}
+	for _, profile := range profiles {
+		t.Run(profile.name, func(t *testing.T) {
+			testApplicationWriterProfileMigration(t, profile.fixture, "v0.3.0", "2d2d49ec9f86e2a247781fd461bcc537459cfbf1", 18, profile.configure)
+		})
+	}
+}
+
 func testApplicationWriterProfileMigration(t *testing.T, fixtureName, sourceRelease, sourceCommit string, wantSize int64, configure func(*config.Config)) {
 	t.Helper()
 	body, err := os.ReadFile("../../internal/portable/testdata/migrations/" + fixtureName)
@@ -352,7 +368,7 @@ func testApplicationWriterProfileMigration(t *testing.T, fixtureName, sourceRele
 	live, _ := domain.NewScope(user, domain.AreaLive)
 	root, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
 	wantFiles := int64(2)
-	if sourceRelease == "schema-004" || sourceRelease == "v0.2.0" {
+	if sourceRelease == "schema-004" || sourceRelease == "v0.2.0" || sourceRelease == "v0.3.0" {
 		wantFiles = 3
 	}
 	if err != nil || root.Size != wantSize || root.FileCount != wantFiles {

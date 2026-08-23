@@ -1145,8 +1145,11 @@ func TestPortableRecursiveAggregateOperationPreparationFailures(t *testing.T) {
 		if _, err := backend.Get(ctx, grandKey); !errors.Is(err, domain.ErrNotFound) {
 			t.Fatalf("deleted grandchild root error = %v", err)
 		}
-		if _, err := engine.Files().Copy(ctx, live, trash, domain.CopyRequest{Source: domain.MustParseUserPath("/child"), Destination: domain.MustParseUserPath("/copy")}); !errors.Is(err, domain.ErrNotFound) {
-			t.Fatalf("Copy() error = %v", err)
+		if operation, err := engine.Files().Copy(ctx, live, trash, domain.CopyRequest{Source: domain.MustParseUserPath("/child"), Destination: domain.MustParseUserPath("/copy")}); err != nil || operation.State != domain.OperationSucceeded {
+			t.Fatalf("Copy() = %+v, %v; immutable parent snapshot should move without a descendant walk", operation, err)
+		}
+		if _, err := engine.Files().Stat(ctx, trash, domain.MustParseUserPath("/copy/grand")); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("Stat(corrupt descendant) error = %v; want fail-closed missing metadata", err)
 		}
 	})
 }
@@ -1498,7 +1501,7 @@ func TestPortableTransferDurableRecordAndCapabilityMatrix(t *testing.T) {
 	}
 
 	for name, mutate := range map[string]func(*storageformat.UploadRecord){
-		"schema": func(value *storageformat.UploadRecord) { value.SchemaVersion = 2 },
+		"schema": func(value *storageformat.UploadRecord) { value.SchemaVersion = 3 },
 		"upload": func(value *storageformat.UploadRecord) { value.UploadID = "other" },
 		"state":  func(value *storageformat.UploadRecord) { value.State = "unknown" },
 	} {

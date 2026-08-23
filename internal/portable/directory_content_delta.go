@@ -3,10 +3,134 @@ package portable
 import (
 	"container/heap"
 	"context"
+	"sort"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
+
+func lazyDirectoryContentForUpdate(update directoryUpdate, additions []storageformat.DirectoryContentDelta) (*storageformat.DirectoryContentBase, []storageformat.DirectoryContentDelta) {
+	if update.recursiveFileCount == 0 {
+		return nil, nil
+	}
+	manifest := update.snapshot.manifest
+	if manifest.SchemaVersion == 3 && len(manifest.ContentDeltas)+len(additions) <= 256 {
+		return cloneDirectoryContentBase(manifest.ContentBase), append(append([]storageformat.DirectoryContentDelta(nil), manifest.ContentDeltas...), additions...)
+	}
+	if update.snapshot.recursiveFileCount == 0 || update.snapshot.manifestID == "" {
+		return nil, append([]storageformat.DirectoryContentDelta(nil), additions...)
+	}
+	return &storageformat.DirectoryContentBase{
+		Area: areaName(update.scope.Area()), DirectoryID: update.directoryID, ManifestID: update.snapshot.manifestID,
+	}, append([]storageformat.DirectoryContentDelta(nil), additions...)
+}
+
+func cloneDirectoryContentBase(value *storageformat.DirectoryContentBase) *storageformat.DirectoryContentBase {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func lazyDirectoryContentSketch(update directoryUpdate, stored []storageformat.DirectoryContentDelta, sources []directoryContentDelta) []string {
+	if update.recursiveFileCount == 0 {
+		return nil
+	}
+	result := append([]string(nil), update.snapshot.manifest.ContentSketch...)
+	if update.snapshot.recursiveFileCount != 0 && validateDirectoryContentSketch(result) != nil {
+		return nil
+	}
+	merge := func(incoming []string) bool {
+		if validateDirectoryContentSketch(incoming) != nil {
+			return false
+		}
+		if len(result) == 0 {
+			result = append([]string(nil), incoming...)
+			return true
+		}
+		for index := range result {
+			if incoming[index] < result[index] {
+				result[index] = incoming[index]
+			}
+		}
+		return true
+	}
+	for _, delta := range stored {
+		if delta.Remove {
+			return nil
+		}
+		if delta.Entry != nil {
+			sketch, err := directoryContentSketch([]storageformat.DirectoryContentIndexEntry{*delta.Entry}, nil)
+			if err != nil || !merge(sketch) {
+				return nil
+			}
+		}
+	}
+	for _, delta := range sources {
+		if delta.remove {
+			return nil
+		}
+		if delta.entry == nil && !merge(delta.manifest.ContentSketch) {
+			return nil
+		}
+	}
+	if validateDirectoryContentSketch(result) != nil {
+		return nil
+	}
+	return result
+}
+
+func storedDirectoryContentDeltasForMutations(changes map[string]directoryContentIndexMutation) []storageformat.DirectoryContentDelta {
+	keys := make([]string, 0, len(changes))
+	for key := range changes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]storageformat.DirectoryContentDelta, 0, len(keys)*2)
+	for _, key := range keys {
+		change := changes[key]
+		if change.before != nil {
+			value := *change.before
+			result = append(result, storageformat.DirectoryContentDelta{Remove: true, Entry: &value})
+		}
+		if change.after != nil {
+			value := *change.after
+			result = append(result, storageformat.DirectoryContentDelta{Entry: &value})
+		}
+	}
+	return result
+}
+
+func storedDirectoryContentDeltas(values []directoryContentDelta) ([]storageformat.DirectoryContentDelta, error) {
+	result := make([]storageformat.DirectoryContentDelta, 0, len(values))
+	for _, value := range values {
+		if !value.scope.Valid() || len(value.prefix) == 0 || value.entry == nil && (value.directoryID == "" || value.manifest.ManifestID == "") {
+			return nil, domain.NewError(domain.ErrorInvalid, "invalid lazy directory content delta")
+		}
+		path := domain.MustParseUserPath("/")
+		var err error
+		for _, segment := range value.prefix {
+			path, err = path.Join(segment)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if value.entry != nil {
+			entry, err := directoryContentIndexEntry(path, *value.entry)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, storageformat.DirectoryContentDelta{Remove: value.remove, Entry: &entry})
+			continue
+		}
+		result = append(result, storageformat.DirectoryContentDelta{
+			Remove: value.remove, Area: areaName(value.scope.Area()), DirectoryID: value.directoryID,
+			ManifestID: value.manifest.ManifestID, Prefix: path.String(),
+		})
+	}
+	return result, nil
+}
 
 // directoryContentDelta describes one already-published directory content
 // index being added to or removed from an ancestor. Keeping the source as a

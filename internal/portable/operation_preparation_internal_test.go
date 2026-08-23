@@ -185,6 +185,99 @@ func TestAdmittedOperationHeaderResumesWithoutProcessLocalPreparationState(t *te
 	}
 }
 
+func TestGateDrainCancelsPredecessorPreparingOperationWithoutPublishingVisibility(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2047, 6, 7, 8, 9, 11, 0, time.UTC))
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("predecessor-preparation", 1<<16)))
+	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	if _, err := engine.Files().CreateDirectory(ctx, scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/source")}); err != nil {
+		t.Fatal(err)
+	}
+	crashed := false
+	engine.scheduler = SchedulerFunc(func(_ context.Context, step string) error {
+		if step == StepOperationAfterHeader && !crashed {
+			crashed = true
+			return domain.NewError(domain.ErrorUnavailable, "simulated predecessor loss after operation header")
+		}
+		return nil
+	})
+	if _, err := engine.Files().Move(ctx, scope, scope, domain.MoveRequest{
+		Source: domain.MustParseUserPath("/source"), Destination: domain.MustParseUserPath("/moved"), IdempotencyKey: "predecessor-move",
+	}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("crashed Move() error = %v; want unavailable", err)
+	}
+	engine.scheduler = nil
+
+	operations, err := backend.List(ctx, objectstore.ListRequest{Prefix: storageformat.OperationPrefix(), Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var operationKey objectstore.Key
+	var stale storageformat.FileOperation
+	for _, info := range operations.Objects {
+		object, envelope, operation, readErr := engine.Files().readFileOperationObject(ctx, info.Key)
+		if readErr != nil || operation.State != storageformat.FileOperationPreparing {
+			continue
+		}
+		operationKey, stale = info.Key, operation
+		// Model a predecessor binary that durably checkpointed more preparation
+		// runs than the current namespace algorithm would generate. Replaying
+		// those runs under changed semantics must never publish mixed-version
+		// visibility.
+		operation.Preparation.RunCount = 2
+		body := encodeInternalEnvelope(t, fileOperationSchema, info.Key, envelope.Revision+1, operation)
+		if _, err := backend.Put(ctx, info.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
+			t.Fatal(err)
+		}
+		break
+	}
+	if !operationKey.Valid() {
+		t.Fatal("predecessor preparing operation was not persisted")
+	}
+	gateKey := storageformat.WriteGateKey()
+	gateObject, err := backend.Get(ctx, gateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gateEnvelope storageformat.Envelope
+	var gate storageformat.WriteGate
+	if err := storageformat.DecodeEnvelope(gateObject.Body, gateKey, writeGateSchema, &gateEnvelope, &gate); err != nil {
+		t.Fatal(err)
+	}
+	predecessorFeatures, found := schemaFeatures(storageSchema005, engine.writer.RequiredFeatures)
+	if !found {
+		t.Fatal("schema 005 is not registered")
+	}
+	gate.WriterFeatures = predecessorFeatures
+	gateBody := encodeInternalEnvelope(t, writeGateSchema, gateKey, gateEnvelope.Revision+1, gate)
+	if _, err := backend.Put(ctx, gateKey, gateBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: gateObject.Version}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(2 * time.Minute)
+	if err := engine.drainAdmissions(ctx, 1); err != nil {
+		t.Fatalf("drainAdmissions() error = %v", err)
+	}
+	stored, err := engine.Files().readFileOperation(ctx, user, stale.OperationID)
+	if err != nil || stored.State != storageformat.FileOperationFailed || stored.ErrorKind != domain.ErrorPreconditionFailed {
+		t.Fatalf("quiesced predecessor operation = %+v, %v", stored, err)
+	}
+	if err := engine.Files().checkpointFileOperationPreparationRun(ctx, operationKey, stale.Fence, stale.ReplicaAttemptID, stale.Preparation.RunCount+1); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("stale predecessor checkpoint error = %v", err)
+	}
+	if _, err := engine.Files().Stat(ctx, scope, domain.MustParseUserPath("/source")); err != nil {
+		t.Fatalf("source after quiescence = %v", err)
+	}
+	if _, err := engine.Files().Stat(ctx, scope, domain.MustParseUserPath("/moved")); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("destination after quiescence = %v; want not found", err)
+	}
+	page, err := backend.List(ctx, objectstore.ListRequest{Prefix: storageformat.AdmissionPrefix(1), Limit: 100})
+	if err != nil || len(page.Objects) != 0 {
+		t.Fatalf("admissions after quiescence = %+v, %v", page.Objects, err)
+	}
+}
+
 func TestPreparingFileOperationSealsBoundedRunsBeforeVisibility(t *testing.T) {
 	ctx := context.Background()
 	backend := objectmemory.New()

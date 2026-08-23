@@ -869,6 +869,23 @@ func (s *FileStore) recoverFileOperation(ctx context.Context, key objectstore.Ke
 	}
 }
 
+// quiesceFileOperation is used only while the canonical write gate is closing.
+// A preparing operation has not published visibility yet, so failing it is the
+// only safe cross-version action: recomputing predecessor preparation runs with
+// a newer namespace algorithm could otherwise mix incompatible durable intent.
+// Running and committed operations already carry sealed immutable steps and are
+// recovered normally.
+func (s *FileStore) quiesceFileOperation(ctx context.Context, key objectstore.Key, cancelPreparing bool) error {
+	_, _, operation, err := s.readFileOperationObject(ctx, key)
+	if err != nil {
+		return err
+	}
+	if operation.State == storageformat.FileOperationPreparing && cancelPreparing {
+		return s.failPreparingFileOperation(ctx, key, "operation was safely cancelled while closing the storage write gate; retry the mutation")
+	}
+	return s.recoverFileOperation(ctx, key)
+}
+
 func (s *FileStore) prepareOperationRoot(ctx context.Context, root storageformat.FileOperationRoot) error {
 	key, err := objectstore.ParseKey(root.Key)
 	if err != nil {

@@ -360,7 +360,7 @@ func (e *Engine) drainOperationRecords(ctx context.Context, recoverFiles, drainU
 			if !recoverFiles {
 				return nil
 			}
-			return e.Files().recoverFileOperation(ctx, info.Key)
+			return e.quiesceFileOperation(ctx, info.Key)
 		}
 		if generic.Schema != uploadRecordSchema || !drainUploads {
 			return nil
@@ -521,11 +521,24 @@ func (e *Engine) takeoverAndRecover(ctx context.Context, object objectstore.Obje
 		if parseErr != nil {
 			return parseErr
 		}
-		if err := e.Files().recoverFileOperation(ctx, key); err != nil {
+		if err := e.quiesceFileOperation(ctx, key); err != nil {
 			return err
 		}
 	}
 	return e.backend.Delete(ctx, object.Key, objectstore.DeleteCondition{Version: version})
+}
+
+func (e *Engine) quiesceFileOperation(ctx context.Context, key objectstore.Key) error {
+	_, _, gate, err := e.readGate(ctx)
+	if err != nil {
+		return err
+	}
+	// Preparing pages are safe to resume only while the persisted gate carries
+	// the exact semantics of this writer. During an adjacent schema migration,
+	// predecessor pages may have a different count or meaning; no visibility is
+	// published yet, so fail that operation and let the caller retry post-upgrade.
+	cancelPreparing := !reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures)
+	return e.Files().quiesceFileOperation(ctx, key, cancelPreparing)
 }
 
 func (e *Engine) drainFileOperations(ctx context.Context) error {

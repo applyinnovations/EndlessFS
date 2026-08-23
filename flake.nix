@@ -6,7 +6,7 @@
     # The canonical vuln.go.dev hostname rejects GitHub-hosted runner IPs;
     # pin the official bulk object by its immutable GCS generation as well as
     # the Nix content hash recorded in flake.lock.
-    url = "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1787088262759230";
+    url = "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1787345732225399";
     flake = false;
   };
 

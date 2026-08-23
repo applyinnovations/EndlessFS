@@ -23,6 +23,7 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 
 	for _, target := range []string{"state", "file"} {
 		t.Run(target, func(t *testing.T) {
+			t.Parallel()
 			baselineState := objectmemory.New()
 			baselineFile := objectmemory.New()
 			if err := baselineState.Import(fixture.StateObjects); err != nil {

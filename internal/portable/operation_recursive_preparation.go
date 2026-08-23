@@ -316,8 +316,14 @@ func (s *FileStore) buildRecursiveFileOperationPreparation(ctx context.Context, 
 		}
 		destinationCatalog := sourceCatalog
 		destinationCatalog.entry = preparedEntry
-		if err := s.addPreparedCatalogOccurrence(ctx, collector, userID, to, resolved, destinationCatalog, false); err != nil {
-			return err
+		// A same-owner file copy is another logical name for the same immutable
+		// blob, not another physical duplicate. Directory aliases still publish
+		// their exact root occurrence so structurally identical trees remain
+		// discoverable without expanding descendant occurrences.
+		if request.Move || preparedEntry.Kind == domain.EntryDirectory {
+			if err := s.addPreparedCatalogOccurrence(ctx, collector, userID, to, resolved, destinationCatalog, false); err != nil {
+				return err
+			}
 		}
 		if request.DestinationEntry != nil {
 			if err := s.addPreparedCatalogOccurrence(ctx, collector, userID, to, resolved, relativeCatalogEntry{entry: *request.DestinationEntry}, true); err != nil {

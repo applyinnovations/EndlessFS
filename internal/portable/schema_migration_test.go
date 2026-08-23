@@ -133,6 +133,27 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 		producer: "v0.2.0", commit: "97e70a84b12de0533b8a7cf4add62ecbf575a0fd",
 		wantEpoch: 2, wantSize: 18, wantFiles: 3,
 	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-006",
+		profile:  "portable-minimal",
+		file:     "schema-006-v0.3.0-portable-minimal.json", digest: "4bed9189a829a4687c310659636f22d74e8babf1a074a2f4136a42c2b934ba2c",
+		producer: "v0.3.0", commit: "2d2d49ec9f86e2a247781fd461bcc537459cfbf1",
+		wantEpoch: 1, wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-006",
+		profile:  "application-preview-disabled",
+		file:     "schema-006-v0.3.0-application-disabled.json", digest: "3daf89025cdedcfb353727ec668e6c7a5b3970abf8ceda60bebcea0b72f507f0",
+		producer: "v0.3.0", commit: "2d2d49ec9f86e2a247781fd461bcc537459cfbf1",
+		wantEpoch: 1, wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-006",
+		profile:  "application-preview-gcs",
+		file:     "schema-006-v0.3.0-application-gcs.json", digest: "f1bb23118a29d5edfafa1e16d7c28870607b8f92210a0cc85dc46479161beda7",
+		producer: "v0.3.0", commit: "2d2d49ec9f86e2a247781fd461bcc537459cfbf1",
+		wantEpoch: 1, wantSize: 18, wantFiles: 3,
+	},
 }
 
 var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.2.0", "v0.2.1", "v0.3.0"}

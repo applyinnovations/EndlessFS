@@ -74,6 +74,7 @@ func TestStorageSchemaGateDetectionUsesEpochBindingRepresentation(t *testing.T) 
 		"metadata-only-checkpoints-v1",
 		"paged-operation-steps-v1",
 		"persistent-directory-indexes-v1",
+		"persistent-namespace-snapshots-v1",
 		"persistent-state-indexes-v1",
 		"portable-checkpoints",
 		"preview-integrity-crc32c-v1",

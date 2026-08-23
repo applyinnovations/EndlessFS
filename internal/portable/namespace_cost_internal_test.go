@@ -232,4 +232,11 @@ func TestLogicalCopyAndUploadPublicationUseNoFileBackendCopy(t *testing.T) {
 	if source.BlobID == "" || copy.BlobID != source.BlobID {
 		t.Fatalf("logical copy blob IDs = source %q, copy %q", source.BlobID, copy.BlobID)
 	}
+	groups, err := engine.Files().ListDuplicateGroups(ctx, user, domain.DuplicateGroupRequest{Kind: domain.DuplicateFile, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups.Groups) != 0 {
+		t.Fatalf("logical reflink was reported as reclaimable physical duplication: %+v", groups.Groups)
+	}
 }

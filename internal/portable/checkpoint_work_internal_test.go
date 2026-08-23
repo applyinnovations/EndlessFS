@@ -13,6 +13,33 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
+type checksumOmittingListBackend struct {
+	objectstore.Backend
+	omitFingerprints bool
+	headRequests     int
+	bodyOpens        int
+}
+
+func (backend *checksumOmittingListBackend) List(ctx context.Context, request objectstore.ListRequest) (objectstore.ListPage, error) {
+	page, err := backend.Backend.List(ctx, request)
+	if err == nil && backend.omitFingerprints {
+		for index := range page.Objects {
+			page.Objects[index].Fingerprint = objectstore.ContentFingerprint{}
+		}
+	}
+	return page, err
+}
+
+func (backend *checksumOmittingListBackend) Head(ctx context.Context, key objectstore.Key) (objectstore.ObjectInfo, error) {
+	backend.headRequests++
+	return backend.Backend.Head(ctx, key)
+}
+
+func (backend *checksumOmittingListBackend) Open(ctx context.Context, key objectstore.Key) (objectstore.ObjectReader, error) {
+	backend.bodyOpens++
+	return backend.Backend.Open(ctx, key)
+}
+
 func TestCheckpointMetadataAttestationDenials(t *testing.T) {
 	ctx := context.Background()
 	body := []byte("authoritative")
@@ -65,6 +92,23 @@ func TestCheckpointMetadataAttestationDenials(t *testing.T) {
 			t.Fatalf("streamCheckpointObject() error = %v; want precondition failed", err)
 		}
 	})
+}
+
+func TestCheckpointHydratesChecksumsOmittedFromProviderListingsWithoutReadingBodies(t *testing.T) {
+	backend := &checksumOmittingListBackend{Backend: objectmemory.New()}
+	clock := domain.NewFixedClock(time.Date(2044, 2, 3, 4, 5, 6, 0, time.UTC))
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("metadata-checksums", 1<<14)))
+	backend.omitFingerprints = true
+
+	if _, err := engine.CreateCheckpoint(context.Background(), "metadata-checksums"); err != nil {
+		t.Fatal(err)
+	}
+	if backend.headRequests == 0 {
+		t.Fatal("checkpoint did not hydrate checksum-less listing entries with metadata heads")
+	}
+	if backend.bodyOpens != 0 {
+		t.Fatalf("checkpoint opened %d object bodies", backend.bodyOpens)
+	}
 }
 
 func TestMigrationCheckpointReopenRejectsDifferentStoredCheckpoint(t *testing.T) {

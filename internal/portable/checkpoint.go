@@ -318,7 +318,11 @@ func (e *Engine) prepareCheckpointInventoryMetadata(ctx context.Context, checkpo
 		})
 	}
 	if err := e.walkCheckpointMetadata(ctx, func(info objectstore.ObjectInfo, fileData bool) error {
-		object, err := checkpointObjectFromInfo(info)
+		metadataBackend := objectstore.MetadataBackend(e.backend)
+		if fileData {
+			metadataBackend = e.fileBackend
+		}
+		object, _, err := streamCheckpointObject(ctx, metadataBackend, info)
 		if err != nil {
 			return err
 		}

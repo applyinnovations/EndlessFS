@@ -514,3 +514,60 @@ func TestUploadCompletionRecoversAtEveryAggregateCommitBoundary(t *testing.T) {
 		})
 	}
 }
+
+func TestUploadRecoversCommittedNamespaceTransitionBeforePublishing(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2039, 4, 10, 6, 7, 8, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(190, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	crasher := &stepFailure{}
+	engine := openEngine(t, backend, clock, 191, crasher)
+	user, _ := domain.ParseUserID("SEhISEhISEhISEhISEhISA")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/before.txt"), []byte("before"))
+
+	crasher.step = portable.StepOperationAfterCommitted
+	if _, err := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{
+		Source: domain.MustParseUserPath("/before.txt"), Destination: domain.MustParseUserPath("/after.txt"),
+	}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("interrupted Move() error = %v", err)
+	}
+	if _, err := engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/after.txt")); err != nil {
+		t.Fatalf("committed move is not visible before finalization: %v", err)
+	}
+	if _, err := engine.Files().Delete(context.Background(), scope, domain.DeleteRequest{Path: domain.MustParseUserPath("/after.txt")}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("mutation recovered committed operation before its owner lease expired: %v", err)
+	}
+	clock.Advance(2 * time.Minute)
+
+	path := domain.MustParseUserPath("/photo.jpg")
+	content := []byte("photo bytes")
+	capability, err := engine.Files().CreateUpload(context.Background(), scope, domain.CreateUploadRequest{
+		Path: path, Size: int64(len(content)), MediaType: "image/jpeg",
+	})
+	if err != nil {
+		t.Fatalf("CreateUpload() after committed namespace transition = %v", err)
+	}
+	request, _ := http.NewRequest(capability.Method, capability.URL, bytes.NewReader(content))
+	for name, value := range capability.Headers {
+		request.Header.Set(name, value)
+	}
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("upload status = %d", response.StatusCode)
+	}
+
+	completed, err := engine.Files().CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{
+		UploadID: capability.UploadID, Path: path, Size: int64(len(content)), MediaType: "image/jpeg",
+	})
+	if err != nil || completed.Path != path || completed.Size != int64(len(content)) {
+		t.Fatalf("CompleteUpload() after committed namespace transition = %+v, %v", completed, err)
+	}
+}

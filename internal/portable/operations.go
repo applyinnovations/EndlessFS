@@ -93,7 +93,7 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 		return existing, err
 	}
 
-	sourceTrail, err := s.resolveDirectoryMetadataTrail(ctx, from, request.Source.Parent())
+	sourceTrail, err := s.resolveMutableDirectoryMetadataTrail(ctx, from, request.Source.Parent())
 	if err != nil {
 		return domain.Operation{}, err
 	}
@@ -125,7 +125,7 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 			return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "source directory recursive aggregate mismatch")
 		}
 	}
-	destinationTrail, err := s.resolveDirectoryMetadataTrail(ctx, to, request.Destination.Parent())
+	destinationTrail, err := s.resolveMutableDirectoryMetadataTrail(ctx, to, request.Destination.Parent())
 	if err != nil {
 		return domain.Operation{}, err
 	}
@@ -187,7 +187,7 @@ func (s *FileStore) Delete(ctx context.Context, scope domain.Scope, request doma
 	if existing, found, err := s.lookupIdempotentOperation(ctx, scope.UserID(), operationDelete, request.IdempotencyKey, fingerprint); found || err != nil {
 		return existing, err
 	}
-	parentTrail, err := s.resolveDirectoryMetadataTrail(ctx, scope, request.Path.Parent())
+	parentTrail, err := s.resolveMutableDirectoryMetadataTrail(ctx, scope, request.Path.Parent())
 	if err != nil {
 		return domain.Operation{}, err
 	}

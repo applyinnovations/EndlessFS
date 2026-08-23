@@ -45,7 +45,7 @@ func (s *FileStore) CreateUpload(ctx context.Context, scope domain.Scope, reques
 	if err != nil {
 		return domain.UploadCapability{}, err
 	}
-	parentTrail, err := s.resolveDirectoryMetadataTrail(ctx, scope, request.Path.Parent())
+	parentTrail, err := s.resolveMutableDirectoryMetadataTrail(ctx, scope, request.Path.Parent())
 	if err != nil {
 		return domain.UploadCapability{}, err
 	}
@@ -380,7 +380,7 @@ func (s *FileStore) completeUpload(ctx context.Context, scope domain.Scope, requ
 			return resumed, nil
 		}
 	}
-	parentTrail, err := s.resolveDirectoryMetadataTrail(ctx, scope, resolvedPath.Parent())
+	parentTrail, err := s.resolveMutableDirectoryMetadataTrail(ctx, scope, resolvedPath.Parent())
 	if err != nil {
 		return domain.Entry{}, err
 	}

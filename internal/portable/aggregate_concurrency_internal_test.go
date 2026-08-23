@@ -105,6 +105,56 @@ func TestDirectoryTrailMismatchDistinguishesRacesFromStableCorruption(t *testing
 	})
 }
 
+func TestMutableDirectoryRecoveryFailsClosedOnUnexpectedOperationRead(t *testing.T) {
+	ctx := context.Background()
+	clock := domain.NewFixedClock(time.Date(2046, 1, 10, 3, 4, 5, 0, time.UTC))
+	user, _ := domain.ParseUserID("aGhoaGhoaGhoaGhoaGhoaA")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+	memory := objectmemory.New()
+	engine := openInternalTestEngine(t, memory, clock, strings.NewReader(strings.Repeat(t.Name(), 1<<14)))
+	crashed := false
+	engine.scheduler = SchedulerFunc(func(_ context.Context, step string) error {
+		if step == StepCreateDirectoryAfterCommitted && !crashed {
+			crashed = true
+			return domain.NewError(domain.ErrorUnavailable, "simulated loss after commit")
+		}
+		return nil
+	})
+	if _, err := engine.Files().CreateDirectory(ctx, scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/stuck")}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("interrupted CreateDirectory() error = %v", err)
+	}
+	clock.Advance(2 * time.Minute)
+
+	rootKey := storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID)
+	rootObject, err := memory.Get(ctx, rootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rootEnvelope storageformat.Envelope
+	var root storageformat.DirectoryRoot
+	if err := storageformat.DecodeEnvelope(rootObject.Body, rootKey, directoryRootSchema, &rootEnvelope, &root); err != nil {
+		t.Fatal(err)
+	}
+	if root.Pending == nil {
+		t.Fatal("interrupted create did not leave a pending root")
+	}
+	operationKey := storageformat.OperationKey(user.String(), root.Pending.OperationID)
+	operationReads := 0
+	hooks := &hookedBackend{Backend: memory, get: func(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
+		if key == operationKey {
+			operationReads++
+			if operationReads == 2 {
+				return objectstore.Object{}, domain.NewError(domain.ErrorUnauthorized, "operation read denied")
+			}
+		}
+		return memory.Get(ctx, key)
+	}}
+	engine.backend = hooks
+	if _, err := engine.Files().resolveMutableDirectoryMetadataTrail(ctx, scope, domain.MustParseUserPath("/")); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("resolveMutableDirectoryMetadataTrail() error = %v", err)
+	}
+}
+
 func TestFileOperationFailureRollbackFaultsRemainRecoverable(t *testing.T) {
 	ctx := context.Background()
 	clock := domain.NewFixedClock(time.Date(2046, 2, 3, 4, 5, 6, 0, time.UTC))

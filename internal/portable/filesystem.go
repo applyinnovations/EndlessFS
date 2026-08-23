@@ -25,6 +25,7 @@ const (
 	directoryManifestSchema = "directory-manifest-v1"
 	directoryPageSchema     = "directory-page-v1"
 	maxEntriesPerPage       = 256
+	maxMutationRecoveries   = 8
 )
 
 // FileStore is the application-facing filesystem facade over the same
@@ -50,6 +51,7 @@ type directorySnapshot struct {
 	pending            bool
 	transitionState    storageformat.FileOperationState
 	transitionFence    uint64
+	transitionExpires  time.Time
 }
 
 type preparedDirectory struct {
@@ -330,7 +332,7 @@ func (s *FileStore) CreateDirectory(ctx context.Context, scope domain.Scope, req
 		return domain.Entry{}, err
 	}
 	for range 64 {
-		parentTrail, err := s.resolveDirectoryMetadataTrail(ctx, scope, request.Path.Parent())
+		parentTrail, err := s.resolveMutableDirectoryMetadataTrail(ctx, scope, request.Path.Parent())
 		if err != nil {
 			return domain.Entry{}, err
 		}
@@ -645,6 +647,41 @@ func (s *FileStore) resolveDirectoryMetadataTrail(ctx context.Context, scope dom
 	return trail, nil
 }
 
+// resolveMutableDirectoryMetadataTrail clears durable operation residue before
+// a new namespace mutation is planned. A committed operation is already the
+// visible truth, but a replica can disappear after commit and before replacing
+// its pending roots with their compact final bodies. Reads must remain
+// side-effect free and can interpret that transition directly. Once its owner
+// lease has expired, mutations recover the referenced operation and then plan
+// against a freshly read trail; before expiry the active owner remains solely
+// responsible for finalization.
+func (s *FileStore) resolveMutableDirectoryMetadataTrail(ctx context.Context, scope domain.Scope, path domain.UserPath) ([]directoryTrailNode, error) {
+	for range maxMutationRecoveries {
+		trail, err := s.resolveDirectoryMetadataTrail(ctx, scope, path)
+		if err != nil {
+			return nil, err
+		}
+		var pendingOperationID string
+		for _, node := range trail {
+			if node.snapshot.pending {
+				if node.snapshot.transitionState != storageformat.FileOperationCommitted || !expired(s.engine.clock.Now(), node.snapshot.transitionExpires) {
+					return trail, nil
+				}
+				pendingOperationID = node.snapshot.root.Pending.OperationID
+				break
+			}
+		}
+		if pendingOperationID == "" {
+			return trail, nil
+		}
+		if err := s.recoverFileOperation(ctx, storageformat.OperationKey(scope.UserID().String(), pendingOperationID)); err != nil &&
+			!errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrUnavailable) {
+			return nil, err
+		}
+	}
+	return nil, domain.NewError(domain.ErrorUnavailable, "directory operation recovery did not converge")
+}
+
 func directoryEntryStorageScope(inherited domain.Scope, entry storageformat.DirectoryEntry) (domain.Scope, error) {
 	if !inherited.Valid() || entry.Kind != domain.EntryDirectory {
 		return domain.Scope{}, domain.NewError(domain.ErrorInvalid, "invalid directory storage scope")
@@ -739,6 +776,7 @@ func (s *FileStore) readDirectoryMetadata(ctx context.Context, scope domain.Scop
 	pending := root.Pending != nil
 	transitionState := storageformat.FileOperationState("")
 	var transitionFence uint64
+	var transitionExpires time.Time
 	if pending {
 		if root.Pending.OperationID == "" || root.Pending.Fence == 0 || root.Pending.PostManifestID == "" || root.Pending.PreManifestID != root.ManifestID || root.Pending.PostRecursiveBytes < 0 || root.Pending.PostRecursiveFileCount < 0 || root.Pending.PostContentAccumulator == "" || root.Pending.PostContentDigest == "" {
 			return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "invalid pending directory transition")
@@ -752,6 +790,7 @@ func (s *FileStore) readDirectoryMetadata(ctx context.Context, scope domain.Scop
 		}
 		transitionState = operation.State
 		transitionFence = operation.Fence
+		transitionExpires = operation.ExpiresAt
 		if operation.State == storageformat.FileOperationCommitted || operation.State == storageformat.FileOperationSucceeded {
 			manifestID = root.Pending.PostManifestID
 			recursiveBytes = root.Pending.PostRecursiveBytes
@@ -764,7 +803,7 @@ func (s *FileStore) readDirectoryMetadata(ctx context.Context, scope domain.Scop
 		if recursiveBytes != 0 || recursiveFileCount != 0 {
 			return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "empty directory root recursive aggregate mismatch")
 		}
-		return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, recursiveBytes: recursiveBytes, recursiveFileCount: recursiveFileCount, contentAccumulator: contentAccumulator, contentDigest: contentDigest, pending: pending, transitionState: transitionState, transitionFence: transitionFence}, nil
+		return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, recursiveBytes: recursiveBytes, recursiveFileCount: recursiveFileCount, contentAccumulator: contentAccumulator, contentDigest: contentDigest, pending: pending, transitionState: transitionState, transitionFence: transitionFence, transitionExpires: transitionExpires}, nil
 	}
 	manifest, err := s.readDirectoryManifest(ctx, scope, directoryID, manifestID)
 	if err != nil {
@@ -773,7 +812,7 @@ func (s *FileStore) readDirectoryMetadata(ctx context.Context, scope domain.Scop
 	if manifest.RecursiveBytes != recursiveBytes || manifest.RecursiveFileCount != recursiveFileCount || manifest.ContentAccumulator != contentAccumulator || manifest.ContentDigest != contentDigest {
 		return directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "directory root and manifest recursive aggregate mismatch")
 	}
-	return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, manifestID: manifestID, manifest: manifest, recursiveBytes: recursiveBytes, recursiveFileCount: recursiveFileCount, contentAccumulator: contentAccumulator, contentDigest: contentDigest, pending: pending, transitionState: transitionState, transitionFence: transitionFence}, nil
+	return directorySnapshot{object: object, exists: true, envelope: envelope, root: root, manifestID: manifestID, manifest: manifest, recursiveBytes: recursiveBytes, recursiveFileCount: recursiveFileCount, contentAccumulator: contentAccumulator, contentDigest: contentDigest, pending: pending, transitionState: transitionState, transitionFence: transitionFence, transitionExpires: transitionExpires}, nil
 }
 
 func (s *FileStore) readDirectoryManifest(ctx context.Context, scope domain.Scope, directoryID, manifestID string) (storageformat.DirectoryManifest, error) {

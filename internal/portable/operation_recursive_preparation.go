@@ -302,7 +302,7 @@ func (s *FileStore) buildRecursiveFileOperationPreparation(ctx context.Context, 
 		}
 		sourceCatalog.entry = sourceEntry
 		preparedEntry.Name, preparedEntry.NameDigest = resolved.Name(), storageformat.NameDigest(resolved.Name())
-		if !request.Move || preparedEntry.Kind == domain.EntryDirectory {
+		if preparedEntry.Kind == domain.EntryDirectory {
 			preparedEntry.ModifiedAt = operation.StartedAt.UTC()
 		}
 		preparedEntry.LogicalVersion, err = directoryEntryVersion(preparedEntry)

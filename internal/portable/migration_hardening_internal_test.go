@@ -209,6 +209,18 @@ func TestMigrationManifestValidationRejectsMalformedCanonicalState(t *testing.T)
 	if err := validateMigrationManifest(valid, "directory", "manifest"); err != nil {
 		t.Fatalf("valid migration manifest rejected: %v", err)
 	}
+	contentAccumulator, contentDigest, err := directoryContentIdentity(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := valid
+	latest.SchemaVersion = 3
+	latest.PageIDs = nil
+	latest.ContentAccumulator = contentAccumulator
+	latest.ContentDigest = contentDigest
+	if err := validateMigrationManifest(latest, "directory", "manifest"); err != nil {
+		t.Fatalf("valid lazy migration manifest rejected: %v", err)
+	}
 	invalid := valid
 	invalid.EntryCount = -1
 	if err := validateMigrationManifest(invalid, "directory", "manifest"); !errors.Is(err, domain.ErrInvalid) {
@@ -1800,6 +1812,9 @@ func TestMigrationFingerprintAndStreamingPreparationDenials(t *testing.T) {
 	}
 	if err := engine.migrateAllDirectoryAggregatesPhase(t.Context(), schemaMigration003To004, aggregateMigrationPlan{}, "invalid"); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid migration phase error = %v", err)
+	}
+	if err := (&Engine{backend: objectmemory.New()}).migrateAllDirectoryAggregatesPhase(t.Context(), schemaMigration003To004, aggregateMigrationPlan{}, migrationPhaseTransform); err != nil {
+		t.Fatalf("empty migration traversal failed: %v", err)
 	}
 
 	entry := withCurrentTestFingerprint(migrationFileEntry(t, "file", 1))

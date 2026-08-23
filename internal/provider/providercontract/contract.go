@@ -482,8 +482,8 @@ func Run(t *testing.T, factory Factory) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if copied.ContentID == restored.ContentID || copied.ContentVersion == restored.ContentVersion {
-			t.Fatalf("copy identity = %+v, source = %+v", copied.PreviewContentIdentity(), restored.PreviewContentIdentity())
+		if copied.PreviewContentIdentity() != restored.PreviewContentIdentity() {
+			t.Fatalf("copy identity = %+v, want source identity %+v", copied.PreviewContentIdentity(), restored.PreviewContentIdentity())
 		}
 
 		harness.Advance(time.Second)

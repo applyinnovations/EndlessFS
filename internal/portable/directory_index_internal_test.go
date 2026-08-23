@@ -91,8 +91,8 @@ func TestDirectoryIndexSingleEntryUpdateRetainsUnchangedNodesAndReadsBoundedPage
 	if initialNodes < 10 || updatedNodes > 4 {
 		t.Fatalf("directory index node writes: initial=%d update=%d; want a multi-page index and at most four copy-on-write nodes", initialNodes, updatedNodes)
 	}
-	if updatedContentNodes == 0 || updatedContentNodes > 8 {
-		t.Fatalf("directory content-index node writes = %d; want a bounded copy-on-write path", updatedContentNodes)
+	if updatedContentNodes != 0 {
+		t.Fatalf("directory content-index node writes = %d; want a lazy metadata-only content delta", updatedContentNodes)
 	}
 	if _, err := backend.Put(ctx, rootKey, updated.rootBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: snapshot.object.Version}); err != nil {
 		t.Fatal(err)
@@ -194,8 +194,8 @@ func TestDirectoryContentIndexSharesRootAcrossSameContentReplacement(t *testing.
 			}
 		}
 	}
-	if manifest.ContentIndexRootID != snapshot.manifest.ContentIndexRootID || manifest.ContentIndexRootDigest != snapshot.manifest.ContentIndexRootDigest {
-		t.Fatalf("same-content replacement changed content root: before=%s/%s after=%s/%s", snapshot.manifest.ContentIndexRootID, snapshot.manifest.ContentIndexRootDigest, manifest.ContentIndexRootID, manifest.ContentIndexRootDigest)
+	if manifest.SchemaVersion != 3 || manifest.ContentBase == nil || manifest.ContentBase.ManifestID != snapshot.manifestID || len(manifest.ContentDeltas) != 0 {
+		t.Fatalf("same-content replacement lazy content view = %+v; want unchanged snapshot base and no deltas", manifest)
 	}
 }
 

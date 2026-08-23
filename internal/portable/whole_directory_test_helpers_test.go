@@ -44,14 +44,17 @@ func (s *FileStore) resolveDirectory(ctx context.Context, scope domain.Scope, pa
 		snapshot, err := s.readDirectory(ctx, scope, storageformat.RootDirectoryID, true)
 		return storageformat.RootDirectoryID, snapshot, err
 	}
-	entry, err := s.resolveEntry(ctx, scope, path)
+	entry, storageScope, err := s.resolveEntryWithScope(ctx, scope, path)
 	if err != nil {
 		return "", directorySnapshot{}, err
 	}
 	if entry.Kind != domain.EntryDirectory || entry.DirectoryID == "" {
 		return "", directorySnapshot{}, domain.NewError(domain.ErrorNotFound, "directory not found")
 	}
-	snapshot, err := s.readDirectory(ctx, scope, entry.DirectoryID, false)
+	snapshot, err := s.readDirectoryEntryMetadata(ctx, storageScope, entry)
+	if err == nil && snapshot.manifestID != "" {
+		snapshot.entries, err = s.readManifestPageEntries(ctx, storageScope, entry.DirectoryID, snapshot.manifest)
+	}
 	if err == nil && (snapshot.recursiveBytes != entry.Size || snapshot.recursiveFileCount != entry.FileCount || snapshot.contentDigest != entry.ContentDigest) {
 		return "", directorySnapshot{}, domain.NewError(domain.ErrorInvalid, "directory recursive aggregate mismatch")
 	}
@@ -65,6 +68,7 @@ func (s *FileStore) resolveDirectoryTrail(ctx context.Context, scope domain.Scop
 	}
 	trail := []directoryTrailNode{{scope: scope, path: domain.MustParseUserPath("/"), directoryID: storageformat.RootDirectoryID, snapshot: root}}
 	current := root
+	storageScope := scope
 	currentPath := domain.MustParseUserPath("/")
 	for _, segment := range path.Segments() {
 		entry, found := findDirectoryEntry(current.entries, segment)
@@ -75,14 +79,24 @@ func (s *FileStore) resolveDirectoryTrail(ctx context.Context, scope domain.Scop
 		if err != nil {
 			return nil, err
 		}
-		current, err = s.readDirectory(ctx, scope, entry.DirectoryID, false)
+		storageScope, err = directoryEntryStorageScope(storageScope, entry)
 		if err != nil {
 			return nil, err
+		}
+		current, err = s.readDirectoryEntryMetadata(ctx, storageScope, entry)
+		if err != nil {
+			return nil, err
+		}
+		if current.manifestID != "" {
+			current.entries, err = s.readManifestPageEntries(ctx, storageScope, entry.DirectoryID, current.manifest)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if current.recursiveBytes != entry.Size || current.recursiveFileCount != entry.FileCount || current.contentDigest != entry.ContentDigest {
 			return nil, s.classifyDirectoryTrailMismatch(ctx, trail[len(trail)-1], entry, current)
 		}
-		trail = append(trail, directoryTrailNode{scope: scope, path: currentPath, directoryID: entry.DirectoryID, entry: entry, snapshot: current})
+		trail = append(trail, directoryTrailNode{scope: storageScope, path: currentPath, directoryID: entry.DirectoryID, entry: entry, snapshot: current})
 	}
 	return trail, nil
 }

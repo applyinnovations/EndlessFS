@@ -1353,10 +1353,7 @@ func (s *FileStore) readDuplicateDirectoryContentInventory(ctx context.Context, 
 	if err != nil {
 		return duplicateDirectoryContentInventory{}, err
 	}
-	leaf, err := s.readDirectoryMetadata(ctx, scope, view.directoryID, path.IsRoot())
-	if err != nil {
-		return duplicateDirectoryContentInventory{}, err
-	}
+	leaf := view.snapshot
 	version := view.current.Version
 	if path.IsRoot() {
 		version = domain.Version("root")
@@ -1369,7 +1366,7 @@ func (s *FileStore) readDuplicateDirectoryContentInventory(ctx context.Context, 
 		GroupID: groupID, Kind: domain.DuplicateDirectory, Area: scope.Area(), AreaName: areaName(scope.Area()),
 		Path: path, Size: leaf.recursiveBytes, FileCount: leaf.recursiveFileCount, Version: version,
 	}
-	return duplicateDirectoryContentInventory{occurrence: occurrence, scope: scope, path: path, directory: view.directoryID, manifestID: leaf.manifestID, manifest: leaf.manifest}, nil
+	return duplicateDirectoryContentInventory{occurrence: occurrence, scope: view.storageScope, path: path, directory: view.directoryID, manifestID: leaf.manifestID, manifest: leaf.manifest}, nil
 }
 
 type directoryContentIndexIterator struct {
@@ -1691,7 +1688,7 @@ func (s *FileStore) duplicateContentIndexOccurrence(ctx context.Context, invento
 			return domain.DuplicateOccurrence{}, err
 		}
 	}
-	entry, err := s.resolveDirectoryContentIndexEntry(ctx, inventory.scope, inventory.directory, value.RelativePath)
+	entry, err := s.resolveDirectoryContentIndexEntry(ctx, inventory.scope, inventory.directory, inventory.manifest, value.RelativePath)
 	if err != nil {
 		return domain.DuplicateOccurrence{}, err
 	}

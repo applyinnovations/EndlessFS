@@ -247,7 +247,7 @@ func terminalOperationExpired(object objectstore.Object, cutoff time.Time) (bool
 		if err := storageformat.DecodeEnvelope(object.Body, object.Key, uploadRecordSchema, &envelope, &upload); err != nil {
 			return false, err
 		}
-		if upload.SchemaVersion != 1 || storageformat.OperationKey(upload.UserID, upload.UploadID) != object.Key || upload.CreatedAt.IsZero() {
+		if (upload.SchemaVersion != 1 && upload.SchemaVersion != 2) || storageformat.OperationKey(upload.UserID, upload.UploadID) != object.Key || upload.CreatedAt.IsZero() {
 			return false, domain.NewError(domain.ErrorInvalid, "invalid upload operation during retention pruning")
 		}
 		terminal := upload.State == storageformat.UploadCompleted || upload.State == storageformat.UploadAborted
@@ -586,46 +586,55 @@ func (e *Engine) recoverMutation(ctx context.Context, admission storageformat.Ad
 		return err
 	}
 	object, getErr := e.backend.Get(ctx, key)
+	targetMatches := false
 	switch intent.Action {
 	case storageformat.MutationCreate:
 		if getErr == nil {
 			// Either the original admitted create committed this exact body, or
 			// another admitted create won the create-only race. Both are terminal.
-			return nil
+			targetMatches = bytes.Equal(object.Body, intent.TargetBody)
+			break
 		}
 		if !errors.Is(getErr, domain.ErrNotFound) {
 			return getErr
 		}
 		_, err = e.backend.Put(ctx, key, intent.TargetBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
 		if errors.Is(err, domain.ErrConflict) {
-			return nil
+			break
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		targetMatches = true
 	case storageformat.MutationCAS:
 		if getErr != nil {
 			if errors.Is(getErr, domain.ErrNotFound) {
-				return nil // The original CAS reached a terminal not-found outcome.
+				break // The original CAS reached a terminal not-found outcome.
 			}
 			return getErr
 		}
 		if bytes.Equal(object.Body, intent.TargetBody) {
-			return nil
+			targetMatches = true
+			break
 		}
 		logical, err := canonicalLogicalVersion(object.Body)
 		if err != nil {
 			return err
 		}
 		if logical != intent.ExpectedLogicalVersion {
-			return nil // A different successful writer made the original CAS terminal.
+			break // A different successful writer made the original CAS terminal.
 		}
 		_, err = e.backend.Put(ctx, key, intent.TargetBody, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
 		if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrNotFound) {
-			return nil
+			break
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		targetMatches = true
 	case storageformat.MutationDelete:
 		if errors.Is(getErr, domain.ErrNotFound) {
-			return nil
+			break
 		}
 		if getErr != nil {
 			return getErr
@@ -639,12 +648,63 @@ func (e *Engine) recoverMutation(ctx context.Context, admission storageformat.Ad
 		}
 		err = e.backend.Delete(ctx, key, objectstore.DeleteCondition{Version: object.Version})
 		if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrNotFound) {
-			return nil
+			break
 		}
-		return err
+		if err != nil {
+			return err
+		}
 	default:
 		return domain.NewError(domain.ErrorInvalid, "unknown admission mutation")
 	}
+	if targetMatches {
+		return e.ensureUploadCompletions(ctx, intent.CompleteUploads)
+	}
+	return nil
+}
+
+func (e *Engine) ensureUploadCompletions(ctx context.Context, uploadIDs []string) error {
+	if len(uploadIDs) == 0 {
+		return nil
+	}
+	transfers, ok := e.fileBackend.(objectstore.DirectTransferBackend)
+	if !ok {
+		return domain.NewError(domain.ErrorPreconditionFailed, "object backend has no direct transfer support")
+	}
+	previous := ""
+	for _, uploadID := range uploadIDs {
+		if uploadID == "" || uploadID <= previous {
+			return domain.NewError(domain.ErrorInvalid, "invalid upload completion order")
+		}
+		leaseKey := storageformat.LeaseKey(transfers.BackendKind(), uploadID)
+		leaseObject, err := e.backend.Get(ctx, leaseKey)
+		if errors.Is(err, domain.ErrNotFound) {
+			previous = uploadID
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var envelope storageformat.Envelope
+		var lease storageformat.TransferLease
+		if err := storageformat.DecodeEnvelope(leaseObject.Body, leaseKey, transferLeaseSchema, &envelope, &lease); err != nil {
+			return err
+		}
+		if lease.SchemaVersion != 1 || lease.BackendKind != transfers.BackendKind() || lease.UploadID != uploadID || len(lease.Ciphertext) == 0 {
+			return domain.NewError(domain.ErrorInvalid, "invalid completed upload lease")
+		}
+		progress, err := transfers.UploadProgress(ctx, lease.Ciphertext)
+		if err != nil || !progress.Complete || progress.Offset != progress.Size || progress.Version == "" || !progress.Fingerprint.Complete() {
+			if err != nil {
+				return err
+			}
+			return domain.NewError(domain.ErrorPreconditionFailed, "completed upload is not provider-confirmed")
+		}
+		if err := e.backend.Delete(ctx, leaseKey, objectstore.DeleteCondition{Version: leaseObject.Version}); err != nil && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
+			return err
+		}
+		previous = uploadID
+	}
+	return nil
 }
 
 func (e *Engine) ensureUploadAborts(ctx context.Context, uploadIDs []string) error {

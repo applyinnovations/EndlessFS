@@ -53,21 +53,84 @@ func (s *FileStore) addPreparedCatalogOccurrence(ctx context.Context, collector 
 	if err != nil {
 		return err
 	}
+	if remove {
+		key := duplicateOccurrenceKey(userID.String(), occurrence)
+		object, getErr := s.engine.backend.Get(ctx, key)
+		if errors.Is(getErr, domain.ErrNotFound) {
+			return nil
+		}
+		if getErr != nil {
+			return getErr
+		}
+		var envelope storageformat.Envelope
+		var root storageformat.DuplicateOccurrenceRoot
+		if err := storageformat.DecodeEnvelope(object.Body, key, duplicateOccurrenceSchema, &envelope, &root); err != nil {
+			return err
+		}
+		if root.SchemaVersion != 1 || root.UserID != userID.String() || root.Pending != nil {
+			return domain.NewError(domain.ErrorUnavailable, "duplicate occurrence is changing concurrently")
+		}
+		if root.Current == nil {
+			return nil
+		}
+		occurrence = *root.Current
+	}
 	change := catalogChange{}
 	if remove {
 		change.pre = &occurrence
 	} else {
 		change.post = &occurrence
 	}
-	if item.entry.Kind == domain.EntryDirectory && item.entry.FileCount > 0 {
+	if item.entry.Kind == domain.EntryDirectory && item.entry.FileCount > 0 && validateDirectoryContentSketch(item.contentSketch) == nil {
 		postings, err := duplicateSimilarityPostings(scope, path, item.entry.DirectoryID, item.contentSketch)
 		if err != nil {
 			return err
 		}
 		if remove {
-			change.similarityPre = postings
+			for _, posting := range postings {
+				key := duplicateSimilarityPostingKey(userID.String(), posting)
+				object, getErr := s.engine.backend.Get(ctx, key)
+				if errors.Is(getErr, domain.ErrNotFound) {
+					continue
+				}
+				if getErr != nil {
+					return getErr
+				}
+				var envelope storageformat.Envelope
+				var root storageformat.DuplicateSimilarityPostingRoot
+				if err := storageformat.DecodeEnvelope(object.Body, key, duplicateSimilaritySchema, &envelope, &root); err != nil {
+					return err
+				}
+				if root.SchemaVersion != 1 || root.UserID != userID.String() || root.Pending != nil {
+					return domain.NewError(domain.ErrorUnavailable, "duplicate similarity posting is changing concurrently")
+				}
+				if root.Current != nil && *root.Current == posting {
+					change.similarityPre = append(change.similarityPre, posting)
+				}
+			}
 		} else {
-			change.similarityPost = postings
+			for _, posting := range postings {
+				key := duplicateSimilarityPostingKey(userID.String(), posting)
+				object, getErr := s.engine.backend.Get(ctx, key)
+				if errors.Is(getErr, domain.ErrNotFound) {
+					change.similarityPost = append(change.similarityPost, posting)
+					continue
+				}
+				if getErr != nil {
+					return getErr
+				}
+				var envelope storageformat.Envelope
+				var root storageformat.DuplicateSimilarityPostingRoot
+				if err := storageformat.DecodeEnvelope(object.Body, key, duplicateSimilaritySchema, &envelope, &root); err != nil {
+					return err
+				}
+				if root.SchemaVersion != 1 || root.UserID != userID.String() || root.Pending != nil {
+					return domain.NewError(domain.ErrorUnavailable, "duplicate similarity posting is changing concurrently")
+				}
+				if root.Current == nil {
+					change.similarityPost = append(change.similarityPost, posting)
+				}
+			}
 		}
 	}
 	return s.addCatalogChangePreparationItems(ctx, collector, userID, change)
@@ -102,14 +165,18 @@ func (s *FileStore) contentDeltaForEntry(ctx context.Context, scope domain.Scope
 		delta.entry = cloneDirectoryEntry(&entry)
 		return delta, nil
 	}
-	directory, err := s.readDirectoryMetadata(ctx, scope, entry.DirectoryID, false)
+	storageScope, err := directoryEntryStorageScope(scope, entry)
+	if err != nil {
+		return directoryContentDelta{}, err
+	}
+	directory, err := s.readDirectoryEntryMetadata(ctx, storageScope, entry)
 	if err != nil {
 		return directoryContentDelta{}, err
 	}
 	if directory.pending || directory.recursiveBytes != entry.Size || directory.recursiveFileCount != entry.FileCount || directory.contentDigest != entry.ContentDigest {
 		return directoryContentDelta{}, domain.NewError(domain.ErrorPreconditionFailed, "prepared operation content source changed")
 	}
-	delta.directoryID, delta.manifest = entry.DirectoryID, directory.manifest
+	delta.scope, delta.directoryID, delta.manifest = storageScope, entry.DirectoryID, directory.manifest
 	return delta, nil
 }
 
@@ -160,7 +227,7 @@ func (s *FileStore) buildRecursiveFileOperationPreparation(ctx context.Context, 
 		return err
 	}
 	sourceParent := sourceTrail[len(sourceTrail)-1]
-	sourceEntry, err := s.directoryIndexEntry(ctx, from, sourceParent.directoryID, sourceParent.snapshot.manifest, sourcePath.Name())
+	sourceEntry, err := s.directoryIndexEntry(ctx, sourceParent.scope, sourceParent.directoryID, sourceParent.snapshot.manifest, sourcePath.Name())
 	if err != nil {
 		return err
 	}
@@ -176,9 +243,6 @@ func (s *FileStore) buildRecursiveFileOperationPreparation(ctx context.Context, 
 	}
 	emitObject := func(value storageformat.MutationObject) error {
 		return s.addPreparedOperationObject(ctx, collector, operation, value)
-	}
-	emitCopy := func(value storageformat.MutationCopy) error {
-		return s.addPreparedOperationCopy(ctx, collector, value)
 	}
 	if operation.Kind == operationCreateDirectory {
 		return s.buildCreateDirectoryReplacementPreparation(ctx, operationKey, operation, userID, from, sourcePath, sourceTrail, sourceEntry, collector, emitObject)
@@ -205,7 +269,7 @@ func (s *FileStore) buildRecursiveFileOperationPreparation(ctx context.Context, 
 			return err
 		}
 		destinationParent := destinationTrail[len(destinationTrail)-1]
-		currentDestination, lookupErr := s.directoryIndexEntry(ctx, to, destinationParent.directoryID, destinationParent.snapshot.manifest, resolved.Name())
+		currentDestination, lookupErr := s.directoryIndexEntry(ctx, destinationParent.scope, destinationParent.directoryID, destinationParent.snapshot.manifest, resolved.Name())
 		if request.DestinationEntry == nil {
 			if lookupErr != nil && !errors.Is(lookupErr, domain.ErrNotFound) {
 				return lookupErr
@@ -218,23 +282,25 @@ func (s *FileStore) buildRecursiveFileOperationPreparation(ctx context.Context, 
 		} else if currentDestination != *request.DestinationEntry {
 			return domain.NewError(domain.ErrorPreconditionFailed, "prepared operation destination changed before traversal")
 		}
-		if !request.Move || from.Area() != to.Area() {
-			prepared, cloneErr := s.cloneTreeStream(ctx, operation.OperationID, operation.StartedAt, from, to, sourceEntry, !request.Move, emitObject, emitCopy, func(item relativeCatalogEntry) error {
-				if len(item.segments) == 0 {
-					item.entry.Name, item.entry.NameDigest = resolved.Name(), storageformat.NameDigest(resolved.Name())
-					version, versionErr := directoryEntryVersion(item.entry)
-					if versionErr != nil {
-						return versionErr
-					}
-					item.entry.LogicalVersion = version
-				}
-				return s.addPreparedCatalogOccurrence(ctx, collector, userID, to, resolved, item, false)
-			})
-			if cloneErr != nil {
-				return cloneErr
+		var sourceCatalog relativeCatalogEntry
+		if sourceEntry.Kind == domain.EntryDirectory {
+			sourceStorageScope, scopeErr := directoryEntryStorageScope(sourceParent.scope, sourceEntry)
+			if scopeErr != nil {
+				return scopeErr
 			}
-			preparedEntry = prepared.entry
+			sourceDirectory, readErr := s.readDirectoryEntryMetadata(ctx, sourceStorageScope, sourceEntry)
+			if readErr != nil {
+				return readErr
+			}
+			if sourceDirectory.pending || sourceDirectory.recursiveBytes != sourceEntry.Size || sourceDirectory.recursiveFileCount != sourceEntry.FileCount || sourceDirectory.contentDigest != sourceEntry.ContentDigest {
+				return domain.NewError(domain.ErrorPreconditionFailed, "prepared operation source snapshot changed")
+			}
+			preparedEntry.ManifestID = sourceDirectory.manifestID
+			preparedEntry.StorageArea = areaName(sourceStorageScope.Area())
+			sourceCatalog.manifestID = sourceDirectory.manifestID
+			sourceCatalog.contentSketch = append([]string(nil), sourceDirectory.manifest.ContentSketch...)
 		}
+		sourceCatalog.entry = sourceEntry
 		preparedEntry.Name, preparedEntry.NameDigest = resolved.Name(), storageformat.NameDigest(resolved.Name())
 		if !request.Move || preparedEntry.Kind == domain.EntryDirectory {
 			preparedEntry.ModifiedAt = operation.StartedAt.UTC()
@@ -244,33 +310,23 @@ func (s *FileStore) buildRecursiveFileOperationPreparation(ctx context.Context, 
 			return err
 		}
 		if request.Move {
-			if err := s.collectCatalogTreeStream(ctx, from, sourceEntry, func(item relativeCatalogEntry) error {
-				if err := s.addPreparedCatalogOccurrence(ctx, collector, userID, from, sourcePath, item, true); err != nil {
-					return err
-				}
-				if from.Area() == to.Area() {
-					if len(item.segments) == 0 {
-						item.entry = preparedEntry
-					}
-					return s.addPreparedCatalogOccurrence(ctx, collector, userID, to, resolved, item, false)
-				}
-				return nil
-			}); err != nil {
+			if err := s.addPreparedCatalogOccurrence(ctx, collector, userID, from, sourcePath, sourceCatalog, true); err != nil {
 				return err
 			}
 		}
+		destinationCatalog := sourceCatalog
+		destinationCatalog.entry = preparedEntry
+		if err := s.addPreparedCatalogOccurrence(ctx, collector, userID, to, resolved, destinationCatalog, false); err != nil {
+			return err
+		}
 		if request.DestinationEntry != nil {
-			if err := s.collectCatalogTreeStream(ctx, to, *request.DestinationEntry, func(item relativeCatalogEntry) error {
-				return s.addPreparedCatalogOccurrence(ctx, collector, userID, to, resolved, item, true)
-			}); err != nil {
+			if err := s.addPreparedCatalogOccurrence(ctx, collector, userID, to, resolved, relativeCatalogEntry{entry: *request.DestinationEntry}, true); err != nil {
 				return err
 			}
 		}
 	}
 	if operation.Kind == operationDelete {
-		if err := s.collectCatalogTreeStream(ctx, from, sourceEntry, func(item relativeCatalogEntry) error {
-			return s.addPreparedCatalogOccurrence(ctx, collector, userID, from, sourcePath, item, true)
-		}); err != nil {
+		if err := s.addPreparedCatalogOccurrence(ctx, collector, userID, from, sourcePath, relativeCatalogEntry{entry: sourceEntry}, true); err != nil {
 			return err
 		}
 	}
@@ -352,9 +408,7 @@ func (s *FileStore) buildCreateDirectoryReplacementPreparation(
 	if err != nil {
 		return err
 	}
-	if err := s.collectCatalogTreeStream(ctx, scope, existing, func(item relativeCatalogEntry) error {
-		return s.addPreparedCatalogOccurrence(ctx, collector, userID, scope, path, item, true)
-	}); err != nil {
+	if err := s.addPreparedCatalogOccurrence(ctx, collector, userID, scope, path, relativeCatalogEntry{entry: existing}, true); err != nil {
 		return err
 	}
 	if err := s.addPreparedCatalogOccurrence(ctx, collector, userID, scope, path, relativeCatalogEntry{
@@ -394,7 +448,13 @@ func (s *FileStore) finishRecursiveFileOperationPreparation(
 	for key := range updates {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	sort.Slice(keys, func(i, j int) bool {
+		left, right := updates[keys[i]], updates[keys[j]]
+		if len(left.path.Segments()) != len(right.path.Segments()) {
+			return len(left.path.Segments()) > len(right.path.Segments())
+		}
+		return keys[i] < keys[j]
+	})
 	for _, keyValue := range keys {
 		update := updates[keyValue]
 		currentRevision := uint64(0)
@@ -406,6 +466,15 @@ func (s *FileStore) finishRecursiveFileOperationPreparation(
 		prepared, err := s.prepareDirectoryMutationWithContentDeltas(ctx, update, currentRevision+2, manifestID, operation.StartedAt, contentDeltas[keyValue], emitObject)
 		if err != nil {
 			return err
+		}
+		if err := pinPreparedDirectoryInParent(updates, update, prepared); err != nil {
+			return err
+		}
+		if err := s.addPreparedDirectoryCatalogChange(ctx, collector, userID, update, prepared); err != nil {
+			return err
+		}
+		if !update.path.IsRoot() {
+			continue
 		}
 		key := objectstore.MustKey(keyValue)
 		pendingBody, err := storageformat.EncodeEnvelope(directoryRootSchema, key, currentRevision+1, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: preManifest, RecursiveBytes: update.snapshot.recursiveBytes, RecursiveFileCount: update.snapshot.recursiveFileCount, ContentAccumulator: update.snapshot.contentAccumulator, ContentDigest: update.snapshot.contentDigest, Pending: &storageformat.DirectoryTransition{
@@ -430,9 +499,6 @@ func (s *FileStore) finishRecursiveFileOperationPreparation(
 		if err := collector.Add(ctx, storageformat.FileOperationPreparationItem{SortKey: "root\x00" + keyValue, Kind: storageformat.FileOperationPreparationRoot, Root: &root}); err != nil {
 			return err
 		}
-		if err := s.addPreparedDirectoryCatalogChange(ctx, collector, userID, update, prepared); err != nil {
-			return err
-		}
 	}
 	runCount, err := collector.Close(ctx)
 	if err != nil {
@@ -442,44 +508,111 @@ func (s *FileStore) finishRecursiveFileOperationPreparation(
 }
 
 func (s *FileStore) addPreparedDirectoryCatalogChange(ctx context.Context, collector *operationPreparationRunCollector, userID domain.UserID, update directoryUpdate, prepared preparedDirectory) error {
+	change, present, err := preparedDirectoryCatalogChange(update, prepared)
+	if err != nil || !present {
+		return err
+	}
+	if err := s.filterPreparedSimilarityChange(ctx, userID, &change); err != nil {
+		return err
+	}
+	return s.addCatalogChangePreparationItems(ctx, collector, userID, change)
+}
+
+func (s *FileStore) filterPreparedSimilarityChange(ctx context.Context, userID domain.UserID, change *catalogChange) error {
+	if change == nil || !userID.Valid() {
+		return domain.NewError(domain.ErrorInvalid, "invalid duplicate similarity change")
+	}
+	read := func(posting storageformat.DuplicateSimilarityPosting) (*storageformat.DuplicateSimilarityPosting, error) {
+		key := duplicateSimilarityPostingKey(userID.String(), posting)
+		object, err := s.engine.backend.Get(ctx, key)
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		var envelope storageformat.Envelope
+		var root storageformat.DuplicateSimilarityPostingRoot
+		if err := storageformat.DecodeEnvelope(object.Body, key, duplicateSimilaritySchema, &envelope, &root); err != nil {
+			return nil, err
+		}
+		if root.SchemaVersion != 1 || root.UserID != userID.String() || root.Pending != nil {
+			return nil, domain.NewError(domain.ErrorUnavailable, "duplicate similarity posting is changing concurrently")
+		}
+		return root.Current, nil
+	}
+	keptPre := make(map[string]storageformat.DuplicateSimilarityPosting)
+	filteredPre := change.similarityPre[:0]
+	for _, posting := range change.similarityPre {
+		current, err := read(posting)
+		if err != nil {
+			return err
+		}
+		if current != nil && *current == posting {
+			filteredPre = append(filteredPre, posting)
+			keptPre[duplicateSimilarityPostingKey(userID.String(), posting).String()] = posting
+		}
+	}
+	change.similarityPre = filteredPre
+	filteredPost := change.similarityPost[:0]
+	for _, posting := range change.similarityPost {
+		current, err := read(posting)
+		if err != nil {
+			return err
+		}
+		key := duplicateSimilarityPostingKey(userID.String(), posting).String()
+		_, replacing := keptPre[key]
+		if current == nil || replacing {
+			filteredPost = append(filteredPost, posting)
+		}
+	}
+	change.similarityPost = filteredPost
+	return nil
+}
+
+func preparedDirectoryCatalogChange(update directoryUpdate, prepared preparedDirectory) (catalogChange, bool, error) {
 	if !update.path.Valid() {
-		return nil
+		return catalogChange{}, false, nil
 	}
 	change := catalogChange{}
 	var err error
 	if !update.path.IsRoot() {
 		before, err := catalogOccurrence(update.scope, update.path, update.entry)
 		if err != nil {
-			return err
+			return catalogChange{}, false, err
 		}
 		change.pre = &before
 	}
-	if update.snapshot.recursiveFileCount > 0 {
+	if update.snapshot.recursiveFileCount > 0 && validateDirectoryContentSketch(update.snapshot.manifest.ContentSketch) == nil {
 		change.similarityPre, err = duplicateSimilarityPostings(update.scope, update.path, update.directoryID, update.snapshot.manifest.ContentSketch)
 		if err != nil {
-			return err
+			return catalogChange{}, false, err
 		}
 	}
 	afterEntry := update.entry
 	afterEntry.Size, afterEntry.FileCount, afterEntry.ContentDigest = prepared.recursiveBytes, prepared.recursiveFileCount, prepared.contentDigest
+	if afterEntry.Kind == domain.EntryDirectory && !update.path.IsRoot() {
+		afterEntry.ManifestID = prepared.manifestID
+		afterEntry.StorageArea = areaName(update.scope.Area())
+	}
 	afterEntry.LogicalVersion, err = directoryEntryVersion(afterEntry)
 	if err != nil {
-		return err
+		return catalogChange{}, false, err
 	}
 	if !update.path.IsRoot() {
 		after, err := catalogOccurrence(update.scope, update.path, afterEntry)
 		if err != nil {
-			return err
+			return catalogChange{}, false, err
 		}
 		change.post = &after
 	}
-	if prepared.recursiveFileCount > 0 {
+	if prepared.recursiveFileCount > 0 && validateDirectoryContentSketch(prepared.contentSketch) == nil {
 		change.similarityPost, err = duplicateSimilarityPostings(update.scope, update.path, update.directoryID, prepared.contentSketch)
 		if err != nil {
-			return err
+			return catalogChange{}, false, err
 		}
 	}
-	return s.addCatalogChangePreparationItems(ctx, collector, userID, change)
+	return change, true, nil
 }
 
 func (s *FileStore) prepareDirectoryMutationWithContentDeltas(ctx context.Context, update directoryUpdate, revision uint64, manifestID string, createdAt time.Time, deltas []directoryContentDelta, emit func(storageformat.MutationObject) error) (preparedDirectory, error) {
@@ -508,10 +641,6 @@ func (s *FileStore) prepareDirectoryMutationWithContentDeltas(ctx context.Contex
 			return preparedDirectory{}, err
 		}
 	}
-	contentRoot, err := s.rebuildDirectoryContentIndexWithDeltas(ctx, update, deltas, emit)
-	if err != nil {
-		return preparedDirectory{}, err
-	}
 	if update.entryCount > 0 && (indexRoot.EntryCount != uint64(update.entryCount) || indexRoot.RecursiveBytes != update.recursiveBytes || indexRoot.RecursiveFileCount != update.recursiveFileCount) { // #nosec G115 -- negative aggregates are rejected by the mutation functions.
 		return preparedDirectory{}, domain.NewError(domain.ErrorInvalid, "streamed directory mutation aggregate mismatch")
 	}
@@ -523,24 +652,21 @@ func (s *FileStore) prepareDirectoryMutationWithContentDeltas(ctx context.Contex
 	if err != nil || expectedDigest != update.contentDigest || validateDirectorySortIndexRoots(sortRoots, update.entryCount) != nil {
 		return preparedDirectory{}, domain.NewError(domain.ErrorInvalid, "streamed directory mutation content identity mismatch")
 	}
-	manifestKey := storageformat.DirectoryManifestKey(update.scope.UserID().String(), areaName(update.scope.Area()), update.directoryID, manifestID)
-	manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, storageformat.DirectoryManifest{
-		SchemaVersion: 2, DirectoryID: update.directoryID, ManifestID: manifestID,
-		IndexRootID: indexRoot.NodeID, IndexRootDigest: indexRoot.NodeDigest, SortIndexes: sortRoots,
-		ContentIndexRootID: contentRoot.NodeID, ContentIndexRootDigest: contentRoot.NodeDigest, ContentSketch: append([]string(nil), contentRoot.Sketch...),
-		EntryCount: update.entryCount, RecursiveBytes: update.recursiveBytes, RecursiveFileCount: update.recursiveFileCount,
-		ContentAccumulator: update.contentAccumulator, ContentDigest: update.contentDigest, CreatedAt: createdAt.UTC(),
-	})
+	storedDeltas, err := storedDirectoryContentDeltas(deltas)
 	if err != nil {
 		return preparedDirectory{}, err
 	}
-	if err := emit(storageformat.MutationObject{Key: manifestKey.String(), Body: manifestBody}); err != nil {
-		return preparedDirectory{}, err
-	}
-	rootKey := storageformat.DirectoryRootKey(update.scope.UserID().String(), areaName(update.scope.Area()), update.directoryID)
-	rootBody, err := storageformat.EncodeEnvelope(directoryRootSchema, rootKey, revision, storageformat.DirectoryRoot{SchemaVersion: 1, DirectoryID: update.directoryID, ManifestID: manifestID, RecursiveBytes: update.recursiveBytes, RecursiveFileCount: update.recursiveFileCount, ContentAccumulator: update.contentAccumulator, ContentDigest: update.contentDigest})
+	contentSketch := lazyDirectoryContentSketch(update, storedDeltas, deltas)
+	contentBase, contentDeltas := lazyDirectoryContentForUpdate(update, storedDeltas)
+	prepared, err := s.prepareDirectoryWithLazyContent(update.scope, update.directoryID, update.entryCount, update.recursiveBytes, update.recursiveFileCount, revision, indexRoot, sortRoots, nil, contentBase, contentDeltas, contentSketch, update.contentAccumulator, update.contentDigest, createdAt, manifestID)
 	if err != nil {
 		return preparedDirectory{}, err
 	}
-	return preparedDirectory{manifestID: manifestID, recursiveBytes: update.recursiveBytes, recursiveFileCount: update.recursiveFileCount, contentAccumulator: update.contentAccumulator, contentDigest: update.contentDigest, contentSketch: append([]string(nil), contentRoot.Sketch...), rootBody: rootBody}, nil
+	for _, object := range prepared.prerequisites {
+		if err := emit(object); err != nil {
+			return preparedDirectory{}, err
+		}
+	}
+	prepared.prerequisites = nil
+	return prepared, nil
 }

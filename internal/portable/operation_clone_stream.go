@@ -179,20 +179,15 @@ func (s *FileStore) cloneTreeStreamAt(
 	emitCopy func(storageformat.MutationCopy) error,
 	visitOccurrence func(relativeCatalogEntry) error,
 ) (streamedTreePreparation, error) {
-	entry, err := s.transformedCloneEntry(operationID, modifiedAt, source, copyBlobs)
+	// File copies are logical reflinks to the same immutable owner-scoped blob.
+	// Only directory metadata may need a new identity in the legacy tree model;
+	// issuing a provider rewrite for a same-owner file copy wastes operations,
+	// bandwidth, and storage without improving isolation.
+	entry, err := s.transformedCloneEntry(operationID, modifiedAt, source, copyBlobs && source.Kind != domain.EntryFile)
 	if err != nil {
 		return streamedTreePreparation{}, err
 	}
 	if source.Kind == domain.EntryFile {
-		if copyBlobs {
-			if err := emitCopy(storageformat.MutationCopy{
-				SourceKey:      storageformat.BlobKey(from.UserID().String(), source.BlobID).String(),
-				DestinationKey: storageformat.BlobKey(to.UserID().String(), entry.BlobID).String(),
-				Size:           source.Size, MD5: source.MD5, CRC32C: source.CRC32C,
-			}); err != nil {
-				return streamedTreePreparation{}, err
-			}
-		}
 		if err := visitOccurrence(relativeCatalogEntry{segments: append([]string(nil), segments...), entry: entry}); err != nil {
 			return streamedTreePreparation{}, err
 		}

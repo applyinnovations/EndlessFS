@@ -619,8 +619,39 @@ func (s *FileStore) directoryContentIndexRoot(ctx context.Context, scope domain.
 }
 
 func (s *FileStore) collectDirectoryContentIndexEntries(ctx context.Context, scope domain.Scope, directoryID string, manifest storageformat.DirectoryManifest, after string, limit int) ([]storageformat.DirectoryContentIndexEntry, error) {
+	return s.collectDirectoryContentIndexEntriesAtDepth(ctx, scope, directoryID, manifest, after, limit, 0)
+}
+
+func (s *FileStore) collectDirectoryContentIndexEntriesAtDepth(ctx context.Context, scope domain.Scope, directoryID string, manifest storageformat.DirectoryManifest, after string, limit, depth int) ([]storageformat.DirectoryContentIndexEntry, error) {
 	if manifest.RecursiveFileCount == 0 {
 		return nil, nil
+	}
+	if depth > 256 {
+		return nil, domain.NewError(domain.ErrorInvalid, "directory content expression is too deep")
+	}
+	if manifest.SchemaVersion == 3 {
+		next, err := s.lazyDirectoryContentIterator(ctx, scope.UserID(), manifest, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		result := make([]storageformat.DirectoryContentIndexEntry, 0, limit)
+		for len(result) < limit {
+			value, ok, err := next()
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				break
+			}
+			key, err := directoryContentIndexKey(value)
+			if err != nil {
+				return nil, err
+			}
+			if after == "" || key > after {
+				result = append(result, value)
+			}
+		}
+		return result, nil
 	}
 	root, err := s.directoryContentIndexRoot(ctx, scope, directoryID, manifest)
 	if err != nil {
@@ -661,6 +692,147 @@ func (s *FileStore) collectDirectoryContentIndexEntries(ctx context.Context, sco
 	return result, walk(root)
 }
 
+func (s *FileStore) lazyDirectoryContentIterator(ctx context.Context, userID domain.UserID, manifest storageformat.DirectoryManifest, depth int) (func() (storageformat.DirectoryContentIndexEntry, bool, error), error) {
+	if !userID.Valid() || manifest.SchemaVersion != 3 || validateDirectoryManifestContent(manifest) != nil {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid lazy directory content iterator")
+	}
+	pageSource := func(scope domain.Scope, directoryID string, sourceManifest storageformat.DirectoryManifest) func() (storageformat.DirectoryContentIndexEntry, bool, error) {
+		after := ""
+		var page []storageformat.DirectoryContentIndexEntry
+		index := 0
+		done := false
+		return func() (storageformat.DirectoryContentIndexEntry, bool, error) {
+			for index == len(page) {
+				if done {
+					return storageformat.DirectoryContentIndexEntry{}, false, nil
+				}
+				var err error
+				page, err = s.collectDirectoryContentIndexEntriesAtDepth(ctx, scope, directoryID, sourceManifest, after, maxEntriesPerPage, depth)
+				if err != nil {
+					return storageformat.DirectoryContentIndexEntry{}, false, err
+				}
+				index = 0
+				if len(page) < maxEntriesPerPage {
+					done = true
+				}
+				if len(page) == 0 {
+					return storageformat.DirectoryContentIndexEntry{}, false, nil
+				}
+				after, err = directoryContentIndexKey(page[len(page)-1])
+				if err != nil {
+					return storageformat.DirectoryContentIndexEntry{}, false, err
+				}
+			}
+			value := page[index]
+			index++
+			return value, true, nil
+		}
+	}
+	var sources []directoryContentDeltaSource
+	if manifest.ContentBase != nil {
+		baseScope, err := storedOperationScope(userID, manifest.ContentBase.Area)
+		if err != nil {
+			return nil, err
+		}
+		baseManifest, err := s.readDirectoryManifest(ctx, baseScope, manifest.ContentBase.DirectoryID, manifest.ContentBase.ManifestID)
+		if err != nil {
+			return nil, err
+		}
+		sources = append(sources, directoryContentDeltaSource{base: true, next: pageSource(baseScope, manifest.ContentBase.DirectoryID, baseManifest)})
+	}
+	for _, delta := range manifest.ContentDeltas {
+		if delta.Entry != nil {
+			emitted := false
+			value := *delta.Entry
+			sources = append(sources, directoryContentDeltaSource{remove: delta.Remove, next: func() (storageformat.DirectoryContentIndexEntry, bool, error) {
+				if emitted {
+					return storageformat.DirectoryContentIndexEntry{}, false, nil
+				}
+				emitted = true
+				return value, true, nil
+			}})
+			continue
+		}
+		sourceScope, err := storedOperationScope(userID, delta.Area)
+		if err != nil {
+			return nil, err
+		}
+		sourceManifest, err := s.readDirectoryManifest(ctx, sourceScope, delta.DirectoryID, delta.ManifestID)
+		if err != nil {
+			return nil, err
+		}
+		prefix, _ := domain.ParseUserPath(delta.Prefix)
+		sources = append(sources, directoryContentDeltaSource{
+			remove: delta.Remove, prefix: prefix.Segments(),
+			next: pageSource(sourceScope, delta.DirectoryID, sourceManifest),
+		})
+	}
+	values := make(directoryContentDeltaHeap, 0, len(sources))
+	for index := range sources {
+		value, ok, err := sources[index].advance()
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		key, err := directoryContentIndexKey(value)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, directoryContentDeltaHeapItem{source: index, key: key, value: value})
+	}
+	heap.Init(&values)
+	return func() (storageformat.DirectoryContentIndexEntry, bool, error) {
+		for len(values) != 0 {
+			key := values[0].key
+			var base, removal, addition *storageformat.DirectoryContentIndexEntry
+			for len(values) != 0 && values[0].key == key {
+				item := heap.Pop(&values).(directoryContentDeltaHeapItem)
+				source := sources[item.source]
+				target := &addition
+				if source.base {
+					target = &base
+				} else if source.remove {
+					target = &removal
+				}
+				if *target != nil {
+					return storageformat.DirectoryContentIndexEntry{}, false, domain.NewError(domain.ErrorInvalid, "duplicate lazy directory content delta key")
+				}
+				value := item.value
+				*target = &value
+				following, ok, err := source.advance()
+				if err != nil {
+					return storageformat.DirectoryContentIndexEntry{}, false, err
+				}
+				if ok {
+					followingKey, err := directoryContentIndexKey(following)
+					if err != nil {
+						return storageformat.DirectoryContentIndexEntry{}, false, err
+					}
+					heap.Push(&values, directoryContentDeltaHeapItem{source: item.source, key: followingKey, value: following})
+				}
+			}
+			if removal != nil && (base == nil || !sameDirectoryContentIndexEntry(*base, *removal)) {
+				return storageformat.DirectoryContentIndexEntry{}, false, domain.NewError(domain.ErrorInvalid, "lazy directory content removal does not match snapshot")
+			}
+			if removal != nil {
+				base = nil
+			}
+			if addition != nil {
+				if base != nil && !sameDirectoryContentIndexEntry(*base, *addition) {
+					return storageformat.DirectoryContentIndexEntry{}, false, domain.NewError(domain.ErrorInvalid, "lazy directory content addition collides with snapshot")
+				}
+				base = addition
+			}
+			if base != nil {
+				return *base, true, nil
+			}
+		}
+		return storageformat.DirectoryContentIndexEntry{}, false, nil
+	}, nil
+}
+
 func (s *FileStore) verifyDirectoryContentIndex(ctx context.Context, scope domain.Scope, directoryID string, manifest storageformat.DirectoryManifest) error {
 	after := ""
 	var files, bytes int64
@@ -673,7 +845,7 @@ func (s *FileStore) verifyDirectoryContentIndex(ctx context.Context, scope domai
 			if files == math.MaxInt64 || value.Size > math.MaxInt64-bytes {
 				return domain.NewError(domain.ErrorInvalid, "directory content-index aggregates overflow")
 			}
-			entry, err := s.resolveDirectoryContentIndexEntry(ctx, scope, directoryID, value.RelativePath)
+			entry, err := s.resolveDirectoryContentIndexEntry(ctx, scope, directoryID, manifest, value.RelativePath)
 			if err != nil {
 				return err
 			}
@@ -695,18 +867,16 @@ func (s *FileStore) verifyDirectoryContentIndex(ctx context.Context, scope domai
 	return nil
 }
 
-func (s *FileStore) resolveDirectoryContentIndexEntry(ctx context.Context, scope domain.Scope, directoryID, relativePath string) (storageformat.DirectoryEntry, error) {
+func (s *FileStore) resolveDirectoryContentIndexEntry(ctx context.Context, scope domain.Scope, directoryID string, manifest storageformat.DirectoryManifest, relativePath string) (storageformat.DirectoryEntry, error) {
 	path, err := domain.ParseUserPath(relativePath)
 	if err != nil || path.IsRoot() {
 		return storageformat.DirectoryEntry{}, domain.NewError(domain.ErrorInvalid, "invalid directory content-index path")
 	}
 	currentID := directoryID
+	currentManifest := manifest
+	storageScope := scope
 	for index, segment := range path.Segments() {
-		snapshot, err := s.readDirectoryMetadata(ctx, scope, currentID, currentID == storageformat.RootDirectoryID)
-		if err != nil {
-			return storageformat.DirectoryEntry{}, err
-		}
-		entry, err := s.directoryIndexEntry(ctx, scope, currentID, snapshot.manifest, segment)
+		entry, err := s.directoryIndexEntry(ctx, storageScope, currentID, currentManifest, segment)
 		if err != nil {
 			return storageformat.DirectoryEntry{}, err
 		}
@@ -719,7 +889,15 @@ func (s *FileStore) resolveDirectoryContentIndexEntry(ctx context.Context, scope
 		if entry.Kind != domain.EntryDirectory || entry.DirectoryID == "" {
 			return storageformat.DirectoryEntry{}, domain.NewError(domain.ErrorInvalid, "directory content-index path crosses a file")
 		}
-		currentID = entry.DirectoryID
+		storageScope, err = directoryEntryStorageScope(storageScope, entry)
+		if err != nil {
+			return storageformat.DirectoryEntry{}, err
+		}
+		child, err := s.readDirectoryEntryMetadata(ctx, storageScope, entry)
+		if err != nil {
+			return storageformat.DirectoryEntry{}, err
+		}
+		currentID, currentManifest = entry.DirectoryID, child.manifest
 	}
 	return storageformat.DirectoryEntry{}, domain.NewError(domain.ErrorInvalid, "directory content-index path is empty")
 }

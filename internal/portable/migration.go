@@ -208,6 +208,17 @@ func (e *Engine) runStorageMigration003To004(ctx context.Context, transition sto
 // creates its own checkpoint; it deliberately avoids a redundant directory
 // graph walk and reachability collection.
 func (e *Engine) runStorageMigration004To005(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
+	return e.runFeatureOnlyStorageMigration(ctx, transition, superblockObject, superblock)
+}
+
+// Schema 006 freezes existing schema-005 directory roots as immutable snapshot
+// sources. New writes publish persistent manifest pins and lazy content deltas,
+// so no predecessor application object needs rewriting at this boundary.
+func (e *Engine) runStorageMigration005To006(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
+	return e.runFeatureOnlyStorageMigration(ctx, transition, superblockObject, superblock)
+}
+
+func (e *Engine) runFeatureOnlyStorageMigration(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
 	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageStarted})
 	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterDetection)); err != nil {
 		return err
@@ -1130,7 +1141,7 @@ func (e *Engine) readMigrationDirectoryRoot(ctx context.Context, scope domain.Sc
 	var schema001Envelope storageformat.Envelope
 	var schema001 schema001DirectoryRoot
 	if err := storageformat.DecodeEnvelope(object.Body, key, directoryRootSchema, &schema001Envelope, &schema001); err != nil {
-		return migrationDirectoryRoot{}, err
+		return migrationDirectoryRoot{}, domain.WrapError(domain.ErrorInvalid, "cannot decode predecessor directory root "+key.String(), err)
 	}
 	if schema001.SchemaVersion != 1 || schema001.DirectoryID != directoryID || schema001.ManifestID == "" || schema001.Pending != nil {
 		return migrationDirectoryRoot{}, domain.NewError(domain.ErrorInvalid, "invalid schema-001 directory root")
@@ -1168,7 +1179,7 @@ func (e *Engine) readMigrationDirectoryManifest(ctx context.Context, scope domai
 	var schema001Envelope storageformat.Envelope
 	var schema001 schema001DirectoryManifest
 	if err := storageformat.DecodeEnvelope(object.Body, key, directoryManifestSchema, &schema001Envelope, &schema001); err != nil {
-		return migrationDirectoryManifest{}, err
+		return migrationDirectoryManifest{}, domain.WrapError(domain.ErrorInvalid, "cannot decode predecessor directory manifest "+key.String(), err)
 	}
 	current = storageformat.DirectoryManifest{
 		SchemaVersion: schema001.SchemaVersion, DirectoryID: schema001.DirectoryID, ManifestID: schema001.ManifestID,
@@ -1188,8 +1199,13 @@ func validateMigrationManifest(manifest storageformat.DirectoryManifest, directo
 		_, contentIndexErr := directoryContentIndexManifestRoot(manifest)
 		validShape = accumulatorErr == nil && digestErr == nil && contentIndexErr == nil && digest == manifest.ContentDigest && len(manifest.PageIDs) == 0 && validateDirectorySortIndexRoots(manifest.SortIndexes, manifest.EntryCount) == nil && (manifest.EntryCount == 0 && manifest.IndexRootID == "" && manifest.IndexRootDigest == "" || manifest.EntryCount > 0 && manifest.IndexRootID != "" && manifest.IndexRootDigest != "")
 	}
+	if manifest.SchemaVersion == 3 {
+		accumulator, accumulatorErr := decodeDirectoryContentAccumulator(manifest.ContentAccumulator)
+		digest, digestErr := directoryContentAccumulatorDigest(accumulator, manifest.EntryCount)
+		validShape = accumulatorErr == nil && digestErr == nil && validateDirectoryManifestContent(manifest) == nil && digest == manifest.ContentDigest && len(manifest.PageIDs) == 0 && validateDirectorySortIndexRoots(manifest.SortIndexes, manifest.EntryCount) == nil && (manifest.EntryCount == 0 && manifest.IndexRootID == "" && manifest.IndexRootDigest == "" || manifest.EntryCount > 0 && manifest.IndexRootID != "" && manifest.IndexRootDigest != "")
+	}
 	if !validShape || manifest.DirectoryID != directoryID || manifest.ManifestID != manifestID || manifest.EntryCount < 0 || manifest.RecursiveBytes < 0 || manifest.RecursiveFileCount < 0 || manifest.CreatedAt.IsZero() {
-		return domain.NewError(domain.ErrorInvalid, fmt.Sprintf("invalid directory manifest during migration (schema=%d entries=%d pages=%d index=%t)", manifest.SchemaVersion, manifest.EntryCount, len(manifest.PageIDs), manifest.IndexRootID != ""))
+		return domain.NewError(domain.ErrorInvalid, fmt.Sprintf("invalid directory manifest during migration (directory=%s manifest=%s schema=%d entries=%d pages=%d index=%t)", directoryID, manifestID, manifest.SchemaVersion, manifest.EntryCount, len(manifest.PageIDs), manifest.IndexRootID != ""))
 	}
 	return nil
 }

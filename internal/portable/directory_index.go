@@ -22,11 +22,11 @@ func validateDirectoryIndexEntry(entry storageformat.DirectoryEntry) error {
 	}
 	switch entry.Kind {
 	case domain.EntryDirectory:
-		if entry.DirectoryID == "" || entry.BlobID != "" || entry.MediaType != "" || entry.FileCount < 0 || entry.ContentDigest == "" || entry.MD5 != "" || entry.CRC32C != "" || entry.SHA256 != "" {
+		if entry.DirectoryID == "" || entry.BlobID != "" || entry.MediaType != "" || entry.FileCount < 0 || entry.ContentDigest == "" || entry.MD5 != "" || entry.CRC32C != "" || entry.SHA256 != "" || entry.StorageArea != "" && entry.StorageArea != "live" && entry.StorageArea != "trash" {
 			return domain.NewError(domain.ErrorInvalid, "invalid directory index directory entry")
 		}
 	case domain.EntryFile:
-		if entry.BlobID == "" || entry.DirectoryID != "" || entry.MediaType == "" || entry.FileCount != 0 || entry.ContentDigest != "" || entry.SHA256 != "" || !(objectstore.ContentFingerprint{MD5: entry.MD5, CRC32C: entry.CRC32C}).Complete() {
+		if entry.BlobID == "" || entry.DirectoryID != "" || entry.ManifestID != "" || entry.StorageArea != "" || entry.MediaType == "" || entry.FileCount != 0 || entry.ContentDigest != "" || entry.SHA256 != "" || !(objectstore.ContentFingerprint{MD5: entry.MD5, CRC32C: entry.CRC32C}).Complete() {
 			return domain.NewError(domain.ErrorInvalid, "invalid directory index file entry")
 		}
 	default:
@@ -285,7 +285,7 @@ func (s *FileStore) readDirectoryIndexNode(ctx context.Context, scope domain.Sco
 }
 
 func (s *FileStore) directoryIndexRoot(ctx context.Context, scope domain.Scope, directoryID string, manifest storageformat.DirectoryManifest) (storageformat.DirectoryIndexChild, error) {
-	if manifest.SchemaVersion != 2 || manifest.IndexRootID == "" || manifest.IndexRootDigest == "" || manifest.EntryCount <= 0 {
+	if (manifest.SchemaVersion != 2 && manifest.SchemaVersion != 3) || manifest.IndexRootID == "" || manifest.IndexRootDigest == "" || manifest.EntryCount <= 0 {
 		return storageformat.DirectoryIndexChild{}, domain.NewError(domain.ErrorInvalid, "invalid non-empty directory index manifest")
 	}
 	key := storageformat.DirectoryIndexNodeKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifest.IndexRootID)

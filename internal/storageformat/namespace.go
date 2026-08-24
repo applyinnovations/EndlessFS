@@ -59,6 +59,11 @@ type NamespaceBatchItem struct {
 	State       domain.OperationState `json:"state"`
 }
 
+// MaxNamespaceBatchItems is a durable schema bound. It prevents a corrupt
+// outcome from turning its uint64 item count into an overflowing allocation
+// or unbounded tree walk when decoded by an application replica.
+const MaxNamespaceBatchItems = 10_000
+
 func ValidateNamespaceEntry(entry NamespaceEntry) error {
 	if entry.SchemaVersion != 1 || !validDomainText(entry.NodeID) || entry.OccurrenceContextID != "" && !validDomainDigest(entry.OccurrenceContextID) || entry.Entry.LogicalVersion == "" || entry.Entry.Size < 0 || entry.Entry.FileCount < 0 {
 		return domain.NewError(domain.ErrorInvalid, "invalid namespace entry")
@@ -106,10 +111,7 @@ func ValidateNamespaceMutationResult(result NamespaceMutationResult) error {
 		return domain.NewError(domain.ErrorInvalid, "invalid namespace mutation result")
 	}
 	if result.Batch != nil {
-		if result.Batch.Operation.ID == "" || result.Batch.Operation.State != domain.OperationSucceeded || result.Batch.ItemCount == 0 || result.Batch.Items.EntryCount != result.Batch.ItemCount {
-			return domain.NewError(domain.ErrorInvalid, "invalid namespace batch result")
-		}
-		if err := validateDomainTreeRoot(result.Batch.Items); err != nil {
+		if err := ValidateNamespaceBatch(*result.Batch); err != nil {
 			return err
 		}
 	}
@@ -118,6 +120,13 @@ func ValidateNamespaceMutationResult(result NamespaceMutationResult) error {
 	}
 	_, err := EncodeCanonical(result)
 	return err
+}
+
+func ValidateNamespaceBatch(batch NamespaceBatch) error {
+	if batch.Operation.ID == "" || batch.Operation.State != domain.OperationSucceeded || batch.ItemCount == 0 || batch.ItemCount > MaxNamespaceBatchItems || batch.Items.EntryCount != batch.ItemCount {
+		return domain.NewError(domain.ErrorInvalid, "invalid namespace batch result")
+	}
+	return validateDomainTreeRoot(batch.Items)
 }
 
 func ValidateNamespaceBatchItem(item NamespaceBatchItem) error {

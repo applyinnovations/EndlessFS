@@ -233,15 +233,6 @@ func (store *namespaceStore) resolveTrail(ctx context.Context, view *namespaceVi
 	return trail, nil
 }
 
-func namespaceSortRoot(entry storageformat.NamespaceEntry, field domain.SortField) (storageformat.DomainTreeRoot, error) {
-	switch field {
-	case domain.SortName:
-		return entry.Children, nil
-	default:
-		return storageformat.DomainTreeRoot{}, domain.NewError(domain.ErrorInvalid, "namespace sort requires a derived projection")
-	}
-}
-
 func namespaceSortKey(field domain.SortField, entry storageformat.DirectoryEntry) (string, error) {
 	if entry.Name == "" {
 		return "", domain.NewError(domain.ErrorInvalid, "namespace child name is empty")
@@ -251,6 +242,9 @@ func namespaceSortKey(field domain.SortField, entry storageformat.DirectoryEntry
 	case domain.SortModified:
 		return entry.ModifiedAt.UTC().Format("20060102T150405.000000000Z") + "." + name, nil
 	case domain.SortSize:
+		if entry.Size < 0 {
+			return "", domain.NewError(domain.ErrorInvalid, "namespace child size is negative")
+		}
 		return fmt.Sprintf("%016x.%s", uint64(entry.Size), name), nil
 	case domain.SortKind:
 		return string(entry.Kind) + "." + name, nil
@@ -269,6 +263,9 @@ func normalizeDomainChanges(values map[string]storageformat.DomainChange) []stor
 }
 
 func (store *namespaceStore) applyDirectoryEdits(ctx context.Context, view *namespaceView, parent storageformat.NamespaceEntry, edits []namespaceDirectoryEdit, modifiedAt time.Time) (storageformat.NamespaceEntry, error) {
+	if parent.EntryCount > math.MaxInt64 {
+		return storageformat.NamespaceEntry{}, domain.NewError(domain.ErrorInvalid, "namespace entry count overflows")
+	}
 	children := make(map[string]storageformat.DomainChange)
 	beforeRecords := make([]storageformat.DirectoryEntry, 0, len(edits))
 	afterRecords := make([]storageformat.DirectoryEntry, 0, len(edits))
@@ -317,7 +314,7 @@ func (store *namespaceStore) applyDirectoryEdits(ctx context.Context, view *name
 			}
 		}
 	}
-	if count < 0 || uint64(count) > math.MaxUint64 {
+	if count < 0 {
 		return storageformat.NamespaceEntry{}, domain.NewError(domain.ErrorInvalid, "namespace entry count underflows")
 	}
 	var err error
@@ -394,13 +391,39 @@ func (store *namespaceStore) operationReplay(ctx context.Context, view *namespac
 		return nil, err
 	}
 	var result storageformat.NamespaceMutationResult
-	if err := decodeCanonicalValue(outcome.Result, &result); err != nil || storageformat.ValidateNamespaceMutationResult(result) != nil {
+	if err := decodeCanonicalValue(outcome.Result, &result); err != nil || validateNamespaceMutationResult(result) != nil {
 		return nil, domain.NewError(domain.ErrorInvalid, "invalid namespace mutation outcome")
 	}
 	if requestFingerprint != "" && result.RequestFingerprint != requestFingerprint {
 		return nil, domain.NewError(domain.ErrorConflict, "namespace idempotency key was reused")
 	}
 	return &result, nil
+}
+
+func validateNamespaceMutationResult(result storageformat.NamespaceMutationResult) error {
+	if err := storageformat.ValidateNamespaceMutationResult(result); err != nil {
+		return err
+	}
+	validateOperation := func(operation domain.Operation, requireSuccess bool) error {
+		terminal := operation.State == domain.OperationSucceeded || operation.State == domain.OperationFailed
+		if operation.ID == "" || !terminal || requireSuccess && operation.State != domain.OperationSucceeded || operation.StartedAt.IsZero() || operation.UpdatedAt.IsZero() || operation.UpdatedAt.Before(operation.StartedAt) {
+			return domain.NewError(domain.ErrorInvalid, "invalid namespace operation result")
+		}
+		if operation.State == domain.OperationSucceeded && (operation.ErrorKind != "" || operation.Error != "") {
+			return domain.NewError(domain.ErrorInvalid, "successful namespace operation contains an error")
+		}
+		return nil
+	}
+	if result.Operation != nil {
+		return validateOperation(*result.Operation, false)
+	}
+	if result.Entry != nil {
+		return validateDirectoryEntries([]storageformat.DirectoryEntry{*result.Entry})
+	}
+	if result.Batch != nil {
+		return validateOperation(result.Batch.Operation, true)
+	}
+	return nil
 }
 
 func (store *namespaceStore) commit(ctx context.Context, view *namespaceView, mutationID string, requestFingerprint string, changes map[string]storageformat.NamespaceEntry, result storageformat.NamespaceMutationResult) (storageformat.NamespaceMutationResult, error) {
@@ -437,6 +460,9 @@ func (store *namespaceStore) commitWithAdditionalChanges(ctx context.Context, vi
 	}
 	mutationChanges = append(mutationChanges, additional...)
 	result.SchemaVersion, result.RequestFingerprint = 1, requestFingerprint
+	if err := validateNamespaceMutationResult(result); err != nil {
+		return storageformat.NamespaceMutationResult{}, err
+	}
 	resultBody, err := storageformat.EncodeCanonical(result)
 	if err != nil {
 		return storageformat.NamespaceMutationResult{}, err
@@ -445,7 +471,7 @@ func (store *namespaceStore) commitWithAdditionalChanges(ctx context.Context, vi
 	if err != nil {
 		return storageformat.NamespaceMutationResult{}, err
 	}
-	if err := decodeCanonicalValue(outcome.Result, &result); err != nil || storageformat.ValidateNamespaceMutationResult(result) != nil || result.RequestFingerprint != requestFingerprint {
+	if err := decodeCanonicalValue(outcome.Result, &result); err != nil || validateNamespaceMutationResult(result) != nil || result.RequestFingerprint != requestFingerprint {
 		return storageformat.NamespaceMutationResult{}, domain.NewError(domain.ErrorInvalid, "namespace committed result is invalid")
 	}
 	return result, nil
@@ -473,7 +499,11 @@ func namespaceNodeID(operationID domain.OperationID, role string) string {
 }
 
 func (store *namespaceStore) stat(ctx context.Context, scope domain.Scope, path domain.UserPath) (domain.Entry, error) {
-	entry, err := store.resolveEntry(ctx, scope, path)
+	view, err := store.loadView(ctx, scope.UserID(), "")
+	if err != nil {
+		return domain.Entry{}, err
+	}
+	entry, err := store.resolveEntryAtView(ctx, view, scope, path)
 	if err != nil {
 		return domain.Entry{}, err
 	}
@@ -484,6 +514,13 @@ func (store *namespaceStore) resolveEntry(ctx context.Context, scope domain.Scop
 	view, err := store.loadView(ctx, scope.UserID(), "")
 	if err != nil {
 		return storageformat.NamespaceEntry{}, err
+	}
+	return store.resolveEntryAtView(ctx, view, scope, path)
+}
+
+func (store *namespaceStore) resolveEntryAtView(ctx context.Context, view *namespaceView, scope domain.Scope, path domain.UserPath) (storageformat.NamespaceEntry, error) {
+	if view == nil || view.reference != namespaceReference(scope.UserID()) {
+		return storageformat.NamespaceEntry{}, domain.NewError(domain.ErrorInvalid, "namespace entry view is misbound")
 	}
 	if path.IsRoot() {
 		return view.roots[scope.Area()], nil
@@ -699,14 +736,6 @@ func (store *namespaceStore) resolveDestination(ctx context.Context, view *names
 	}
 }
 
-func (store *namespaceStore) prepareDestination(ctx context.Context, scope domain.Scope, requested domain.UserPath, conflict domain.ConflictMode, expected domain.Version) (domain.UserPath, bool, error) {
-	view, err := store.loadView(ctx, scope.UserID(), "")
-	if err != nil {
-		return domain.UserPath{}, false, err
-	}
-	return store.prepareDestinationAtView(ctx, view, scope, requested, conflict, expected)
-}
-
 func (store *namespaceStore) prepareDestinationAtView(ctx context.Context, view *namespaceView, scope domain.Scope, requested domain.UserPath, conflict domain.ConflictMode, expected domain.Version) (domain.UserPath, bool, error) {
 	if view == nil || view.reference != namespaceReference(scope.UserID()) {
 		return domain.UserPath{}, false, domain.NewError(domain.ErrorInvalid, "upload destination view is misbound")
@@ -730,10 +759,23 @@ func (store *namespaceStore) createDirectory(ctx context.Context, scope domain.S
 	}
 	nodeID := storageformat.Digest([]byte("endlessfs-namespace-directory-v1\x00" + mutationID))
 	now := store.engine.clock.Now().UTC()
+	fingerprint := namespaceRequestFingerprint("create-directory", areaName(scope.Area()), request.Path.String(), string(conflict), string(request.ExpectedVersion))
 	for {
 		view, err := store.loadView(ctx, scope.UserID(), "")
 		if err != nil {
 			return domain.Entry{}, err
+		}
+		if replay, replayErr := store.operationReplay(ctx, view, mutationID, fingerprint); replayErr != nil {
+			return domain.Entry{}, replayErr
+		} else if replay != nil {
+			if replay.Entry == nil {
+				return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "directory mutation outcome is missing its entry")
+			}
+			resolved, joinErr := request.Path.Parent().Join(replay.Entry.Name)
+			if joinErr != nil {
+				return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "directory mutation outcome path is invalid")
+			}
+			return domainEntry(resolved, *replay.Entry), nil
 		}
 		trail, err := store.resolveTrail(ctx, view, scope.Area(), request.Path.Parent())
 		if err != nil {
@@ -767,7 +809,6 @@ func (store *namespaceStore) createDirectory(ctx context.Context, scope domain.S
 			return domain.Entry{}, err
 		}
 		entryCopy := created.Entry
-		fingerprint := namespaceRequestFingerprint("create-directory", areaName(scope.Area()), request.Path.String(), string(conflict), string(request.ExpectedVersion))
 		result, err := store.commit(ctx, view, mutationID, fingerprint, changes, storageformat.NamespaceMutationResult{Entry: &entryCopy})
 		if err == nil {
 			return domainEntry(resolved, *result.Entry), nil
@@ -778,13 +819,16 @@ func (store *namespaceStore) createDirectory(ctx context.Context, scope domain.S
 	}
 }
 
-func (store *namespaceStore) publishFile(ctx context.Context, scope domain.Scope, path domain.UserPath, conflict domain.ConflictMode, expected domain.Version, mutationID, requestFingerprint string, entry storageformat.DirectoryEntry) (domain.Entry, error) {
-	return store.publishFileWithChanges(ctx, scope, path, conflict, expected, mutationID, requestFingerprint, entry, nil)
+func (store *namespaceStore) publishFileWithChanges(ctx context.Context, scope domain.Scope, path domain.UserPath, conflict domain.ConflictMode, expected domain.Version, mutationID, requestFingerprint string, entry storageformat.DirectoryEntry, additional []consistencyDomainChange) (domain.Entry, error) {
+	return store.publishFileWithChangesAtView(ctx, nil, scope, path, conflict, expected, mutationID, requestFingerprint, entry, additional)
 }
 
-func (store *namespaceStore) publishFileWithChanges(ctx context.Context, scope domain.Scope, path domain.UserPath, conflict domain.ConflictMode, expected domain.Version, mutationID, requestFingerprint string, entry storageformat.DirectoryEntry, additional []consistencyDomainChange) (domain.Entry, error) {
+func (store *namespaceStore) publishFileWithChangesAtView(ctx context.Context, initial *namespaceView, scope domain.Scope, path domain.UserPath, conflict domain.ConflictMode, expected domain.Version, mutationID, requestFingerprint string, entry storageformat.DirectoryEntry, additional []consistencyDomainChange) (domain.Entry, error) {
 	if !path.Valid() || path.IsRoot() || entry.Kind != domain.EntryFile || entry.BlobID == "" || entry.Size < 0 || entry.MediaType == "" || entry.ModifiedAt.IsZero() || mutationID == "" || requestFingerprint == "" {
 		return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "invalid namespace file publication")
+	}
+	if initial != nil && (initial.reference != namespaceReference(scope.UserID()) || initial.snapshotDigest != "" || initial.headSnapshot == nil) {
+		return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "namespace file publication view is misbound")
 	}
 	entry.Name, entry.NameDigest = path.Name(), storageformat.NameDigest(path.Name())
 	entry.DirectoryID, entry.ManifestID, entry.StorageArea, entry.FileCount, entry.ContentDigest, entry.SHA256 = "", "", "", 0, "", ""
@@ -797,13 +841,20 @@ func (store *namespaceStore) publishFileWithChanges(ctx context.Context, scope d
 	nodeID := storageformat.Digest([]byte("endlessfs-namespace-file-v1\x00" + mutationID))
 	file := storageformat.NamespaceEntry{SchemaVersion: 1, NodeID: nodeID, Entry: entry}
 	for {
-		view, err := store.loadView(ctx, scope.UserID(), "")
-		if err != nil {
-			return domain.Entry{}, err
+		view := initial
+		initial = nil
+		if view == nil {
+			view, err = store.loadView(ctx, scope.UserID(), "")
+			if err != nil {
+				return domain.Entry{}, err
+			}
 		}
 		if replay, err := store.operationReplay(ctx, view, mutationID, requestFingerprint); err != nil {
 			return domain.Entry{}, err
 		} else if replay != nil {
+			if replay.Entry == nil {
+				return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "file mutation outcome is missing its entry")
+			}
 			return domainEntry(path, *replay.Entry), nil
 		}
 		trail, err := store.resolveTrail(ctx, view, scope.Area(), path.Parent())
@@ -913,6 +964,9 @@ func (store *namespaceStore) copyOrMoveResolved(ctx context.Context, move, resto
 		if replay, err := store.operationReplay(ctx, view, mutationID, requestFingerprint); err != nil {
 			return domain.Operation{}, err
 		} else if replay != nil {
+			if replay.Operation == nil {
+				return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "copy or move outcome is missing its operation")
+			}
 			return *replay.Operation, nil
 		}
 		sourceTrail, err := store.resolveTrail(ctx, view, from.Area(), request.Source.Parent())
@@ -1074,6 +1128,9 @@ func (store *namespaceStore) deleteResolved(ctx context.Context, scope domain.Sc
 		if replay, err := store.operationReplay(ctx, view, mutationID, requestFingerprint); err != nil {
 			return domain.Operation{}, err
 		} else if replay != nil {
+			if replay.Operation == nil {
+				return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "delete outcome is missing its operation")
+			}
 			return *replay.Operation, nil
 		}
 		trail, err := store.resolveTrail(ctx, view, scope.Area(), request.Path.Parent())

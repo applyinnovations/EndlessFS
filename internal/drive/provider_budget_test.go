@@ -117,7 +117,7 @@ func TestProviderBudgetTrashAndRestore(t *testing.T) {
 	if _, err := service.UploadStatus(ctx, user, capability.UploadID); err != nil {
 		t.Fatal(err)
 	}
-	check("file-upload-status-active")
+	check("file-upload-status-active-schema-008")
 
 	upload, err := http.NewRequestWithContext(ctx, capability.Method, capability.URL, strings.NewReader("payload"))
 	if err != nil {

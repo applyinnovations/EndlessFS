@@ -46,6 +46,16 @@ type BatchStorage interface {
 	GetBatchOperation(context.Context, domain.UserID, domain.OperationID) (domain.Operation, error)
 }
 
+// NamespaceStorage is the complete file-control contract required by the
+// application runtime. Trash placement and bounded batches are mandatory
+// schema-008 namespace mutations, never optional fallbacks to per-item state
+// records or repeated provider transactions.
+type NamespaceStorage interface {
+	Storage
+	TrashStorage
+	BatchStorage
+}
+
 // DuplicateStorage is the optional provider-neutral duplicate reconciliation
 // control plane introduced by the duplicate-catalog storage epoch. Keeping it
 // separate lets historical fixture providers remain deliberately minimal.

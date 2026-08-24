@@ -400,11 +400,10 @@ func (e *Engine) checkpointRoleIncludes(key string, fileData, schema008 bool) (b
 		if isFileData {
 			return false, nil
 		}
+		// Schema-007 metadata and all rebuildable projections are
+		// intentionally absent from schema-008 portability checkpoints.
+		// They are neither mutation authority nor needed to reconstruct it.
 		return isSchema008AuthorityStateKey(key), nil
-		// Schema-007 metadata and all rebuildable projections are intentionally
-		// absent from schema-008 portability checkpoints. They are neither
-		// mutation authority nor needed to reconstruct it.
-		return false, nil
 	}
 	return !isFileData, nil
 }
@@ -429,15 +428,6 @@ func isSchema008AuthorityStateKey(key string) bool {
 		return segments[4] != "" && segments[5] == "head.json"
 	}
 	return segments[4] != "" && segments[5] == "pages" && strings.HasSuffix(segments[6], ".json")
-}
-
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func walkObjectInfos(ctx context.Context, backend objectstore.MetadataBackend, prefix string, visit func(objectstore.ObjectInfo) error) error {

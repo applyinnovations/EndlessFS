@@ -147,7 +147,10 @@ func (e *Engine) validateConsistencyDomainClosure(ctx context.Context, reference
 			continue
 		}
 		root, err := decodeNamespaceEntry(value.Data)
-		if err != nil || root.Entry.Name != "" {
+		if err != nil {
+			return err
+		}
+		if root.Entry.Name != "" {
 			return domain.NewError(domain.ErrorInvalid, "invalid namespace checkpoint root")
 		}
 		if err := e.validateNamespaceEntryClosure(ctx, session, owner, namespaceRootPath(), root); err != nil {
@@ -166,8 +169,14 @@ func (e *Engine) validateConsistencyDomainClosure(ctx context.Context, reference
 }
 
 func (e *Engine) validateKnownControlDomainValues(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead) error {
-	if reference.Kind != storageformat.DomainNamespace && (reference.Kind != storageformat.DomainOwnerControl || !strings.HasPrefix(reference.ID, "uploads:")) {
-		return nil
+	session := newConsistencyDomainTreeSession(e.stateDomainStore(), reference)
+	var namespaceOwner domain.UserID
+	if reference.Kind == storageformat.DomainNamespace {
+		var err error
+		namespaceOwner, err = domain.ParseUserID(reference.ID)
+		if err != nil {
+			return domain.NewError(domain.ErrorInvalid, "invalid namespace owner domain")
+		}
 	}
 	after := ""
 	for {
@@ -176,17 +185,58 @@ func (e *Engine) validateKnownControlDomainValues(ctx context.Context, reference
 			return err
 		}
 		for _, value := range values {
-			switch {
-			case strings.HasPrefix(value.Key, "upload/"):
-				var record storageformat.PortableUploadRecord
-				if err := decodeCanonicalValue(value.Value, &record); err != nil || storageformat.ValidatePortableUploadRecord(record) != nil || uploadRecordKey(record.UploadID) != value.Key || reference.Kind == storageformat.DomainNamespace && record.OwnerID != reference.ID {
-					return domain.NewError(domain.ErrorInvalid, "invalid portable upload in checkpoint closure")
+			if reference.Kind == storageformat.DomainNamespace {
+				switch {
+				case value.Key == namespaceRootKey(domain.AreaLive), value.Key == namespaceRootKey(domain.AreaTrash):
+					// The recursive namespace validator above owns these values.
+				case strings.HasPrefix(value.Key, "upload/"):
+					uploadID := strings.TrimPrefix(value.Key, "upload/")
+					if _, err := decodePortableUploadRecord(value.Value, namespaceOwner, uploadID); err != nil {
+						return domain.NewError(domain.ErrorInvalid, "invalid portable upload in checkpoint closure")
+					}
+				case strings.HasPrefix(value.Key, "upload-idempotency/"):
+					var record storageformat.PortableUploadIdempotency
+					if err := decodeCanonicalValue(value.Value, &record); err != nil || storageformat.ValidatePortableUploadIdempotency(record) != nil || record.OwnerID != reference.ID || value.Key != "upload-idempotency/"+record.KeyDigest {
+						return domain.NewError(domain.ErrorInvalid, "invalid portable upload idempotency in checkpoint closure")
+					}
+					upload, found, err := e.stateDomainStore().lookupAtHeadWithSession(ctx, reference, head, uploadRecordKey(record.UploadID), session)
+					if err != nil {
+						return err
+					}
+					if !found {
+						return domain.NewError(domain.ErrorInvalid, "portable upload idempotency target is missing")
+					}
+					if _, err := decodePortableUploadRecord(upload.Data, namespaceOwner, record.UploadID); err != nil {
+						return domain.NewError(domain.ErrorInvalid, "portable upload idempotency target is invalid")
+					}
+				default:
+					return domain.NewError(domain.ErrorInvalid, "unknown namespace authority value")
 				}
-			case strings.HasPrefix(value.Key, "upload-idempotency/"):
-				var record storageformat.PortableUploadIdempotency
-				if err := decodeCanonicalValue(value.Value, &record); err != nil || storageformat.ValidatePortableUploadIdempotency(record) != nil || reference.Kind == storageformat.DomainNamespace && record.OwnerID != reference.ID {
-					return domain.NewError(domain.ErrorInvalid, "invalid portable upload idempotency in checkpoint closure")
+				continue
+			}
+			if strings.HasPrefix(value.Key, "duplicates/ignore/group/") {
+				groupID := strings.TrimPrefix(value.Key, "duplicates/ignore/group/")
+				var record domain.DuplicateIgnore
+				if reference.Kind != storageformat.DomainOwnerControl || !strings.HasPrefix(reference.ID, "owner:") || decodeCanonicalValue(value.Value, &record) != nil || validateDuplicateGroupID(groupID) != nil || record.GroupID != groupID || record.Revision == 0 {
+					return domain.NewError(domain.ErrorInvalid, "invalid duplicate ignore authority in checkpoint closure")
 				}
+				continue
+			}
+			if strings.HasPrefix(value.Key, "duplicates/ignore/pair/") {
+				pairID := strings.TrimPrefix(value.Key, "duplicates/ignore/pair/")
+				var record storageformat.DuplicateDirectoryPreference
+				if reference.Kind != storageformat.DomainOwnerControl || !strings.HasPrefix(reference.ID, "owner:") || decodeCanonicalValue(value.Value, &record) != nil || storageformat.ValidateDuplicateDirectoryPreference(record) != nil || record.PairID != pairID {
+					return domain.NewError(domain.ErrorInvalid, "invalid duplicate directory preference in checkpoint closure")
+				}
+				continue
+			}
+			key, err := parseExistingStateKey(value.Key)
+			if err != nil {
+				return domain.NewError(domain.ErrorInvalid, "unknown consistency-domain authority value")
+			}
+			routed, err := stateDomainReferenceForKey(key)
+			if err != nil || routed != reference {
+				return domain.NewError(domain.ErrorInvalid, "state authority value is stored in the wrong consistency domain")
 			}
 		}
 		if len(values) < domainPageMaximumItems {
@@ -267,7 +317,7 @@ func (e *Engine) validateNamespaceOutcomeClosure(ctx context.Context, session *c
 
 func (e *Engine) validateNamespaceMutationResultClosure(ctx context.Context, session *consistencyDomainTreeSession, body []byte) error {
 	var result storageformat.NamespaceMutationResult
-	if err := decodeCanonicalValue(body, &result); err != nil || storageformat.ValidateNamespaceMutationResult(result) != nil {
+	if err := decodeCanonicalValue(body, &result); err != nil || validateNamespaceMutationResult(result) != nil {
 		return domain.NewError(domain.ErrorInvalid, "invalid namespace outcome result closure")
 	}
 	if result.Batch == nil {

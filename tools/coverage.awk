@@ -16,20 +16,20 @@ function belongs(file, group) {
   if (group == "authorization") return index(file, "/internal/drive/") > 0
   if (group == "path") return index(file, "/internal/domain/") > 0
   if (group == "token") return index(file, "/internal/secret/") > 0
-  if (group == "capability") return file ~ /\/internal\/provider\/memory\/transfer.go$/ || file ~ /\/internal\/portable\/transfers.go$/ || file ~ /\/internal\/objectstore\/gcs\/transfers.go$/
-  if (group == "state-CAS") return (index(file, "/internal/state/") > 0 && index(file, "/internal/state/statecontract/") == 0) || file ~ /\/internal\/portable\/state.go$/
-  if (group == "scope-mapping") return index(file, "/internal/provider/memory/") > 0 || file ~ /\/internal\/portable\/(filesystem|operations|state|transfers).go$/
-  if (group == "canonical-format-key-version-checkpoint") return index(file, "/internal/storageformat/") > 0 || file ~ /\/internal\/portable\/(engine|checkpoint).go$/
-  if (group == "write-gate-admission") return file ~ /\/internal\/portable\/(gate|admission).go$/
-  if (group == "operation-fencing-recovery") return file ~ /\/internal\/portable\/(gate|operations).go$/
-  if (group == "directory-manifest") return file ~ /\/internal\/portable\/filesystem.go$/
+  if (group == "capability") return file ~ /\/internal\/provider\/memory\/transfer.go$/ || file ~ /\/internal\/portable\/transfers(008)?\.go$/ || file ~ /\/internal\/objectstore\/gcs\/transfers.go$/
+  if (group == "state-CAS") return (index(file, "/internal/state/") > 0 && index(file, "/internal/state/statecontract/") == 0) || file ~ /\/internal\/portable\/(state|domain_store|domain_tree|domain_tree_stream).go$/
+  if (group == "scope-mapping") return index(file, "/internal/provider/memory/") > 0 || file ~ /\/internal\/portable\/(state|runtime008).go$/
+  if (group == "canonical-format-key-version-checkpoint") return index(file, "/internal/storageformat/") > 0 || file ~ /\/internal\/portable\/(engine|checkpoint|checkpoint008|checkpoint_reachability|checkpoint_visit_set).go$/
+  if (group == "gate-catalog-domain-freeze") return file ~ /\/internal\/portable\/(gate|domain_catalog|checkpoint008).go$/
+  if (group == "domain-publication-lost-success") return file ~ /\/internal\/portable\/(domain_store|domain_tree|domain_tree_stream).go$/
+  if (group == "namespace-tree") return file ~ /\/internal\/portable\/(runtime008|namespace_store|namespace_batch|namespace_trash|namespace_projection).go$/
   if (group == "gcs-transport") return index(file, "/internal/objectstore/gcs/") > 0
   if (group == "theme-validation") return index(file, "/internal/theme/") > 0
   if (group == "configuration") return index(file, "/internal/config/") > 0
   if (group == "preview-core") return index(file, "/internal/preview/") > 0 && index(file, "/internal/preview/imagegen/") == 0 && index(file, "/internal/preview/memory/") == 0 && index(file, "/internal/preview/durable/") == 0 && index(file, "/internal/preview/storecontract/") == 0
   if (group == "preview-image-generator") return index(file, "/internal/preview/imagegen/") > 0
   if (group == "preview-store") return index(file, "/internal/preview/memory/") > 0 || index(file, "/internal/preview/durable/") > 0
-  if (group == "migration") return file ~ /\/internal\/portable\/migration(_ledger)?\.go$/
+  if (group == "migration") return file ~ /\/internal\/portable\/migration(008|_ledger)?\.go$/
   return 0
 }
 
@@ -52,9 +52,9 @@ END {
   groups[6] = "state-CAS"
   groups[7] = "scope-mapping"
   groups[8] = "canonical-format-key-version-checkpoint"
-  groups[9] = "write-gate-admission"
-  groups[10] = "operation-fencing-recovery"
-  groups[11] = "directory-manifest"
+  groups[9] = "gate-catalog-domain-freeze"
+  groups[10] = "domain-publication-lost-success"
+  groups[11] = "namespace-tree"
   groups[12] = "gcs-transport"
   groups[13] = "theme-validation"
   groups[14] = "configuration"

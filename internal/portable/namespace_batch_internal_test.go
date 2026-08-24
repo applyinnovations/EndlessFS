@@ -10,6 +10,7 @@ import (
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
+	"github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
@@ -71,6 +72,26 @@ func TestNamespaceBatchTrashPublishesTenThousandEdgesThroughOneHead(t *testing.T
 		t.Fatalf("BatchMoveToTrash() = %d items, %+v, %v", len(result.Items), result.Operation, err)
 	}
 	events := ledger.Events()
+	economics, err := gcs.RegionalStandardFlatEconomics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics, err := economics.Estimate(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ratchet, err := gcs.RegionalStandardFlatBudgetRatchet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget, found := ratchet.Latest("trash-batch-10000-schema-008")
+	if !found {
+		t.Fatal("10,000-item trash provider budget is missing")
+	}
+	if _, err := budget.CheckRatchet(economics, events); err != nil {
+		t.Fatalf("10,000-item trash provider budget: %v", err)
+	}
+	t.Logf("measured 10,000-item atomic trash provider budget: %+v", metrics)
 	headKey := storageformat.DomainHeadKey(storageformat.DomainNamespace, live.UserID().String()).String()
 	headPuts := 0
 	parallelPagePuts := 0

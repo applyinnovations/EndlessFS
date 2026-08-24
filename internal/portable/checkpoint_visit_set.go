@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
@@ -22,6 +21,7 @@ const checkpointVisitBufferEntries = 16 * 1024
 // weaker collision boundary.
 type checkpointVisitSet struct {
 	directory string
+	root      *os.Root
 	buffer    map[[sha256.Size]byte]struct{}
 	levels    []string
 	sequence  uint64
@@ -33,31 +33,38 @@ func newCheckpointVisitSet() (*checkpointVisitSet, error) {
 	if err != nil {
 		return nil, domain.WrapError(domain.ErrorUnavailable, "create checkpoint visited workspace", err)
 	}
-	return &checkpointVisitSet{directory: directory, buffer: make(map[[sha256.Size]byte]struct{}, checkpointVisitBufferEntries), limit: checkpointVisitBufferEntries}, nil
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		_ = os.RemoveAll(directory)
+		return nil, domain.WrapError(domain.ErrorUnavailable, "open checkpoint visited workspace", err)
+	}
+	return &checkpointVisitSet{directory: directory, root: root, buffer: make(map[[sha256.Size]byte]struct{}, checkpointVisitBufferEntries), limit: checkpointVisitBufferEntries}, nil
 }
 
 func (set *checkpointVisitSet) Close() error {
 	if set == nil || set.directory == "" {
 		return nil
 	}
-	err := os.RemoveAll(set.directory)
+	rootErr := set.root.Close()
+	removeErr := os.RemoveAll(set.directory)
+	set.root = nil
 	set.directory = ""
-	return err
+	return errors.Join(rootErr, removeErr)
 }
 
 func (set *checkpointVisitSet) Seen(value string) (bool, error) {
-	if set == nil || set.directory == "" || value == "" {
+	if set == nil || set.root == nil || set.directory == "" || value == "" {
 		return false, domain.NewError(domain.ErrorInvalid, "invalid checkpoint visited identity")
 	}
 	digest := sha256.Sum256([]byte(value))
 	if _, found := set.buffer[digest]; found {
 		return true, nil
 	}
-	for _, path := range set.levels {
-		if path == "" {
+	for _, name := range set.levels {
+		if name == "" {
 			continue
 		}
-		found, err := checkpointVisitRunContains(path, digest)
+		found, err := checkpointVisitRunContains(set.root, name, digest)
 		if err != nil {
 			return false, err
 		}
@@ -83,9 +90,9 @@ func (set *checkpointVisitSet) flush() error {
 		values = append(values, value)
 	}
 	sort.Slice(values, func(left, right int) bool { return bytes.Compare(values[left][:], values[right][:]) < 0 })
-	path := filepath.Join(set.directory, checkpointReachabilityChunkName(set.sequence)+".visited")
+	name := checkpointReachabilityChunkName(set.sequence) + ".visited"
 	set.sequence++
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	file, err := set.root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return domain.WrapError(domain.ErrorUnavailable, "create checkpoint visited run", err)
 	}
@@ -99,34 +106,37 @@ func (set *checkpointVisitSet) flush() error {
 		return domain.WrapError(domain.ErrorUnavailable, "close checkpoint visited run", err)
 	}
 	clear(set.buffer)
-	return set.insertRun(0, path)
+	return set.insertRun(0, name)
 }
 
-func (set *checkpointVisitSet) insertRun(level int, path string) error {
+func (set *checkpointVisitSet) insertRun(level int, name string) error {
 	for len(set.levels) <= level {
 		set.levels = append(set.levels, "")
 	}
 	if set.levels[level] == "" {
-		set.levels[level] = path
+		set.levels[level] = name
 		return nil
 	}
-	merged := filepath.Join(set.directory, "merged-"+checkpointReachabilityChunkName(set.sequence)+".visited")
+	merged := "merged-" + checkpointReachabilityChunkName(set.sequence) + ".visited"
 	set.sequence++
-	if err := mergeCheckpointVisitRuns(set.levels[level], path, merged); err != nil {
+	if err := mergeCheckpointVisitRuns(set.root, set.levels[level], name, merged); err != nil {
 		return err
 	}
-	if err := os.Remove(set.levels[level]); err != nil {
+	if err := set.root.Remove(set.levels[level]); err != nil {
 		return domain.WrapError(domain.ErrorUnavailable, "remove checkpoint visited run", err)
 	}
-	if err := os.Remove(path); err != nil {
+	if err := set.root.Remove(name); err != nil {
 		return domain.WrapError(domain.ErrorUnavailable, "remove checkpoint visited run", err)
 	}
 	set.levels[level] = ""
 	return set.insertRun(level+1, merged)
 }
 
-func checkpointVisitRunContains(path string, value [sha256.Size]byte) (bool, error) {
-	file, err := os.Open(path)
+func checkpointVisitRunContains(root *os.Root, name string, value [sha256.Size]byte) (bool, error) {
+	if root == nil {
+		return false, domain.NewError(domain.ErrorInvalid, "checkpoint visited workspace is closed")
+	}
+	file, err := root.Open(name)
 	if err != nil {
 		return false, domain.WrapError(domain.ErrorUnavailable, "open checkpoint visited run", err)
 	}
@@ -163,8 +173,11 @@ type checkpointVisitRunReader struct {
 	found   bool
 }
 
-func openCheckpointVisitRun(path string) (*checkpointVisitRunReader, error) {
-	file, err := os.Open(path)
+func openCheckpointVisitRun(root *os.Root, name string) (*checkpointVisitRunReader, error) {
+	if root == nil {
+		return nil, domain.NewError(domain.ErrorInvalid, "checkpoint visited workspace is closed")
+	}
+	file, err := root.Open(name)
 	if err != nil {
 		return nil, domain.WrapError(domain.ErrorUnavailable, "open checkpoint visited merge input", err)
 	}
@@ -189,18 +202,18 @@ func (reader *checkpointVisitRunReader) advance() error {
 	return nil
 }
 
-func mergeCheckpointVisitRuns(leftPath, rightPath, outputPath string) error {
-	left, err := openCheckpointVisitRun(leftPath)
+func mergeCheckpointVisitRuns(root *os.Root, leftName, rightName, outputName string) error {
+	left, err := openCheckpointVisitRun(root, leftName)
 	if err != nil {
 		return err
 	}
 	defer left.file.Close()
-	right, err := openCheckpointVisitRun(rightPath)
+	right, err := openCheckpointVisitRun(root, rightName)
 	if err != nil {
 		return err
 	}
 	defer right.file.Close()
-	output, err := os.OpenFile(outputPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	output, err := root.OpenFile(outputName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return domain.WrapError(domain.ErrorUnavailable, "create checkpoint visited merged run", err)
 	}

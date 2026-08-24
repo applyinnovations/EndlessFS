@@ -15,7 +15,9 @@ The [v1.1 media browsing and image preview specification](./docs/v1.1-media-prev
 - Strict logical user isolation and deny-by-default authorization.
 - Direct browser-to-provider uploads and provider-to-browser downloads; the control plane does not proxy file bodies.
 - One provider-independent canonical format and portable engine, with logical state independent of GCS generations, S3 version IDs, Azure ETags, bucket names, and provider metadata.
-- Durable admission, fencing, takeover, operation, and checkpoint protocols for multiple replicas sharing one single- or split-bucket storage set.
+- Consistency-domain head publication, retained idempotent outcomes, stale-writer
+  denial, catalog/domain freeze, and checkpoint protocols for multiple replicas
+  sharing one single- or split-bucket storage set.
 - Optional lazy image previews stored independently from originals, with fast WebP variants and file-type icon fallback.
 - One Go binary with embedded HTML, application CSS, vanilla JavaScript, and validated theme media.
 - Data-only themes: typed tokens and allowlisted static assets, never theme CSS, HTML, JavaScript, or remote code.
@@ -109,7 +111,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#test-contract` | Run reusable provider and state-store contract suites. |
 | `nix run .#test-provider-budget` | Run exact GCS request-count, modeled-cost, and modeled-latency ratchets for state, file, data-plane, and preview pathways. |
 | `nix run .#test-migration` | Run the complete historical migration matrix and enforce 98% migration-ledger/implementation statement coverage. Pass a candidate release tag to verify its ledger mapping. |
-| `nix run .#test-replica` | Run deterministic multi-replica admission, fencing, takeover, and recovery tests. |
+| `nix run .#test-replica` | Run deterministic multi-replica head-publication, lost-success, stale-writer, catalog-freeze, and recovery tests. |
 | `nix run .#test-portability` | Run canonical-format, checkpoint, raw-copy/reopen, and continued-mutation tests. |
 | `nix run .#provider-verify -- check CONFIG` | Strictly read and verify a closed checkpoint on configured single- or split-backend memory fixtures/GCS buckets. |
 | `nix run .#test-preview` | Run focused preview policy, generator, store-contract, and HTTP tests. |
@@ -181,9 +183,9 @@ internal/config/         environment parsing and validation
 internal/auth/           established WebAuthn adapter, sessions, cookies, CSRF, and origin policy
 internal/domain/         strict paths, names, IDs, entries, operations, and capabilities
 internal/model/          strict versioned persistence records
-internal/storageformat/  canonical keys, envelopes, logical versions, writer/gate/operation/checkpoint records
+internal/storageformat/  canonical keys, envelopes, logical versions, writer/gate/domain/checkpoint records
 internal/objectstore/    narrow atomic backend contract plus memory and GCS adapters
-internal/portable/       provider-independent state/filesystem, admission, fencing, recovery, and checkpoints
+internal/portable/       provider-independent domains, namespace graph, recovery, migration, and checkpoints
 internal/provider/       application-facing contracts and legacy deterministic test provider
 internal/state/          state contract, strict codec, and concurrency-safe memory CAS store
 internal/secret/         redacted bearer-token hashing and validation
@@ -269,7 +271,10 @@ release-tag mutation or deletion.
 - **Milestone 5 — implemented baseline:** accessible browser drive, confirmed-offset transfers, previews, trash, theme UX, and real Chromium coverage.
 - **Milestone 6 — implemented baseline:** public-share management, invite onboarding, profile/passkey settings, account administration, disable/enable behavior, recovery, and a second full Chromium journey.
 - **Milestone 7 — implemented baseline:** exhaustive cross-user and traversal matrices, fuzz/race/coverage gates, structured-log redaction, dependency/vulnerability policy, OCI inspection, threat/operations review, and release evidence.
-- **v1 portability clarification — implemented:** canonical single-/split-bucket storage-set format, one portable engine, multi-replica admission/fencing/recovery, quiescent checkpoint/raw-copy verification, and credential-free GCS protocol qualification.
+- **v1 portability clarification — implemented:** canonical single-/split-bucket
+  storage-set format, one schema-008 consistency-domain engine, multi-replica
+  conditional publication/lost-success recovery, quiescent checkpoint/raw-copy
+  verification, and credential-free GCS protocol qualification.
 - **v1.1 media previews — complete:** always-available virtualized grid and viewer, optional generated image WebP variants, independent preview-store lifecycle, strict startup validation, and real-browser scale proof.
 - **v1.2/v1.3 — deferred:** video and PDF generator profiles will be revised now that the v1.1 base architecture is implemented.
 

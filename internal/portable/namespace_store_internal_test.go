@@ -19,7 +19,15 @@ import (
 
 func openNamespaceTestEngine(t *testing.T, backend objectstore.Backend) *Engine {
 	t.Helper()
-	return openInternalTestEngine(t, backend, domain.NewFixedClock(time.Date(2046, 1, 2, 3, 4, 5, 0, time.UTC)), strings.NewReader(strings.Repeat("abcdefghijklmnopqrstuvwxyz012345", 1<<15)))
+	value := make([]byte, 1<<20)
+	state := uint64(0x9e3779b97f4a7c15)
+	for index := range value {
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		value[index] = byte(state >> 29)
+	}
+	return openInternalTestEngine(t, backend, domain.NewFixedClock(time.Date(2046, 1, 2, 3, 4, 5, 0, time.UTC)), strings.NewReader(string(value)))
 }
 
 func namespaceTestScope(t *testing.T, area domain.Area) domain.Scope {
@@ -38,10 +46,10 @@ func namespaceTestScope(t *testing.T, area domain.Area) domain.Scope {
 func publishNamespaceTestFile(t *testing.T, store *namespaceStore, scope domain.Scope, path string, size int64, id string) domain.Entry {
 	t.Helper()
 	fingerprint := objectstore.FingerprintFor(bytes.Repeat([]byte{byte(size % 251)}, int(size)))
-	entry, err := store.publishFile(context.Background(), scope, domain.MustParseUserPath(path), domain.ConflictFail, "", id, namespaceRequestFingerprint("test-file", id), storageformat.DirectoryEntry{
+	entry, err := store.publishFileWithChanges(context.Background(), scope, domain.MustParseUserPath(path), domain.ConflictFail, "", id, namespaceRequestFingerprint("test-file", id), storageformat.DirectoryEntry{
 		Kind: domain.EntryFile, BlobID: "blob-" + id, Size: size, MediaType: "application/octet-stream", MD5: fingerprint.MD5, CRC32C: fingerprint.CRC32C,
 		ModifiedAt: store.engine.clock.Now().UTC(),
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("publish %s: %v", path, err)
 	}

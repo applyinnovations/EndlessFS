@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"math"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +24,8 @@ type AccountReader interface {
 
 type Service struct {
 	storage        provider.Storage
+	trash          provider.TrashStorage
+	batch          provider.BatchStorage
 	repository     *repository
 	accounts       AccountReader
 	ids            *domain.IDGenerator
@@ -39,7 +40,11 @@ func NewService(storage provider.Storage, store state.Store, accounts AccountRea
 	if storage == nil || store == nil || accounts == nil || ids == nil || clock == nil || !secret.ValidBearerToken(tokenKey.Reveal()) || baseURL == "" || dataOrigin == "" || textPreviewMax < 1 {
 		return nil, domain.NewError(domain.ErrorInvalid, "invalid drive service configuration")
 	}
-	return &Service{storage: storage, repository: newRepository(store), accounts: accounts, ids: ids, clock: clock, tokenKey: tokenKey, baseURL: strings.TrimRight(baseURL, "/"), dataOrigin: strings.TrimRight(dataOrigin, "/"), textPreviewMax: textPreviewMax}, nil
+	namespace, ok := storage.(provider.NamespaceStorage)
+	if !ok {
+		return nil, domain.NewError(domain.ErrorInvalid, "storage does not implement atomic namespace trash and batch mutations")
+	}
+	return &Service{storage: namespace, trash: namespace, batch: namespace, repository: newRepository(store), accounts: accounts, ids: ids, clock: clock, tokenKey: tokenKey, baseURL: strings.TrimRight(baseURL, "/"), dataOrigin: strings.TrimRight(dataOrigin, "/"), textPreviewMax: textPreviewMax}, nil
 }
 
 func (s *Service) DataOrigin() string { return s.dataOrigin }
@@ -47,10 +52,6 @@ func (s *Service) DataOrigin() string { return s.dataOrigin }
 func liveScope(userID domain.UserID) (domain.Scope, error) {
 	return domain.NewScope(userID, domain.AreaLive)
 }
-func trashScope(userID domain.UserID) (domain.Scope, error) {
-	return domain.NewScope(userID, domain.AreaTrash)
-}
-
 func (s *Service) List(ctx context.Context, userID domain.UserID, request domain.ListRequest) (domain.ListPage, error) {
 	scope, err := liveScope(userID)
 	if err != nil {
@@ -73,16 +74,6 @@ func (s *Service) duplicateStorage() (provider.DuplicateStorage, error) {
 		return nil, domain.NewError(domain.ErrorUnavailable, "duplicate catalog is not available")
 	}
 	return storage, nil
-}
-
-func (s *Service) namespaceTrashStorage() (provider.TrashStorage, bool) {
-	storage, ok := s.storage.(provider.TrashStorage)
-	return storage, ok
-}
-
-func (s *Service) namespaceBatchStorage() (provider.BatchStorage, bool) {
-	storage, ok := s.storage.(provider.BatchStorage)
-	return storage, ok
 }
 
 func driveBatchResult(result domain.NamespaceBatchResult) BatchResult {
@@ -168,10 +159,6 @@ func (s *Service) ApplyDuplicateReconciliation(ctx context.Context, userID domai
 	if err != nil {
 		return BatchResult{}, err
 	}
-	trash, err := trashScope(userID)
-	if err != nil {
-		return BatchResult{}, err
-	}
 	result := BatchResult{OperationID: domain.OperationID(s.derivedID("duplicate-reconciliation", userID, idempotencyKey)), Items: make([]ItemResult, 0, len(selection.Items))}
 	for index, planned := range selection.Items {
 		keep, keepErr := s.storage.Stat(ctx, live, planned.Keep.Path)
@@ -182,7 +169,7 @@ func (s *Service) ApplyDuplicateReconciliation(ctx context.Context, userID domai
 			result.Items = append(result.Items, ItemResult{Path: planned.Remove.Path, State: domain.OperationFailed, ErrorKind: domain.KindOf(keepErr)})
 			continue
 		}
-		item, itemErr := s.trashOneExpected(ctx, userID, live, trash, planned.Remove.Path, planned.Remove.Version, idempotencyKey+":"+strconv.Itoa(index))
+		item, itemErr := s.trashOneExpected(ctx, userID, planned.Remove.Path, planned.Remove.Version, idempotencyKey+":"+strconv.Itoa(index))
 		if itemErr != nil {
 			item = ItemResult{Path: planned.Remove.Path, State: domain.OperationFailed, ErrorKind: domain.KindOf(itemErr)}
 		}
@@ -335,37 +322,11 @@ func (s *Service) BatchCopyMove(ctx context.Context, userID domain.UserID, reque
 	if len(requests) < 1 || len(requests) > MaxBatchItems {
 		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "copy/move batch must contain 1 to 10000 items")
 	}
-	if storage, ok := s.namespaceBatchStorage(); ok {
-		result, err := storage.BatchCopyMove(ctx, userID, requests, move, idempotencyKey)
-		if err != nil {
-			return BatchResult{}, err
-		}
-		return driveBatchResult(result), nil
-	}
-	label := "copy-batch"
-	if move {
-		label = "move-batch"
-	}
-	result := BatchResult{OperationID: domain.OperationID(s.derivedID(label, userID, idempotencyKey)), Items: make([]ItemResult, 0, len(requests))}
-	for index, request := range requests {
-		request.IdempotencyKey = idempotencyKey + ":" + strconv.Itoa(index)
-		var operation domain.Operation
-		var err error
-		if move {
-			operation, err = s.Move(ctx, userID, request)
-		} else {
-			operation, err = s.Copy(ctx, userID, request)
-		}
-		item := ItemResult{Path: request.Source, OperationID: operation.ID, State: operation.State, ErrorKind: operation.ErrorKind}
-		if err != nil {
-			item.State, item.ErrorKind = domain.OperationFailed, domain.KindOf(err)
-		}
-		result.Items = append(result.Items, item)
-	}
-	if err := s.recordBatchOperation(ctx, userID, result); err != nil {
+	result, err := s.batch.BatchCopyMove(ctx, userID, requests, move, idempotencyKey)
+	if err != nil {
 		return BatchResult{}, err
 	}
-	return result, nil
+	return driveBatchResult(result), nil
 }
 
 type ItemResult struct {
@@ -409,16 +370,9 @@ func (s *Service) Trash(ctx context.Context, userID domain.UserID, paths []domai
 	if len(paths) < 1 || len(paths) > MaxBatchItems {
 		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "trash batch must contain 1 to 10000 items")
 	}
-	live, err := liveScope(userID)
-	if err != nil {
+	if _, err := liveScope(userID); err != nil {
 		return BatchResult{}, err
 	}
-	trash, err := trashScope(userID)
-	if err != nil {
-		return BatchResult{}, err
-	}
-	batchID := domain.OperationID(s.derivedID("trash-batch", userID, idempotencyKey))
-	result := BatchResult{OperationID: batchID, Items: make([]ItemResult, 0, len(paths))}
 	seen := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
 		if !path.Valid() || path.IsRoot() {
@@ -429,112 +383,43 @@ func (s *Service) Trash(ctx context.Context, userID domain.UserID, paths []domai
 		}
 		seen[path.String()] = struct{}{}
 	}
-	if storage, ok := s.namespaceBatchStorage(); ok {
-		requests := make([]domain.TrashRequest, len(paths))
-		for index, path := range paths {
-			key := idempotencyKey + ":" + strconv.Itoa(index)
-			requests[index] = domain.TrashRequest{Path: path, TrashID: s.derivedID("trash", userID, key), IdempotencyKey: key}
-		}
-		result, err := storage.BatchMoveToTrash(ctx, userID, requests, idempotencyKey)
-		if err != nil {
-			return BatchResult{}, err
-		}
-		return driveBatchResult(result), nil
-	}
+	requests := make([]domain.TrashRequest, len(paths))
 	for index, path := range paths {
-		item, itemErr := s.trashOneExpected(ctx, userID, live, trash, path, "", idempotencyKey+":"+strconv.Itoa(index))
-		if itemErr != nil {
-			item = ItemResult{Path: path, State: domain.OperationFailed, ErrorKind: domain.KindOf(itemErr)}
-		}
-		result.Items = append(result.Items, item)
+		key := idempotencyKey + ":" + strconv.Itoa(index)
+		requests[index] = domain.TrashRequest{Path: path, TrashID: s.derivedID("trash", userID, key), IdempotencyKey: key}
 	}
-	if err := s.recordBatchOperation(ctx, userID, result); err != nil {
+	result, err := s.batch.BatchMoveToTrash(ctx, userID, requests, idempotencyKey)
+	if err != nil {
 		return BatchResult{}, err
 	}
-	return result, nil
+	return driveBatchResult(result), nil
 }
 
-func (s *Service) recordBatchOperation(ctx context.Context, userID domain.UserID, result BatchResult) error {
-	stateValue := domain.OperationSucceeded
-	for _, item := range result.Items {
-		if item.State != domain.OperationSucceeded {
-			stateValue = domain.OperationFailed
-			break
-		}
-	}
-	now := s.clock.Now()
-	record := model.BatchOperation{SchemaVersion: model.SchemaVersion, OwnerUserID: userID, OperationID: result.OperationID, State: stateValue, StartedAt: now, UpdatedAt: now}
-	return createOrMatch(s.repository.createBatchOperation(ctx, record))
-}
-
-func (s *Service) trashOneExpected(ctx context.Context, userID domain.UserID, live, trash domain.Scope, path domain.UserPath, expected domain.Version, key string) (ItemResult, error) {
+func (s *Service) trashOneExpected(ctx context.Context, userID domain.UserID, path domain.UserPath, expected domain.Version, key string) (ItemResult, error) {
 	trashID := s.derivedID("trash", userID, key)
-	if storage, ok := s.namespaceTrashStorage(); ok {
-		operation, err := storage.MoveToTrash(ctx, userID, domain.TrashRequest{Path: path, ExpectedVersion: expected, TrashID: trashID, IdempotencyKey: key})
-		if err != nil {
-			return ItemResult{}, err
-		}
-		return ItemResult{Path: path, TrashID: trashID, OperationID: operation.ID, State: operation.State, ErrorKind: operation.ErrorKind}, nil
-	}
-	if existing, _, err := s.repository.trash(ctx, userID, trashID); err == nil {
-		if existing.OriginalPath != path {
-			return ItemResult{}, domain.NewError(domain.ErrorConflict, "idempotency key was used for a different request")
-		}
-		return ItemResult{Path: existing.OriginalPath, TrashID: trashID, State: domain.OperationSucceeded}, nil
-	} else if !errors.Is(err, domain.ErrNotFound) {
-		return ItemResult{}, err
-	}
-	entry, err := s.storage.Stat(ctx, live, path)
+	operation, err := s.trash.MoveToTrash(ctx, userID, domain.TrashRequest{Path: path, ExpectedVersion: expected, TrashID: trashID, IdempotencyKey: key})
 	if err != nil {
 		return ItemResult{}, err
 	}
-	if expected != "" && entry.Version != expected {
-		return ItemResult{}, domain.NewError(domain.ErrorPreconditionFailed, "trash source version changed")
-	}
-	trashedPath := domain.MustParseUserPath("/" + trashID)
-	operation, err := s.storage.Move(ctx, live, trash, domain.MoveRequest{Source: path, Destination: trashedPath, Conflict: domain.ConflictFail, ExpectedSource: entry.Version, IdempotencyKey: key})
-	if err != nil {
-		return ItemResult{}, err
-	}
-	if operation.State != domain.OperationSucceeded {
-		return ItemResult{Path: path, OperationID: operation.ID, State: operation.State, ErrorKind: operation.ErrorKind}, nil
-	}
-	record := model.Trash{SchemaVersion: model.SchemaVersion, TrashID: trashID, OwnerUserID: userID, OriginalPath: path, TrashedPath: trashedPath, Kind: entry.Kind, TrashedAt: s.clock.Now(), OriginalVersion: entry.Version}
-	if err := createOrMatch(s.repository.createTrash(ctx, record)); err != nil {
-		return ItemResult{}, err
-	}
-	return ItemResult{Path: path, TrashID: trashID, OperationID: operation.ID, State: operation.State}, nil
+	return ItemResult{Path: path, TrashID: trashID, OperationID: operation.ID, State: operation.State, ErrorKind: operation.ErrorKind}, nil
 }
 
 func (s *Service) TrashList(ctx context.Context, userID domain.UserID) ([]model.Trash, error) {
-	if storage, ok := s.namespaceTrashStorage(); ok {
-		var records []model.Trash
-		request := domain.TrashListRequest{Limit: 1000}
-		for {
-			page, err := storage.ListTrash(ctx, userID, request)
-			if err != nil {
-				return nil, err
-			}
-			for _, item := range page.Items {
-				records = append(records, model.Trash{SchemaVersion: model.SchemaVersion, TrashID: item.TrashID, OwnerUserID: item.OwnerUserID, OriginalPath: item.OriginalPath, TrashedPath: item.TrashedPath, Kind: item.Entry.Kind, TrashedAt: item.TrashedAt, OriginalVersion: item.OriginalVersion})
-			}
-			if page.NextCursor == "" {
-				return records, nil
-			}
-			request.Cursor = page.NextCursor
+	var records []model.Trash
+	request := domain.TrashListRequest{Limit: 1000}
+	for {
+		page, err := s.trash.ListTrash(ctx, userID, request)
+		if err != nil {
+			return nil, err
 		}
-	}
-	records, err := s.repository.trashList(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(records, func(i, j int) bool {
-		if records[i].TrashedAt.Equal(records[j].TrashedAt) {
-			return records[i].TrashID < records[j].TrashID
+		for _, item := range page.Items {
+			records = append(records, model.Trash{SchemaVersion: model.SchemaVersion, TrashID: item.TrashID, OwnerUserID: item.OwnerUserID, OriginalPath: item.OriginalPath, TrashedPath: item.TrashedPath, Kind: item.Entry.Kind, TrashedAt: item.TrashedAt, OriginalVersion: item.OriginalVersion})
 		}
-		return records[i].TrashedAt.After(records[j].TrashedAt)
-	})
-	return records, nil
+		if page.NextCursor == "" {
+			return records, nil
+		}
+		request.Cursor = page.NextCursor
+	}
 }
 
 func (s *Service) TrashPage(ctx context.Context, userID domain.UserID, limit int, cursor string) (TrashPage, error) {
@@ -544,156 +429,34 @@ func (s *Service) TrashPage(ctx context.Context, userID domain.UserID, limit int
 	if limit < 1 || limit > 1000 {
 		return TrashPage{}, domain.NewError(domain.ErrorInvalid, "trash page limit must be between 1 and 1000")
 	}
-	if storage, ok := s.namespaceTrashStorage(); ok {
-		page, err := storage.ListTrash(ctx, userID, domain.TrashListRequest{Limit: limit, Cursor: cursor})
-		if err != nil {
-			return TrashPage{}, err
-		}
-		result := TrashPage{Items: make([]TrashEntry, 0, len(page.Items)), NextCursor: page.NextCursor}
-		for _, item := range page.Items {
-			result.Items = append(result.Items, TrashEntry{
-				SchemaVersion: model.SchemaVersion, TrashID: item.TrashID, OwnerUserID: item.OwnerUserID,
-				OriginalPath: item.OriginalPath, TrashedPath: item.TrashedPath, Kind: item.Entry.Kind,
-				Size: item.Entry.Size, FileCount: item.Entry.FileCount, MediaType: item.Entry.MediaType,
-				TrashedAt: item.TrashedAt, OriginalVersion: item.OriginalVersion,
-			})
-		}
-		return result, nil
-	}
-	records, next, err := s.repository.trashPage(ctx, userID, limit, cursor)
+	page, err := s.trash.ListTrash(ctx, userID, domain.TrashListRequest{Limit: limit, Cursor: cursor})
 	if err != nil {
 		return TrashPage{}, err
 	}
-	if len(records) == 0 {
-		return TrashPage{Items: []TrashEntry{}, NextCursor: next}, nil
-	}
-	scope, err := trashScope(userID)
-	if err != nil {
-		return TrashPage{}, err
-	}
-	names := make([]string, 0, len(records))
-	for _, record := range records {
-		expectedPath, pathErr := domain.ParseUserPath("/" + record.TrashID)
-		if pathErr != nil || record.OwnerUserID != userID || record.TrashedPath != expectedPath {
-			return TrashPage{}, domain.NewError(domain.ErrorInvalid, "trash record metadata is inconsistent")
-		}
-		names = append(names, record.TrashID)
-	}
-	lookup, err := s.storage.LookupChildren(ctx, scope, domain.ChildLookupRequest{Directory: domain.MustParseUserPath("/"), Names: names})
-	if err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
-			return TrashPage{}, domain.NewError(domain.ErrorInvalid, "trash tree metadata is incomplete")
-		}
-		return TrashPage{}, err
-	}
-	if lookup.Current.Path != domain.MustParseUserPath("/") || lookup.Current.Kind != domain.EntryDirectory || lookup.Current.Size < 0 || lookup.Current.FileCount < 0 || lookup.Current.MediaType != "" || len(lookup.Entries) != len(records) {
-		return TrashPage{}, domain.NewError(domain.ErrorInvalid, "trash tree metadata is inconsistent")
-	}
-	items := make([]TrashEntry, 0, len(records))
-	for index, record := range records {
-		entry := lookup.Entries[index]
-		if entry.Path != record.TrashedPath || entry.Name != record.TrashID || entry.Kind != record.Kind || entry.Size < 0 || entry.FileCount < 0 || (entry.Kind == domain.EntryDirectory && entry.MediaType != "") || (entry.Kind == domain.EntryFile && (entry.MediaType == "" || entry.FileCount != 1)) {
-			return TrashPage{}, domain.NewError(domain.ErrorInvalid, "trash entry metadata is inconsistent")
-		}
-		items = append(items, TrashEntry{
-			SchemaVersion: record.SchemaVersion, TrashID: record.TrashID, OwnerUserID: record.OwnerUserID,
-			OriginalPath: record.OriginalPath, TrashedPath: record.TrashedPath, Kind: record.Kind,
-			Size: entry.Size, FileCount: entry.FileCount, MediaType: entry.MediaType, TrashedAt: record.TrashedAt, OriginalVersion: record.OriginalVersion,
+	result := TrashPage{Items: make([]TrashEntry, 0, len(page.Items)), NextCursor: page.NextCursor}
+	for _, item := range page.Items {
+		result.Items = append(result.Items, TrashEntry{
+			SchemaVersion: model.SchemaVersion, TrashID: item.TrashID, OwnerUserID: item.OwnerUserID,
+			OriginalPath: item.OriginalPath, TrashedPath: item.TrashedPath, Kind: item.Entry.Kind,
+			Size: item.Entry.Size, FileCount: item.Entry.FileCount, MediaType: item.Entry.MediaType,
+			TrashedAt: item.TrashedAt, OriginalVersion: item.OriginalVersion,
 		})
 	}
-	return TrashPage{Items: items, NextCursor: next}, nil
+	return result, nil
 }
 
 func (s *Service) Restore(ctx context.Context, userID domain.UserID, trashID string, conflict domain.ConflictMode, idempotencyKey string) (domain.Operation, error) {
 	if err := validateIdempotencyKey(idempotencyKey); err != nil {
 		return domain.Operation{}, err
 	}
-	if storage, ok := s.namespaceTrashStorage(); ok {
-		return storage.RestoreFromTrash(ctx, userID, trashID, conflict, idempotencyKey)
-	}
-	fingerprint := mutationFingerprint("restore", trashID, string(conflict))
-	if prior, err := s.replayMutation(ctx, userID, idempotencyKey, "restore", fingerprint); err != nil || prior.ID != "" {
-		return prior, err
-	}
-	record, version, err := s.repository.trash(ctx, userID, trashID)
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	from, _ := trashScope(userID)
-	to, _ := liveScope(userID)
-	entry, err := s.storage.Stat(ctx, from, record.TrashedPath)
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	operation, err := s.storage.Move(ctx, from, to, domain.MoveRequest{Source: record.TrashedPath, Destination: record.OriginalPath, Conflict: conflict, ExpectedSource: entry.Version, IdempotencyKey: idempotencyKey})
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	if operation.State == domain.OperationSucceeded {
-		if err := s.repository.deleteTrash(ctx, userID, trashID, version); err != nil && !errors.Is(err, domain.ErrNotFound) {
-			return domain.Operation{}, err
-		}
-	}
-	if err := s.saveMutation(ctx, userID, idempotencyKey, "restore", fingerprint, operation); err != nil {
-		return domain.Operation{}, err
-	}
-	return operation, nil
+	return s.trash.RestoreFromTrash(ctx, userID, trashID, conflict, idempotencyKey)
 }
 
 func (s *Service) PermanentDelete(ctx context.Context, userID domain.UserID, trashID, idempotencyKey string) (domain.Operation, error) {
 	if err := validateIdempotencyKey(idempotencyKey); err != nil {
 		return domain.Operation{}, err
 	}
-	if storage, ok := s.namespaceTrashStorage(); ok {
-		return storage.DeleteFromTrash(ctx, userID, trashID, idempotencyKey)
-	}
-	fingerprint := mutationFingerprint("permanent_delete", trashID)
-	if prior, err := s.replayMutation(ctx, userID, idempotencyKey, "permanent_delete", fingerprint); err != nil || prior.ID != "" {
-		return prior, err
-	}
-	record, version, err := s.repository.trash(ctx, userID, trashID)
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	scope, _ := trashScope(userID)
-	entry, err := s.storage.Stat(ctx, scope, record.TrashedPath)
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	operation, err := s.storage.Delete(ctx, scope, domain.DeleteRequest{Path: record.TrashedPath, ExpectedVersion: entry.Version, IdempotencyKey: idempotencyKey})
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	if operation.State == domain.OperationSucceeded {
-		if err := s.repository.deleteTrash(ctx, userID, trashID, version); err != nil && !errors.Is(err, domain.ErrNotFound) {
-			return domain.Operation{}, err
-		}
-	}
-	if err := s.saveMutation(ctx, userID, idempotencyKey, "permanent_delete", fingerprint, operation); err != nil {
-		return domain.Operation{}, err
-	}
-	return operation, nil
-}
-
-func mutationFingerprint(values ...string) string { return secret.Hash(strings.Join(values, "\x00")) }
-
-func (s *Service) replayMutation(ctx context.Context, owner domain.UserID, key, kind, fingerprint string) (domain.Operation, error) {
-	prior, err := s.repository.mutationOutcome(ctx, owner, key)
-	if errors.Is(err, domain.ErrNotFound) {
-		return domain.Operation{}, nil
-	}
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	if prior.Kind != kind || prior.Fingerprint != fingerprint {
-		return domain.Operation{}, domain.NewError(domain.ErrorConflict, "idempotency key was used for a different request")
-	}
-	return prior.Operation, nil
-}
-
-func (s *Service) saveMutation(ctx context.Context, owner domain.UserID, key, kind, fingerprint string, operation domain.Operation) error {
-	record := model.MutationOutcome{SchemaVersion: model.SchemaVersion, OwnerUserID: owner, KeyHash: secret.Hash(key), Kind: kind, Fingerprint: fingerprint, Operation: operation}
-	return createOrMatch(s.repository.createMutationOutcome(ctx, key, record))
+	return s.trash.DeleteFromTrash(ctx, userID, trashID, idempotencyKey)
 }
 
 func (s *Service) EmptyTrash(ctx context.Context, userID domain.UserID, confirmed bool, idempotencyKey string) (BatchResult, error) {
@@ -710,30 +473,18 @@ func (s *Service) EmptyTrash(ctx context.Context, userID domain.UserID, confirme
 	if len(records) > MaxBatchItems {
 		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "empty trash is limited to 100 items per request")
 	}
-	if storage, ok := s.namespaceBatchStorage(); ok && len(records) > 0 {
+	if len(records) > 0 {
 		trashIDs := make([]string, len(records))
 		for index, record := range records {
 			trashIDs[index] = record.TrashID
 		}
-		result, err := storage.BatchDeleteFromTrash(ctx, userID, trashIDs, idempotencyKey)
+		result, err := s.batch.BatchDeleteFromTrash(ctx, userID, trashIDs, idempotencyKey)
 		if err != nil {
 			return BatchResult{}, err
 		}
 		return driveBatchResult(result), nil
 	}
-	result := BatchResult{OperationID: domain.OperationID(s.derivedID("empty-trash", userID, idempotencyKey))}
-	for index, record := range records {
-		op, itemErr := s.PermanentDelete(ctx, userID, record.TrashID, idempotencyKey+":"+strconv.Itoa(index))
-		item := ItemResult{Path: record.OriginalPath, TrashID: record.TrashID, OperationID: op.ID, State: op.State}
-		if itemErr != nil {
-			item.State, item.ErrorKind = domain.OperationFailed, domain.KindOf(itemErr)
-		}
-		result.Items = append(result.Items, item)
-	}
-	if err := s.recordBatchOperation(ctx, userID, result); err != nil {
-		return BatchResult{}, err
-	}
-	return result, nil
+	return BatchResult{OperationID: domain.OperationID(s.derivedID("empty-trash", userID, idempotencyKey)), Items: []ItemResult{}}, nil
 }
 
 func (s *Service) Operation(ctx context.Context, userID domain.UserID, operationID domain.OperationID) (domain.Operation, error) {
@@ -741,17 +492,11 @@ func (s *Service) Operation(ctx context.Context, userID domain.UserID, operation
 	if err == nil || !errors.Is(err, domain.ErrNotFound) {
 		return operation, err
 	}
-	if storage, ok := s.namespaceBatchStorage(); ok {
-		operation, batchErr := storage.GetBatchOperation(ctx, userID, operationID)
-		if batchErr == nil || !errors.Is(batchErr, domain.ErrNotFound) {
-			return operation, batchErr
-		}
+	operation, batchErr := s.batch.GetBatchOperation(ctx, userID, operationID)
+	if batchErr == nil || !errors.Is(batchErr, domain.ErrNotFound) {
+		return operation, batchErr
 	}
-	batch, err := s.repository.batchOperation(ctx, userID, operationID)
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	return domain.Operation{ID: batch.OperationID, State: batch.State, StartedAt: batch.StartedAt, UpdatedAt: batch.UpdatedAt}, nil
+	return domain.Operation{}, batchErr
 }
 
 func (s *Service) derivedID(label string, owner domain.UserID, key string) string {

@@ -6,11 +6,14 @@ import (
 )
 
 type Limits struct {
-	Requests    int64 `json:"requests"`
-	CostPicoUSD int64 `json:"costPicoUSD"`
-	P50Micros   int64 `json:"p50Micros"`
-	P95Micros   int64 `json:"p95Micros"`
-	P99Micros   int64 `json:"p99Micros"`
+	Requests          int64 `json:"requests"`
+	CostPicoUSD       int64 `json:"costPicoUSD"`
+	P50Micros         int64 `json:"p50Micros"`
+	P95Micros         int64 `json:"p95Micros"`
+	P99Micros         int64 `json:"p99Micros"`
+	CriticalP50Micros int64 `json:"criticalP50Micros,omitempty"`
+	CriticalP95Micros int64 `json:"criticalP95Micros,omitempty"`
+	CriticalP99Micros int64 `json:"criticalP99Micros,omitempty"`
 }
 
 type Budget struct {
@@ -86,6 +89,12 @@ func validateLimits(limits Limits) error {
 	if limits.Requests < 0 || limits.CostPicoUSD < 0 || limits.P50Micros < 0 || limits.P95Micros < limits.P50Micros || limits.P99Micros < limits.P95Micros {
 		return errors.New("limits are invalid")
 	}
+	if limits.CriticalP50Micros < 0 || limits.CriticalP95Micros < 0 || limits.CriticalP99Micros < 0 ||
+		(limits.CriticalP50Micros == 0) != (limits.CriticalP95Micros == 0) ||
+		(limits.CriticalP50Micros == 0) != (limits.CriticalP99Micros == 0) ||
+		limits.CriticalP50Micros > limits.CriticalP95Micros || limits.CriticalP95Micros > limits.CriticalP99Micros {
+		return errors.New("critical-path limits are invalid")
+	}
 	return nil
 }
 
@@ -100,8 +109,11 @@ func checkLimits(name, label string, observed, maximum Limits) error {
 		{name: "p50 latency", observed: observed.P50Micros, maximum: maximum.P50Micros},
 		{name: "p95 latency", observed: observed.P95Micros, maximum: maximum.P95Micros},
 		{name: "p99 latency", observed: observed.P99Micros, maximum: maximum.P99Micros},
+		{name: "critical-path p50 latency", observed: observed.CriticalP50Micros, maximum: maximum.CriticalP50Micros},
+		{name: "critical-path p95 latency", observed: observed.CriticalP95Micros, maximum: maximum.CriticalP95Micros},
+		{name: "critical-path p99 latency", observed: observed.CriticalP99Micros, maximum: maximum.CriticalP99Micros},
 	} {
-		if metric.observed > metric.maximum {
+		if metric.maximum != 0 && metric.observed > metric.maximum {
 			return fmt.Errorf("provider budget %q exceeded %s%s: observed %d, maximum %d", name, label, metric.name, metric.observed, metric.maximum)
 		}
 	}
@@ -109,7 +121,11 @@ func checkLimits(name, label string, observed, maximum Limits) error {
 }
 
 func totalsToLimits(totals Totals) Limits {
-	return Limits{Requests: totals.Requests, CostPicoUSD: totals.CostPicoUSD, P50Micros: totals.P50Micros, P95Micros: totals.P95Micros, P99Micros: totals.P99Micros}
+	return Limits{
+		Requests: totals.Requests, CostPicoUSD: totals.CostPicoUSD,
+		P50Micros: totals.P50Micros, P95Micros: totals.P95Micros, P99Micros: totals.P99Micros,
+		CriticalP50Micros: totals.CriticalP50Micros, CriticalP95Micros: totals.CriticalP95Micros, CriticalP99Micros: totals.CriticalP99Micros,
+	}
 }
 
 func roleTotalsToLimits(totals RoleTotals) Limits {

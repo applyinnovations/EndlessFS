@@ -3,7 +3,6 @@ package portable
 import (
 	"errors"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
@@ -54,11 +53,11 @@ func TestCheckpointVisitSetFailsClosedOnCorruptRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = set.Close() })
-	path := filepath.Join(set.directory, "corrupt.visited")
-	if err := os.WriteFile(path, []byte("truncated"), 0o600); err != nil {
+	const name = "corrupt.visited"
+	if err := set.root.WriteFile(name, []byte("truncated"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	set.levels = []string{path}
+	set.levels = []string{name}
 	if _, err := set.Seen("new-page"); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("corrupt visited run error = %v", err)
 	}

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"reflect"
 	"sort"
-	"sync/atomic"
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
@@ -80,30 +79,24 @@ type SchedulerFunc func(context.Context, string) error
 func (f SchedulerFunc) Step(ctx context.Context, step string) error { return f(ctx, step) }
 
 const (
-	StepAdmissionAfterCandidate = "admission:after-candidate"
-	StepStateAfterAdmitted      = "state:after-admitted"
-	StepStateAfterBackend       = "state:after-backend"
-	StepDomainBeforeHeadCommit  = "consistency-domain:before-head-commit"
-	StepDomainAfterHeadCommit   = "consistency-domain:after-head-commit"
+	StepDomainBeforeHeadCommit = "consistency-domain:before-head-commit"
+	StepDomainAfterHeadCommit  = "consistency-domain:after-head-commit"
 )
 
 type Engine struct {
-	backend                            objectstore.Backend
-	fileBackend                        objectstore.FileControlBackend
-	separateFileBackend                bool
-	clock                              domain.Clock
-	ids                                *domain.IDGenerator
-	writer                             storageformat.WriterSet
-	leaseTTL                           time.Duration
-	uploadTTL                          time.Duration
-	downloadTTL                        time.Duration
-	cursorAEAD                         cipher.AEAD
-	cursorTTL                          time.Duration
-	scheduler                          Scheduler
-	migrationObserver                  func(MigrationProgress)
-	forceResumableOperationPreparation bool // tests exercise the large-plan recovery path deterministically
-
-	admissionSequence atomic.Uint64
+	backend             objectstore.Backend
+	fileBackend         objectstore.FileControlBackend
+	separateFileBackend bool
+	clock               domain.Clock
+	ids                 *domain.IDGenerator
+	writer              storageformat.WriterSet
+	leaseTTL            time.Duration
+	uploadTTL           time.Duration
+	downloadTTL         time.Duration
+	cursorAEAD          cipher.AEAD
+	cursorTTL           time.Duration
+	scheduler           Scheduler
+	migrationObserver   func(MigrationProgress)
 }
 
 func Open(ctx context.Context, options Options) (*Engine, error) {

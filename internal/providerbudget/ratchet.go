@@ -88,5 +88,7 @@ func (ledger RatchetLedger) Latest(name string) (Budget, bool) {
 }
 
 func limitsTighten(previous, next Limits) bool {
-	return next.Requests <= previous.Requests && next.CostPicoUSD <= previous.CostPicoUSD && next.P50Micros <= previous.P50Micros && next.P95Micros <= previous.P95Micros && next.P99Micros <= previous.P99Micros
+	criticalTightens := previous.CriticalP50Micros == 0 ||
+		next.CriticalP50Micros != 0 && next.CriticalP50Micros <= previous.CriticalP50Micros && next.CriticalP95Micros <= previous.CriticalP95Micros && next.CriticalP99Micros <= previous.CriticalP99Micros
+	return next.Requests <= previous.Requests && next.CostPicoUSD <= previous.CostPicoUSD && next.P50Micros <= previous.P50Micros && next.P95Micros <= previous.P95Micros && next.P99Micros <= previous.P99Micros && criticalTightens
 }

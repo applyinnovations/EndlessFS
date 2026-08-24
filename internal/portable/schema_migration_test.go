@@ -175,6 +175,27 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 		producer: "schema-007", commit: "43171275e93717b1261eeff3b98ecd11b08c9e3f",
 		wantEpoch: 1, wantSize: 18, wantFiles: 3,
 	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-008",
+		profile:  "portable-minimal",
+		file:     "schema-008-portable-minimal.json", digest: "d2bf14ccd03e26741310f5604289ba4f90cdea7fd2b697d5e5f8f5396231584a",
+		producer: "schema-008", commit: "359ec9fbc9e8020257659c0d91e64372baece1b9",
+		wantEpoch: 0, wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-008",
+		profile:  "application-preview-disabled",
+		file:     "schema-008-application-disabled.json", digest: "c56c6684649dc1c5f7f36bf881877a49f4cea5fb2f98da738af22eade88b7423",
+		producer: "schema-008", commit: "359ec9fbc9e8020257659c0d91e64372baece1b9",
+		wantEpoch: 0, wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-008",
+		profile:  "application-preview-gcs",
+		file:     "schema-008-application-gcs.json", digest: "62b07aa949bcf325ca7af46f6835ce9986b3f67cd894a243063bb94af0750b87",
+		producer: "schema-008", commit: "359ec9fbc9e8020257659c0d91e64372baece1b9",
+		wantEpoch: 0, wantSize: 18, wantFiles: 3,
+	},
 }
 
 var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.2.0", "v0.2.1", "v0.3.0", "v0.3.1", "v0.3.2"}
@@ -239,7 +260,11 @@ func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *
 					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != wantEpoch {
 						t.Fatalf("upgraded %s %s-backend gate = %+v, %v; want open epoch %d", family.schemaID, topology, gate, err, wantEpoch)
 					}
-					assertAllUploadRecordsUseCurrentSchema(t, stateBackend.Export())
+					if family.schemaID == "endlessfs-portable-v1/schema-008" {
+						assertNoRetiredUploadRecords(t, stateBackend.Export())
+					} else {
+						assertAllUploadRecordsUseCurrentSchema(t, stateBackend.Export())
+					}
 					assertSchema007TerminalAuthorityMigrated(t, engine, fixture)
 					uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath("/projects/after-upgrade.txt"), []byte("ok"))
 					after, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
@@ -1220,6 +1245,14 @@ func assertAllUploadRecordsUseCurrentSchema(t *testing.T, objects map[string][]b
 	current, schema001 := countUploadRecordSchemas(t, objects)
 	if current < 2 || schema001 != 0 {
 		t.Fatalf("schema migration fixture exposed %d current/%d schema-001 upload records; want at least 2/0", current, schema001)
+	}
+}
+
+func assertNoRetiredUploadRecords(t *testing.T, objects map[string][]byte) {
+	t.Helper()
+	current, schema001 := countUploadRecordSchemas(t, objects)
+	if current != 0 || schema001 != 0 {
+		t.Fatalf("schema-008 fixture contains %d schema-007/%d schema-001 upload records; want none", current, schema001)
 	}
 }
 

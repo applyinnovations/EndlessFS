@@ -124,6 +124,52 @@ func (s *FileStore) runtimeUploadLease(ctx context.Context, uploadID string) ([]
 	return append([]byte(nil), object.Body...), object, nil
 }
 
+func (s *FileStore) deleteRuntimeUploadLease(ctx context.Context, uploadID string) error {
+	transfers, err := s.transferBackend()
+	if err != nil {
+		return err
+	}
+	key := storageformat.LeaseKey(transfers.BackendKind(), uploadID)
+	object, err := s.engine.backend.Get(ctx, key)
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return s.deleteKnownRuntimeUploadLease(ctx, object)
+}
+
+func (s *FileStore) deleteKnownRuntimeUploadLease(ctx context.Context, object objectstore.Object) error {
+	err := s.engine.backend.Delete(ctx, object.Key, objectstore.DeleteCondition{Version: object.Version})
+	if errors.Is(err, domain.ErrNotFound) || errors.Is(err, domain.ErrPreconditionFailed) {
+		return nil
+	}
+	return err
+}
+
+func (s *FileStore) abortAndDeleteRuntimeUploadLease(ctx context.Context, uploadID string) error {
+	lease, object, err := s.runtimeUploadLease(ctx, uploadID)
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	transfers, err := s.transferBackend()
+	if err != nil {
+		return err
+	}
+	if err := transfers.AbortUpload(ctx, lease); err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	err = s.engine.backend.Delete(ctx, object.Key, objectstore.DeleteCondition{Version: object.Version})
+	if errors.Is(err, domain.ErrNotFound) || errors.Is(err, domain.ErrPreconditionFailed) {
+		return nil
+	}
+	return err
+}
+
 func (s *FileStore) resumePortableUpload(ctx context.Context, record storageformat.PortableUploadRecord) (domain.UploadCapability, error) {
 	if record.State != storageformat.UploadActive || !s.engine.clock.Now().Before(record.ExpiresAt) {
 		return domain.UploadCapability{}, domain.NewError(domain.ErrorConflict, "upload is no longer active")
@@ -301,7 +347,12 @@ func (s *FileStore) completeUpload008(ctx context.Context, scope domain.Scope, r
 	if request.UploadID == "" || !request.Path.Valid() || request.Path.IsRoot() || request.Size < 0 {
 		return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "invalid upload completion")
 	}
-	record, value, err := s.portableUpload(ctx, scope.UserID(), string(request.UploadID))
+	namespace := newNamespaceStore(s.engine)
+	view, err := namespace.loadView(ctx, scope.UserID(), "")
+	if err != nil {
+		return domain.Entry{}, err
+	}
+	record, value, err := s.portableUploadAtView(ctx, view, scope.UserID(), string(request.UploadID))
 	if err != nil {
 		return domain.Entry{}, err
 	}
@@ -321,7 +372,14 @@ func (s *FileStore) completeUpload008(ctx context.Context, scope domain.Scope, r
 		return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "stored upload path is invalid")
 	}
 	if record.State == storageformat.UploadCompleted {
-		return newNamespaceStore(s.engine).stat(ctx, scope, resolved)
+		resolvedEntry, statErr := namespace.resolveEntryAtView(ctx, view, scope, resolved)
+		if statErr != nil {
+			return domain.Entry{}, statErr
+		}
+		if err := s.deleteRuntimeUploadLease(ctx, record.UploadID); err != nil {
+			return domain.Entry{}, err
+		}
+		return namespaceDomainEntry(resolved, resolvedEntry), nil
 	}
 	if record.State == storageformat.UploadAborted {
 		return domain.Entry{}, domain.NewError(domain.ErrorNotFound, "upload does not exist")
@@ -329,7 +387,7 @@ func (s *FileStore) completeUpload008(ctx context.Context, scope domain.Scope, r
 	if record.State != storageformat.UploadActive || !s.engine.clock.Now().Before(record.ExpiresAt) {
 		return domain.Entry{}, domain.NewError(domain.ErrorConflict, "upload is not active")
 	}
-	lease, _, err := s.runtimeUploadLease(ctx, record.UploadID)
+	lease, leaseObject, err := s.runtimeUploadLease(ctx, record.UploadID)
 	if err != nil {
 		return domain.Entry{}, err
 	}
@@ -354,10 +412,13 @@ func (s *FileStore) completeUpload008(ctx context.Context, scope domain.Scope, r
 	if err != nil {
 		return domain.Entry{}, err
 	}
-	entry, err := newNamespaceStore(s.engine).publishFileWithChanges(ctx, scope, resolved, conflict, record.ExpectedVersion, record.UploadID+"-complete", completionFingerprint, storageformat.DirectoryEntry{
+	entry, err := namespace.publishFileWithChangesAtView(ctx, view, scope, resolved, conflict, record.ExpectedVersion, record.UploadID+"-complete", completionFingerprint, storageformat.DirectoryEntry{
 		Kind: domain.EntryFile, BlobID: record.BlobID, Size: record.Size, MediaType: record.MediaType, MD5: progress.Fingerprint.MD5, CRC32C: progress.Fingerprint.CRC32C, ModifiedAt: s.engine.clock.Now().UTC(),
 	}, []consistencyDomainChange{{Key: uploadRecordKey(record.UploadID), Require: domainValuePresent, ExpectedVersion: value.LogicalVersion, Value: body}})
 	if err != nil {
+		return domain.Entry{}, err
+	}
+	if err := s.deleteKnownRuntimeUploadLease(ctx, leaseObject); err != nil {
 		return domain.Entry{}, err
 	}
 	return entry, nil
@@ -367,7 +428,12 @@ func (s *FileStore) abortUpload008(ctx context.Context, scope domain.Scope, uplo
 	if uploadID == "" {
 		return domain.NewError(domain.ErrorInvalid, "upload ID is required")
 	}
-	record, value, err := s.portableUpload(ctx, scope.UserID(), string(uploadID))
+	namespace := newNamespaceStore(s.engine)
+	view, err := namespace.loadView(ctx, scope.UserID(), "")
+	if err != nil {
+		return err
+	}
+	record, value, err := s.portableUploadAtView(ctx, view, scope.UserID(), string(uploadID))
 	if err != nil {
 		return err
 	}
@@ -375,7 +441,7 @@ func (s *FileStore) abortUpload008(ctx context.Context, scope domain.Scope, uplo
 		return domain.NewError(domain.ErrorNotFound, "upload does not exist")
 	}
 	if record.State == storageformat.UploadAborted {
-		return nil
+		return s.abortAndDeleteRuntimeUploadLease(ctx, record.UploadID)
 	}
 	if record.State == storageformat.UploadCompleted {
 		return domain.NewError(domain.ErrorConflict, "completed upload cannot be aborted")
@@ -389,18 +455,10 @@ func (s *FileStore) abortUpload008(ctx context.Context, scope domain.Scope, uplo
 	if err != nil {
 		return err
 	}
-	if _, err := s.engine.stateDomainStore().mutate(ctx, uploadDomainReference(scope.UserID()), consistencyDomainMutation{ID: record.UploadID + "-abort", Changes: []consistencyDomainChange{{Key: uploadRecordKey(record.UploadID), Require: domainValuePresent, ExpectedVersion: value.LogicalVersion, Value: body}}, Result: resultBody}); err != nil {
+	if _, err := s.engine.stateDomainStore().mutatePrepared(ctx, uploadDomainReference(scope.UserID()), consistencyDomainMutation{ID: record.UploadID + "-abort", Changes: []consistencyDomainChange{{Key: uploadRecordKey(record.UploadID), Require: domainValuePresent, ExpectedVersion: value.LogicalVersion, Value: body}}, Result: resultBody}, view.headSnapshot, view.session); err != nil {
 		return err
 	}
-	lease, _, err := s.runtimeUploadLease(ctx, record.UploadID)
-	if err != nil {
-		return nil
-	}
-	transfers, err := s.transferBackend()
-	if err == nil {
-		_ = transfers.AbortUpload(ctx, lease)
-	}
-	return nil
+	return s.abortAndDeleteRuntimeUploadLease(ctx, record.UploadID)
 }
 
 func (s *FileStore) createDownload008(ctx context.Context, scope domain.Scope, request domain.CreateDownloadRequest) (domain.DownloadCapability, error) {

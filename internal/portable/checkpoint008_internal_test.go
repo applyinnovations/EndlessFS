@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +33,42 @@ func TestCheckpointFreezeClosesEveryRegisteredDomainAndRegistrationRace(t *testi
 	newOwner := state.MustKey(state.NamespaceAccounts, "aGhoaGhoaGhoaGhoaGhoaA")
 	if _, err := engine.Create(ctx, newOwner, []byte("new")); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("new domain registration during freeze error = %v", err)
+	}
+}
+
+func TestCheckpointFreezeWinsDeterministicFirstPublicationRace(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	engine := openNamespaceTestEngine(t, backend)
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	engine.scheduler = SchedulerFunc(func(_ context.Context, step string) error {
+		if step == StepDomainBeforeHeadCommit {
+			once.Do(func() { close(blocked) })
+			<-release
+		}
+		return nil
+	})
+	key := state.MustKey(state.NamespaceAccounts, "registration-freeze-race")
+	result := make(chan error, 1)
+	go func() {
+		_, err := engine.Create(ctx, key, []byte("must-not-escape"))
+		result <- err
+	}()
+	<-blocked
+	if err := engine.CloseWrites(ctx, "registration-freeze-race"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-result; err == nil {
+		t.Fatal("first domain publication escaped a completed checkpoint freeze")
+	}
+	if _, err := engine.Get(ctx, key); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("racing value became visible: %v", err)
+	}
+	if _, err := engine.CreateCheckpoint(ctx, "registration-freeze-race"); err != nil {
+		t.Fatalf("checkpoint after won freeze: %v", err)
 	}
 }
 

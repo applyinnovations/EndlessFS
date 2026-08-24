@@ -7,9 +7,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"os"
-	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
@@ -28,6 +29,7 @@ const (
 // memory proportional to bucket size and costs no provider requests.
 type checkpointReachabilityCollector struct {
 	directory string
+	root      *os.Root
 	buffer    []string
 	chunks    []string
 	sequence  uint64
@@ -38,20 +40,27 @@ func newCheckpointReachabilityCollector() (*checkpointReachabilityCollector, err
 	if err != nil {
 		return nil, domain.WrapError(domain.ErrorUnavailable, "create checkpoint reachability workspace", err)
 	}
-	return &checkpointReachabilityCollector{directory: directory, buffer: make([]string, 0, checkpointReachabilityChunkEntries)}, nil
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		_ = os.RemoveAll(directory)
+		return nil, domain.WrapError(domain.ErrorUnavailable, "open checkpoint reachability workspace", err)
+	}
+	return &checkpointReachabilityCollector{directory: directory, root: root, buffer: make([]string, 0, checkpointReachabilityChunkEntries)}, nil
 }
 
 func (collector *checkpointReachabilityCollector) Close() error {
 	if collector == nil || collector.directory == "" {
 		return nil
 	}
-	err := os.RemoveAll(collector.directory)
+	rootErr := collector.root.Close()
+	removeErr := os.RemoveAll(collector.directory)
+	collector.root = nil
 	collector.directory = ""
-	return err
+	return errors.Join(rootErr, removeErr)
 }
 
 func (collector *checkpointReachabilityCollector) Add(key objectstore.Key) error {
-	if collector == nil || !key.Valid() {
+	if collector == nil || collector.root == nil || collector.directory == "" || !key.Valid() {
 		return domain.NewError(domain.ErrorInvalid, "invalid checkpoint reachability key")
 	}
 	collector.buffer = append(collector.buffer, key.String())
@@ -66,9 +75,9 @@ func (collector *checkpointReachabilityCollector) flush() error {
 		return nil
 	}
 	sort.Strings(collector.buffer)
-	path := filepath.Join(collector.directory, checkpointReachabilityChunkName(collector.sequence))
+	name := checkpointReachabilityChunkName(collector.sequence)
 	collector.sequence++
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	file, err := collector.root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return domain.WrapError(domain.ErrorUnavailable, "create checkpoint reachability chunk", err)
 	}
@@ -91,7 +100,7 @@ func (collector *checkpointReachabilityCollector) flush() error {
 	if err := file.Close(); err != nil {
 		return domain.WrapError(domain.ErrorUnavailable, "close checkpoint reachability chunk", err)
 	}
-	collector.chunks = append(collector.chunks, path)
+	collector.chunks = append(collector.chunks, name)
 	collector.buffer = collector.buffer[:0]
 	return nil
 }
@@ -108,11 +117,12 @@ func checkpointReachabilityChunkName(sequence uint64) string {
 }
 
 func writeCheckpointReachabilityKey(writer io.Writer, key string) error {
-	if len(key) == 0 || len(key) > objectstore.MaxKeyBytes {
+	if len(key) == 0 || len(key) > objectstore.MaxKeyBytes || len(key) > math.MaxUint16 {
 		return domain.NewError(domain.ErrorInvalid, "invalid checkpoint reachability key length")
 	}
 	var size [2]byte
-	binary.BigEndian.PutUint16(size[:], uint16(len(key)))
+	encodedSize := uint16(len(key)) // #nosec G115 -- the preceding MaxUint16 bound proves this conversion lossless.
+	binary.BigEndian.PutUint16(size[:], encodedSize)
 	if _, err := writer.Write(size[:]); err != nil {
 		return domain.WrapError(domain.ErrorUnavailable, "write checkpoint reachability key length", err)
 	}
@@ -128,8 +138,11 @@ type checkpointReachabilityReader struct {
 	current string
 }
 
-func openCheckpointReachabilityReader(path string) (*checkpointReachabilityReader, error) {
-	file, err := os.Open(path)
+func openCheckpointReachabilityReader(root *os.Root, name string) (*checkpointReachabilityReader, error) {
+	if root == nil {
+		return nil, domain.NewError(domain.ErrorInvalid, "checkpoint reachability workspace is closed")
+	}
+	file, err := root.Open(name)
 	if err != nil {
 		return nil, domain.WrapError(domain.ErrorUnavailable, "open checkpoint reachability chunk", err)
 	}
@@ -178,21 +191,21 @@ func (values *checkpointReachabilityHeap) Pop() any {
 	return last
 }
 
-func (collector *checkpointReachabilityCollector) merge(paths []string, output string) error {
-	writers, err := os.OpenFile(output, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+func (collector *checkpointReachabilityCollector) merge(names []string, output string) error {
+	writers, err := collector.root.OpenFile(output, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return domain.WrapError(domain.ErrorUnavailable, "create merged checkpoint reachability chunk", err)
 	}
 	writer := bufio.NewWriter(writers)
-	readers := make([]*checkpointReachabilityReader, 0, len(paths))
+	readers := make([]*checkpointReachabilityReader, 0, len(names))
 	queue := checkpointReachabilityHeap{}
 	closeAll := func() {
 		for _, reader := range readers {
 			_ = reader.close()
 		}
 	}
-	for _, path := range paths {
-		reader, openErr := openCheckpointReachabilityReader(path)
+	for _, name := range names {
+		reader, openErr := openCheckpointReachabilityReader(collector.root, name)
 		if openErr != nil {
 			closeAll()
 			_ = writers.Close()
@@ -245,17 +258,17 @@ func (collector *checkpointReachabilityCollector) consolidate() error {
 		merged := make([]string, 0, (len(collector.chunks)+checkpointReachabilityMergeWidth-1)/checkpointReachabilityMergeWidth)
 		for start := 0; start < len(collector.chunks); start += checkpointReachabilityMergeWidth {
 			end := min(start+checkpointReachabilityMergeWidth, len(collector.chunks))
-			path := filepath.Join(collector.directory, "merged-"+checkpointReachabilityChunkName(collector.sequence))
+			name := "merged-" + checkpointReachabilityChunkName(collector.sequence)
 			collector.sequence++
-			if err := collector.merge(collector.chunks[start:end], path); err != nil {
+			if err := collector.merge(collector.chunks[start:end], name); err != nil {
 				return err
 			}
 			for _, old := range collector.chunks[start:end] {
-				if err := os.Remove(old); err != nil {
+				if err := collector.root.Remove(old); err != nil {
 					return domain.WrapError(domain.ErrorUnavailable, "remove checkpoint reachability chunk", err)
 				}
 			}
-			merged = append(merged, path)
+			merged = append(merged, name)
 		}
 		collector.chunks = merged
 	}
@@ -274,8 +287,8 @@ func (collector *checkpointReachabilityCollector) Stream() (*checkpointReachabil
 		return nil, err
 	}
 	stream := &checkpointReachabilityStream{collector: collector}
-	for _, path := range collector.chunks {
-		reader, err := openCheckpointReachabilityReader(path)
+	for _, name := range collector.chunks {
+		reader, err := openCheckpointReachabilityReader(collector.root, name)
 		if err != nil {
 			_ = stream.Close()
 			return nil, err
@@ -517,8 +530,23 @@ func (stream *schema008CheckpointMetadataStream) Close() error { return stream.r
 func (stream *schema008CheckpointMetadataStream) next(ctx context.Context) (objectstore.ObjectInfo, bool, bool, error) {
 	if !stream.found {
 		key, found, err := stream.reachable.Next()
-		if err != nil || !found {
+		if err != nil {
 			return objectstore.ObjectInfo{}, false, false, err
+		}
+		if !found {
+			for {
+				info, fileData, metadataFound, metadataErr := stream.metadata.next(ctx)
+				if metadataErr != nil || !metadataFound {
+					return objectstore.ObjectInfo{}, false, false, metadataErr
+				}
+				collectable, collectErr := stream.collectableMetadata(ctx, info, fileData)
+				if collectErr != nil {
+					return objectstore.ObjectInfo{}, false, false, collectErr
+				}
+				if !collectable {
+					return objectstore.ObjectInfo{}, false, false, domain.NewError(domain.ErrorPreconditionFailed, "checkpoint contains unenumerated mutable authority")
+				}
+			}
 		}
 		stream.key, stream.found = key, true
 	}
@@ -532,8 +560,16 @@ func (stream *schema008CheckpointMetadataStream) next(ctx context.Context) (obje
 		}
 		switch {
 		case info.Key.String() < stream.key.String():
-			// Content-addressed objects not named by a current authority root are
-			// harmless collectable garbage and never enter a portable checkpoint.
+			// Only immutable pages and unreachable file blobs are collectable.
+			// A mutable domain head omitted from the catalog is unenumerated
+			// authority and must make checkpoint creation fail closed.
+			collectable, collectErr := stream.collectableMetadata(ctx, info, fileData)
+			if collectErr != nil {
+				return objectstore.ObjectInfo{}, false, false, collectErr
+			}
+			if !collectable {
+				return objectstore.ObjectInfo{}, false, false, domain.NewError(domain.ErrorPreconditionFailed, "checkpoint contains unenumerated mutable authority")
+			}
 			continue
 		case info.Key != stream.key:
 			return objectstore.ObjectInfo{}, false, false, domain.NewError(domain.ErrorPreconditionFailed, "checkpoint authority object is missing")
@@ -541,5 +577,47 @@ func (stream *schema008CheckpointMetadataStream) next(ctx context.Context) (obje
 			stream.found = false
 			return info, fileData, true, nil
 		}
+	}
+}
+
+func (stream *schema008CheckpointMetadataStream) collectableMetadata(ctx context.Context, info objectstore.ObjectInfo, fileData bool) (bool, error) {
+	if fileData || isSchema008CollectableAuthorityGarbageKey(info.Key.String()) {
+		return true, nil
+	}
+	segments := strings.Split(info.Key.String(), "/")
+	if len(segments) != 6 || segments[0] != "endlessfs" || segments[1] != "v1" || segments[2] != "domains" || segments[3] == "catalog" || segments[4] == "" || segments[5] != "head.json" {
+		return false, nil
+	}
+	object, err := stream.metadata.engine.backend.Get(ctx, info.Key)
+	if err != nil {
+		return false, err
+	}
+	var envelope storageformat.Envelope
+	var head storageformat.DomainHead
+	if err := storageformat.DecodeEnvelope(object.Body, info.Key, domainHeadSchema, &envelope, &head); err != nil {
+		return false, err
+	}
+	if err := storageformat.ValidateInitialDomainHead(head); err != nil || storageformat.DomainHeadKey(head.Kind, head.DomainID) != info.Key {
+		return false, nil
+	}
+	// A crash may leave the deliberately inert pre-registration head. It can
+	// expose no values and is safe to exclude from a checkpoint; reopening a
+	// mutation will either register it or lose to catalog freeze.
+	return true, nil
+}
+
+func isSchema008CollectableAuthorityGarbageKey(key string) bool {
+	segments := strings.Split(key, "/")
+	if len(segments) == 6 && segments[0] == "endlessfs" && segments[1] == "v1" && segments[2] == "domains" && segments[3] == "catalog" && segments[4] == "pages" {
+		return strings.HasSuffix(segments[5], ".json")
+	}
+	if len(segments) != 7 || segments[0] != "endlessfs" || segments[1] != "v1" || segments[2] != "domains" || segments[4] == "" || segments[5] != "pages" || !strings.HasSuffix(segments[6], ".json") {
+		return false
+	}
+	switch storageformat.ConsistencyDomainKind(segments[3]) {
+	case storageformat.DomainNamespace, storageformat.DomainOwnerControl, storageformat.DomainAdmin, storageformat.DomainCapability, storageformat.DomainShare:
+		return true
+	default:
+		return false
 	}
 }

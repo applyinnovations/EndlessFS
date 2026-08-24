@@ -682,6 +682,27 @@ func TestMigrationSchemaChainFailsClosedForEveryControlPlaneDisagreement(t *test
 		}
 	})
 
+	t.Run("current-superblock-with-predecessor-gate-without-checkpoint", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		predecessorFeatures, found := schemaFeatures(storageSchema007, engine.writer.RequiredFeatures)
+		if !found {
+			t.Fatal("schema 007 features are not registered")
+		}
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateOpen
+			gate.CheckpointID = ""
+			gate.WriterFeatures = append([]string(nil), predecessorFeatures...)
+		})
+
+		pending, err := engine.storageMigrationPending(context.Background())
+		if err != nil || !pending {
+			t.Fatalf("predecessor gate pending = %t, %v; want true, nil", pending, err)
+		}
+		if err := engine.migrateStorageSchemaChain(context.Background()); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("marker disagreement error = %v; want precondition failed", err)
+		}
+	})
+
 	t.Run("broken-ledger-path", func(t *testing.T) {
 		backend, engine := currentMigrationEngine(t)
 		rewriteMigrationSuperblock(t, backend, func(superblock *storageformat.Superblock) { superblock.RequiredFeatures = nil })
@@ -1135,39 +1156,6 @@ func TestFeatureOnlyMigrationGateClosureRejectsEveryUnsafeControlState(t *testin
 	})
 }
 
-func TestMigrationDirectoryDiscoveryRejectsMalformedAndDisconnectedScopes(t *testing.T) {
-	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
-	orphanID := "AAAAAAAAAAAAAAAAAAAAAA"
-
-	t.Run("malformed-root-key", func(t *testing.T) {
-		backend := objectmemory.New()
-		segments := strings.Split(storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID).String(), "/")
-		segments[3] = "invalid"
-		migrationPut(t, backend, objectstore.MustKey(strings.Join(segments, "/")), []byte("{}"))
-		engine := &Engine{backend: backend}
-		if err := engine.migrateAllDirectoryAggregates(context.Background(), schemaMigration002To003, aggregateMigrationPlan{writeFileCounts: true}); !errors.Is(err, domain.ErrInvalid) {
-			t.Fatalf("malformed root key error = %v; want invalid", err)
-		}
-	})
-
-	t.Run("missing-canonical-root", func(t *testing.T) {
-		backend := objectmemory.New()
-		migrationPut(t, backend, storageformat.DirectoryRootKey(user.String(), "live", orphanID), []byte("{}"))
-		engine := &Engine{backend: backend}
-		if err := engine.migrateAllDirectoryAggregates(context.Background(), schemaMigration002To003, aggregateMigrationPlan{writeFileCounts: true}); !errors.Is(err, domain.ErrInvalid) {
-			t.Fatalf("missing canonical root error = %v; want invalid", err)
-		}
-	})
-
-	t.Run("unreachable-directory-root", func(t *testing.T) {
-		backend, engine, scope, _, _ := emptyPhysicalMigrationRoot(t)
-		migrationPut(t, backend, storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), orphanID), []byte("{}"))
-		if err := engine.migrateAllDirectoryAggregates(context.Background(), schemaMigration002To003, aggregateMigrationPlan{writeFileCounts: true}); !errors.Is(err, domain.ErrInvalid) {
-			t.Fatalf("unreachable directory root error = %v; want invalid", err)
-		}
-	})
-}
-
 func TestMigrationWinnerValidationRejectsEveryInconsistentResult(t *testing.T) {
 	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
 	scope, _ := domain.NewScope(user, domain.AreaLive)
@@ -1246,10 +1234,7 @@ func TestMigrationWinnerValidationRejectsEveryInconsistentResult(t *testing.T) {
 	t.Run("schema-004-index-read-failure", func(t *testing.T) {
 		backend, engine := currentMigrationEngine(t)
 		entry := withCurrentTestFingerprint(migrationFileEntry(t, "file", 1))
-		prepared, err := engine.Files().prepareDirectory(t.Context(), scope, directoryID, []storageformat.DirectoryEntry{entry}, 1)
-		if err != nil {
-			t.Fatal(err)
-		}
+		prepared := prepareSchema007DirectoryFixture(t, engine, scope, directoryID, []storageformat.DirectoryEntry{entry}, nil)
 		for _, prerequisite := range prepared.prerequisites {
 			migrationPut(t, backend, objectstore.MustKey(prerequisite.Key), prerequisite.Body)
 		}
@@ -1279,10 +1264,7 @@ func TestMigrationWinnerValidationRejectsEveryInconsistentResult(t *testing.T) {
 	t.Run("schema-004-content-index-read-failure", func(t *testing.T) {
 		backend, engine := currentMigrationEngine(t)
 		entry := withCurrentTestFingerprint(migrationFileEntry(t, "file", 1))
-		prepared, err := engine.Files().prepareDirectory(t.Context(), scope, directoryID, []storageformat.DirectoryEntry{entry}, 1)
-		if err != nil {
-			t.Fatal(err)
-		}
+		prepared := prepareSchema007DirectoryFixture(t, engine, scope, directoryID, []storageformat.DirectoryEntry{entry}, nil)
 		for _, prerequisite := range prepared.prerequisites {
 			migrationPut(t, backend, objectstore.MustKey(prerequisite.Key), prerequisite.Body)
 		}
@@ -1524,10 +1506,7 @@ func TestMigrationDirectoryWalkRejectsStaleChildAggregates(t *testing.T) {
 				}
 				contentEntries = []storageformat.DirectoryContentIndexEntry{content}
 			}
-			prepared, err := engine.Files().prepareDirectoryWithContentEntries(scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{entry}, contentEntries, 1)
-			if err != nil {
-				t.Fatal(err)
-			}
+			prepared := prepareSchema007DirectoryFixture(t, engine, scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{entry}, contentEntries)
 			for _, prerequisite := range prepared.prerequisites {
 				migrationPut(t, backend, objectstore.MustKey(prerequisite.Key), prerequisite.Body)
 			}
@@ -1839,15 +1818,104 @@ func TestMigrationFingerprintAndStreamingPreparationDenials(t *testing.T) {
 	}
 }
 
+// prepareSchema007DirectoryFixture builds predecessor directory objects for
+// migration tests without retaining the retired schema-007 mutation backend in
+// production. Current code may read and transform these bytes, but cannot use
+// this helper from an application request.
+func prepareSchema007DirectoryFixture(t *testing.T, engine *Engine, scope domain.Scope, directoryID string, entries []storageformat.DirectoryEntry, contentEntries []storageformat.DirectoryContentIndexEntry) preparedDirectory {
+	t.Helper()
+	if err := validateDirectoryEntries(entries); err != nil {
+		t.Fatal(err)
+	}
+	recursiveBytes, err := recursiveByteSize(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileCount, err := recursiveFileCount(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accumulator, digest, err := directoryContentIdentity(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentEntries == nil {
+		for _, entry := range entries {
+			if entry.Kind != domain.EntryFile {
+				continue
+			}
+			value, err := directoryContentIndexEntry(domain.MustParseUserPath("/"+entry.Name), entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contentEntries = append(contentEntries, value)
+		}
+	}
+	sort.Slice(contentEntries, func(i, j int) bool {
+		left, leftErr := directoryContentIndexKey(contentEntries[i])
+		right, rightErr := directoryContentIndexKey(contentEntries[j])
+		if leftErr != nil || rightErr != nil {
+			t.Fatalf("invalid content fixture: %v, %v", leftErr, rightErr)
+		}
+		return left < right
+	})
+	indexRoot, indexObjects, err := engine.Files().buildDirectoryIndex(scope, directoryID, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sortRoots, sortObjects, err := engine.Files().buildDirectorySortIndexes(scope, directoryID, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects := append(indexObjects, sortObjects...)
+	nextIndex := 0
+	contentRoot, err := engine.Files().buildDirectoryContentIndexStream(scope, directoryID, func() (storageformat.DirectoryContentIndexEntry, bool, error) {
+		if nextIndex == len(contentEntries) {
+			return storageformat.DirectoryContentIndexEntry{}, false, nil
+		}
+		value := contentEntries[nextIndex]
+		nextIndex++
+		return value, true, nil
+	}, func(object storageformat.MutationObject) error {
+		objects = append(objects, object)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestID := storageformat.Digest([]byte("schema-007-test-directory-v1\x00" + t.Name() + "\x00" + directoryID))
+	createdAt := time.Date(2042, 1, 2, 3, 4, 5, 0, time.UTC)
+	manifestKey := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifestID)
+	manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, storageformat.DirectoryManifest{
+		SchemaVersion: 2, DirectoryID: directoryID, ManifestID: manifestID,
+		IndexRootID: indexRoot.NodeID, IndexRootDigest: indexRoot.NodeDigest, SortIndexes: sortRoots,
+		ContentIndexRootID: contentRoot.NodeID, ContentIndexRootDigest: contentRoot.NodeDigest, ContentSketch: contentRoot.Sketch,
+		EntryCount: len(entries), RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount,
+		ContentAccumulator: accumulator, ContentDigest: digest, CreatedAt: createdAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects = append(objects, storageformat.MutationObject{Key: manifestKey.String(), Body: manifestBody})
+	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
+	rootKey := storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), directoryID)
+	rootBody, err := storageformat.EncodeEnvelope(directoryRootSchema, rootKey, 1, storageformat.DirectoryRoot{
+		SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID,
+		RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount,
+		ContentAccumulator: accumulator, ContentDigest: digest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return preparedDirectory{manifestID: manifestID, recursiveBytes: recursiveBytes, recursiveFileCount: fileCount, contentAccumulator: accumulator, contentDigest: digest, contentSketch: append([]string(nil), contentRoot.Sketch...), rootBody: rootBody, prerequisites: objects}
+}
+
 func emptyPhysicalMigrationRoot(t *testing.T) (*objectmemory.Backend, *Engine, domain.Scope, migrationDirectoryRoot, migrationDirectoryManifest) {
 	t.Helper()
 	backend, engine := currentMigrationEngine(t)
 	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
 	scope, _ := domain.NewScope(user, domain.AreaLive)
-	prepared, err := engine.Files().prepareDirectory(context.Background(), scope, storageformat.RootDirectoryID, nil, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	prepared := prepareSchema007DirectoryFixture(t, engine, scope, storageformat.RootDirectoryID, nil, nil)
 	for _, prerequisite := range prepared.prerequisites {
 		migrationPut(t, backend, objectstore.MustKey(prerequisite.Key), prerequisite.Body)
 	}
@@ -1876,7 +1944,7 @@ func migrationFileEntry(t *testing.T, name string, size int64) storageformat.Dir
 
 func migrationDirectoryEntry(t *testing.T, name, directoryID string, size, files int64) storageformat.DirectoryEntry {
 	t.Helper()
-	emptyDigest, err := directoryContentDigest(nil)
+	_, emptyDigest, err := directoryContentIdentity(nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -675,10 +675,6 @@ func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition stora
 	return false, domain.NewError(domain.ErrorUnavailable, "storage-schema migration gate remained contended")
 }
 
-func (e *Engine) migrateAllDirectoryAggregates(ctx context.Context, transition storageMigration, plan aggregateMigrationPlan) error {
-	return e.migrateAllDirectoryAggregatesPhase(ctx, transition, plan, "")
-}
-
 func (e *Engine) migrateAllDirectoryAggregatesPhase(ctx context.Context, transition storageMigration, plan aggregateMigrationPlan, phase string) error {
 	if phase != "" && phase != migrationPhaseTransform && phase != migrationPhaseVerify {
 		return domain.NewError(domain.ErrorInvalid, "invalid directory migration phase")

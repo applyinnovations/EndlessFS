@@ -61,15 +61,16 @@ func schema008DomainIdentity(reference consistencyDomainRef) string {
 	return storageformat.Digest([]byte(string(reference.Kind) + "\x00" + reference.ID))
 }
 
-func validateSchema008MigrationStage(value schema008MigrationStage) (consistencyDomainRef, error) {
+func validateSchema008MigrationStage(value schema008MigrationStage) (consistencyDomainRef, []byte, error) {
 	reference := consistencyDomainRef{Kind: value.DomainKind, ID: value.DomainID}
 	if value.SchemaVersion != schema008MigrationStageSchema || value.SourceKey == "" || value.Key == "" || value.LogicalVersion == "" || value.Tree != "" && value.Tree != "base" && value.Tree != "outcomes" && value.Tree != "outcome-expiry" || validateConsistencyDomainRef(reference) != nil {
-		return consistencyDomainRef{}, domain.NewError(domain.ErrorInvalid, "invalid schema-008 migration stage")
+		return consistencyDomainRef{}, nil, domain.NewError(domain.ErrorInvalid, "invalid schema-008 migration stage")
 	}
-	if _, err := storageformat.EncodeCanonical(value); err != nil {
-		return consistencyDomainRef{}, err
+	body, err := storageformat.EncodeCanonical(value)
+	if err != nil {
+		return consistencyDomainRef{}, nil, err
 	}
-	return reference, nil
+	return reference, body, nil
 }
 
 func (e *Engine) runStorageMigration007To008(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
@@ -168,23 +169,7 @@ func (e *Engine) runStorageMigration007To008(ctx context.Context, transition sto
 
 func (e *Engine) stageSchema007State008(ctx context.Context) error {
 	return visitObjectPages(ctx, e.backend, storageformat.StateRecordsPrefix(), func(info objectstore.ObjectInfo) error {
-		markerKey := storageformat.Schema008MigrationSourceMarkerKey(info.Key.String())
-		if marker, err := e.backend.Get(ctx, markerKey); err == nil {
-			var stored schema008MigrationSourceMarker
-			if decodeCanonicalValue(marker.Body, &stored) != nil || stored.SchemaVersion != 1 || stored.SourceKey != info.Key.String() || len(stored.StageKeys) == 0 {
-				return domain.NewError(domain.ErrorInvalid, "invalid schema-008 migration source marker")
-			}
-			for _, stageValue := range stored.StageKeys {
-				stageKey, err := objectstore.ParseKey(stageValue)
-				if err != nil {
-					return err
-				}
-				if _, err := e.backend.Head(ctx, stageKey); err != nil {
-					return err
-				}
-			}
-			return nil
-		} else if !errors.Is(err, domain.ErrNotFound) {
+		if staged, err := e.schema008MigrationSourceStaged(ctx, info.Key); err != nil || staged {
 			return err
 		}
 		object, err := e.backend.Get(ctx, info.Key)
@@ -204,11 +189,7 @@ func (e *Engine) stageSchema007State008(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		namespace, _, err := decodedStatePath(key.String(), false)
-		if err != nil {
-			return err
-		}
-		stage := schema008MigrationStage{SchemaVersion: 1, SourceKey: info.Key.String(), DomainKind: reference.Kind, DomainID: reference.ID, Key: key.String(), Value: record.Data, LogicalVersion: envelope.LogicalVersion, MigrationOnly: namespace == state.NamespaceTrash}
+		stage := schema008MigrationStage{SchemaVersion: 1, SourceKey: info.Key.String(), DomainKind: reference.Kind, DomainID: reference.ID, Key: key.String(), Value: record.Data, LogicalVersion: envelope.LogicalVersion, MigrationOnly: strings.HasPrefix(key.String(), string(state.NamespaceTrash)+"/")}
 		stageKey, err := e.writeSchema008MigrationStage(ctx, stage)
 		if err != nil {
 			return err
@@ -218,15 +199,11 @@ func (e *Engine) stageSchema007State008(ctx context.Context) error {
 }
 
 func (e *Engine) writeSchema008MigrationStage(ctx context.Context, stage schema008MigrationStage) (objectstore.Key, error) {
-	reference, err := validateSchema008MigrationStage(stage)
+	reference, body, err := validateSchema008MigrationStage(stage)
 	if err != nil {
 		return objectstore.Key{}, err
 	}
 	key := storageformat.Schema008MigrationStageKey(schema008DomainIdentity(reference), stage.SourceKey)
-	body, err := storageformat.EncodeCanonical(stage)
-	if err != nil {
-		return objectstore.Key{}, err
-	}
 	if _, err := e.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
 		if !errors.Is(err, domain.ErrConflict) {
 			return objectstore.Key{}, err
@@ -357,6 +334,10 @@ func (e *Engine) stageSchema007UploadIdempotency008(ctx context.Context) error {
 		if err != nil || legacy.SchemaVersion != 1 || legacy.KeyDigest == "" || legacy.Fingerprint == "" || legacy.OperationID == "" {
 			return domain.NewError(domain.ErrorInvalid, "invalid schema-007 idempotency record")
 		}
+		expectedKey, err := storageformat.Schema007IdempotencyKeyFromDigest(owner.String(), legacy.KeyDigest)
+		if err != nil || expectedKey != info.Key {
+			return domain.NewError(domain.ErrorInvalid, "schema-007 idempotency key binding mismatch")
+		}
 		if legacy.Kind != "upload" {
 			if legacy.Kind != operationCopy && legacy.Kind != operationMove && legacy.Kind != operationDelete {
 				return domain.NewError(domain.ErrorInvalid, "unsupported schema-007 file-operation idempotency kind")
@@ -396,6 +377,22 @@ func (e *Engine) stageSchema007UploadIdempotency008(ctx context.Context) error {
 		portable := storageformat.PortableUploadIdempotency{SchemaVersion: 1, OwnerID: owner.String(), KeyDigest: legacy.KeyDigest, Fingerprint: legacy.Fingerprint, UploadID: legacy.OperationID}
 		if err := storageformat.ValidatePortableUploadIdempotency(portable); err != nil {
 			return err
+		}
+		uploadSource := storageformat.OperationKey(owner.String(), legacy.OperationID)
+		uploadStageKey := storageformat.Schema008MigrationStageKey(schema008DomainIdentity(uploadDomainReference(owner)), uploadSource.String())
+		uploadStageObject, err := e.backend.Get(ctx, uploadStageKey)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				return domain.NewError(domain.ErrorInvalid, "schema-007 upload idempotency target is missing")
+			}
+			return err
+		}
+		var uploadStage schema008MigrationStage
+		var upload storageformat.PortableUploadRecord
+		decodeStageErr := decodeCanonicalValue(uploadStageObject.Body, &uploadStage)
+		uploadReference, _, stageErr := validateSchema008MigrationStage(uploadStage)
+		if decodeStageErr != nil || stageErr != nil || uploadReference != uploadDomainReference(owner) || uploadStage.Tree != "" || uploadStage.MigrationOnly || uploadStage.SourceKey != uploadSource.String() || uploadStage.Key != uploadRecordKey(legacy.OperationID) || decodeCanonicalValue(uploadStage.Value, &upload) != nil || storageformat.ValidatePortableUploadRecord(upload) != nil || upload.OwnerID != owner.String() || upload.UploadID != legacy.OperationID || upload.BlobID != legacy.OperationID {
+			return domain.NewError(domain.ErrorInvalid, "schema-007 upload idempotency target is invalid")
 		}
 		body, err := storageformat.EncodeCanonical(portable)
 		if err != nil {
@@ -440,6 +437,11 @@ func (e *Engine) stageSchema007Operations008(ctx context.Context) error {
 		}
 		if operation.State != storageformat.FileOperationSucceeded && operation.State != storageformat.FileOperationFailed {
 			return domain.NewError(domain.ErrorInvalid, "schema-007 operation did not quiesce before migration")
+		}
+		switch operation.Kind {
+		case operationCopy, operationMove, operationDelete, operationCreateDirectory, "upload-complete":
+		default:
+			return domain.NewError(domain.ErrorInvalid, "unsupported terminal schema-007 operation kind")
 		}
 		owner, err := domain.ParseUserID(operation.UserID)
 		if err != nil || storageformat.OperationKey(operation.UserID, operation.OperationID) != info.Key {
@@ -511,10 +513,7 @@ func (e *Engine) stageSchema007RecoveredTrashMetadata008(ctx context.Context) er
 		if err != nil || !matched || areaValue != "trash" || directoryID != storageformat.RootDirectoryID {
 			return err
 		}
-		owner, err := domain.ParseUserID(ownerValue)
-		if err != nil {
-			return err
-		}
+		owner, _ := domain.ParseUserID(ownerValue) // ParseDirectoryRootKey authenticated the owner.
 		scope, _ := domain.NewScope(owner, domain.AreaTrash)
 		root, err := e.readMigrationDirectoryRoot(ctx, scope, directoryID)
 		if err != nil {
@@ -682,10 +681,7 @@ func (e *Engine) stageSchema007RecoveredTrashMetadata008(ctx context.Context) er
 			return err
 		}
 		logicalKey := state.MustKey(state.NamespaceTrash, key.owner.String(), key.trashID)
-		reference, err := stateDomainReferenceForKey(logicalKey)
-		if err != nil {
-			return err
-		}
+		reference, _ := stateDomainReferenceForKey(logicalKey) // The fixed trash namespace has an exact route.
 		_, err = e.writeSchema008MigrationStage(ctx, schema008MigrationStage{
 			SchemaVersion: 1, SourceKey: schema007RecoveredTrashSource(key.owner, key.trashID), DomainKind: reference.Kind, DomainID: reference.ID,
 			Key: logicalKey.String(), Value: body, LogicalVersion: storageformat.Digest(append([]byte("endlessfs-schema008-recovered-trash-v1\x00"), body...)), MigrationOnly: true,
@@ -726,15 +722,10 @@ func (e *Engine) stageSchema007Namespaces008(ctx context.Context) error {
 		if err != nil || !matched || directoryID != storageformat.RootDirectoryID {
 			return err
 		}
-		owner, err := domain.ParseUserID(ownerValue)
-		if err != nil {
-			return err
-		}
+		owner, _ := domain.ParseUserID(ownerValue) // ParseDirectoryRootKey authenticated the owner.
 		area := domain.AreaLive
 		if areaValue == "trash" {
 			area = domain.AreaTrash
-		} else if areaValue != "live" {
-			return domain.NewError(domain.ErrorInvalid, "invalid schema-007 namespace area")
 		}
 		reference := namespaceReference(owner)
 		stageKey := storageformat.Schema008MigrationStageKey(schema008DomainIdentity(reference), info.Key.String())
@@ -743,10 +734,7 @@ func (e *Engine) stageSchema007Namespaces008(ctx context.Context) error {
 		} else if !errors.Is(err, domain.ErrNotFound) {
 			return err
 		}
-		scope, scopeErr := domain.NewScope(owner, area)
-		if scopeErr != nil {
-			return scopeErr
-		}
+		scope, _ := domain.NewScope(owner, area) // Canonical owner and area were authenticated above.
 		root, err := e.readMigrationDirectoryRoot(ctx, scope, storageformat.RootDirectoryID)
 		if err != nil {
 			return err
@@ -766,6 +754,7 @@ func (e *Engine) stageSchema007Namespaces008(ctx context.Context) error {
 
 func (e *Engine) buildSchema008NamespaceSubtree(ctx context.Context, owner domain.UserID, logicalArea, storageArea domain.Area, logicalPath domain.UserPath, directoryID, manifestID string, parentMetadata *storageformat.DirectoryEntry, active map[string]struct{}) (storageformat.NamespaceEntry, error) {
 	sourceID := owner.String() + "\x00" + areaName(logicalArea) + "\x00" + logicalPath.String() + "\x00" + areaName(storageArea) + "\x00" + directoryID + "\x00" + manifestID
+	activeID := owner.String() + "\x00" + areaName(storageArea) + "\x00" + directoryID + "\x00" + manifestID
 	cacheKey := storageformat.Schema008MigrationSubtreeKey(storageformat.Digest([]byte(sourceID)))
 	if object, err := e.backend.Get(ctx, cacheKey); err == nil {
 		var cached schema008MigrationSubtree
@@ -776,11 +765,11 @@ func (e *Engine) buildSchema008NamespaceSubtree(ctx context.Context, owner domai
 	} else if !errors.Is(err, domain.ErrNotFound) {
 		return storageformat.NamespaceEntry{}, err
 	}
-	if _, found := active[sourceID]; found {
+	if _, found := active[activeID]; found {
 		return storageformat.NamespaceEntry{}, domain.NewError(domain.ErrorInvalid, "schema-007 namespace graph contains a cycle")
 	}
-	active[sourceID] = struct{}{}
-	defer delete(active, sourceID)
+	active[activeID] = struct{}{}
+	defer delete(active, activeID)
 	scope, _ := domain.NewScope(owner, storageArea)
 	if manifestID == "" {
 		root, err := e.readMigrationDirectoryRoot(ctx, scope, directoryID)
@@ -851,6 +840,9 @@ func (e *Engine) buildSchema008NamespaceSubtree(ctx context.Context, owner domai
 	entry.LogicalVersion, err = directoryEntryVersion(entry)
 	if err != nil {
 		return storageformat.NamespaceEntry{}, err
+	}
+	if manifest.manifest.EntryCount < 0 {
+		return storageformat.NamespaceEntry{}, domain.NewError(domain.ErrorInvalid, "legacy directory manifest has a negative entry count")
 	}
 	result := storageformat.NamespaceEntry{SchemaVersion: 1, NodeID: nodeID, Entry: entry, Children: children, EntryCount: uint64(manifest.manifest.EntryCount), ContentAccumulator: manifest.manifest.ContentAccumulator}
 	if err := storageformat.ValidateNamespaceEntry(result); err != nil {
@@ -928,19 +920,13 @@ func (e *Engine) schema007TrashMetadata008(ctx context.Context, owner domain.Use
 		return metadata, err
 	}
 	key := state.MustKey(state.NamespaceTrash, owner.String(), trashID)
-	reference, err := stateDomainReferenceForKey(key)
-	if err != nil {
-		return nil, err
-	}
+	reference, _ := stateDomainReferenceForKey(key) // The fixed trash namespace has an exact route.
 	return e.readSchema007TrashMetadataStage008(ctx, storageformat.Schema008MigrationStageKey(schema008DomainIdentity(reference), schema007RecoveredTrashSource(owner, trashID)), schema007RecoveredTrashSource(owner, trashID), key, owner, trashID, kind)
 }
 
 func (e *Engine) schema007ExplicitTrashMetadata008(ctx context.Context, owner domain.UserID, trashID string, kind domain.EntryKind) (*storageformat.NamespaceTrashMetadata, error) {
 	key := state.MustKey(state.NamespaceTrash, owner.String(), trashID)
-	reference, err := stateDomainReferenceForKey(key)
-	if err != nil {
-		return nil, err
-	}
+	reference, _ := stateDomainReferenceForKey(key) // The fixed trash namespace has an exact route.
 	sourceKey := canonicalStateKey(key)
 	stageKey := storageformat.Schema008MigrationStageKey(schema008DomainIdentity(reference), sourceKey.String())
 	return e.readSchema007TrashMetadataStage008(ctx, stageKey, sourceKey.String(), key, owner, trashID, kind)
@@ -1087,7 +1073,7 @@ func (e *Engine) installSchema008StagedDomains(ctx context.Context) error {
 			if err := decodeCanonicalValue(object.Body, &stage); err != nil {
 				return err
 			}
-			reference, err := validateSchema008MigrationStage(stage)
+			reference, _, err := validateSchema008MigrationStage(stage)
 			if err != nil || storageformat.Schema008MigrationStageKey(schema008DomainIdentity(reference), stage.SourceKey) != info.Key {
 				return domain.NewError(domain.ErrorInvalid, "schema-008 migration stage key binding mismatch")
 			}
@@ -1109,8 +1095,6 @@ func (e *Engine) installSchema008StagedDomains(ctx context.Context) error {
 					target = runs.outcomes
 				case "outcome-expiry":
 					target = runs.expiry
-				default:
-					return domain.NewError(domain.ErrorInvalid, "invalid schema-008 migration stage tree")
 				}
 				if err := target.Add(storageformat.DomainEntry{Key: stage.Key, Value: stage.Value, LogicalVersion: stage.LogicalVersion}); err != nil {
 					return err

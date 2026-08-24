@@ -15,7 +15,7 @@ import (
 // complete transaction per item. Schema 008 publishes one bounded owner
 // transaction and stores the result in immutable pages, so the product-scale
 // selection bound can be raised without growing the conditional head.
-const maximumNamespaceBatchItems = 10_000
+const maximumNamespaceBatchItems = storageformat.MaxNamespaceBatchItems
 
 type namespaceBatchMoveSpec struct {
 	from        domain.Scope
@@ -318,8 +318,11 @@ func (store *namespaceStore) writeBatchItems(ctx context.Context, view *namespac
 }
 
 func (store *namespaceStore) decodeBatchResult(ctx context.Context, view *namespaceView, batch storageformat.NamespaceBatch) (domain.NamespaceBatchResult, error) {
-	if batch.ItemCount == 0 || batch.Items.EntryCount != batch.ItemCount {
+	if batch.ItemCount == 0 || batch.ItemCount > maximumNamespaceBatchItems || batch.Items.EntryCount != batch.ItemCount {
 		return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid namespace batch outcome")
+	}
+	if err := storageformat.ValidateNamespaceBatch(batch); err != nil {
+		return domain.NamespaceBatchResult{}, err
 	}
 	values, err := view.session.collect(ctx, batch.Items, "", "", int(batch.ItemCount)+1)
 	if err != nil || uint64(len(values)) != batch.ItemCount {
@@ -337,16 +340,12 @@ func (store *namespaceStore) decodeBatchResult(ctx context.Context, view *namesp
 		if err := decodeCanonicalValue(value.Value, &stored); err != nil || storageformat.ValidateNamespaceBatchItem(stored) != nil || stored.Index != uint64(index) || stored.OperationID != batch.Operation.ID {
 			return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid namespace batch outcome item")
 		}
-		source, err := domain.ParseUserPath(stored.Source)
-		if err != nil {
-			return domain.NamespaceBatchResult{}, err
-		}
+		// ValidateNamespaceBatchItem already proved these path parses. Parsing
+		// again only converts the canonical strings into their domain values.
+		source, _ := domain.ParseUserPath(stored.Source)
 		var destination domain.UserPath
 		if stored.Destination != "" {
-			destination, err = domain.ParseUserPath(stored.Destination)
-			if err != nil {
-				return domain.NamespaceBatchResult{}, err
-			}
+			destination, _ = domain.ParseUserPath(stored.Destination)
 		}
 		result.Items[index] = domain.NamespaceBatchItemResult{Source: source, Destination: destination, TrashID: stored.TrashID, OperationID: stored.OperationID, State: stored.State}
 	}

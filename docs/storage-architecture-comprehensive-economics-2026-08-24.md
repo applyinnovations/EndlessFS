@@ -1,8 +1,9 @@
 # EndlessFS comprehensive storage-architecture economics
 
 **Date:** 2026-08-24
-**Status:** executable architecture-selection evidence; no production schema,
-migration, writer, or release change is authorized by this report
+**Status:** executable architecture-selection evidence; schema 008 implements
+the selected family, with final measurements in
+`storage-schema-008-implementation.md`
 
 ## Conclusion
 
@@ -65,10 +66,11 @@ ratchets. Thus:
 - neither latency value is a Google SLA or a live-network benchmark.
 
 “Current” means either the real portable engine/use case under instrumentation
-or its exact checked-in ratchet. “Prototype” means executable code under
-`internal/architecturelab`. “Composed HTTP” adds independently measured session
-authentication to the measured service path. “Extrapolated” is used only where
-the current API limit prevents running the requested cardinality.
+or its exact checked-in ratchet. “Prototype” means the executable experiment
+preserved in evidence commit `39aa2ab`; schema 008 is now the sole production
+implementation in the current tree. “Composed HTTP” adds independently measured
+session authentication to the measured service path. “Extrapolated” is used
+only where the current API limit prevents running the requested cardinality.
 
 ## Architecture exercised by the prototype
 
@@ -395,14 +397,16 @@ inventory. The migration benchmark belongs in the schema PR, starting from
 every immutable predecessor profile, and must report metadata requests and
 bytes without reading file bodies.
 
-## Reproduce
+## Reproduce the historical experiment
 
 ```text
+git worktree add /tmp/endlessfs-architecture-evidence 39aa2ab
+cd /tmp/endlessfs-architecture-evidence
 nix develop -c go test -v ./internal/architecturelab
 ```
 
-The coverage catalogs are `production_workloads.go` and
-`production_routes.go`; the before/after tests are the `*_economics_test.go`,
-batch, duplicate, catalog, recovery, and scale tests in the same package. The
-GCS price and latency sources are the checked-in fixtures under
+In that evidence commit, the coverage catalogs are `production_workloads.go`
+and `production_routes.go`; the before/after tests are the
+`*_economics_test.go`, batch, duplicate, catalog, recovery, and scale tests in
+the same package. The GCS price and latency sources remain checked in under
 `internal/objectstore/gcs/economics`.

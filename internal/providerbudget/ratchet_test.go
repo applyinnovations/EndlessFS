@@ -22,3 +22,14 @@ func TestRatchetLedgerOnlyTightensAndCannotDropPathways(t *testing.T) {
 		})
 	}
 }
+
+func TestRatchetLedgerCanIntroduceButNeverLoosenCriticalPathLimits(t *testing.T) {
+	valid := []byte(`{"schemaVersion":1,"provider":"gcs","profile":"regional","epochs":[{"id":"001","budgets":[{"name":"batch","provider":"gcs","profile":"regional","maximum":{"requests":2,"p50Micros":20,"p95Micros":30,"p99Micros":40},"roles":{"state":{"requests":2}}}]},{"id":"002","budgets":[{"name":"batch","provider":"gcs","profile":"regional","maximum":{"requests":2,"p50Micros":20,"p95Micros":30,"p99Micros":40,"criticalP50Micros":5,"criticalP95Micros":8,"criticalP99Micros":13},"roles":{"state":{"requests":2}}}]}]}`)
+	if _, err := ParseRatchetLedger(valid); err != nil {
+		t.Fatal(err)
+	}
+	loosened := []byte(`{"schemaVersion":1,"provider":"gcs","profile":"regional","epochs":[{"id":"001","budgets":[{"name":"batch","provider":"gcs","profile":"regional","maximum":{"requests":2,"p50Micros":20,"p95Micros":30,"p99Micros":40,"criticalP50Micros":5,"criticalP95Micros":8,"criticalP99Micros":13},"roles":{"state":{"requests":2}}}]},{"id":"002","budgets":[{"name":"batch","provider":"gcs","profile":"regional","maximum":{"requests":2,"p50Micros":20,"p95Micros":30,"p99Micros":40,"criticalP50Micros":6,"criticalP95Micros":8,"criticalP99Micros":13},"roles":{"state":{"requests":2}}}]}]}`)
+	if _, err := ParseRatchetLedger(loosened); err == nil {
+		t.Fatal("critical-path ratchet loosened")
+	}
+}

@@ -328,6 +328,18 @@ func IdempotencyKey(userID, key string) objectstore.Key {
 	return fixedKey("idempotency/" + encodedPart(userID) + "/" + digestPart(key) + ".json")
 }
 
+// Schema007IdempotencyKeyFromDigest reconstructs the schema-007 object key
+// from the canonical digest stored in its record. It exists only so the
+// forward migration can authenticate the legacy key/body binding without
+// knowing the original client idempotency string.
+func Schema007IdempotencyKeyFromDigest(userID, digest string) (objectstore.Key, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(digest)
+	if err != nil || len(decoded) != sha256.Size || base64.RawURLEncoding.EncodeToString(decoded) != digest {
+		return objectstore.Key{}, domain.NewError(domain.ErrorInvalid, "invalid schema-007 idempotency digest")
+	}
+	return fixedKey("idempotency/" + encodedPart(userID) + "/" + base32Lower.EncodeToString(decoded) + ".json"), nil
+}
+
 func IdempotencyPrefix() string { return root + "idempotency/" }
 
 func CheckpointKey(checkpointID string) objectstore.Key {

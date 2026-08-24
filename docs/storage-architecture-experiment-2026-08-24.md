@@ -1,7 +1,8 @@
 # EndlessFS storage architecture experiment
 
-**Status:** executable architecture-selection evidence; production cutover is
-not enabled by this document
+**Status:** historical architecture-selection evidence. The selected design is
+implemented by schema 008; the normative implementation record is
+[`storage-schema-008-implementation.md`](storage-schema-008-implementation.md).
 
 ## Result
 
@@ -32,9 +33,10 @@ idempotency retention, and garbage grace periods still require sensitivity
 results and must be derived from provider limits, workload measurements, or an
 explicit product policy before the storage format becomes normative.
 
-## Reproducible implementation
+## Archived executable experiment
 
-The experimental implementation is in `internal/architecturelab`. It contains:
+The experimental implementation was committed in `39aa2ab` before production
+implementation began. That commit contains:
 
 - one shared namespace semantic model;
 - eight executable candidates;
@@ -47,11 +49,20 @@ The experimental implementation is in `internal/architecturelab`. It contains:
 - a domain-catalog checkpoint experiment; and
 - Pareto comparison without a weighted score or guessed passing threshold.
 
-Run the focused evidence with:
+To inspect or rerun the historical experiment without restoring a second
+runtime implementation to the current tree, use a separate checkout of that
+commit and run:
 
 ```text
+git worktree add /tmp/endlessfs-architecture-evidence 39aa2ab
+cd /tmp/endlessfs-architecture-evidence
 nix develop -c go test -v ./internal/architecturelab
 ```
+
+The current tree deliberately does not retain `internal/architecturelab`:
+schema 008 is the one production implementation, and keeping a parallel model
+would create an untested source of semantic drift. The measured tables in this
+document and the provider-budget regression tests remain the durable evidence.
 
 ## Current fact base
 

@@ -495,6 +495,9 @@ func (s *FileStore) listDuplicateOccurrences008(ctx context.Context, userID doma
 	if hasMore {
 		cursor := duplicateProjectionCursor008{SchemaVersion: 1, OwnerID: userID.String(), Kind: kind, GroupID: request.GroupID, Limit: limit, ProjectionID: projection.projectionID, Root: projection.root, After: values[len(values)-1].Key, ExpiresAt: s.engine.clock.Now().UTC().Add(s.engine.cursorTTL)}
 		result.NextCursor, err = s.encodeDuplicateCursor(cursor)
+		if err != nil {
+			return domain.DuplicateOccurrencePage{}, err
+		}
 	}
 	return result, nil
 }
@@ -899,21 +902,6 @@ func duplicateDirectoryPreference008(leftIdentity, rightIdentity string) (storag
 }
 
 func duplicateDirectoryIgnoreKey008(pairID string) string { return "duplicates/ignore/pair/" + pairID }
-
-func (s *FileStore) duplicateDirectoryIgnoreState008(ctx context.Context, owner domain.UserID, preference storageformat.DuplicateDirectoryPreference) (bool, uint64, error) {
-	value, err := newConsistencyDomainStore(s.engine.backend, s.engine.scheduler, s.engine.clock).get(ctx, consistencyDomainRef{Kind: storageformat.DomainOwnerControl, ID: "owner:" + owner.String()}, duplicateDirectoryIgnoreKey008(preference.PairID))
-	if errors.Is(err, domain.ErrNotFound) {
-		return false, 0, nil
-	}
-	if err != nil {
-		return false, 0, err
-	}
-	var stored storageformat.DuplicateDirectoryPreference
-	if err := decodeCanonicalValue(value.Data, &stored); err != nil || storageformat.ValidateDuplicateDirectoryPreference(stored) != nil || stored.PairID != preference.PairID || stored.LeftIdentity != preference.LeftIdentity || stored.RightIdentity != preference.RightIdentity {
-		return false, 0, domain.NewError(domain.ErrorInvalid, "invalid duplicate directory preference authority")
-	}
-	return stored.Ignored, stored.Revision, nil
-}
 
 func (s *FileStore) setDuplicateDirectoryIgnored008(ctx context.Context, owner domain.UserID, request domain.SetDuplicateDirectoryIgnoredRequest) (domain.DuplicateDirectoryIgnore, error) {
 	if !owner.Valid() || !request.Left.Path.Valid() || !request.Right.Path.Valid() {

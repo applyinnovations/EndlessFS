@@ -8,7 +8,6 @@ import (
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/model"
-	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
 )
 
@@ -18,54 +17,8 @@ type repository struct {
 
 func newRepository(store state.Store) *repository { return &repository{store: store} }
 
-func (r *repository) createTrash(ctx context.Context, record model.Trash) error {
-	return r.create(ctx, state.MustKey(state.NamespaceTrash, record.OwnerUserID.String(), record.TrashID), &record)
-}
-
 func (r *repository) createBatchOperation(ctx context.Context, record model.BatchOperation) error {
 	return r.create(ctx, state.MustKey(state.NamespaceOperations, "batch", record.OwnerUserID.String(), string(record.OperationID)), &record)
-}
-
-func (r *repository) batchOperation(ctx context.Context, owner domain.UserID, operationID domain.OperationID) (model.BatchOperation, error) {
-	record, _, err := getRecord[model.BatchOperation](ctx, r.store, state.MustKey(state.NamespaceOperations, "batch", owner.String(), string(operationID)))
-	return record, err
-}
-
-func (r *repository) createMutationOutcome(ctx context.Context, key string, record model.MutationOutcome) error {
-	return r.create(ctx, state.MustKey(state.NamespaceIdempotency, "drive", record.OwnerUserID.String(), secret.Hash(key)), &record)
-}
-
-func (r *repository) mutationOutcome(ctx context.Context, owner domain.UserID, key string) (model.MutationOutcome, error) {
-	record, _, err := getRecord[model.MutationOutcome](ctx, r.store, state.MustKey(state.NamespaceIdempotency, "drive", owner.String(), secret.Hash(key)))
-	return record, err
-}
-
-func (r *repository) trash(ctx context.Context, owner domain.UserID, trashID string) (model.Trash, state.Version, error) {
-	return getRecord[model.Trash](ctx, r.store, state.MustKey(state.NamespaceTrash, owner.String(), trashID))
-}
-
-func (r *repository) deleteTrash(ctx context.Context, owner domain.UserID, trashID string, version state.Version) error {
-	return r.store.Delete(ctx, state.MustKey(state.NamespaceTrash, owner.String(), trashID), version)
-}
-
-func (r *repository) trashList(ctx context.Context, owner domain.UserID) ([]model.Trash, error) {
-	return listRecords[model.Trash](ctx, r.store, state.MustPrefix(state.NamespaceTrash, owner.String()))
-}
-
-func (r *repository) trashPage(ctx context.Context, owner domain.UserID, limit int, cursor string) ([]model.Trash, string, error) {
-	page, err := r.store.List(ctx, state.MustPrefix(state.NamespaceTrash, owner.String()), state.PageRequest{Limit: limit, Cursor: cursor})
-	if err != nil {
-		return nil, "", err
-	}
-	records := make([]model.Trash, 0, len(page.Items))
-	for _, item := range page.Items {
-		var record model.Trash
-		if err := state.DecodeJSON(item.Value.Data, &record); err != nil {
-			return nil, "", err
-		}
-		records = append(records, record)
-	}
-	return records, page.NextCursor, nil
 }
 
 func (r *repository) createShare(ctx context.Context, record model.Share) error {

@@ -59,9 +59,6 @@ func TestRepositoryFaultDecodeAndPaginationMatrix(t *testing.T) {
 	repository := newRepository(repositoryFaultStore{list: func(context.Context, state.Prefix, state.PageRequest) (state.Page, error) {
 		return state.Page{}, unavailable
 	}})
-	if _, _, err := repository.trashPage(context.Background(), owner, 1, ""); !errors.Is(err, unavailable) {
-		t.Fatalf("trash page list fault = %v", err)
-	}
 	if _, err := repository.shares(context.Background(), owner); !errors.Is(err, unavailable) {
 		t.Fatalf("shares list fault = %v", err)
 	}
@@ -72,9 +69,6 @@ func TestRepositoryFaultDecodeAndPaginationMatrix(t *testing.T) {
 	repository = newRepository(repositoryFaultStore{list: func(context.Context, state.Prefix, state.PageRequest) (state.Page, error) {
 		return state.Page{Items: []state.Item{corrupt}}, nil
 	}})
-	if _, _, err := repository.trashPage(context.Background(), owner, 1, ""); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("trash page corrupt record = %v", err)
-	}
 	if _, err := listRecords[model.Share](context.Background(), repository.store, state.MustPrefix(state.NamespaceShares)); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("share list corrupt record = %v", err)
 	}

@@ -112,6 +112,13 @@ type listSnapshot struct {
 	index      int
 }
 
+type trashListSnapshot struct {
+	owner domain.UserID
+	limit int
+	items []domain.TrashEntry
+	index int
+}
+
 type idempotentResult struct {
 	fingerprint string
 	operation   domain.Operation
@@ -120,6 +127,16 @@ type idempotentResult struct {
 type idempotentUpload struct {
 	fingerprint string
 	capability  domain.UploadCapability
+}
+
+type namespaceBatchResult struct {
+	fingerprint string
+	result      domain.NamespaceBatchResult
+}
+
+type namespaceMutationResult struct {
+	fingerprint string
+	operation   domain.Operation
 }
 
 type Provider struct {
@@ -134,17 +151,21 @@ type Provider struct {
 	baseURL              string
 	allowedOrigin        string
 
-	objects           map[domain.Scope]map[string]object
-	uploads           map[domain.UploadID]*upload
-	uploadTokens      map[[sha256.Size]byte]domain.UploadID
-	downloads         map[[sha256.Size]byte]download
-	listSnapshots     map[string]*listSnapshot
-	operations        map[string]domain.Operation
-	idempotency       map[string]idempotentResult
-	uploadIdempotency map[string]idempotentUpload
-	faults            map[string][]Fault
-	metrics           Instrumentation
-	versions          uint64
+	objects            map[domain.Scope]map[string]object
+	uploads            map[domain.UploadID]*upload
+	uploadTokens       map[[sha256.Size]byte]domain.UploadID
+	downloads          map[[sha256.Size]byte]download
+	listSnapshots      map[string]*listSnapshot
+	trashSnapshots     map[string]*trashListSnapshot
+	trashEntries       map[string]domain.TrashEntry
+	namespaceBatches   map[string]namespaceBatchResult
+	namespaceMutations map[string]namespaceMutationResult
+	operations         map[string]domain.Operation
+	idempotency        map[string]idempotentResult
+	uploadIdempotency  map[string]idempotentUpload
+	faults             map[string][]Fault
+	metrics            Instrumentation
+	versions           uint64
 }
 
 func New(options Options) *Provider {
@@ -179,6 +200,10 @@ func New(options Options) *Provider {
 		uploadTokens:         make(map[[sha256.Size]byte]domain.UploadID),
 		downloads:            make(map[[sha256.Size]byte]download),
 		listSnapshots:        make(map[string]*listSnapshot),
+		trashSnapshots:       make(map[string]*trashListSnapshot),
+		trashEntries:         make(map[string]domain.TrashEntry),
+		namespaceBatches:     make(map[string]namespaceBatchResult),
+		namespaceMutations:   make(map[string]namespaceMutationResult),
 		operations:           make(map[string]domain.Operation),
 		idempotency:          make(map[string]idempotentResult),
 		uploadIdempotency:    make(map[string]idempotentUpload),

@@ -50,14 +50,6 @@ type relativeCatalogEntry struct {
 	contentSketch []string
 }
 
-func (s *FileStore) Copy(ctx context.Context, from, to domain.Scope, request domain.CopyRequest) (domain.Operation, error) {
-	return s.copyOrMove(ctx, false, from, to, request)
-}
-
-func (s *FileStore) Move(ctx context.Context, from, to domain.Scope, request domain.MoveRequest) (domain.Operation, error) {
-	return s.copyOrMove(ctx, true, from, to, request)
-}
-
 func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.Scope, request domain.CopyRequest) (domain.Operation, error) {
 	if err := validateFileRequest(ctx, from); err != nil {
 		return domain.Operation{}, err
@@ -189,115 +181,6 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 		},
 	}
 	return s.startPreparingFileOperation(ctx, operation, request.IdempotencyKey, fingerprint)
-}
-
-func (s *FileStore) Delete(ctx context.Context, scope domain.Scope, request domain.DeleteRequest) (domain.Operation, error) {
-	if err := validateFileRequest(ctx, scope); err != nil {
-		return domain.Operation{}, err
-	}
-	if !request.Path.Valid() || request.Path.IsRoot() {
-		return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "delete path is invalid")
-	}
-	if err := validatePortableIdempotencyKey(request.IdempotencyKey); err != nil {
-		return domain.Operation{}, err
-	}
-	fingerprint := storageformat.Digest([]byte(fmt.Sprintf("delete\x00%s\x00%s\x00%s", areaName(scope.Area()), request.Path.String(), request.ExpectedVersion)))
-	if existing, found, err := s.lookupIdempotentOperation(ctx, scope.UserID(), operationDelete, request.IdempotencyKey, fingerprint); found || err != nil {
-		return existing, err
-	}
-	parentTrail, err := s.resolveMutableDirectoryMetadataTrail(ctx, scope, request.Path.Parent())
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	parentNode := parentTrail[len(parentTrail)-1]
-	parent := parentNode.snapshot
-	if parent.pending {
-		return domain.Operation{}, domain.NewError(domain.ErrorUnavailable, "directory has a pending operation")
-	}
-	entry, err := s.directoryIndexEntry(ctx, parentNode.scope, parentNode.directoryID, parent.manifest, request.Path.Name())
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	if request.ExpectedVersion != "" && request.ExpectedVersion != domain.Version(entry.LogicalVersion) {
-		return domain.Operation{}, domain.NewError(domain.ErrorPreconditionFailed, "entry version does not match")
-	}
-	if entry.Kind == domain.EntryDirectory {
-		storageScope, scopeErr := directoryEntryStorageScope(parentNode.scope, entry)
-		if scopeErr != nil {
-			return domain.Operation{}, scopeErr
-		}
-		directory, err := s.readDirectoryEntryMetadata(ctx, storageScope, entry)
-		if err != nil {
-			return domain.Operation{}, err
-		}
-		if directory.pending {
-			return domain.Operation{}, domain.NewError(domain.ErrorUnavailable, "directory has a pending operation")
-		}
-		if directory.recursiveBytes != entry.Size || directory.recursiveFileCount != entry.FileCount || directory.contentDigest != entry.ContentDigest {
-			return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "directory recursive aggregate mismatch")
-		}
-	}
-	operationID, err := s.engine.ids.OpaqueID()
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	ownerID, err := s.engine.ids.OpaqueID()
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	now := s.engine.clock.Now().UTC()
-	directSeed := storageformat.FileOperation{
-		SchemaVersion: 1, OperationID: operationID, UserID: scope.UserID().String(), Kind: operationDelete,
-		IntentFingerprint: fingerprint,
-		State:             storageformat.FileOperationRunning, Attempt: 1, Fence: 1, ReplicaAttemptID: ownerID,
-		ExpiresAt: now.Add(s.engine.leaseTTL), StartedAt: now, UpdatedAt: now,
-	}
-	directErr := errDirectOperationTooLarge
-	var direct storageformat.FileOperation
-	var directBody []byte
-	if !s.engine.forceResumableOperationPreparation {
-		direct, directBody, directErr = s.buildDirectMoveOrDelete(ctx, directSeed, scope.UserID(), scope, scope, request.Path, domain.UserPath{}, parentTrail, nil, entry, nil, false)
-	}
-	if directErr == nil {
-		return s.startFileOperation(ctx, direct, directBody, request.IdempotencyKey, fingerprint)
-	}
-	if !errors.Is(directErr, errDirectOperationTooLarge) {
-		return domain.Operation{}, directErr
-	}
-	_, gateEnvelope, gate, err := s.engine.readGate(ctx)
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	operation := storageformat.FileOperation{
-		SchemaVersion: 2, OperationID: operationID, UserID: scope.UserID().String(), Kind: operationDelete,
-		IntentFingerprint: fingerprint,
-		State:             storageformat.FileOperationPreparing, Attempt: 1, Fence: 1, ReplicaAttemptID: ownerID,
-		ExpiresAt: now.Add(s.engine.leaseTTL), StartedAt: now, UpdatedAt: now,
-		Preparation: &storageformat.FileOperationPreparation{
-			SchemaVersion: 1, RunSetID: deterministicCloneID(operationID, "run-set", "raw"), Phase: "build",
-			GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion,
-			Request: &storageformat.FileOperationPreparationRequest{
-				FromArea: areaName(scope.Area()), Source: request.Path.String(), ExpectedSource: request.ExpectedVersion,
-				Fingerprint: fingerprint, SourceEntry: entry,
-				SourceParent: storageformat.FileOperationDirectoryPin{DirectoryID: parentNode.directoryID, ManifestID: parent.manifestID, LogicalVersion: parent.envelope.LogicalVersion, PreExisted: parent.exists},
-			},
-		},
-	}
-	return s.startPreparingFileOperation(ctx, operation, request.IdempotencyKey, fingerprint)
-}
-
-func (s *FileStore) GetOperation(ctx context.Context, userID domain.UserID, operationID domain.OperationID) (domain.Operation, error) {
-	if err := ctx.Err(); err != nil {
-		return domain.Operation{}, domain.WrapError(domain.ErrorUnavailable, "provider request canceled", err)
-	}
-	if !userID.Valid() || operationID == "" {
-		return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "user and operation IDs are required")
-	}
-	operation, err := s.readFileOperation(ctx, userID, string(operationID))
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	return domainFileOperation(operation), nil
 }
 
 func (s *FileStore) buildFileOperation(

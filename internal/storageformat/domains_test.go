@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 )
@@ -18,7 +19,7 @@ func TestConsistencyDomainKeysRemainCanonicalAndBounded(t *testing.T) {
 		{name: "catalog page", key: DomainCatalogPageKey(strings.Repeat("a", 43)).String()},
 		{name: "namespace head", key: DomainHeadKey(DomainNamespace, strings.Repeat("u", 128)).String()},
 		{name: "control page", key: DomainPageKey(DomainOwnerControl, strings.Repeat("u", 128), strings.Repeat("d", 43)).String()},
-		{name: "claim", key: DomainClaimKey(DomainNamespace, strings.Repeat("u", 128), strings.Repeat("i", 128)).String()},
+		{name: "snapshot", key: DomainSnapshotKey(DomainOwnerControl, strings.Repeat("u", 128), strings.Repeat("d", 43)).String()},
 		{name: "projection head", key: ProjectionHeadKey(strings.Repeat("u", 128), ProjectionDuplicates).String()},
 		{name: "projection page", key: ProjectionPageKey(strings.Repeat("u", 128), ProjectionAdminUsers, strings.Repeat("d", 43)).String()},
 	}
@@ -64,6 +65,7 @@ func TestConsistencyDomainRecordsValidateBoundsAndIntegrity(t *testing.T) {
 		SchemaVersion: 1,
 		DomainID:      "owner-a",
 		Kind:          DomainNamespace,
+		Registered:    true,
 		Revision:      2,
 		BaseRevision:  1,
 		Base: DomainTreeRoot{
@@ -71,8 +73,9 @@ func TestConsistencyDomainRecordsValidateBoundsAndIntegrity(t *testing.T) {
 		},
 		Deltas: []DomainDelta{{
 			MutationID: "mutation-a", Fingerprint: Digest([]byte("fingerprint-a")), Revision: 2,
-			Changes: []DomainChange{{Key: "gamma", Value: []byte(`{"value":3}`), LogicalVersion: "version-c"}},
-			Result:  []byte(`{"committed":true}`),
+			RetainUntil: time.Date(2040, 1, 2, 3, 4, 5, 0, time.UTC),
+			Changes:     []DomainChange{{Key: "gamma", Value: []byte(`{"value":3}`), LogicalVersion: "version-c"}},
+			Result:      []byte(`{"committed":true}`),
 		}},
 	}
 	if err := ValidateDomainHead(head); err != nil {
@@ -95,10 +98,10 @@ func TestConsistencyDomainRecordsValidateBoundsAndIntegrity(t *testing.T) {
 
 func TestConsistencyDomainCanonicalBodiesContainNoProviderNativeFields(t *testing.T) {
 	records := []any{
-		DomainHead{SchemaVersion: 1, DomainID: "owner-a", Kind: DomainNamespace, Revision: 1, BaseRevision: 1, Base: DomainTreeRoot{Digest: "digest"}},
-		DomainClaim{SchemaVersion: 1, DomainID: "owner-a", MutationID: "mutation", Fingerprint: "fingerprint", State: DomainClaimPrepared},
+		DomainHead{SchemaVersion: 1, DomainID: "owner-a", Kind: DomainNamespace, Registered: true, Revision: 1, BaseRevision: 1, Base: DomainTreeRoot{Digest: "digest"}},
+		DomainOutcome{MutationID: "mutation", Fingerprint: "fingerprint", Revision: 1},
 		DomainCatalogHead{SchemaVersion: 1, Revision: 1, Root: DomainTreeRoot{Digest: "digest"}},
-		ProjectionHead{SchemaVersion: 1, OwnerID: "owner-a", Kind: ProjectionDuplicates, SourceRevision: 1, Root: DomainTreeRoot{Digest: "digest"}},
+		ProjectionHead{SchemaVersion: 1, OwnerID: "owner-a", ProjectionID: "projection-a", Kind: ProjectionDuplicates, SourceDomainID: "owner-a", SourceRevision: 1, Root: DomainTreeRoot{Digest: "digest"}},
 	}
 	for _, record := range records {
 		body, err := EncodeCanonical(record)
@@ -138,22 +141,16 @@ func TestConsistencyDomainAuxiliaryRecordsValidateAndDenyCorruption(t *testing.T
 
 	compacted := DomainHead{
 		SchemaVersion: 1, DomainID: "owner-a", Kind: DomainOwnerControl,
-		Revision: 3, BaseRevision: 3, Frozen: true, FreezeEpoch: 7,
+		Registered: true, Revision: 3, BaseRevision: 3, Frozen: true, FreezeEpoch: 7,
 		Base: DomainTreeRoot{Digest: leafDigest, Level: 0, EntryCount: 1, ByteCount: 1},
 	}
 	if err := ValidateDomainHead(compacted); err != nil {
 		t.Fatalf("ValidateDomainHead(valid compacted head) = %v", err)
 	}
 
-	prepared := DomainClaim{SchemaVersion: 1, DomainID: "owner-a", MutationID: "mutation-a", Fingerprint: Digest([]byte("intent")), State: DomainClaimPrepared}
-	committed := prepared
-	committed.State, committed.Revision, committed.Result = DomainClaimCommitted, 3, []byte("result")
-	failed := prepared
-	failed.State = DomainClaimFailed
-	for _, claim := range []DomainClaim{prepared, committed, failed} {
-		if err := ValidateDomainClaim(claim); err != nil {
-			t.Fatalf("ValidateDomainClaim(%+v) = %v", claim, err)
-		}
+	outcome := DomainOutcome{MutationID: "mutation-a", Fingerprint: Digest([]byte("intent")), Revision: 3, RetainUntil: time.Date(2040, 1, 2, 3, 4, 5, 0, time.UTC), Result: []byte("result")}
+	if err := ValidateDomainOutcome(outcome); err != nil {
+		t.Fatalf("ValidateDomainOutcome(%+v) = %v", outcome, err)
 	}
 
 	catalogPage := DomainCatalogPage{SchemaVersion: 1, Entries: []DomainCatalogEntry{
@@ -172,19 +169,19 @@ func TestConsistencyDomainAuxiliaryRecordsValidateAndDenyCorruption(t *testing.T
 	if err := ValidateDomainCatalogHead(catalogHead); err != nil {
 		t.Fatalf("ValidateDomainCatalogHead(valid) = %v", err)
 	}
-	for _, kind := range []ProjectionKind{ProjectionDuplicates, ProjectionAdminUsers, ProjectionAccounting, ProjectionSearch} {
-		head := ProjectionHead{SchemaVersion: 1, OwnerID: "owner-a", Kind: kind, SourceRevision: 3, Root: DomainTreeRoot{Digest: leafDigest, EntryCount: 1}}
+	for _, kind := range []ProjectionKind{ProjectionDuplicates, ProjectionAdminUsers, ProjectionAccounting, ProjectionSearch, ProjectionModified, ProjectionSize, ProjectionEntryKind} {
+		head := ProjectionHead{SchemaVersion: 1, OwnerID: "owner-a", ProjectionID: "projection-a", Kind: kind, SourceDomainID: "owner-a", SourceRevision: 3, Root: DomainTreeRoot{Digest: leafDigest, EntryCount: 1}}
 		if err := ValidateProjectionHead(head); err != nil {
 			t.Fatalf("ValidateProjectionHead(%q) = %v", kind, err)
 		}
 	}
 
 	invalidHeads := []DomainHead{
-		{SchemaVersion: 1, DomainID: "owner-a", Kind: DomainOwnerControl, Revision: 1, BaseRevision: 1, Frozen: true},
-		{SchemaVersion: 1, DomainID: "owner-a", Kind: DomainOwnerControl, Revision: 1, BaseRevision: 2},
-		{SchemaVersion: 1, DomainID: "owner-a", Kind: DomainOwnerControl, Revision: 2, BaseRevision: 0, Deltas: []DomainDelta{{MutationID: "gap", Fingerprint: Digest([]byte("gap")), Revision: 2, Changes: []DomainChange{{Key: "key", Value: []byte("value"), LogicalVersion: "version"}}}}},
-		{SchemaVersion: 1, DomainID: "owner-a", Kind: DomainOwnerControl, Revision: 2, BaseRevision: 1, Deltas: []DomainDelta{{MutationID: "bad-change", Fingerprint: Digest([]byte("change")), Revision: 2, Changes: []DomainChange{{Key: "key", Delete: true, Value: []byte("unexpected")}}}}},
-		{SchemaVersion: 1, DomainID: "owner-a", Kind: DomainOwnerControl, Revision: 3, BaseRevision: 1, Deltas: []DomainDelta{{MutationID: "short", Fingerprint: Digest([]byte("short")), Revision: 2, Changes: []DomainChange{{Key: "key", Value: []byte("value"), LogicalVersion: "version"}}}}},
+		{SchemaVersion: 1, DomainID: "owner-a", Kind: DomainOwnerControl, Registered: true, Revision: 1, BaseRevision: 1, Frozen: true},
+		{SchemaVersion: 1, DomainID: "owner-a", Kind: DomainOwnerControl, Registered: true, Revision: 1, BaseRevision: 2},
+		{SchemaVersion: 1, DomainID: "owner-a", Kind: DomainOwnerControl, Registered: true, Revision: 2, BaseRevision: 0, Deltas: []DomainDelta{{MutationID: "gap", Fingerprint: Digest([]byte("gap")), Revision: 2, Changes: []DomainChange{{Key: "key", Value: []byte("value"), LogicalVersion: "version"}}}}},
+		{SchemaVersion: 1, DomainID: "owner-a", Kind: DomainOwnerControl, Registered: true, Revision: 2, BaseRevision: 1, Deltas: []DomainDelta{{MutationID: "bad-change", Fingerprint: Digest([]byte("change")), Revision: 2, Changes: []DomainChange{{Key: "key", Delete: true, Value: []byte("unexpected")}}}}},
+		{SchemaVersion: 1, DomainID: "owner-a", Kind: DomainOwnerControl, Registered: true, Revision: 3, BaseRevision: 1, Deltas: []DomainDelta{{MutationID: "short", Fingerprint: Digest([]byte("short")), Revision: 2, Changes: []DomainChange{{Key: "key", Value: []byte("value"), LogicalVersion: "version"}}}}},
 	}
 	for index, head := range invalidHeads {
 		if err := ValidateDomainHead(head); !errors.Is(err, domain.ErrInvalid) {
@@ -207,10 +204,10 @@ func TestConsistencyDomainAuxiliaryRecordsValidateAndDenyCorruption(t *testing.T
 		}
 	}
 
-	badClaim := prepared
-	badClaim.Result = []byte("result-before-commit")
-	if err := ValidateDomainClaim(badClaim); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("prepared claim with result error = %v", err)
+	badOutcome := outcome
+	badOutcome.Revision = 0
+	if err := ValidateDomainOutcome(badOutcome); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid outcome error = %v", err)
 	}
 	badCatalog := catalogPage
 	badCatalog.Entries = append([]DomainCatalogEntry(nil), catalogPage.Entries...)
@@ -235,10 +232,10 @@ func TestConsistencyDomainAuxiliaryRecordsValidateAndDenyCorruption(t *testing.T
 	if err := ValidateDomainCatalogPage(catalogPage, Digest([]byte("wrong-catalog"))); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("catalog page digest mismatch error = %v", err)
 	}
-	if err := ValidateProjectionHead(ProjectionHead{SchemaVersion: 1, OwnerID: "owner-a", Kind: "unknown", SourceRevision: 1}); !errors.Is(err, domain.ErrInvalid) {
+	if err := ValidateProjectionHead(ProjectionHead{SchemaVersion: 1, OwnerID: "owner-a", ProjectionID: "projection-a", Kind: "unknown", SourceDomainID: "owner-a", SourceRevision: 1}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid projection head error = %v", err)
 	}
-	if err := ValidateProjectionHead(ProjectionHead{SchemaVersion: 1, OwnerID: "owner-a", Kind: ProjectionSearch, SourceRevision: 1, Root: DomainTreeRoot{Digest: "not-a-digest", EntryCount: 1}}); !errors.Is(err, domain.ErrInvalid) {
+	if err := ValidateProjectionHead(ProjectionHead{SchemaVersion: 1, OwnerID: "owner-a", ProjectionID: "projection-a", Kind: ProjectionSearch, SourceDomainID: "owner-a", SourceRevision: 1, Root: DomainTreeRoot{Digest: "not-a-digest", EntryCount: 1}}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("projection head with invalid root error = %v", err)
 	}
 }
@@ -251,7 +248,7 @@ func TestConsistencyDomainKeyHelpersRejectUnknownKindsAndInvalidText(t *testing.
 		func() { _ = DomainHeadKey("unknown", "owner") },
 		func() { _ = ProjectionHeadKey("owner", "unknown") },
 		func() { _ = DomainHeadKey(DomainNamespace, "") },
-		func() { _ = DomainClaimKey(DomainNamespace, "owner", "bad\x00id") },
+		func() { _ = DomainPageKey(DomainNamespace, "owner", "bad\x00id") },
 	} {
 		func() {
 			defer func() {

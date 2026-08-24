@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
@@ -28,6 +29,9 @@ const (
 	ProjectionAdminUsers ProjectionKind = "admin-users"
 	ProjectionAccounting ProjectionKind = "accounting"
 	ProjectionSearch     ProjectionKind = "search"
+	ProjectionModified   ProjectionKind = "namespace-modified"
+	ProjectionSize       ProjectionKind = "namespace-size"
+	ProjectionEntryKind  ProjectionKind = "namespace-kind"
 )
 
 // DomainTreeRoot is a bounded descriptor for an immutable ordered tree.
@@ -75,8 +79,22 @@ type DomainDelta struct {
 	MutationID  string         `json:"mutationID"`
 	Fingerprint string         `json:"fingerprint"`
 	Revision    uint64         `json:"revision"`
+	RetainUntil time.Time      `json:"retainUntil"`
 	Changes     []DomainChange `json:"changes"`
 	Result      []byte         `json:"result,omitempty"`
+}
+
+// DomainOutcome is the durable replay result for one published mutation. It
+// lives in the domain's immutable outcome tree after the corresponding delta
+// is compacted. Keeping outcomes inside the authority root removes the need
+// for a second mutable claim object and makes lost-success recovery a normal
+// authenticated head/tree read.
+type DomainOutcome struct {
+	MutationID  string    `json:"mutationID"`
+	Fingerprint string    `json:"fingerprint"`
+	Revision    uint64    `json:"revision"`
+	RetainUntil time.Time `json:"retainUntil"`
+	Result      []byte    `json:"result,omitempty"`
 }
 
 // DomainHead is the sole visibility root for one consistency domain. Its
@@ -86,32 +104,38 @@ type DomainHead struct {
 	SchemaVersion int                   `json:"schemaVersion"`
 	DomainID      string                `json:"domainID"`
 	Kind          ConsistencyDomainKind `json:"kind"`
+	Registered    bool                  `json:"registered"`
 	Revision      uint64                `json:"revision"`
 	Frozen        bool                  `json:"frozen,omitempty"`
 	FreezeEpoch   uint64                `json:"freezeEpoch,omitempty"`
 	BaseRevision  uint64                `json:"baseRevision,omitempty"`
 	Base          DomainTreeRoot        `json:"base"`
+	Outcomes      DomainTreeRoot        `json:"outcomes"`
+	OutcomeExpiry DomainTreeRoot        `json:"outcomeExpiry"`
 	Deltas        []DomainDelta         `json:"deltas,omitempty"`
 }
 
-type DomainClaimState string
+// DomainSnapshot pins one immutable head for a bounded authenticated cursor.
+// It is not a visibility root after expiry and can be collected without
+// consulting provider-native timestamps.
+type DomainSnapshot struct {
+	SchemaVersion int                   `json:"schemaVersion"`
+	DomainID      string                `json:"domainID"`
+	Kind          ConsistencyDomainKind `json:"kind"`
+	Head          DomainHead            `json:"head"`
+	ExpiresAt     time.Time             `json:"expiresAt"`
+}
 
-const (
-	DomainClaimPrepared  DomainClaimState = "prepared"
-	DomainClaimCommitted DomainClaimState = "committed"
-	DomainClaimFailed    DomainClaimState = "failed"
-)
-
-// DomainClaim makes an idempotency fingerprint durable before publication.
-// It contains no lock timeout or provider-native precondition.
-type DomainClaim struct {
-	SchemaVersion int              `json:"schemaVersion"`
-	DomainID      string           `json:"domainID"`
-	MutationID    string           `json:"mutationID"`
-	Fingerprint   string           `json:"fingerprint"`
-	State         DomainClaimState `json:"state"`
-	Revision      uint64           `json:"revision,omitempty"`
-	Result        []byte           `json:"result,omitempty"`
+// StateQuerySnapshot pins the immutable merge of every consistency domain
+// selected by one StateStore prefix. It is created only when a query spans
+// multiple independently mutable domains. The snapshot is cursor authority,
+// never mutation authority, and becomes collectable at ExpiresAt.
+type StateQuerySnapshot struct {
+	SchemaVersion int            `json:"schemaVersion"`
+	Prefix        string         `json:"prefix"`
+	DomainID      string         `json:"domainID"`
+	Root          DomainTreeRoot `json:"root"`
+	ExpiresAt     time.Time      `json:"expiresAt"`
 }
 
 type DomainCatalogEntry struct {
@@ -137,16 +161,25 @@ type DomainCatalogHead struct {
 type ProjectionHead struct {
 	SchemaVersion  int            `json:"schemaVersion"`
 	OwnerID        string         `json:"ownerID"`
+	ProjectionID   string         `json:"projectionID"`
 	Kind           ProjectionKind `json:"kind"`
+	SourceDomainID string         `json:"sourceDomainID"`
 	SourceRevision uint64         `json:"sourceRevision"`
+	SourceRoot     DomainTreeRoot `json:"sourceRoot"`
 	Root           DomainTreeRoot `json:"root"`
 }
 
 func ValidateDomainHead(head DomainHead) error {
-	if head.SchemaVersion != 1 || head.DomainID == "" || !validDomainKind(head.Kind) || head.Revision == 0 {
+	if head.SchemaVersion != 1 || head.DomainID == "" || !validDomainKind(head.Kind) || !head.Registered {
 		return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain head")
 	}
 	if err := validateDomainTreeRoot(head.Base); err != nil {
+		return err
+	}
+	if err := validateDomainTreeRoot(head.Outcomes); err != nil {
+		return err
+	}
+	if err := validateDomainTreeRoot(head.OutcomeExpiry); err != nil {
 		return err
 	}
 	if head.Frozen != (head.FreezeEpoch != 0) {
@@ -155,9 +188,12 @@ func ValidateDomainHead(head DomainHead) error {
 	if head.BaseRevision > head.Revision {
 		return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain base revision")
 	}
+	if head.Revision == 0 && (head.BaseRevision != 0 || head.Base.Digest != "" || head.Outcomes.Digest != "" || head.OutcomeExpiry.Digest != "" || len(head.Deltas) != 0) {
+		return domain.NewError(domain.ErrorInvalid, "zero-revision consistency-domain head is not empty")
+	}
 	previousRevision := head.BaseRevision
 	for _, delta := range head.Deltas {
-		if !validDomainText(delta.MutationID) || !validDomainDigest(delta.Fingerprint) || delta.Revision != previousRevision+1 || len(delta.Changes) == 0 {
+		if !validDomainText(delta.MutationID) || !validDomainDigest(delta.Fingerprint) || delta.Revision != previousRevision+1 || delta.RetainUntil.IsZero() || len(delta.Changes) == 0 {
 			return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain delta")
 		}
 		previousRevision = delta.Revision
@@ -179,6 +215,47 @@ func ValidateDomainHead(head DomainHead) error {
 		return err
 	}
 	return nil
+}
+
+// ValidateInitialDomainHead accepts only the inert pre-registration state.
+// It can expose no application values and exists solely so catalog freeze can
+// never name a missing head after winning registration.
+func ValidateInitialDomainHead(head DomainHead) error {
+	if head.Registered || head.SchemaVersion != 1 || head.DomainID == "" || !validDomainKind(head.Kind) || head.Revision != 0 || head.BaseRevision != 0 || head.Frozen || head.FreezeEpoch != 0 || head.Base.Digest != "" || head.Outcomes.Digest != "" || head.OutcomeExpiry.Digest != "" || len(head.Deltas) != 0 {
+		return domain.NewError(domain.ErrorInvalid, "invalid initial consistency-domain head")
+	}
+	_, err := EncodeCanonical(head)
+	return err
+}
+
+func ValidateDomainSnapshot(snapshot DomainSnapshot) error {
+	if snapshot.SchemaVersion != 1 || snapshot.ExpiresAt.IsZero() || snapshot.DomainID != snapshot.Head.DomainID || snapshot.Kind != snapshot.Head.Kind {
+		return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain snapshot")
+	}
+	if err := ValidateDomainHead(snapshot.Head); err != nil {
+		return err
+	}
+	_, err := EncodeCanonical(snapshot)
+	return err
+}
+
+func ValidateStateQuerySnapshot(snapshot StateQuerySnapshot) error {
+	if snapshot.SchemaVersion != 1 || !validDomainText(snapshot.Prefix) || !validDomainText(snapshot.DomainID) || snapshot.ExpiresAt.IsZero() {
+		return domain.NewError(domain.ErrorInvalid, "invalid state-query snapshot")
+	}
+	if err := validateDomainTreeRoot(snapshot.Root); err != nil {
+		return err
+	}
+	_, err := EncodeCanonical(snapshot)
+	return err
+}
+
+func ValidateDomainOutcome(outcome DomainOutcome) error {
+	if !validDomainText(outcome.MutationID) || !validDomainDigest(outcome.Fingerprint) || outcome.Revision == 0 || outcome.RetainUntil.IsZero() {
+		return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain outcome")
+	}
+	_, err := EncodeCanonical(outcome)
+	return err
 }
 
 func ValidateDomainPage(page DomainPage, expectedDigest string) error {
@@ -236,19 +313,11 @@ func validDomainKind(kind ConsistencyDomainKind) bool {
 
 func validProjectionKind(kind ProjectionKind) bool {
 	switch kind {
-	case ProjectionDuplicates, ProjectionAdminUsers, ProjectionAccounting, ProjectionSearch:
+	case ProjectionDuplicates, ProjectionAdminUsers, ProjectionAccounting, ProjectionSearch, ProjectionModified, ProjectionSize, ProjectionEntryKind:
 		return true
 	default:
 		return false
 	}
-}
-
-func ValidateDomainClaim(claim DomainClaim) error {
-	if claim.SchemaVersion != 1 || !validDomainText(claim.DomainID) || !validDomainText(claim.MutationID) || !validDomainDigest(claim.Fingerprint) || claim.State != DomainClaimPrepared && claim.State != DomainClaimCommitted && claim.State != DomainClaimFailed || claim.State == DomainClaimCommitted && claim.Revision == 0 || claim.State != DomainClaimCommitted && (claim.Revision != 0 || len(claim.Result) != 0) {
-		return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain claim")
-	}
-	_, err := EncodeCanonical(claim)
-	return err
 }
 
 func ValidateDomainCatalogHead(head DomainCatalogHead) error {
@@ -288,8 +357,11 @@ func ValidateDomainCatalogPage(page DomainCatalogPage, expectedDigest string) er
 }
 
 func ValidateProjectionHead(head ProjectionHead) error {
-	if head.SchemaVersion != 1 || !validDomainText(head.OwnerID) || !validProjectionKind(head.Kind) || head.SourceRevision == 0 {
+	if head.SchemaVersion != 1 || !validDomainText(head.OwnerID) || !validDomainText(head.ProjectionID) || !validProjectionKind(head.Kind) || !validDomainText(head.SourceDomainID) || head.SourceRevision == 0 {
 		return domain.NewError(domain.ErrorInvalid, "invalid derived-projection head")
+	}
+	if err := validateDomainTreeRoot(head.SourceRoot); err != nil {
+		return err
 	}
 	if err := validateDomainTreeRoot(head.Root); err != nil {
 		return err

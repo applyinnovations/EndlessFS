@@ -17,7 +17,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/state"
 )
 
-const MaxBatchItems = 100
+const MaxBatchItems = 10_000
 
 type AccountReader interface {
 	Account(context.Context, domain.UserID) (model.Account, state.Version, error)
@@ -73,6 +73,24 @@ func (s *Service) duplicateStorage() (provider.DuplicateStorage, error) {
 		return nil, domain.NewError(domain.ErrorUnavailable, "duplicate catalog is not available")
 	}
 	return storage, nil
+}
+
+func (s *Service) namespaceTrashStorage() (provider.TrashStorage, bool) {
+	storage, ok := s.storage.(provider.TrashStorage)
+	return storage, ok
+}
+
+func (s *Service) namespaceBatchStorage() (provider.BatchStorage, bool) {
+	storage, ok := s.storage.(provider.BatchStorage)
+	return storage, ok
+}
+
+func driveBatchResult(result domain.NamespaceBatchResult) BatchResult {
+	mapped := BatchResult{OperationID: result.Operation.ID, Items: make([]ItemResult, len(result.Items))}
+	for index, item := range result.Items {
+		mapped.Items[index] = ItemResult{Path: item.Source, TrashID: item.TrashID, OperationID: item.OperationID, State: item.State}
+	}
+	return mapped
 }
 
 func (s *Service) DuplicateGroups(ctx context.Context, userID domain.UserID, request domain.DuplicateGroupRequest) (domain.DuplicateGroupPage, error) {
@@ -315,7 +333,14 @@ func (s *Service) BatchCopyMove(ctx context.Context, userID domain.UserID, reque
 		return BatchResult{}, err
 	}
 	if len(requests) < 1 || len(requests) > MaxBatchItems {
-		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "copy/move batch must contain 1 to 100 items")
+		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "copy/move batch must contain 1 to 10000 items")
+	}
+	if storage, ok := s.namespaceBatchStorage(); ok {
+		result, err := storage.BatchCopyMove(ctx, userID, requests, move, idempotencyKey)
+		if err != nil {
+			return BatchResult{}, err
+		}
+		return driveBatchResult(result), nil
 	}
 	label := "copy-batch"
 	if move {
@@ -382,7 +407,7 @@ func (s *Service) Trash(ctx context.Context, userID domain.UserID, paths []domai
 		return BatchResult{}, err
 	}
 	if len(paths) < 1 || len(paths) > MaxBatchItems {
-		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "trash batch must contain 1 to 100 items")
+		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "trash batch must contain 1 to 10000 items")
 	}
 	live, err := liveScope(userID)
 	if err != nil {
@@ -403,6 +428,18 @@ func (s *Service) Trash(ctx context.Context, userID domain.UserID, paths []domai
 			return BatchResult{}, domain.NewError(domain.ErrorInvalid, "trash batch contains duplicate paths")
 		}
 		seen[path.String()] = struct{}{}
+	}
+	if storage, ok := s.namespaceBatchStorage(); ok {
+		requests := make([]domain.TrashRequest, len(paths))
+		for index, path := range paths {
+			key := idempotencyKey + ":" + strconv.Itoa(index)
+			requests[index] = domain.TrashRequest{Path: path, TrashID: s.derivedID("trash", userID, key), IdempotencyKey: key}
+		}
+		result, err := storage.BatchMoveToTrash(ctx, userID, requests, idempotencyKey)
+		if err != nil {
+			return BatchResult{}, err
+		}
+		return driveBatchResult(result), nil
 	}
 	for index, path := range paths {
 		item, itemErr := s.trashOneExpected(ctx, userID, live, trash, path, "", idempotencyKey+":"+strconv.Itoa(index))
@@ -432,6 +469,13 @@ func (s *Service) recordBatchOperation(ctx context.Context, userID domain.UserID
 
 func (s *Service) trashOneExpected(ctx context.Context, userID domain.UserID, live, trash domain.Scope, path domain.UserPath, expected domain.Version, key string) (ItemResult, error) {
 	trashID := s.derivedID("trash", userID, key)
+	if storage, ok := s.namespaceTrashStorage(); ok {
+		operation, err := storage.MoveToTrash(ctx, userID, domain.TrashRequest{Path: path, ExpectedVersion: expected, TrashID: trashID, IdempotencyKey: key})
+		if err != nil {
+			return ItemResult{}, err
+		}
+		return ItemResult{Path: path, TrashID: trashID, OperationID: operation.ID, State: operation.State, ErrorKind: operation.ErrorKind}, nil
+	}
 	if existing, _, err := s.repository.trash(ctx, userID, trashID); err == nil {
 		if existing.OriginalPath != path {
 			return ItemResult{}, domain.NewError(domain.ErrorConflict, "idempotency key was used for a different request")
@@ -463,6 +507,23 @@ func (s *Service) trashOneExpected(ctx context.Context, userID domain.UserID, li
 }
 
 func (s *Service) TrashList(ctx context.Context, userID domain.UserID) ([]model.Trash, error) {
+	if storage, ok := s.namespaceTrashStorage(); ok {
+		var records []model.Trash
+		request := domain.TrashListRequest{Limit: 1000}
+		for {
+			page, err := storage.ListTrash(ctx, userID, request)
+			if err != nil {
+				return nil, err
+			}
+			for _, item := range page.Items {
+				records = append(records, model.Trash{SchemaVersion: model.SchemaVersion, TrashID: item.TrashID, OwnerUserID: item.OwnerUserID, OriginalPath: item.OriginalPath, TrashedPath: item.TrashedPath, Kind: item.Entry.Kind, TrashedAt: item.TrashedAt, OriginalVersion: item.OriginalVersion})
+			}
+			if page.NextCursor == "" {
+				return records, nil
+			}
+			request.Cursor = page.NextCursor
+		}
+	}
 	records, err := s.repository.trashList(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -482,6 +543,22 @@ func (s *Service) TrashPage(ctx context.Context, userID domain.UserID, limit int
 	}
 	if limit < 1 || limit > 1000 {
 		return TrashPage{}, domain.NewError(domain.ErrorInvalid, "trash page limit must be between 1 and 1000")
+	}
+	if storage, ok := s.namespaceTrashStorage(); ok {
+		page, err := storage.ListTrash(ctx, userID, domain.TrashListRequest{Limit: limit, Cursor: cursor})
+		if err != nil {
+			return TrashPage{}, err
+		}
+		result := TrashPage{Items: make([]TrashEntry, 0, len(page.Items)), NextCursor: page.NextCursor}
+		for _, item := range page.Items {
+			result.Items = append(result.Items, TrashEntry{
+				SchemaVersion: model.SchemaVersion, TrashID: item.TrashID, OwnerUserID: item.OwnerUserID,
+				OriginalPath: item.OriginalPath, TrashedPath: item.TrashedPath, Kind: item.Entry.Kind,
+				Size: item.Entry.Size, FileCount: item.Entry.FileCount, MediaType: item.Entry.MediaType,
+				TrashedAt: item.TrashedAt, OriginalVersion: item.OriginalVersion,
+			})
+		}
+		return result, nil
 	}
 	records, next, err := s.repository.trashPage(ctx, userID, limit, cursor)
 	if err != nil {
@@ -531,6 +608,9 @@ func (s *Service) Restore(ctx context.Context, userID domain.UserID, trashID str
 	if err := validateIdempotencyKey(idempotencyKey); err != nil {
 		return domain.Operation{}, err
 	}
+	if storage, ok := s.namespaceTrashStorage(); ok {
+		return storage.RestoreFromTrash(ctx, userID, trashID, conflict, idempotencyKey)
+	}
 	fingerprint := mutationFingerprint("restore", trashID, string(conflict))
 	if prior, err := s.replayMutation(ctx, userID, idempotencyKey, "restore", fingerprint); err != nil || prior.ID != "" {
 		return prior, err
@@ -563,6 +643,9 @@ func (s *Service) Restore(ctx context.Context, userID domain.UserID, trashID str
 func (s *Service) PermanentDelete(ctx context.Context, userID domain.UserID, trashID, idempotencyKey string) (domain.Operation, error) {
 	if err := validateIdempotencyKey(idempotencyKey); err != nil {
 		return domain.Operation{}, err
+	}
+	if storage, ok := s.namespaceTrashStorage(); ok {
+		return storage.DeleteFromTrash(ctx, userID, trashID, idempotencyKey)
 	}
 	fingerprint := mutationFingerprint("permanent_delete", trashID)
 	if prior, err := s.replayMutation(ctx, userID, idempotencyKey, "permanent_delete", fingerprint); err != nil || prior.ID != "" {
@@ -627,6 +710,17 @@ func (s *Service) EmptyTrash(ctx context.Context, userID domain.UserID, confirme
 	if len(records) > MaxBatchItems {
 		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "empty trash is limited to 100 items per request")
 	}
+	if storage, ok := s.namespaceBatchStorage(); ok && len(records) > 0 {
+		trashIDs := make([]string, len(records))
+		for index, record := range records {
+			trashIDs[index] = record.TrashID
+		}
+		result, err := storage.BatchDeleteFromTrash(ctx, userID, trashIDs, idempotencyKey)
+		if err != nil {
+			return BatchResult{}, err
+		}
+		return driveBatchResult(result), nil
+	}
 	result := BatchResult{OperationID: domain.OperationID(s.derivedID("empty-trash", userID, idempotencyKey))}
 	for index, record := range records {
 		op, itemErr := s.PermanentDelete(ctx, userID, record.TrashID, idempotencyKey+":"+strconv.Itoa(index))
@@ -646,6 +740,12 @@ func (s *Service) Operation(ctx context.Context, userID domain.UserID, operation
 	operation, err := s.storage.GetOperation(ctx, userID, operationID)
 	if err == nil || !errors.Is(err, domain.ErrNotFound) {
 		return operation, err
+	}
+	if storage, ok := s.namespaceBatchStorage(); ok {
+		operation, batchErr := storage.GetBatchOperation(ctx, userID, operationID)
+		if batchErr == nil || !errors.Is(batchErr, domain.ErrNotFound) {
+			return operation, batchErr
+		}
 	}
 	batch, err := s.repository.batchOperation(ctx, userID, operationID)
 	if err != nil {

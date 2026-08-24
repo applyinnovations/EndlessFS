@@ -221,16 +221,17 @@ func TestLogicalCopyAndUploadPublicationUseNoFileBackendCopy(t *testing.T) {
 	if logicalCopies != 0 {
 		t.Fatalf("logical copy performed %d file-provider copies; want shared immutable BlobID", logicalCopies)
 	}
-	source, err := engine.Files().resolveEntry(ctx, live, domain.MustParseUserPath("/source.bin"))
+	store := newNamespaceStore(engine)
+	source, err := store.resolveEntry(ctx, live, domain.MustParseUserPath("/source.bin"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	copy, err := engine.Files().resolveEntry(ctx, live, domain.MustParseUserPath("/copy.bin"))
+	copy, err := store.resolveEntry(ctx, live, domain.MustParseUserPath("/copy.bin"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if source.BlobID == "" || copy.BlobID != source.BlobID {
-		t.Fatalf("logical copy blob IDs = source %q, copy %q", source.BlobID, copy.BlobID)
+	if source.Entry.BlobID == "" || copy.Entry.BlobID != source.Entry.BlobID {
+		t.Fatalf("logical copy blob IDs = source %q, copy %q", source.Entry.BlobID, copy.Entry.BlobID)
 	}
 	groups, err := engine.Files().ListDuplicateGroups(ctx, user, domain.DuplicateGroupRequest{Kind: domain.DuplicateFile, Limit: 10})
 	if err != nil {

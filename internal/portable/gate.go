@@ -66,37 +66,29 @@ func (e *Engine) finishClosingWrites(ctx context.Context, checkpointID string) e
 	if initialGate.Mode != storageformat.GateClosing || initialGate.CheckpointID != checkpointID {
 		return domain.NewError(domain.ErrorPreconditionFailed, "write gate changed before closure drain")
 	}
-	if err := e.drainAdmissions(ctx, initialGate.Epoch); err != nil {
+	if !writeGateSchemaAtLeast(initialGate.WriterFeatures, storageSchema008, e.writer.RequiredFeatures) {
+		return e.finishLegacyClosingWrites(ctx, checkpointID, initialGate, initialEnvelope)
+	}
+	// Schema 008 pays no global write-admission tax on ordinary mutations.
+	// Checkpoint closure instead freezes the catalog first (preventing a new
+	// domain from escaping enumeration) and then conditionally freezes every
+	// registered domain. Each domain-head freeze CAS totally orders with its
+	// final publication. No schema-007 admissions, mutable operation records,
+	// synchronous duplicate roots, or state-version objects participate.
+	catalog := newDomainCatalog(e.backend, e.scheduler)
+	if _, err := catalog.freezeDomains(ctx, initialGate.Epoch); err != nil {
 		return err
 	}
-	if err := e.drainOperationRecords(ctx, true, true); err != nil {
-		return err
-	}
-	if err := e.pruneDuplicateTombstones(ctx); err != nil {
-		return err
-	}
-	if err := e.pruneExpiredOperationRecords(ctx); err != nil {
-		return err
-	}
-	if err := e.pruneOperationArtifacts(ctx); err != nil {
-		return err
-	}
-	garbageCollectionSupported, err := e.garbageCollectionSupported(ctx)
-	if err != nil {
-		return err
-	}
-	// Epoch-004 reachability collection owns state-version pruning. Running the
-	// legacy version-by-version lookup pass first would duplicate a complete
-	// namespace traversal and an index lookup for every live value.
-	if !garbageCollectionSupported {
-		if err := e.pruneStateVersions(ctx); err != nil {
-			return err
+	if err := e.drainExpiredSchema008Uploads(ctx); err != nil {
+		if errors.Is(err, domain.ErrUnavailable) {
+			if rollbackErr := catalog.unfreeze(ctx, initialGate.Epoch); rollbackErr != nil {
+				return rollbackErr
+			}
+			if rollbackErr := e.cancelClosingWriteGate(ctx, checkpointID); rollbackErr != nil {
+				return rollbackErr
+			}
 		}
-	}
-	if garbageCollectionSupported {
-		if err := e.runGarbageCollection(ctx, checkpointID, initialGate.Epoch, initialEnvelope.LogicalVersion); err != nil {
-			return err
-		}
+		return err
 	}
 	gateObject, gateEnvelope, gate, err := e.readGate(ctx)
 	if err != nil {
@@ -124,6 +116,89 @@ func (e *Engine) finishClosingWrites(ctx context.Context, checkpointID string) e
 		}
 	}
 	return err
+}
+
+// finishLegacyClosingWrites is retained exclusively for the forward migration
+// reader. Schema-008 runtime mutations never enter this admission/operation/
+// manifest maintenance protocol.
+func (e *Engine) finishLegacyClosingWrites(ctx context.Context, checkpointID string, initialGate storageformat.WriteGate, initialEnvelope storageformat.Envelope) error {
+	if err := e.drainAdmissions(ctx, initialGate.Epoch); err != nil {
+		return err
+	}
+	if err := e.drainOperationRecords(ctx, true, true); err != nil {
+		return err
+	}
+	if err := e.pruneDuplicateTombstones(ctx); err != nil {
+		return err
+	}
+	if err := e.pruneExpiredOperationRecords(ctx); err != nil {
+		return err
+	}
+	if err := e.pruneOperationArtifacts(ctx); err != nil {
+		return err
+	}
+	garbageCollectionSupported, err := e.garbageCollectionSupported(ctx)
+	if err != nil {
+		return err
+	}
+	if !garbageCollectionSupported {
+		if err := e.pruneStateVersions(ctx); err != nil {
+			return err
+		}
+	} else if err := e.runGarbageCollection(ctx, checkpointID, initialGate.Epoch, initialEnvelope.LogicalVersion); err != nil {
+		return err
+	}
+	gateObject, gateEnvelope, gate, err := e.readGate(ctx)
+	if err != nil {
+		return err
+	}
+	if gate.Mode == storageformat.GateClosed && gate.CheckpointID == checkpointID {
+		return nil
+	}
+	if gate.Mode != storageformat.GateClosing || gate.CheckpointID != checkpointID {
+		return domain.NewError(domain.ErrorPreconditionFailed, "write gate changed while closing")
+	}
+	gate.Mode = storageformat.GateClosed
+	body, err := storageformat.EncodeEnvelope(writeGateSchema, storageformat.WriteGateKey(), gateEnvelope.Revision+1, gate)
+	if err != nil {
+		return err
+	}
+	_, err = e.backend.Put(ctx, storageformat.WriteGateKey(), body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: gateObject.Version})
+	if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+		_, _, winner, readErr := e.readGate(ctx)
+		if readErr == nil && winner.Mode == storageformat.GateClosed && winner.CheckpointID == checkpointID {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+	return err
+}
+
+func (e *Engine) cancelClosingWriteGate(ctx context.Context, checkpointID string) error {
+	for {
+		object, envelope, gate, err := e.readGate(ctx)
+		if err != nil {
+			return err
+		}
+		if gate.Mode == storageformat.GateOpen {
+			return nil
+		}
+		if gate.Mode != storageformat.GateClosing || gate.CheckpointID != checkpointID {
+			return domain.NewError(domain.ErrorPreconditionFailed, "write gate changed while checkpoint closure was cancelled")
+		}
+		gate.Mode, gate.CheckpointID = storageformat.GateOpen, ""
+		body, err := storageformat.EncodeEnvelope(writeGateSchema, storageformat.WriteGateKey(), envelope.Revision+1, gate)
+		if err != nil {
+			return err
+		}
+		if _, err := e.backend.Put(ctx, storageformat.WriteGateKey(), body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err == nil {
+			return nil
+		} else if !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) {
+			return err
+		}
+	}
 }
 
 func (e *Engine) garbageCollectionSupported(ctx context.Context) (bool, error) {
@@ -405,10 +480,25 @@ func (e *Engine) drainOperationRecords(ctx context.Context, recoverFiles, drainU
 }
 
 func (e *Engine) OpenWrites(ctx context.Context, checkpointID string) error {
-	if err := e.VerifyCheckpoint(ctx, checkpointID); err != nil {
+	checkpoint, err := e.readCheckpoint(ctx, checkpointID)
+	if err != nil {
 		return err
 	}
-	return e.openClosedWriteGate(ctx, checkpointID)
+	_, _, gate, err := e.readGate(ctx)
+	if err != nil {
+		return err
+	}
+	if gate.Mode == storageformat.GateClosed {
+		if err := e.VerifyCheckpoint(ctx, checkpointID); err != nil {
+			return err
+		}
+		if err := e.openClosedWriteGate(ctx, checkpointID); err != nil {
+			return err
+		}
+	} else if gate.Mode != storageformat.GateOpen || gate.Epoch != checkpoint.GateEpoch+1 {
+		return domain.NewError(domain.ErrorPreconditionFailed, "write gate cannot resume checkpoint reopen")
+	}
+	return newDomainCatalog(e.backend, e.scheduler).unfreeze(ctx, checkpoint.GateEpoch)
 }
 
 func (e *Engine) openClosedWriteGate(ctx context.Context, checkpointID string) error {

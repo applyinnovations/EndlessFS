@@ -34,6 +34,9 @@ const (
 	FeatureNamespaceSnapshots   = "persistent-namespace-snapshots-v1"
 	FeatureResumableOperations  = "resumable-operation-preparation-v1"
 	FeatureUserDirectoryCatalog = "user-addressable-duplicate-directories-v1"
+	FeatureConsistencyDomains   = "consistency-domains-v1"
+	FeatureOwnerNamespaceGraph  = "owner-namespace-graph-v1"
+	FeatureDerivedProjections   = "rebuildable-derived-projections-v1"
 )
 
 type Envelope struct {

@@ -83,6 +83,8 @@ const (
 	StepAdmissionAfterCandidate = "admission:after-candidate"
 	StepStateAfterAdmitted      = "state:after-admitted"
 	StepStateAfterBackend       = "state:after-backend"
+	StepDomainBeforeHeadCommit  = "consistency-domain:before-head-commit"
+	StepDomainAfterHeadCommit   = "consistency-domain:after-head-commit"
 )
 
 type Engine struct {
@@ -244,7 +246,13 @@ func (e *Engine) initialize(ctx context.Context) error {
 		return err
 	}
 	if schema.id != currentStorageSchema().id || pendingMigration {
-		return e.migrateStorageSchemaChain(ctx)
+		if err := e.migrateStorageSchemaChain(ctx); err != nil {
+			return err
+		}
+		// A completed migration is not the end of startup validation. In
+		// particular, schema 008 opens the global gate before the idempotent
+		// consistency-domain unfreeze suffix. Every winning and lagging replica
+		// must pass through the ordinary current-schema reconciliation below.
 	}
 	if err := e.createOrVerifyEnvelope(ctx, storageformat.WriterSetKey(), writerSetSchema, e.writer); err != nil {
 		return err
@@ -261,6 +269,23 @@ func (e *Engine) initialize(ctx context.Context) error {
 	}
 	if !reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
 		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
+	}
+	if catalog, found, err := e.readDomainCatalogIfPresent(ctx); err != nil {
+		return err
+	} else if found && catalog.head.FreezeEpoch != 0 {
+		switch {
+		case gate.Mode == storageformat.GateOpen && gate.Epoch == catalog.head.FreezeEpoch+1:
+			// A prior replica durably authorized checkpoint reopening before
+			// losing the response or process. Finish the idempotent per-domain
+			// unfreeze suffix before this replica serves mutations.
+			if err := newDomainCatalog(e.backend, e.scheduler).unfreeze(ctx, catalog.head.FreezeEpoch); err != nil {
+				return err
+			}
+		case (gate.Mode == storageformat.GateClosing || gate.Mode == storageformat.GateClosed) && gate.Epoch == catalog.head.FreezeEpoch:
+			// Checkpoint closure is intentionally durable across restarts.
+		default:
+			return domain.NewError(domain.ErrorPreconditionFailed, "write gate and consistency-domain freeze disagree")
+		}
 	}
 	return nil
 }

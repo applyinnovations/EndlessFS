@@ -100,7 +100,7 @@ func TestProviderBudgetTrashAndRestore(t *testing.T) {
 			t.Fatalf("provider budget %q is missing", name)
 		}
 		if report, err := budget.CheckRatchet(modelEconomics, events); err != nil {
-			t.Errorf("%s: %v; observed=%+v", name, err, report.Totals)
+			t.Errorf("%s: %v; observed=%+v; events=%+v", name, err, report.Totals, events)
 		}
 	}
 	stateLedger.Reset()

@@ -14,7 +14,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/portable"
 )
 
-func TestDuplicateSimilarityPostingsDoNotRewriteWhenContentSetIsUnchanged(t *testing.T) {
+func TestDuplicateProjectionIsRebuildableAndNeverWrittenByForegroundMutation(t *testing.T) {
 	backend := objectmemory.New()
 	server := httptest.NewServer(backend)
 	t.Cleanup(server.Close)
@@ -29,30 +29,54 @@ func TestDuplicateSimilarityPostingsDoNotRewriteWhenContentSetIsUnchanged(t *tes
 		t.Fatal(err)
 	}
 	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/copies/a.bin"), []byte("same bytes"))
-	before := duplicateSimilarityObjects(backend.Export())
-	if len(before) != 16 {
-		t.Fatalf("user-addressable directory similarity posting count = %d; want 16 and no area-root postings", len(before))
+	if projection := duplicateProjectionObjects(backend.Export()); len(projection) != 0 {
+		t.Fatalf("foreground namespace mutation wrote derived duplicate state: %v", projection)
+	}
+	if _, err := engine.Files().ListDuplicateGroups(context.Background(), user, domain.DuplicateGroupRequest{Limit: 20}); err != nil {
+		t.Fatal(err)
+	}
+	before := duplicateProjectionObjects(backend.Export())
+	if len(before) == 0 {
+		t.Fatal("duplicate discovery did not materialize its rebuildable projection")
 	}
 	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/copies/b.bin"), []byte("same bytes"))
-	after := duplicateSimilarityObjects(backend.Export())
-	if len(before) == 0 || len(after) != len(before) {
-		t.Fatalf("similarity posting count changed for duplicate multiplicity: %d -> %d", len(before), len(after))
+	stale := duplicateProjectionObjects(backend.Export())
+	if !equalObjectBodies(before, stale) {
+		t.Fatal("foreground namespace mutation eagerly rewrote the derived duplicate projection")
 	}
-	for key, body := range before {
-		if !bytes.Equal(body, after[key]) {
-			t.Fatalf("unchanged content set rewrote similarity posting %s", key)
-		}
+	page, err := engine.Files().ListDuplicateGroups(context.Background(), user, domain.DuplicateGroupRequest{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := duplicateGroupByKind(t, page.Groups, domain.DuplicateFile)
+	if group.OccurrenceCount != 2 || group.ReclaimableBytes != int64(len("same bytes")) {
+		t.Fatalf("rebuilt duplicate projection = %+v", group)
+	}
+	if equalObjectBodies(before, duplicateProjectionObjects(backend.Export())) {
+		t.Fatal("stale duplicate projection was not replaced after discovery")
 	}
 }
 
-func duplicateSimilarityObjects(objects map[string][]byte) map[string][]byte {
+func duplicateProjectionObjects(objects map[string][]byte) map[string][]byte {
 	result := make(map[string][]byte)
 	for key, body := range objects {
-		if strings.Contains(key, "/duplicates/") && strings.Contains(key, "/similarity/") {
+		if strings.Contains(key, "/projections/") && strings.Contains(key, "/duplicates/") {
 			result[key] = body
 		}
 	}
 	return result
+}
+
+func equalObjectBodies(left, right map[string][]byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, body := range left {
+		if !bytes.Equal(body, right[key]) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestDuplicateCatalogTracksFileAndExactDirectoryGroupsIncrementally(t *testing.T) {
@@ -276,8 +300,49 @@ func TestDuplicateCatalogFollowsSubtreeRootsWithoutWalkingDescendants(t *testing
 	if err != nil || !comparison.Exact || comparison.CommonFiles != 1 {
 		t.Fatalf("copied immutable subtree comparison = %+v, %v", comparison, err)
 	}
+	nestedPreference, err := engine.Files().SetDuplicateDirectoryIgnored(context.Background(), user, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left:    domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/source/nested")},
+		Right:   domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/copy/nested")},
+		Ignored: true,
+	})
+	if err != nil || !nestedPreference.Ignored || nestedPreference.Revision != 1 {
+		t.Fatalf("copied descendant pair identity = %+v, %v", nestedPreference, err)
+	}
+	if _, err := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{Source: domain.MustParseUserPath("/copy/nested"), Destination: domain.MustParseUserPath("/detached"), IdempotencyKey: "duplicate-detach-0001"}); err != nil {
+		t.Fatal(err)
+	}
+	nestedPreference, err = engine.Files().SetDuplicateDirectoryIgnored(context.Background(), user, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left:             domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/source/nested")},
+		Right:            domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/detached")},
+		Ignored:          false,
+		ExpectedRevision: nestedPreference.Revision,
+	})
+	if err != nil || nestedPreference.Ignored || nestedPreference.Revision != 2 {
+		t.Fatalf("detached copied descendant pair identity = %+v, %v", nestedPreference, err)
+	}
+	if _, err := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{Source: domain.MustParseUserPath("/detached"), Destination: domain.MustParseUserPath("/copy/nested"), IdempotencyKey: "duplicate-reattach-01"}); err != nil {
+		t.Fatal(err)
+	}
+	nestedPreference, err = engine.Files().SetDuplicateDirectoryIgnored(context.Background(), user, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left:             domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/source/nested")},
+		Right:            domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/copy/nested")},
+		Ignored:          true,
+		ExpectedRevision: nestedPreference.Revision,
+	})
+	if err != nil || !nestedPreference.Ignored || nestedPreference.Revision != 3 {
+		t.Fatalf("reattached copied descendant pair identity = %+v, %v", nestedPreference, err)
+	}
 	if _, err := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{Source: domain.MustParseUserPath("/copy"), Destination: domain.MustParseUserPath("/moved"), IdempotencyKey: "duplicate-move-0001"}); err != nil {
 		t.Fatal(err)
+	}
+	nestedPreference, err = engine.Files().SetDuplicateDirectoryIgnored(context.Background(), user, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left:             domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/source/nested")},
+		Right:            domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/moved/nested")},
+		Ignored:          false,
+		ExpectedRevision: nestedPreference.Revision,
+	})
+	if err != nil || nestedPreference.Ignored || nestedPreference.Revision != 4 {
+		t.Fatalf("moved copied descendant pair identity = %+v, %v", nestedPreference, err)
 	}
 	directoryGroup := duplicateGroupByKind(t, groups.Groups, domain.DuplicateDirectory)
 	occurrences, err := engine.Files().ListDuplicateOccurrences(context.Background(), user, domain.DuplicateOccurrenceRequest{GroupID: directoryGroup.ID, Limit: 20})

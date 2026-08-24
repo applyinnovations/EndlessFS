@@ -25,6 +25,27 @@ type Storage interface {
 	GetOperation(context.Context, domain.UserID, domain.OperationID) (domain.Operation, error)
 }
 
+// TrashStorage keeps trash placement and original-location metadata inside the
+// owner namespace authority. Implementations publish each action through one
+// namespace visibility point; no separate application-state transaction is
+// permitted for the trash record.
+type TrashStorage interface {
+	MoveToTrash(context.Context, domain.UserID, domain.TrashRequest) (domain.Operation, error)
+	ListTrash(context.Context, domain.UserID, domain.TrashListRequest) (domain.TrashListPage, error)
+	RestoreFromTrash(context.Context, domain.UserID, string, domain.ConflictMode, string) (domain.Operation, error)
+	DeleteFromTrash(context.Context, domain.UserID, string, string) (domain.Operation, error)
+}
+
+// BatchStorage publishes a bounded selection through one owner-namespace
+// visibility point. Preparation may write immutable pages proportional to the
+// touched page set, but must not run one transaction protocol per item.
+type BatchStorage interface {
+	BatchCopyMove(context.Context, domain.UserID, []domain.CopyRequest, bool, string) (domain.NamespaceBatchResult, error)
+	BatchMoveToTrash(context.Context, domain.UserID, []domain.TrashRequest, string) (domain.NamespaceBatchResult, error)
+	BatchDeleteFromTrash(context.Context, domain.UserID, []string, string) (domain.NamespaceBatchResult, error)
+	GetBatchOperation(context.Context, domain.UserID, domain.OperationID) (domain.Operation, error)
+}
+
 // DuplicateStorage is the optional provider-neutral duplicate reconciliation
 // control plane introduced by the duplicate-catalog storage epoch. Keeping it
 // separate lets historical fixture providers remain deliberately minimal.

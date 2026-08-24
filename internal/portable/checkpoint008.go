@@ -1,0 +1,302 @@
+package portable
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
+)
+
+// drainExpiredSchema008Uploads proves that no live provider-native upload
+// capability can mutate bytes outside the frozen canonical snapshot. An
+// unexpired capability makes checkpoint closure retryable; expired leases are
+// aborted and removed before the checkpoint inventory is constructed.
+func (e *Engine) drainExpiredSchema008Uploads(ctx context.Context) error {
+	catalogSnapshot, found, err := e.readDomainCatalogIfPresent(ctx)
+	if err != nil || !found {
+		return err
+	}
+	files := &FileStore{engine: e}
+	return newDomainCatalog(e.backend, e.scheduler).visitEntries(ctx, catalogSnapshot.head, func(entry storageformat.DomainCatalogEntry) error {
+		if entry.Kind != storageformat.DomainNamespace {
+			return nil
+		}
+		reference := consistencyDomainRef{Kind: entry.Kind, ID: entry.DomainID}
+		snapshot, err := e.stateDomainStore().loadHead(ctx, reference)
+		if err != nil {
+			return err
+		}
+		after := ""
+		for {
+			values, err := e.stateDomainStore().listAtHead(ctx, reference, snapshot.head, "upload/", after, domainPageMaximumItems)
+			if err != nil {
+				return err
+			}
+			for _, value := range values {
+				var record storageformat.PortableUploadRecord
+				if err := decodeCanonicalValue(value.Value, &record); err != nil || storageformat.ValidatePortableUploadRecord(record) != nil || record.OwnerID != reference.ID || uploadRecordKey(record.UploadID) != value.Key {
+					return domain.NewError(domain.ErrorInvalid, "invalid portable upload while closing checkpoint")
+				}
+				if record.State != storageformat.UploadActive {
+					continue
+				}
+				if e.clock.Now().UTC().Before(record.ExpiresAt) {
+					return domain.NewError(domain.ErrorUnavailable, "active upload capability prevents checkpoint closure")
+				}
+				transfers, err := files.transferBackend()
+				if err != nil {
+					return err
+				}
+				leaseKey := storageformat.LeaseKey(transfers.BackendKind(), record.UploadID)
+				lease, getErr := e.backend.Get(ctx, leaseKey)
+				if errors.Is(getErr, domain.ErrNotFound) {
+					continue
+				}
+				if getErr != nil {
+					return getErr
+				}
+				if err := transfers.AbortUpload(ctx, lease.Body); err != nil && !errors.Is(err, domain.ErrNotFound) {
+					return err
+				}
+				if err := e.backend.Delete(ctx, leaseKey, objectstore.DeleteCondition{Version: lease.Version}); err != nil && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
+					return err
+				}
+			}
+			if len(values) < domainPageMaximumItems {
+				return nil
+			}
+			after = values[len(values)-1].Key
+		}
+	})
+}
+
+// validateSchema008CheckpointClosure authenticates all schema-008 authority
+// while the catalog and every registered domain are frozen. The inventory
+// builder that follows remains metadata-only; this validation never opens a
+// file body and checks referenced blobs solely through provider metadata.
+func (e *Engine) validateSchema008CheckpointClosure(ctx context.Context, freezeEpoch uint64) error {
+	catalogSnapshot, found, err := e.readDomainCatalogIfPresent(ctx)
+	if err != nil {
+		return err
+	}
+	if !found || catalogSnapshot.head.FreezeEpoch != freezeEpoch {
+		return domain.NewError(domain.ErrorPreconditionFailed, "consistency-domain catalog is not checkpoint-frozen")
+	}
+	catalog := newDomainCatalog(e.backend, e.scheduler)
+	if err := catalog.visitEntries(ctx, catalogSnapshot.head, func(entry storageformat.DomainCatalogEntry) error {
+		reference := consistencyDomainRef{Kind: entry.Kind, ID: entry.DomainID}
+		snapshot, err := e.stateDomainStore().loadHead(ctx, reference)
+		if err != nil {
+			return err
+		}
+		if !snapshot.exists || !snapshot.head.Registered || !snapshot.head.Frozen || snapshot.head.FreezeEpoch != freezeEpoch {
+			return domain.NewError(domain.ErrorPreconditionFailed, "registered consistency domain is not checkpoint-frozen")
+		}
+		if err := e.validateConsistencyDomainClosure(ctx, reference, snapshot.head); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	// Every authoritative page is reached through the catalog, a frozen domain
+	// head, an authority tree, or a namespace/result root above. Unreachable
+	// content-addressed pages are collectable garbage: checkpoint liveness and
+	// portability must never depend on decoding them.
+	return nil
+}
+
+func (e *Engine) validateConsistencyDomainClosure(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead) error {
+	session := newConsistencyDomainTreeSession(e.stateDomainStore(), reference)
+	rootNames := []string{"base", "outcomes", "outcome-expiry"}
+	for rootIndex, root := range []storageformat.DomainTreeRoot{head.Base, head.Outcomes, head.OutcomeExpiry} {
+		iterator, err := newConsistencyDomainTreeIterator(ctx, session, root)
+		if err != nil {
+			return domain.WrapError(domain.KindOf(err), fmt.Sprintf("open consistency-domain %s authority tree", rootNames[rootIndex]), err)
+		}
+		for {
+			entry, found, err := iterator.Next()
+			if err != nil {
+				return domain.WrapError(domain.KindOf(err), fmt.Sprintf("walk consistency-domain %s authority tree", rootNames[rootIndex]), err)
+			}
+			if !found {
+				break
+			}
+			if entry.Key == "" || entry.LogicalVersion == "" {
+				return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain closure entry")
+			}
+		}
+	}
+	if reference.Kind != storageformat.DomainNamespace {
+		return e.validateKnownControlDomainValues(ctx, reference, head)
+	}
+	owner, err := domain.ParseUserID(reference.ID)
+	if err != nil {
+		return domain.NewError(domain.ErrorInvalid, "invalid namespace owner domain")
+	}
+	for _, area := range []domain.Area{domain.AreaLive, domain.AreaTrash} {
+		value, found, err := e.stateDomainStore().lookupAtHead(ctx, reference, head, namespaceRootKey(area))
+		if err != nil {
+			return err
+		}
+		if !found {
+			continue
+		}
+		root, err := decodeNamespaceEntry(value.Data)
+		if err != nil || root.Entry.Name != "" {
+			return domain.NewError(domain.ErrorInvalid, "invalid namespace checkpoint root")
+		}
+		if err := e.validateNamespaceEntryClosure(ctx, session, owner, namespaceRootPath(), root); err != nil {
+			return err
+		}
+	}
+	for _, delta := range head.Deltas {
+		if err := e.validateNamespaceMutationResultClosure(ctx, session, delta.Result); err != nil {
+			return err
+		}
+	}
+	if err := e.validateNamespaceOutcomeClosure(ctx, session, head.Outcomes); err != nil {
+		return err
+	}
+	return e.validateKnownControlDomainValues(ctx, reference, head)
+}
+
+func (e *Engine) validateKnownControlDomainValues(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead) error {
+	if reference.Kind != storageformat.DomainNamespace && (reference.Kind != storageformat.DomainOwnerControl || !strings.HasPrefix(reference.ID, "uploads:")) {
+		return nil
+	}
+	after := ""
+	for {
+		values, err := e.stateDomainStore().listAtHead(ctx, reference, head, "", after, domainPageMaximumItems)
+		if err != nil {
+			return err
+		}
+		for _, value := range values {
+			switch {
+			case strings.HasPrefix(value.Key, "upload/"):
+				var record storageformat.PortableUploadRecord
+				if err := decodeCanonicalValue(value.Value, &record); err != nil || storageformat.ValidatePortableUploadRecord(record) != nil || uploadRecordKey(record.UploadID) != value.Key || reference.Kind == storageformat.DomainNamespace && record.OwnerID != reference.ID {
+					return domain.NewError(domain.ErrorInvalid, "invalid portable upload in checkpoint closure")
+				}
+			case strings.HasPrefix(value.Key, "upload-idempotency/"):
+				var record storageformat.PortableUploadIdempotency
+				if err := decodeCanonicalValue(value.Value, &record); err != nil || storageformat.ValidatePortableUploadIdempotency(record) != nil || reference.Kind == storageformat.DomainNamespace && record.OwnerID != reference.ID {
+					return domain.NewError(domain.ErrorInvalid, "invalid portable upload idempotency in checkpoint closure")
+				}
+			}
+		}
+		if len(values) < domainPageMaximumItems {
+			return nil
+		}
+		after = values[len(values)-1].Key
+	}
+}
+
+func (e *Engine) validateNamespaceEntryClosure(ctx context.Context, session *consistencyDomainTreeSession, owner domain.UserID, path domain.UserPath, directory storageformat.NamespaceEntry) error {
+	if directory.Entry.Kind != domain.EntryDirectory {
+		return domain.NewError(domain.ErrorInvalid, "namespace closure root is not a directory")
+	}
+	iterator, err := newConsistencyDomainTreeIterator(ctx, session, directory.Children)
+	if err != nil {
+		return err
+	}
+	var count uint64
+	for {
+		value, found, err := iterator.Next()
+		if err != nil {
+			return err
+		}
+		if !found {
+			break
+		}
+		entry, err := decodeNamespaceEntry(value.Value)
+		if err != nil || entry.Entry.Name != value.Key || entry.Entry.LogicalVersion != value.LogicalVersion {
+			return domain.NewError(domain.ErrorInvalid, "invalid namespace checkpoint child binding")
+		}
+		childPath, err := path.Join(entry.Entry.Name)
+		if err != nil {
+			return domain.NewError(domain.ErrorInvalid, "namespace checkpoint path exceeds canonical bounds")
+		}
+		count++
+		if entry.Entry.Kind == domain.EntryDirectory {
+			if err := e.validateNamespaceEntryClosure(ctx, session, owner, childPath, entry); err != nil {
+				return err
+			}
+			continue
+		}
+		info, err := e.fileBackend.Head(ctx, storageformat.BlobKey(owner.String(), entry.Entry.BlobID))
+		if err != nil {
+			return domain.WrapError(domain.KindOf(err), "validate namespace file-blob metadata", err)
+		}
+		if info.Size != entry.Entry.Size || info.Fingerprint.MD5 != entry.Entry.MD5 || info.Fingerprint.CRC32C != entry.Entry.CRC32C || !info.Fingerprint.Complete() {
+			return domain.NewError(domain.ErrorPreconditionFailed, "namespace blob metadata does not match checkpoint authority")
+		}
+	}
+	if count != directory.EntryCount {
+		return domain.NewError(domain.ErrorInvalid, "namespace checkpoint directory count mismatch")
+	}
+	return nil
+}
+
+func (e *Engine) validateNamespaceOutcomeClosure(ctx context.Context, session *consistencyDomainTreeSession, root storageformat.DomainTreeRoot) error {
+	iterator, err := newConsistencyDomainTreeIterator(ctx, session, root)
+	if err != nil {
+		return err
+	}
+	for {
+		value, found, err := iterator.Next()
+		if err != nil {
+			return err
+		}
+		if !found {
+			return nil
+		}
+		var outcome storageformat.DomainOutcome
+		if err := decodeCanonicalValue(value.Value, &outcome); err != nil || storageformat.ValidateDomainOutcome(outcome) != nil || outcome.MutationID != value.Key {
+			return domain.NewError(domain.ErrorInvalid, "invalid namespace outcome closure")
+		}
+		if err := e.validateNamespaceMutationResultClosure(ctx, session, outcome.Result); err != nil {
+			return err
+		}
+	}
+}
+
+func (e *Engine) validateNamespaceMutationResultClosure(ctx context.Context, session *consistencyDomainTreeSession, body []byte) error {
+	var result storageformat.NamespaceMutationResult
+	if err := decodeCanonicalValue(body, &result); err != nil || storageformat.ValidateNamespaceMutationResult(result) != nil {
+		return domain.NewError(domain.ErrorInvalid, "invalid namespace outcome result closure")
+	}
+	if result.Batch == nil {
+		return nil
+	}
+	items, err := newConsistencyDomainTreeIterator(ctx, session, result.Batch.Items)
+	if err != nil {
+		return err
+	}
+	var count uint64
+	for {
+		item, found, err := items.Next()
+		if err != nil {
+			return err
+		}
+		if !found {
+			break
+		}
+		var stored storageformat.NamespaceBatchItem
+		if err := decodeCanonicalValue(item.Value, &stored); err != nil || storageformat.ValidateNamespaceBatchItem(stored) != nil {
+			return domain.NewError(domain.ErrorInvalid, "invalid namespace batch outcome closure")
+		}
+		count++
+	}
+	if count != result.Batch.ItemCount {
+		return domain.NewError(domain.ErrorInvalid, "namespace batch outcome count mismatch")
+	}
+	return nil
+}
+
+// Compile-time proof that checkpoint validation has no file-body interface.
+var _ objectstore.MetadataBackend = (objectstore.FileControlBackend)(nil)

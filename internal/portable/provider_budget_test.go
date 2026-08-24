@@ -47,7 +47,7 @@ func TestProviderBudgetStateStoreContract(t *testing.T) {
 			t.Fatalf("provider budget %q is missing", name)
 		}
 		if report, err := budget.CheckRatchet(economics, ledger.Events()); err != nil {
-			t.Errorf("%s: %v; observed=%+v", name, err, report.Totals)
+			t.Errorf("%s: %v; observed=%+v; events=%+v", name, err, report.Totals, ledger.Events())
 		}
 	}
 	key := state.MustKey(state.NamespacePreferences, "budget-user")

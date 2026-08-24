@@ -223,7 +223,7 @@ func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *
 					options.Writer = currentWriterForSchemaFixture(t, fixture)
 					engine, err := portable.Open(context.Background(), options)
 					if err != nil {
-						t.Fatalf("Open(%s %s-backend schema fixture produced by %s) error = %v", family.schemaID, topology, family.producer, err)
+						t.Fatalf("Open(%s %s-backend schema fixture produced by %s) error = %s", family.schemaID, topology, family.producer, migrationErrorChain(err))
 					}
 					user, err := domain.ParseUserID(fixture.UserID)
 					if err != nil {
@@ -235,10 +235,12 @@ func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *
 						t.Fatalf("upgraded %s %s-backend root = %+v, %v; want %d bytes/%d files", family.schemaID, topology, root, err, family.wantSize, family.wantFiles)
 					}
 					gate, err := engine.GateStatus(context.Background())
-					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != family.wantEpoch {
-						t.Fatalf("upgraded %s %s-backend gate = %+v, %v; want open epoch %d", family.schemaID, topology, gate, err, family.wantEpoch)
+					wantEpoch := family.wantEpoch + 1
+					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != wantEpoch {
+						t.Fatalf("upgraded %s %s-backend gate = %+v, %v; want open epoch %d", family.schemaID, topology, gate, err, wantEpoch)
 					}
 					assertAllUploadRecordsUseCurrentSchema(t, stateBackend.Export())
+					assertSchema007TerminalAuthorityMigrated(t, engine, fixture)
 					uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath("/projects/after-upgrade.txt"), []byte("ok"))
 					after, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
 					if err != nil || after.Size != family.wantSize+2 || after.FileCount != family.wantFiles+1 {
@@ -253,6 +255,95 @@ func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *
 			t.Fatalf("ledger schema %s has no immutable migration fixture", entry.ID)
 		}
 	}
+}
+
+func migrationErrorChain(err error) string {
+	parts := make([]string, 0, 4)
+	for err != nil {
+		parts = append(parts, err.Error())
+		err = errors.Unwrap(err)
+	}
+	return strings.Join(parts, ": ")
+}
+
+func assertSchema007TerminalAuthorityMigrated(t *testing.T, engine *portable.Engine, fixture storageSchemaFixture) {
+	t.Helper()
+	if !strings.Contains(fixture.SourceCommit, "43171275") && fixture.SourceRelease != "schema-007" {
+		return
+	}
+	ctx := context.Background()
+	for keyValue, body := range fixture.StateObjects {
+		key := storageformatKey(t, keyValue)
+		var generic storageformat.Envelope
+		if err := state.DecodeJSONWithLimit(body, &generic, storageformat.MaxCanonicalBytes); err != nil {
+			continue
+		}
+		switch generic.Schema {
+		case "file-operation-v1":
+			var envelope storageformat.Envelope
+			var legacy storageformat.FileOperation
+			if err := storageformat.DecodeEnvelope(body, key, "file-operation-v1", &envelope, &legacy); err != nil {
+				t.Fatal(err)
+			}
+			owner, err := domain.ParseUserID(legacy.UserID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			operation, err := engine.Files().GetOperation(ctx, owner, domain.OperationID(legacy.OperationID))
+			if err != nil || operation.ID != domain.OperationID(legacy.OperationID) || operation.StartedAt != legacy.StartedAt || operation.UpdatedAt != legacy.UpdatedAt {
+				t.Fatalf("migrated operation %s = %+v, %v", legacy.OperationID, operation, err)
+			}
+		case "upload-record-v1":
+			var envelope storageformat.Envelope
+			var legacy storageformat.UploadRecord
+			if err := storageformat.DecodeEnvelope(body, key, "upload-record-v1", &envelope, &legacy); err != nil {
+				t.Fatal(err)
+			}
+			owner, err := domain.ParseUserID(legacy.UserID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			area := domain.AreaLive
+			if legacy.Area == "trash" {
+				area = domain.AreaTrash
+			}
+			scope, _ := domain.NewScope(owner, area)
+			status, err := engine.Files().UploadStatus(ctx, scope, domain.UploadID(legacy.UploadID))
+			if err != nil || status.UploadID != domain.UploadID(legacy.UploadID) || legacy.State == storageformat.UploadCompleted && status.State != domain.UploadStateCompleted || legacy.State == storageformat.UploadAborted && status.State != domain.UploadStateAborted {
+				t.Fatalf("migrated upload %s = %+v, %v; legacy=%+v", legacy.UploadID, status, err, legacy)
+			}
+		}
+	}
+	owner, err := domain.ParseUserID(fixture.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, _ := domain.NewScope(owner, domain.AreaLive)
+	trash, _ := domain.NewScope(owner, domain.AreaTrash)
+	trashPage, err := engine.Files().ListTrash(ctx, owner, domain.TrashListRequest{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range trashPage.Items {
+		if item.OriginalPath != domain.MustParseUserPath("/trash-me.txt") {
+			continue
+		}
+		replayed, err := engine.Files().Move(ctx, live, trash, domain.MoveRequest{
+			Source: item.OriginalPath, Destination: item.TrashedPath, Conflict: domain.ConflictFail,
+			ExpectedSource: item.OriginalVersion, IdempotencyKey: "fixture-trash",
+		})
+		if err != nil || replayed.State != domain.OperationSucceeded {
+			t.Fatalf("migrated schema-007 idempotent move replay = %+v, %v", replayed, err)
+		}
+		if _, err := engine.Files().Move(ctx, live, trash, domain.MoveRequest{
+			Source: item.OriginalPath, Destination: domain.MustParseUserPath("/different"), Conflict: domain.ConflictFail,
+			ExpectedSource: item.OriginalVersion, IdempotencyKey: "fixture-trash",
+		}); !errors.Is(err, domain.ErrConflict) {
+			t.Fatalf("changed migrated schema-007 idempotent move error = %v", err)
+		}
+		return
+	}
+	t.Fatal("schema-007 fixture trash entry was not migrated")
 }
 
 func TestEveryHistoricalReleaseMapsToRegisteredStorageSchemaFixture(t *testing.T) {
@@ -314,8 +405,8 @@ func TestMigrationCheckpointInventoryResumesFromBoundedPagesWithoutReadingFileBo
 	if got := interrupted.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads across interrupted migration = %d; want 0", got)
 	}
-	if got := interrupted.totalAttempts(); got < 10 || got > 12 {
-		t.Fatalf("file metadata list calls across interrupted migration = %d; want bounded restart traversal", got)
+	if got := interrupted.totalAttempts(); got != 18 {
+		t.Fatalf("file metadata list calls across interrupted schema-002-to-008 migration = %d; want measured restart ratchet 18", got)
 	}
 	progressRecords := 0
 	inventoryPages := 0
@@ -476,8 +567,8 @@ func TestMigrationDoesNotReadFileBodiesAgainImmediatelyBeforeOpeningWrites(t *te
 	if got := counting.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads during migration = %d; want 0", got)
 	}
-	if got := counting.totalAttempts(); got != 5 {
-		t.Fatalf("file metadata listing calls across five metadata-relevant migration checkpoints = %d; want 5", got)
+	if got := counting.totalAttempts(); got != 7 {
+		t.Fatalf("file metadata listing calls across schema-002-to-008 checkpoint suffix = %d; want measured ratchet 7", got)
 	}
 }
 
@@ -594,7 +685,7 @@ func TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary(t *testing.T) 
 	for edgeIndex, entry := range history[:len(history)-1] {
 		families := storageSchemaFixturesFor(entry.ID)
 		edgeBoundaries := boundaries
-		if entry.MigrationID == "schema-004-to-005" || entry.MigrationID == "schema-005-to-006" || entry.MigrationID == "schema-006-to-007" {
+		if entry.MigrationID == "schema-004-to-005" || entry.MigrationID == "schema-005-to-006" || entry.MigrationID == "schema-006-to-007" || entry.MigrationID == "schema-007-to-008" {
 			edgeBoundaries = []string{
 				portable.StepMigrationAfterDetection,
 				portable.StepMigrationAfterGateClosed,
@@ -641,8 +732,9 @@ func TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary(t *testing.T) 
 						t.Fatalf("resumed %s root = %+v, %v; want %d bytes/%d files", entry.MigrationID, root, err, family.wantSize, family.wantFiles)
 					}
 					gate, err := engine.GateStatus(context.Background())
-					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != family.wantEpoch {
-						t.Fatalf("resumed %s gate = %+v, %v; want open epoch %d", entry.MigrationID, gate, err, family.wantEpoch)
+					wantEpoch := family.wantEpoch + 1
+					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != wantEpoch {
+						t.Fatalf("resumed %s gate = %+v, %v; want open epoch %d", entry.MigrationID, gate, err, wantEpoch)
 					}
 				})
 			}
@@ -787,11 +879,12 @@ func TestMigrationLaggingReplicaAcceptsCompletedWinnerAfterSourceCollection(t *t
 	supersededKey := laggingBackend.pausedKey()
 	assertMigrationManifestSuperseded(t, stateBackend, supersededKey)
 	superseded, err := stateBackend.Get(context.Background(), supersededKey)
-	if err != nil {
+	if err == nil {
+		if err := stateBackend.Delete(context.Background(), supersededKey, objectstore.DeleteCondition{Version: superseded.Version}); err != nil {
+			t.Fatalf("collect superseded source manifest: %v", err)
+		}
+	} else if !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("read superseded source manifest: %v", err)
-	}
-	if err := stateBackend.Delete(context.Background(), supersededKey, objectstore.DeleteCondition{Version: superseded.Version}); err != nil {
-		t.Fatalf("collect superseded source manifest: %v", err)
 	}
 	laggingBackend.resume()
 	if err := <-laggingResult; err != nil {

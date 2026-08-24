@@ -436,14 +436,18 @@ func TestUploadCompletionLostSuccessIsIdempotentlyReconciled(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	crasher.step = portable.StepStateAfterBackend
+	crasher.step = portable.StepDomainAfterHeadCommit
 	completion := domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(content)), MediaType: "text/plain"}
-	if _, err := engine.Files().CompleteUpload(context.Background(), scope, completion); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("lost-success CompleteUpload() error = %v", err)
+	completed, err := engine.Files().CompleteUpload(context.Background(), scope, completion)
+	if err != nil {
+		t.Fatalf("lost-success was not reconciled in the original CompleteUpload() call: %v", err)
 	}
 	visible, err := engine.Files().Stat(context.Background(), scope, path)
 	if err != nil {
 		t.Fatalf("lost-success file was not visible: %v", err)
+	}
+	if completed.Version != visible.Version {
+		t.Fatalf("same-call recovery = %+v; visible=%+v", completed, visible)
 	}
 	reconciled, err := engine.Files().CompleteUpload(context.Background(), scope, completion)
 	if err != nil || reconciled.Version != visible.Version {
@@ -457,9 +461,8 @@ func TestUploadCompletionLostSuccessIsIdempotentlyReconciled(t *testing.T) {
 
 func TestUploadCompletionRecoversAtEveryAggregateCommitBoundary(t *testing.T) {
 	for index, step := range []string{
-		portable.StepUploadCompletionAfterPrepared,
-		portable.StepUploadCompletionAfterCommitted,
-		portable.StepUploadCompletionAfterFinalized,
+		portable.StepDomainBeforeHeadCommit,
+		portable.StepDomainAfterHeadCommit,
 	} {
 		t.Run(step, func(t *testing.T) {
 			backend := objectmemory.New()
@@ -469,7 +472,7 @@ func TestUploadCompletionRecoversAtEveryAggregateCommitBoundary(t *testing.T) {
 			if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(byte(170+index), 1<<20)))); err != nil {
 				t.Fatal(err)
 			}
-			crasher := &stepFailure{step: step}
+			crasher := &stepFailure{}
 			engine := openEngine(t, backend, clock, byte(180+index), crasher)
 			user, _ := domain.ParseUserID("RkdHRkdHRkdHRkdHRkdHRw")
 			scope, _ := domain.NewScope(user, domain.AreaLive)
@@ -488,22 +491,28 @@ func TestUploadCompletionRecoversAtEveryAggregateCommitBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			_ = response.Body.Close()
+			crasher.step = step
 			completion := domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(content)), MediaType: "text/plain"}
-			if _, err := engine.Files().CompleteUpload(context.Background(), scope, completion); !errors.Is(err, domain.ErrUnavailable) {
-				t.Fatalf("interrupted CompleteUpload() error = %v", err)
-			}
+			completed, completionErr := engine.Files().CompleteUpload(context.Background(), scope, completion)
 			root, err := engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			wantBeforeRetry := int64(0)
-			if step != portable.StepUploadCompletionAfterPrepared {
+			if step == portable.StepDomainBeforeHeadCommit {
+				if !errors.Is(completionErr, domain.ErrUnavailable) {
+					t.Fatalf("pre-publication interruption error = %v", completionErr)
+				}
+			} else {
 				wantBeforeRetry = int64(len(content))
+				if completionErr != nil || completed.Size != wantBeforeRetry {
+					t.Fatalf("post-publication lost response was not recovered in the same call: %+v, %v", completed, completionErr)
+				}
 			}
 			if root.Size != wantBeforeRetry {
 				t.Fatalf("interrupted root aggregate = %d; want %d", root.Size, wantBeforeRetry)
 			}
-			completed, err := engine.Files().CompleteUpload(context.Background(), scope, completion)
+			completed, err = engine.Files().CompleteUpload(context.Background(), scope, completion)
 			if err != nil || completed.Size != int64(len(content)) {
 				t.Fatalf("retried CompleteUpload() = %+v, %v", completed, err)
 			}
@@ -515,7 +524,7 @@ func TestUploadCompletionRecoversAtEveryAggregateCommitBoundary(t *testing.T) {
 	}
 }
 
-func TestUploadRecoversCommittedNamespaceTransitionBeforePublishing(t *testing.T) {
+func TestNamespaceMutationLostSuccessDoesNotLeaveARecoveryLease(t *testing.T) {
 	backend := objectmemory.New()
 	server := httptest.NewServer(backend)
 	t.Cleanup(server.Close)
@@ -529,19 +538,19 @@ func TestUploadRecoversCommittedNamespaceTransitionBeforePublishing(t *testing.T
 	scope, _ := domain.NewScope(user, domain.AreaLive)
 	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/before.txt"), []byte("before"))
 
-	crasher.step = portable.StepOperationAfterCommitted
-	if _, err := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{
+	crasher.step = portable.StepDomainAfterHeadCommit
+	moved, err := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{
 		Source: domain.MustParseUserPath("/before.txt"), Destination: domain.MustParseUserPath("/after.txt"),
-	}); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("interrupted Move() error = %v", err)
+	})
+	if err != nil || moved.State != domain.OperationSucceeded {
+		t.Fatalf("lost-success Move() = %+v, %v", moved, err)
 	}
 	if _, err := engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/after.txt")); err != nil {
-		t.Fatalf("committed move is not visible before finalization: %v", err)
+		t.Fatalf("committed move is not visible: %v", err)
 	}
-	if _, err := engine.Files().Delete(context.Background(), scope, domain.DeleteRequest{Path: domain.MustParseUserPath("/after.txt")}); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("mutation recovered committed operation before its owner lease expired: %v", err)
+	if _, err := engine.Files().Delete(context.Background(), scope, domain.DeleteRequest{Path: domain.MustParseUserPath("/after.txt")}); err != nil {
+		t.Fatalf("a committed namespace mutation left a blocking recovery lease: %v", err)
 	}
-	clock.Advance(2 * time.Minute)
 
 	path := domain.MustParseUserPath("/photo.jpg")
 	content := []byte("photo bytes")

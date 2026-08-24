@@ -53,17 +53,63 @@ func DomainPageKey(kind ConsistencyDomainKind, domainID, pageID string) objectst
 	return fixedKey("domains/" + domainKeyKind(kind) + "/" + digestPart(domainID) + "/pages/" + digestPart(pageID) + ".json")
 }
 
-func DomainClaimKey(kind ConsistencyDomainKind, domainID, mutationID string) objectstore.Key {
+func DomainSnapshotKey(kind ConsistencyDomainKind, domainID, digest string) objectstore.Key {
 	validateDomainKeyPart(domainID)
-	validateDomainKeyPart(mutationID)
-	return fixedKey("domains/" + domainKeyKind(kind) + "/" + digestPart(domainID) + "/claims/" + digestPart(mutationID) + ".json")
+	validateDomainKeyPart(digest)
+	return fixedKey("domains/" + domainKeyKind(kind) + "/" + digestPart(domainID) + "/snapshots/" + digestPart(digest) + ".json")
 }
 
+func StateQuerySnapshotKey(digest string) objectstore.Key {
+	validateDomainKeyPart(digest)
+	return fixedKey("domains/state-query-snapshots/" + digestPart(digest) + ".json")
+}
+
+func StateQuerySnapshotPrefix() string { return root + "domains/state-query-snapshots/" }
+
 func DomainPrefix() string { return root + "domains/" }
+
+func Schema008MigrationStageKey(domainIdentity, sourceIdentity string) objectstore.Key {
+	validateDomainKeyPart(domainIdentity)
+	validateDomainKeyPart(sourceIdentity)
+	return fixedKey("migrations/schema-007-to-008/staged/" + digestPart(domainIdentity) + "/" + digestPart(sourceIdentity) + ".json")
+}
+
+func Schema008MigrationStagePrefix() string {
+	return root + "migrations/schema-007-to-008/staged/"
+}
+
+func Schema008MigrationStageDomainPrefix(domainIdentity string) string {
+	validateDomainKeyPart(domainIdentity)
+	return Schema008MigrationStagePrefix() + digestPart(domainIdentity) + "/"
+}
+
+func Schema008MigrationSourceMarkerKey(sourceIdentity string) objectstore.Key {
+	validateDomainKeyPart(sourceIdentity)
+	return fixedKey("migrations/schema-007-to-008/sources/" + digestPart(sourceIdentity) + ".json")
+}
+
+func Schema008MigrationSourceMarkerPrefix() string {
+	return root + "migrations/schema-007-to-008/sources/"
+}
+
+func Schema008MigrationSubtreeKey(sourceIdentity string) objectstore.Key {
+	validateDomainKeyPart(sourceIdentity)
+	return fixedKey("migrations/schema-007-to-008/subtrees/" + digestPart(sourceIdentity) + ".json")
+}
+
+func Schema008MigrationSubtreePrefix() string {
+	return root + "migrations/schema-007-to-008/subtrees/"
+}
 
 func ProjectionHeadKey(ownerID string, kind ProjectionKind) objectstore.Key {
 	validateDomainKeyPart(ownerID)
 	return fixedKey("projections/" + digestPart(ownerID) + "/" + projectionKeyKind(kind) + "/head.json")
+}
+
+func ScopedProjectionHeadKey(ownerID string, kind ProjectionKind, projectionID string) objectstore.Key {
+	validateDomainKeyPart(ownerID)
+	validateDomainKeyPart(projectionID)
+	return fixedKey("projections/" + digestPart(ownerID) + "/" + projectionKeyKind(kind) + "/heads/" + digestPart(projectionID) + ".json")
 }
 
 func ProjectionPageKey(ownerID string, kind ProjectionKind, pageID string) objectstore.Key {

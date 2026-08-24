@@ -94,7 +94,7 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 					t.Fatalf("resume after %s interruption %d: %v", target, failAt, err)
 				}
 				gate, err := engine.GateStatus(context.Background())
-				if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != family.wantEpoch {
+				if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != family.wantEpoch+1 {
 					t.Fatalf("resume after %s interruption %d gate = %+v, %v", target, failAt, gate, err)
 				}
 			}

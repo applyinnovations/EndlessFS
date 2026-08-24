@@ -63,6 +63,7 @@ nix run .#test
 nix run .#test-unit
 nix run .#test-integration
 nix run .#test-contract
+nix run .#test-provider-budget
 nix run .#test-migration
 nix run .#test-preview
 nix run .#test-replica
@@ -82,6 +83,13 @@ nix run .#provider-verify -- check CONFIG
 nix build .#container-images
 nix build .#release-images
 ```
+
+Before pushing a commit, run the focused Nix test for the changed subsystem and
+then `nix flake check` locally. A storage-epoch change additionally requires
+`nix run .#test-migration`; provider-call or storage-operation work additionally
+requires `nix run .#test-provider-budget`. Do not push while any applicable
+local check is failing. CI confirms these results; it must not be the first
+place the required checks run.
 
 Application, server, test-driver, helper, and generator code must be Go. Browser code is embedded semantic HTML, application-owned CSS, and minimal vanilla JavaScript. Do not introduce Node.js or a frontend/CSS framework. Do not add Python, Ruby, Java, .NET, PHP, Rust, SQL, Redis, queues, Docker Compose, or a required container runtime.
 

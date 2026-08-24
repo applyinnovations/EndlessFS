@@ -137,6 +137,7 @@ func TestAdmittedOperationHeaderResumesWithoutProcessLocalPreparationState(t *te
 	backend := objectmemory.New()
 	clock := domain.NewFixedClock(time.Date(2047, 6, 7, 8, 9, 10, 0, time.UTC))
 	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("durable-header-entropy", 1<<16)))
+	engine.forceResumableOperationPreparation = true
 	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
 	scope, _ := domain.NewScope(user, domain.AreaLive)
 	if _, err := engine.Files().CreateDirectory(ctx, scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/source")}); err != nil {
@@ -185,11 +186,40 @@ func TestAdmittedOperationHeaderResumesWithoutProcessLocalPreparationState(t *te
 	}
 }
 
+func TestDirectOperationFallsBackToResumablePreparationWhenInlinePlanIsTooLarge(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2047, 6, 7, 8, 9, 10, 0, time.UTC))
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(string(namespaceCostRandom(0x73, 1<<20))))
+	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
+	scope, _ := domain.NewScope(user, domain.AreaLive)
+
+	path := ""
+	for index := range 18 {
+		path += fmt.Sprintf("/d%02d", index)
+		if _, err := engine.Files().CreateDirectory(ctx, scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(path)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := engine.Files().Delete(ctx, scope, domain.DeleteRequest{Path: domain.MustParseUserPath(path), IdempotencyKey: "deep-delete"})
+	if err != nil || result.State != domain.OperationSucceeded {
+		t.Fatalf("Delete() = %+v, %v", result, err)
+	}
+	operation, err := engine.Files().readFileOperation(ctx, user, string(result.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation.SchemaVersion != 2 || operation.StepPageCount == 0 || operation.StepSetID == "" {
+		t.Fatalf("oversized operation = schema %d, pages %d, set %q; want resumable schema-2 pages", operation.SchemaVersion, operation.StepPageCount, operation.StepSetID)
+	}
+}
+
 func TestGateDrainCancelsPredecessorPreparingOperationWithoutPublishingVisibility(t *testing.T) {
 	ctx := context.Background()
 	backend := objectmemory.New()
 	clock := domain.NewFixedClock(time.Date(2047, 6, 7, 8, 9, 11, 0, time.UTC))
 	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("predecessor-preparation", 1<<16)))
+	engine.forceResumableOperationPreparation = true
 	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
 	scope, _ := domain.NewScope(user, domain.AreaLive)
 	if _, err := engine.Files().CreateDirectory(ctx, scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/source")}); err != nil {

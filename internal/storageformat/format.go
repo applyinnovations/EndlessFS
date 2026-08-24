@@ -33,6 +33,7 @@ const (
 	FeatureDirectoryIndexes     = "persistent-directory-indexes-v1"
 	FeatureNamespaceSnapshots   = "persistent-namespace-snapshots-v1"
 	FeatureResumableOperations  = "resumable-operation-preparation-v1"
+	FeatureUserDirectoryCatalog = "user-addressable-duplicate-directories-v1"
 )
 
 type Envelope struct {
@@ -513,6 +514,7 @@ type FileOperation struct {
 	IntentFingerprint string                    `json:"intentFingerprint,omitempty"`
 	Roots             []FileOperationRoot       `json:"roots"`
 	Prerequisites     []MutationObject          `json:"prerequisites,omitempty"`
+	PrerequisiteRefs  []MutationObjectReference `json:"prerequisiteRefs,omitempty"`
 	Copies            []MutationCopy            `json:"copies,omitempty"`
 	StepPageCount     uint64                    `json:"stepPageCount,omitempty"`
 	StepSetID         string                    `json:"stepSetID,omitempty"`

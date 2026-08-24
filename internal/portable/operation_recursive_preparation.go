@@ -44,7 +44,7 @@ func joinRelativeCatalogPath(base domain.UserPath, item relativeCatalogEntry) (d
 	return path, nil
 }
 
-func (s *FileStore) addPreparedCatalogOccurrence(ctx context.Context, collector *operationPreparationRunCollector, userID domain.UserID, scope domain.Scope, base domain.UserPath, item relativeCatalogEntry, remove bool) error {
+func (s *FileStore) addPreparedCatalogOccurrence(ctx context.Context, collector operationPreparationItemCollector, userID domain.UserID, scope domain.Scope, base domain.UserPath, item relativeCatalogEntry, remove bool) error {
 	path, err := joinRelativeCatalogPath(base, item)
 	if err != nil {
 		return err
@@ -506,7 +506,7 @@ func (s *FileStore) finishRecursiveFileOperationPreparation(
 	return s.sealBuiltFileOperationPreparation(ctx, operationKey, operation.Fence, operation.ReplicaAttemptID, runCount)
 }
 
-func (s *FileStore) addPreparedDirectoryCatalogChange(ctx context.Context, collector *operationPreparationRunCollector, userID domain.UserID, update directoryUpdate, prepared preparedDirectory) error {
+func (s *FileStore) addPreparedDirectoryCatalogChange(ctx context.Context, collector operationPreparationItemCollector, userID domain.UserID, update directoryUpdate, prepared preparedDirectory) error {
 	change, present, err := preparedDirectoryCatalogChange(update, prepared)
 	if err != nil || !present {
 		return err
@@ -571,6 +571,13 @@ func (s *FileStore) filterPreparedSimilarityChange(ctx context.Context, userID d
 
 func preparedDirectoryCatalogChange(update directoryUpdate, prepared preparedDirectory) (catalogChange, bool, error) {
 	if !update.path.Valid() {
+		return catalogChange{}, false, nil
+	}
+	// Area roots are navigation containers, not user-addressable duplicate
+	// candidates. Publishing similarity postings for them makes every ordinary
+	// namespace mutation rewrite the global similarity catalog without adding a
+	// folder the user can reconcile.
+	if update.path.IsRoot() {
 		return catalogChange{}, false, nil
 	}
 	change := catalogChange{}

@@ -947,6 +947,25 @@ func TestFileOperationValidationAndRecoveryMatrix(t *testing.T) {
 				}
 			})
 		}
+		for name, references := range map[string][]storageformat.MutationObjectReference{
+			"inline-reference-missing-digest": {{Key: "endlessfs/v1/prerequisite"}},
+			"inline-reference-staging":        {{Key: "endlessfs/v1/prerequisite", BodyDigest: "digest", StagingKey: "endlessfs/v1/staging"}},
+			"inline-reference-order": {
+				{Key: "endlessfs/v1/prerequisite-b", BodyDigest: "digest-b"},
+				{Key: "endlessfs/v1/prerequisite-a", BodyDigest: "digest-a"},
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				memory, _, engine := newEngine(t)
+				key, _, operation, _ := validOperation(t, storageformat.FileOperationRunning)
+				operation.SchemaVersion = 3
+				operation.PrerequisiteRefs = references
+				put(t, memory, key, encodeInternalEnvelope(t, fileOperationSchema, key, 1, operation))
+				if _, _, _, err := engine.Files().readFileOperationObject(ctx, key); !errors.Is(err, domain.ErrInvalid) {
+					t.Fatalf("readFileOperationObject() error = %v", err)
+				}
+			})
+		}
 	})
 
 	t.Run("idempotency-corruption", func(t *testing.T) {

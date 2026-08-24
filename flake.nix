@@ -649,7 +649,7 @@
               exit 2
             fi
             export ENDLESSFS_MIGRATION_FIXTURE_PRODUCER_COMMIT="$1"
-            exec go test ./cmd/endlessfs -run '^TestGenerateSchema006MigrationFixtures$' -count=1
+            exec go test ./cmd/endlessfs -run '^TestGenerateSchema007MigrationFixtures$' -count=1
           '';
 
           fmt =
@@ -701,6 +701,11 @@
 
           test-contract = goTask "endlessfs-test-contract" ''
             go test ./... -run '^TestContract'
+          '';
+
+          test-provider-budget = goTask "endlessfs-test-provider-budget" ''
+            go test ./internal/providerbudget ./internal/objectstore/gcs -count=1
+            go test ./internal/portable ./internal/drive ./internal/preview/... -run 'ProviderBudget' -count=1
           '';
           test-migration = mkTask "endlessfs-test-migration" (goTools ++ [ pkgs.gawk ]) ''
             export CGO_ENABLED=0
@@ -1041,6 +1046,10 @@
               -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
             gawk -v only_group=migration -f tools/coverage.awk "$profile"
           '' [ pkgs.gawk ];
+          providerEconomicsCheck = goCheck "provider-economics" ''
+            go test ./internal/providerbudget ./internal/objectstore/gcs -count=1
+            go test ./internal/portable ./internal/drive ./internal/preview/... -run 'ProviderBudget' -count=1
+          '' [ ];
           e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
           coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
           publishContainerPolicy =
@@ -1159,6 +1168,7 @@
           replica = testSuite;
           portability = testSuite;
           provider-verify = testSuite;
+          provider-economics = providerEconomicsCheck;
           preview = testSuite;
           theme = testSuite;
           race = raceCheck;

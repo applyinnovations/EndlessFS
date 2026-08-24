@@ -30,6 +30,9 @@ func TestDuplicateSimilarityPostingsDoNotRewriteWhenContentSetIsUnchanged(t *tes
 	}
 	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/copies/a.bin"), []byte("same bytes"))
 	before := duplicateSimilarityObjects(backend.Export())
+	if len(before) != 16 {
+		t.Fatalf("user-addressable directory similarity posting count = %d; want 16 and no area-root postings", len(before))
+	}
 	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/copies/b.bin"), []byte("same bytes"))
 	after := duplicateSimilarityObjects(backend.Export())
 	if len(before) == 0 || len(after) != len(before) {

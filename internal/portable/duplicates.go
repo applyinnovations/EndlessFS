@@ -593,6 +593,10 @@ func (s *FileStore) visibleDuplicateOccurrence(ctx context.Context, userID domai
 }
 
 func (s *FileStore) visibleDuplicateSimilarityPosting(ctx context.Context, userID domain.UserID, object objectstore.Object) (*storageformat.DuplicateSimilarityPosting, error) {
+	return s.visibleDuplicateSimilarityPostingForSchema(ctx, userID, object, false)
+}
+
+func (s *FileStore) visibleDuplicateSimilarityPostingForSchema(ctx context.Context, userID domain.UserID, object objectstore.Object, includeAreaRoots bool) (*storageformat.DuplicateSimilarityPosting, error) {
 	var envelope storageformat.Envelope
 	var root storageformat.DuplicateSimilarityPostingRoot
 	if err := storageformat.DecodeEnvelope(object.Body, object.Key, duplicateSimilaritySchema, &envelope, &root); err != nil {
@@ -619,6 +623,13 @@ func (s *FileStore) visibleDuplicateSimilarityPosting(ctx context.Context, userI
 	if current != nil {
 		if validateDuplicateSimilarityPosting(*current) != nil || duplicateSimilarityPostingKey(userID.String(), *current) != object.Key {
 			return nil, domain.NewError(domain.ErrorInvalid, "invalid duplicate similarity posting")
+		}
+		// Schema 006 recorded live/trash area roots even though those navigation
+		// containers cannot be selected for reconciliation. Schema 007 retains
+		// those immutable historical objects for portable-copy compatibility but
+		// treats them as absent from the user-addressable catalog.
+		if current.Path == "/" && !includeAreaRoots {
+			return nil, nil
 		}
 	}
 	return current, nil
@@ -1916,7 +1927,7 @@ func (e *Engine) ensureMigratedSimilarityPosting(ctx context.Context, userID dom
 		if err != nil {
 			return err
 		}
-		current, err := e.Files().visibleDuplicateSimilarityPosting(ctx, userID, object)
+		current, err := e.Files().visibleDuplicateSimilarityPostingForSchema(ctx, userID, object, true)
 		if err != nil {
 			return err
 		}

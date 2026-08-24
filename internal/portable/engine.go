@@ -86,19 +86,20 @@ const (
 )
 
 type Engine struct {
-	backend             objectstore.Backend
-	fileBackend         objectstore.FileControlBackend
-	separateFileBackend bool
-	clock               domain.Clock
-	ids                 *domain.IDGenerator
-	writer              storageformat.WriterSet
-	leaseTTL            time.Duration
-	uploadTTL           time.Duration
-	downloadTTL         time.Duration
-	cursorAEAD          cipher.AEAD
-	cursorTTL           time.Duration
-	scheduler           Scheduler
-	migrationObserver   func(MigrationProgress)
+	backend                            objectstore.Backend
+	fileBackend                        objectstore.FileControlBackend
+	separateFileBackend                bool
+	clock                              domain.Clock
+	ids                                *domain.IDGenerator
+	writer                             storageformat.WriterSet
+	leaseTTL                           time.Duration
+	uploadTTL                          time.Duration
+	downloadTTL                        time.Duration
+	cursorAEAD                         cipher.AEAD
+	cursorTTL                          time.Duration
+	scheduler                          Scheduler
+	migrationObserver                  func(MigrationProgress)
+	forceResumableOperationPreparation bool // tests exercise the large-plan recovery path deterministically
 
 	admissionSequence atomic.Uint64
 }

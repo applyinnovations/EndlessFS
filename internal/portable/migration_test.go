@@ -93,8 +93,8 @@ func TestStartupMigratesSchema001ThroughCurrent(t *testing.T) {
 		t.Fatalf("migrated legacy trash lookup = %+v, %v; want directory size/count 5/1", lookup, err)
 	}
 	gate, err := engine.GateStatus(context.Background())
-	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 6 {
-		t.Fatalf("migrated gate = %+v, %v; want open epoch 6 after five schema migrations", gate, err)
+	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 7 {
+		t.Fatalf("migrated gate = %+v, %v; want open epoch 7 after six schema migrations", gate, err)
 	}
 	assertRecursiveFeatureActivated(t, backend.Export())
 	assertLegacyWriterCannotDecodeMigratedGate(t, backend.Export())
@@ -213,7 +213,7 @@ func TestEightReplicasConcurrentlyMigrateSchema002(t *testing.T) {
 		t.Fatalf("migrated byte-only trash root = %+v, %v; want 2 bytes/1 file", trashRoot, err)
 	}
 	gate, err := engines[1].GateStatus(context.Background())
-	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 5 {
+	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 6 {
 		t.Fatalf("migrated byte-only gate = %+v, %v", gate, err)
 	}
 	assertRecursiveFeatureActivated(t, predecessor.Export())
@@ -253,7 +253,7 @@ func TestEightReplicasConcurrentlyMigrateSchema001AggregateTree(t *testing.T) {
 		t.Fatalf("concurrently migrated aggregate = %d; want 12", got)
 	}
 	gate, err := engines[0].GateStatus(context.Background())
-	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 6 {
+	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != 7 {
 		t.Fatalf("concurrently migrated gate = %+v, %v", gate, err)
 	}
 	assertRecursiveFeatureActivated(t, backend.Export())
@@ -429,7 +429,7 @@ func encodeSchema002Fixture(t *testing.T, objects map[string][]byte) map[string]
 	withoutCount := func(features []string) []string {
 		result := make([]string, 0, len(features))
 		for _, feature := range features {
-			if feature != storageformat.FeatureRecursiveFileCounts && feature != storageformat.FeatureProviderFingerprints && feature != storageformat.FeatureDuplicateCatalog && feature != storageformat.FeatureDirectoryDigests && feature != storageformat.FeatureMetadataCheckpoints && feature != storageformat.FeaturePagedOperations && feature != storageformat.FeatureDirectoryIndexes && feature != storageformat.FeatureStateIndexes && feature != storageformat.FeatureResumableOperations && feature != storageformat.FeatureNamespaceSnapshots {
+			if feature != storageformat.FeatureRecursiveFileCounts && feature != storageformat.FeatureProviderFingerprints && feature != storageformat.FeatureDuplicateCatalog && feature != storageformat.FeatureDirectoryDigests && feature != storageformat.FeatureMetadataCheckpoints && feature != storageformat.FeaturePagedOperations && feature != storageformat.FeatureDirectoryIndexes && feature != storageformat.FeatureStateIndexes && feature != storageformat.FeatureResumableOperations && feature != storageformat.FeatureNamespaceSnapshots && feature != storageformat.FeatureUserDirectoryCatalog {
 				result = append(result, feature)
 			}
 		}
@@ -832,7 +832,7 @@ func decodeStoredGate(t *testing.T, objects map[string][]byte) storageformat.Wri
 func withoutRecursiveFeature(features []string) []string {
 	result := make([]string, 0, len(features))
 	for _, feature := range features {
-		if feature != storageformat.FeatureRecursiveBytes && feature != storageformat.FeatureRecursiveFileCounts && feature != storageformat.FeatureProviderFingerprints && feature != storageformat.FeatureDuplicateCatalog && feature != storageformat.FeatureDirectoryDigests && feature != storageformat.FeatureMetadataCheckpoints && feature != storageformat.FeaturePagedOperations && feature != storageformat.FeatureDirectoryIndexes && feature != storageformat.FeatureStateIndexes && feature != storageformat.FeatureResumableOperations && feature != storageformat.FeatureNamespaceSnapshots {
+		if feature != storageformat.FeatureRecursiveBytes && feature != storageformat.FeatureRecursiveFileCounts && feature != storageformat.FeatureProviderFingerprints && feature != storageformat.FeatureDuplicateCatalog && feature != storageformat.FeatureDirectoryDigests && feature != storageformat.FeatureMetadataCheckpoints && feature != storageformat.FeaturePagedOperations && feature != storageformat.FeatureDirectoryIndexes && feature != storageformat.FeatureStateIndexes && feature != storageformat.FeatureResumableOperations && feature != storageformat.FeatureNamespaceSnapshots && feature != storageformat.FeatureUserDirectoryCatalog {
 			result = append(result, feature)
 		}
 	}

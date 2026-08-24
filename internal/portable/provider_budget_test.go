@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
@@ -17,7 +18,7 @@ import (
 func TestProviderBudgetStateStoreContract(t *testing.T) {
 	ctx := context.Background()
 	ledger := providerbudget.NewLedger()
-	backend := providerbudget.InstrumentBackend(providerbudget.RoleState, objectmemory.New(), ledger)
+	backend := budgettest.Wrap(providerbudget.RoleState, objectmemory.New(), ledger)
 	clock := domain.NewFixedClock(time.Date(2050, 1, 2, 3, 4, 5, 0, time.UTC))
 	engine, err := portable.Open(ctx, portable.Options{
 		Backend: backend, FileBackend: objectmemory.New(), Clock: clock,

@@ -55,20 +55,18 @@ func ParseRatchetLedger(body []byte) (RatchetLedger, error) {
 			}
 			current[budget.Name] = budget
 		}
-		if prior != nil {
-			for name, previous := range prior {
-				next, exists := current[name]
-				if !exists {
-					return RatchetLedger{}, fmt.Errorf("provider budget ratchet removed pathway %q", name)
-				}
-				if !limitsTighten(previous.Maximum, next.Maximum) {
-					return RatchetLedger{}, fmt.Errorf("provider budget ratchet loosened %q", name)
-				}
-				for role, previousRole := range previous.Roles {
-					nextRole, exists := next.Roles[role]
-					if !exists || !limitsTighten(previousRole, nextRole) {
-						return RatchetLedger{}, fmt.Errorf("provider budget ratchet loosened %q role %q", name, role)
-					}
+		for name, previous := range prior {
+			next, exists := current[name]
+			if !exists {
+				return RatchetLedger{}, fmt.Errorf("provider budget ratchet removed pathway %q", name)
+			}
+			if !limitsTighten(previous.Maximum, next.Maximum) {
+				return RatchetLedger{}, fmt.Errorf("provider budget ratchet loosened %q", name)
+			}
+			for role, previousRole := range previous.Roles {
+				nextRole, exists := next.Roles[role]
+				if !exists || !limitsTighten(previousRole, nextRole) {
+					return RatchetLedger{}, fmt.Errorf("provider budget ratchet loosened %q role %q", name, role)
 				}
 			}
 		}

@@ -15,6 +15,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/model"
+	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
@@ -53,14 +54,14 @@ func TestProviderBudgetTrashAndRestore(t *testing.T) {
 	ctx := context.Background()
 	clock := domain.NewFixedClock(time.Date(2049, 1, 2, 3, 4, 5, 0, time.UTC))
 	stateLedger, fileLedger := providerbudget.NewLedger(), providerbudget.NewLedger()
-	stateBackend := providerbudget.InstrumentBackend(providerbudget.RoleState, objectmemory.New(), stateLedger)
+	stateBackend := budgettest.Wrap(providerbudget.RoleState, objectmemory.New(), stateLedger)
 	fileBase := objectmemory.New()
 	dataServer := httptest.NewServer(fileBase)
 	t.Cleanup(dataServer.Close)
 	if err := fileBase.ConfigureDataPlane(dataServer.URL, clock, domain.NewIDGenerator(&budgetHashReader{})); err != nil {
 		t.Fatal(err)
 	}
-	fileBackend := providerbudget.InstrumentBackend(providerbudget.RoleFile, fileBase, fileLedger)
+	fileBackend := budgettest.Wrap(providerbudget.RoleFile, fileBase, fileLedger)
 	ids := domain.NewIDGenerator(&budgetHashReader{})
 	engine, err := portable.Open(ctx, portable.Options{
 		Backend: stateBackend, FileBackend: fileBackend, Clock: clock, IDs: ids,

@@ -704,7 +704,7 @@
           '';
 
           test-provider-budget = goTask "endlessfs-test-provider-budget" ''
-            go test ./internal/providerbudget ./internal/objectstore/gcs -count=1
+            go test ./internal/providerbudget ./internal/objectstore/budgettest ./internal/objectstore/gcs -count=1
             go test ./internal/portable ./internal/drive ./internal/preview/... -run 'ProviderBudget' -count=1
           '';
           test-migration = mkTask "endlessfs-test-migration" (goTools ++ [ pkgs.gawk ]) ''
@@ -797,7 +797,7 @@
             export CGO_ENABLED=1
             export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
             export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
-            go test -race ./...
+            go test -race -timeout=30m ./...
           '';
 
           test-fuzz = goTask "endlessfs-test-fuzz" ''
@@ -1047,7 +1047,7 @@
             gawk -v only_group=migration -f tools/coverage.awk "$profile"
           '' [ pkgs.gawk ];
           providerEconomicsCheck = goCheck "provider-economics" ''
-            go test ./internal/providerbudget ./internal/objectstore/gcs -count=1
+            go test ./internal/providerbudget ./internal/objectstore/budgettest ./internal/objectstore/gcs -count=1
             go test ./internal/portable ./internal/drive ./internal/preview/... -run 'ProviderBudget' -count=1
           '' [ ];
           e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
@@ -1121,7 +1121,7 @@
                 ${pipelinePolicyCommand}
                 touch "$out"
               '';
-          raceCheck = goCheck "race" "CGO_ENABLED=1 go test -race ./..." [ pkgs.stdenv.cc ];
+          raceCheck = goCheck "race" "CGO_ENABLED=1 go test -race -timeout=30m ./..." [ pkgs.stdenv.cc ];
           fuzzCheck = goCheck "fuzz" ''
             fuzztime=1000x
             ${fuzzSmokeCommand}

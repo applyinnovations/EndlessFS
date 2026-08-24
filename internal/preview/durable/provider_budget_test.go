@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/preview/durable"
@@ -26,7 +27,7 @@ func TestProviderBudgetDurablePreviewStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	ledger := providerbudget.NewLedger()
-	backend := providerbudget.InstrumentBackend(providerbudget.RolePreviewArtifact, base, ledger)
+	backend := budgettest.Wrap(providerbudget.RolePreviewArtifact, base, ledger)
 	store, err := durable.New(durable.Options{
 		Backend: backend, Transfers: backend, Clock: clock, IDs: ids,
 		Key: secret.Value(testBearer(0x41)), CapabilityTTL: time.Minute,

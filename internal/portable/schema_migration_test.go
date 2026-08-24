@@ -157,22 +157,22 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 	{
 		schemaID: "endlessfs-portable-v1/schema-007",
 		profile:  "portable-minimal",
-		file:     "schema-007-portable-minimal.json", digest: "dfbff227935f971d71fa76618010f02cf798393f19ebec44a99c991ac16d1884",
-		producer: "schema-007", commit: "8d9715f000000000000000000000000000000000",
+		file:     "schema-007-portable-minimal.json", digest: "1a8227ad1293adb53192d2c1079e99e2197cdd12d6df3954395666fe81579731",
+		producer: "schema-007", commit: "43171275e93717b1261eeff3b98ecd11b08c9e3f",
 		wantEpoch: 1, wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-007",
 		profile:  "application-preview-disabled",
-		file:     "schema-007-application-disabled.json", digest: "51b453b43f56c0c4c8c66cc2a45343ba2c2f83b7fdc3c629bb09e9ed60dbe146",
-		producer: "schema-007", commit: "8d9715f000000000000000000000000000000000",
+		file:     "schema-007-application-disabled.json", digest: "10e9d3d9d6f4ddeb34839f1bac21005c6d64fbd36bbbb5371a945f27c722b302",
+		producer: "schema-007", commit: "43171275e93717b1261eeff3b98ecd11b08c9e3f",
 		wantEpoch: 1, wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-007",
 		profile:  "application-preview-gcs",
-		file:     "schema-007-application-gcs.json", digest: "a873c4adf1b2823661d7c5b8a89daee09e9f506c41c223567f6f278eb21c3ae9",
-		producer: "schema-007", commit: "8d9715f000000000000000000000000000000000",
+		file:     "schema-007-application-gcs.json", digest: "cb7ebd3c1058347e6ee13d243c9ff6632de9a87a7e1eb7e3c69aa412de25d7bd",
+		producer: "schema-007", commit: "43171275e93717b1261eeff3b98ecd11b08c9e3f",
 		wantEpoch: 1, wantSize: 18, wantFiles: 3,
 	},
 }

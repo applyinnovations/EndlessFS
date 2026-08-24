@@ -113,5 +113,5 @@ func totalsToLimits(totals Totals) Limits {
 }
 
 func roleTotalsToLimits(totals RoleTotals) Limits {
-	return Limits{Requests: totals.Requests, CostPicoUSD: totals.CostPicoUSD, P50Micros: totals.P50Micros, P95Micros: totals.P95Micros, P99Micros: totals.P99Micros}
+	return Limits(totals)
 }

@@ -13,12 +13,15 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/state"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
 func TestProviderBudgetStateStoreContract(t *testing.T) {
 	ctx := context.Background()
 	ledger := providerbudget.NewLedger()
-	backend := budgettest.Wrap(providerbudget.RoleState, objectmemory.New(), ledger)
+	backend := budgettest.WrapClassified(providerbudget.RoleState, objectmemory.New(), ledger, func(_ providerbudget.RequestKind, target string) string {
+		return storageformat.ClassifyEconomicsTarget(target)
+	})
 	clock := domain.NewFixedClock(time.Date(2050, 1, 2, 3, 4, 5, 0, time.UTC))
 	engine, err := portable.Open(ctx, portable.Options{
 		Backend: backend, FileBackend: objectmemory.New(), Clock: clock,

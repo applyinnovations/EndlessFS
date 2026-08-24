@@ -70,3 +70,34 @@ func TestInstrumentedBackendRecordsEveryPrimitiveByRole(t *testing.T) {
 		t.Fatal("Reset() retained events")
 	}
 }
+
+func TestInstrumentedBackendPropagatesEconomicsTrace(t *testing.T) {
+	ledger := providerbudget.NewLedger()
+	backend := Wrap(providerbudget.RoleState, objectmemory.New(), ledger)
+	ctx := providerbudget.WithTrace(context.Background(), providerbudget.Trace{Operation: "move", Subsystem: "namespace-commit", ParallelGroup: "publish"})
+	key := objectstore.MustKey("trace/object")
+	if _, err := backend.Put(ctx, key, []byte("body"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	events := ledger.Events()
+	if len(events) != 1 || events[0].Operation != "move" || events[0].Subsystem != "namespace-commit" || events[0].ParallelGroup != "publish" {
+		t.Fatalf("events = %+v", events)
+	}
+}
+
+func TestInstrumentedBackendClassifiesUnattributedTargets(t *testing.T) {
+	ledger := providerbudget.NewLedger()
+	backend := WrapClassified(providerbudget.RoleState, objectmemory.New(), ledger, func(_ providerbudget.RequestKind, target string) string {
+		if target == "trace/object" {
+			return "classified"
+		}
+		return "other"
+	})
+	if _, err := backend.Put(context.Background(), objectstore.MustKey("trace/object"), []byte("body"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	events := ledger.Events()
+	if len(events) != 1 || events[0].Subsystem != "classified" {
+		t.Fatalf("events = %+v", events)
+	}
+}

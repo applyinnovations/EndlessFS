@@ -4,6 +4,14 @@
 **Scope:** discover and prove the best replacement for the authoritative state
 and namespace architecture without weakening product or reliability guarantees
 
+**Implementation status (2026-08-24):** the comparative prototype, fault
+schedules, provider-economics instrumentation, scale curves, and current
+selection evidence are recorded in
+`storage-architecture-experiment-2026-08-24.md`. That evidence selects the
+paged-delta family for production hardening, but it does not yet authorize a
+schema epoch or production cutover: several provider/workload parameters remain
+non-dominated and must be resolved before their values can become normative.
+
 ## Purpose
 
 EndlessFS needs a new storage architecture. The current architecture converts a

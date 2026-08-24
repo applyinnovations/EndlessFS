@@ -22,6 +22,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
 type budgetAccountReader struct{}
@@ -54,7 +55,9 @@ func TestProviderBudgetTrashAndRestore(t *testing.T) {
 	ctx := context.Background()
 	clock := domain.NewFixedClock(time.Date(2049, 1, 2, 3, 4, 5, 0, time.UTC))
 	stateLedger, fileLedger := providerbudget.NewLedger(), providerbudget.NewLedger()
-	stateBackend := budgettest.Wrap(providerbudget.RoleState, objectmemory.New(), stateLedger)
+	stateBackend := budgettest.WrapClassified(providerbudget.RoleState, objectmemory.New(), stateLedger, func(_ providerbudget.RequestKind, target string) string {
+		return storageformat.ClassifyEconomicsTarget(target)
+	})
 	fileBase := objectmemory.New()
 	dataServer := httptest.NewServer(fileBase)
 	t.Cleanup(dataServer.Close)

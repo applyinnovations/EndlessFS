@@ -106,21 +106,26 @@ func (transport *instrumentedRoundTripper) RoundTrip(request *http.Request) (*ht
 	}
 	response, requestErr := transport.base.RoundTrip(request)
 	requestBytes := int64(0)
+	trace := TraceFromContext(request.Context())
+	event := Event{Role: transport.role, Kind: kind, Operation: trace.Operation, Subsystem: trace.Subsystem, ParallelGroup: trace.ParallelGroup}
 	if requestCounter != nil {
 		requestBytes = requestCounter.BytesRead()
 	} else if request.ContentLength > 0 {
 		requestBytes = request.ContentLength
 	}
 	if requestErr != nil {
-		transport.ledger.Record(Event{Role: transport.role, Kind: kind, RequestBytes: requestBytes, Failed: true})
+		event.RequestBytes, event.Failed = requestBytes, true
+		transport.ledger.Record(event)
 		return nil, requestErr
 	}
 	if response.Body == nil {
-		transport.ledger.Record(Event{Role: transport.role, Kind: kind, RequestBytes: requestBytes, StatusCode: response.StatusCode, Failed: response.StatusCode >= http.StatusBadRequest})
+		event.RequestBytes, event.StatusCode, event.Failed = requestBytes, response.StatusCode, response.StatusCode >= http.StatusBadRequest
+		transport.ledger.Record(event)
 		return response, nil
 	}
 	response.Body = &recordingReadCloser{ReadCloser: response.Body, record: func(responseBytes int64, streamErr error) {
-		transport.ledger.Record(Event{Role: transport.role, Kind: kind, RequestBytes: requestBytes, ResponseBytes: responseBytes, StatusCode: response.StatusCode, Failed: streamErr != nil || response.StatusCode >= http.StatusBadRequest})
+		event.RequestBytes, event.ResponseBytes, event.StatusCode, event.Failed = requestBytes, responseBytes, response.StatusCode, streamErr != nil || response.StatusCode >= http.StatusBadRequest
+		transport.ledger.Record(event)
 	}}
 	return response, nil
 }

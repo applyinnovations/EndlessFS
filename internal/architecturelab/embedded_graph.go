@@ -632,11 +632,11 @@ func validateRootEntry(entry graphEntry, id string) error {
 }
 
 func validateGraphEntry(entry graphEntry) error {
-	if entry.NodeID == "" || entry.Size < 0 || entry.FileCount < 0 {
+	if entry.NodeID == "" || entry.Size < 0 || entry.FileCount < 0 || entry.ChildCount < 0 {
 		return errors.New("invalid graph entry")
 	}
 	if entry.Kind == NodeFile {
-		if entry.FileCount != 1 || entry.BlobIdentity == "" || entry.DirectoryRef != "" {
+		if entry.FileCount != 1 || entry.ChildCount != 0 || entry.BlobIdentity == "" || entry.DirectoryRef != "" {
 			return errors.New("invalid graph file entry")
 		}
 		return nil

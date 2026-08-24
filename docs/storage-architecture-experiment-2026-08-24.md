@@ -5,6 +5,15 @@ not enabled by this document
 
 ## Result
 
+The comprehensive production-path inventory and before/after economics are in
+[`storage-architecture-comprehensive-economics-2026-08-24.md`](storage-architecture-comprehensive-economics-2026-08-24.md).
+That follow-up classifies all 57 provider workloads and all 61 provider-backed
+HTTP routes, and executes every current runtime family before and after across
+state, file/data-plane, preview, identity, session, administration, share,
+duplicate, batch, startup, recovery, checkpoint, compaction, and garbage
+pathways. Schema migration is deliberately reserved for the approved canonical
+format and real predecessor fixtures.
+
 The experiments reject the current per-record transaction architecture and
 select a composed family for production hardening:
 
@@ -393,8 +402,13 @@ The following are deliberately unresolved rather than guessed:
 - derived-view freshness policy;
 - garbage safety horizon;
 - online shadow versus offline production cutover; and
-- complete economics for state, share, preview, migration, checkpoint, repair,
-  and garbage paths under the selected family.
+- migration economics from every immutable predecessor profile after the
+  canonical page and range format has been approved.
+
+The comprehensive report resolves the production-path economics item without
+inventing a migration result. It deliberately leaves page/delta constants and
+the migration budget open because those depend on the approved canonical
+format and real predecessor fixture inventory.
 
 No release ledger entry or production writer should be added until those values
 are supported by the remaining sensitivity and migration evidence. Once the

@@ -56,6 +56,149 @@ type hybridEngine struct {
 	headByteLimit int
 }
 
+// Stat is the selected prototype's cold authoritative lookup. It resolves only
+// the head and page paths required by the virtual path; it never walks a
+// descendant subtree.
+func (engine *hybridEngine) Stat(ctx context.Context, area Area, pathValue string) (graphEntry, bool, error) {
+	path, err := domain.ParseUserPath(pathValue)
+	if err != nil || !area.valid() {
+		return graphEntry{}, false, domain.NewError(domain.ErrorInvalid, "invalid hybrid stat")
+	}
+	head, _, err := engine.loadHead(ctx, "stat")
+	if err != nil {
+		return graphEntry{}, false, err
+	}
+	entry := head.Live
+	if area == AreaTrash {
+		entry = head.Trash
+	}
+	entry = engine.currentDirectory(head, entry)
+	session := newTreeSession(engine.tree)
+	for _, segment := range path.Segments() {
+		if entry.Kind != NodeDirectory {
+			return graphEntry{}, false, nil
+		}
+		next, found, lookupErr := engine.lookupEntry(ctx, "stat", session, head, entry, segment)
+		if lookupErr != nil || !found {
+			return graphEntry{}, found, lookupErr
+		}
+		entry = next
+	}
+	return entry, true, nil
+}
+
+// List returns the first bounded directory page. The released design needs an
+// authenticated cursor, but this prototype already proves that one page reads
+// only the B-tree path/pages needed for that page rather than the whole tree.
+func (engine *hybridEngine) List(ctx context.Context, area Area, pathValue string, limit int) ([]graphEntry, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid hybrid list limit")
+	}
+	path, err := domain.ParseUserPath(pathValue)
+	if err != nil || !area.valid() {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid hybrid list")
+	}
+	head, _, err := engine.loadHead(ctx, "list")
+	if err != nil {
+		return nil, err
+	}
+	session := newTreeSession(engine.tree)
+	trail, err := engine.resolveTrail(ctx, "list", session, head, area, path)
+	if err != nil {
+		return nil, err
+	}
+	directory := trail[len(trail)-1].directory
+	values, err := session.first(ctx, "list", "hybrid-base-index", directory.DirectoryRef, limit)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]graphEntry, 0, len(values))
+	for _, value := range values {
+		var entry graphEntry
+		if json.Unmarshal(value.Value, &entry) != nil || validateGraphEntry(entry) != nil {
+			return nil, domain.NewError(domain.ErrorInvalid, "invalid hybrid list entry")
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+// ListDirectories is the storage-map/read-proof shape: one authoritative head
+// and one request-local page cache serve several bounded directory listings.
+func (engine *hybridEngine) ListDirectories(ctx context.Context, area Area, pathValues []string, limit int) (map[string][]graphEntry, error) {
+	if !area.valid() || len(pathValues) < 1 || len(pathValues) > 9 || limit < 1 || limit > 1000 {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid hybrid directory batch")
+	}
+	head, _, err := engine.loadHead(ctx, "list-directories")
+	if err != nil {
+		return nil, err
+	}
+	session := newTreeSession(engine.tree)
+	result := make(map[string][]graphEntry, len(pathValues))
+	for _, pathValue := range pathValues {
+		path, err := domain.ParseUserPath(pathValue)
+		if err != nil {
+			return nil, domain.NewError(domain.ErrorInvalid, "invalid hybrid directory batch path")
+		}
+		trail, err := engine.resolveTrail(ctx, "list-directories", session, head, area, path)
+		if err != nil {
+			return nil, err
+		}
+		directory := trail[len(trail)-1].directory
+		values, err := session.first(ctx, "list-directories", "hybrid-base-index", directory.DirectoryRef, limit)
+		if err != nil {
+			return nil, err
+		}
+		entries := make([]graphEntry, 0, len(values))
+		for _, value := range values {
+			var entry graphEntry
+			if json.Unmarshal(value.Value, &entry) != nil || validateGraphEntry(entry) != nil {
+				return nil, domain.NewError(domain.ErrorInvalid, "invalid hybrid list entry")
+			}
+			entries = append(entries, entry)
+		}
+		result[pathValue] = entries
+	}
+	return result, nil
+}
+
+// LookupChildren shares a tree session across all requested names, so internal
+// and leaf pages are fetched once even when many immediate children are
+// resolved from the same directory snapshot.
+func (engine *hybridEngine) LookupChildren(ctx context.Context, area Area, pathValue string, names []string) ([]graphEntry, error) {
+	path, err := domain.ParseUserPath(pathValue)
+	if err != nil || !area.valid() || len(names) < 1 || len(names) > 1000 {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid hybrid child lookup")
+	}
+	head, _, err := engine.loadHead(ctx, "lookup-children")
+	if err != nil {
+		return nil, err
+	}
+	session := newTreeSession(engine.tree)
+	trail, err := engine.resolveTrail(ctx, "lookup-children", session, head, area, path)
+	if err != nil {
+		return nil, err
+	}
+	directory := trail[len(trail)-1].directory
+	result := make([]graphEntry, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if name == "" || seen[name] {
+			return nil, domain.NewError(domain.ErrorInvalid, "invalid hybrid child name")
+		}
+		seen[name] = true
+		entry, found, err := engine.lookupEntry(ctx, "lookup-children", session, head, directory, name)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, domain.NewError(domain.ErrorNotFound, "hybrid child does not exist")
+		}
+		result = append(result, entry)
+	}
+	return result, nil
+}
+
 func (engine *hybridEngine) maximumDeltas() int {
 	if engine.deltaLimit > 0 {
 		return engine.deltaLimit
@@ -134,9 +277,12 @@ func (engine *hybridEngine) lookupEntry(ctx context.Context, operation MutationK
 				if entry == nil {
 					return graphEntry{}, false, nil
 				}
-				return *entry, true, nil
+				return cloneScopedEntry(directory, *entry), true, nil
 			}
 		}
+	}
+	if directory.ChildCount == 0 {
+		return graphEntry{}, false, nil
 	}
 	body, found, err := session.lookup(ctx, operation, "hybrid-base-index", directory.DirectoryRef, name)
 	if err != nil || !found {
@@ -146,7 +292,16 @@ func (engine *hybridEngine) lookupEntry(ctx context.Context, operation MutationK
 	if json.Unmarshal(body, &entry) != nil || validateGraphEntry(entry) != nil {
 		return graphEntry{}, false, domain.NewError(domain.ErrorInvalid, "invalid hybrid base entry")
 	}
-	return entry, true, nil
+	return cloneScopedEntry(directory, entry), true, nil
+}
+
+func cloneScopedEntry(parent, entry graphEntry) graphEntry {
+	if parent.CloneSalt == "" || entry.CloneSalt == parent.CloneSalt {
+		return entry
+	}
+	entry.NodeID = "clone-" + digest([]byte(parent.CloneSalt + "\x00" + entry.NodeID))[:32]
+	entry.CloneSalt = parent.CloneSalt
+	return entry
 }
 
 func (engine *hybridEngine) resolveTrail(ctx context.Context, operation MutationKind, session *treeSession, head hybridHead, area Area, path domain.UserPath) ([]hybridFrame, error) {
@@ -248,7 +403,8 @@ func (engine *hybridEngine) Mutate(ctx context.Context, mutation Mutation) (Outc
 			change.Entries[path.Name()] = &copy
 			change.Directory.Size += entry.Size
 			change.Directory.FileCount += entry.FileCount
-		case MutationMove:
+			change.Directory.ChildCount++
+		case MutationCopy, MutationMove:
 			source, parseErr := domain.ParseUserPath(mutation.Source)
 			if parseErr != nil || source.IsRoot() || !mutation.FromArea.valid() || !mutation.ToArea.valid() {
 				return Outcome{}, domain.NewError(domain.ErrorInvalid, "invalid hybrid move mutation")
@@ -280,25 +436,42 @@ func (engine *hybridEngine) Mutate(ctx context.Context, mutation Mutation) (Outc
 			} else if found {
 				return Outcome{}, domain.NewError(domain.ErrorConflict, "destination already exists")
 			}
-			sourceChange := changeFor(sourceFrame)
-			sourceChange.Entries[source.Name()] = nil
 			copy := entry
-			if sourceFrame.directory.NodeID == destinationFrame.directory.NodeID {
-				sourceChange.Entries[destination.Name()] = &copy
-			} else {
+			if mutation.Kind == MutationCopy {
+				if mutation.NodeID == "" {
+					return Outcome{}, domain.NewError(domain.ErrorInvalid, "hybrid copy identity is required")
+				}
+				copy.NodeID = mutation.NodeID
+				if copy.Kind == NodeDirectory {
+					copy.CloneSalt = fingerprint
+				}
 				destinationChange := changeFor(destinationFrame)
 				destinationChange.Entries[destination.Name()] = &copy
-				sourceChange.Directory.Size -= entry.Size
-				sourceChange.Directory.FileCount -= entry.FileCount
 				destinationChange.Directory.Size += entry.Size
 				destinationChange.Directory.FileCount += entry.FileCount
+				destinationChange.Directory.ChildCount++
+			} else {
+				sourceChange := changeFor(sourceFrame)
+				sourceChange.Entries[source.Name()] = nil
+				if sourceFrame.directory.NodeID == destinationFrame.directory.NodeID {
+					sourceChange.Entries[destination.Name()] = &copy
+				} else {
+					destinationChange := changeFor(destinationFrame)
+					destinationChange.Entries[destination.Name()] = &copy
+					sourceChange.Directory.Size -= entry.Size
+					sourceChange.Directory.FileCount -= entry.FileCount
+					sourceChange.Directory.ChildCount--
+					destinationChange.Directory.Size += entry.Size
+					destinationChange.Directory.FileCount += entry.FileCount
+					destinationChange.Directory.ChildCount++
+				}
 			}
 			// A directory change carries the parent relationship that compaction
 			// uses to publish its rewritten page reference. Rebind that
 			// relationship even when this move does not otherwise mutate the
 			// directory itself; retaining its former parent can make compaction
 			// publish the subtree below the path it just left.
-			if entry.Kind == NodeDirectory {
+			if mutation.Kind == MutationMove && entry.Kind == NodeDirectory {
 				moved := engine.currentDirectory(head, entry)
 				movedFrame := hybridFrame{
 					directory:  moved,
@@ -332,6 +505,7 @@ func (engine *hybridEngine) Mutate(ctx context.Context, mutation Mutation) (Outc
 			change.Entries[path.Name()] = nil
 			change.Directory.Size -= entry.Size
 			change.Directory.FileCount -= entry.FileCount
+			change.Directory.ChildCount--
 		default:
 			return Outcome{}, domain.NewError(domain.ErrorInvalid, "unsupported hybrid mutation")
 		}

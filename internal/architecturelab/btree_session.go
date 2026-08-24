@@ -70,6 +70,43 @@ func (session *treeSession) lookup(ctx context.Context, operation MutationKind, 
 	}
 }
 
+func (session *treeSession) first(ctx context.Context, operation MutationKind, subsystem, ref string, limit int) ([]treeValue, error) {
+	if limit < 1 {
+		return nil, domain.NewError(domain.ErrorInvalid, "tree page limit is required")
+	}
+	result := make([]treeValue, 0, limit)
+	var visit func(string) error
+	visit = func(pageRef string) error {
+		page, err := session.readPage(ctx, operation, subsystem, pageRef)
+		if err != nil {
+			return err
+		}
+		if page.Level == 0 {
+			remaining := limit - len(result)
+			if remaining > len(page.Values) {
+				remaining = len(page.Values)
+			}
+			for _, value := range page.Values[:remaining] {
+				result = append(result, treeValue{Key: value.Key, Value: append(json.RawMessage(nil), value.Value...)})
+			}
+			return nil
+		}
+		for _, child := range page.Children {
+			if len(result) == limit {
+				return nil
+			}
+			if err := visit(child.Ref); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := visit(ref); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 func (session *treeSession) apply(ctx context.Context, operation MutationKind, subsystem, ref string, edits []treeEdit) (string, error) {
 	if len(edits) == 0 {
 		return ref, nil

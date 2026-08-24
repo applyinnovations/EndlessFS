@@ -16,9 +16,11 @@ type graphEntry struct {
 	Kind           NodeKind `json:"kind"`
 	Size           int64    `json:"size"`
 	FileCount      int64    `json:"fileCount"`
+	ChildCount     int64    `json:"childCount,omitempty"`
 	BlobIdentity   string   `json:"blobIdentity,omitempty"`
 	ContentVersion string   `json:"contentVersion,omitempty"`
 	DirectoryRef   string   `json:"directoryRef,omitempty"`
+	CloneSalt      string   `json:"cloneSalt,omitempty"`
 }
 
 type graphDirectory struct {

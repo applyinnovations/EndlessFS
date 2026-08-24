@@ -241,11 +241,15 @@ func verifyTreeChild(expected treeChild, page treePage, level int) error {
 }
 
 func (tree immutableTree) readPage(ctx context.Context, operation MutationKind, subsystem, ref string) (treePage, error) {
+	return tree.readPageGrouped(ctx, operation, subsystem, "", ref)
+}
+
+func (tree immutableTree) readPageGrouped(ctx context.Context, operation MutationKind, subsystem, parallel, ref string) (treePage, error) {
 	key, err := objectstore.ParseKey(ref)
 	if err != nil {
 		return treePage{}, err
 	}
-	object, err := tree.backend.Get(trace(ctx, operation, subsystem, ""), key)
+	object, err := tree.backend.Get(trace(ctx, operation, subsystem, parallel), key)
 	if err != nil {
 		return treePage{}, err
 	}

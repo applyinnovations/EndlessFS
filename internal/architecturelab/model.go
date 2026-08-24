@@ -47,6 +47,7 @@ type MutationKind string
 const (
 	MutationCreateDirectory MutationKind = "create-directory"
 	MutationCreateFile      MutationKind = "complete-upload"
+	MutationCopy            MutationKind = "copy"
 	MutationMove            MutationKind = "move"
 	MutationDelete          MutationKind = "delete"
 )

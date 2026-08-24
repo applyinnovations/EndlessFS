@@ -649,7 +649,7 @@
               exit 2
             fi
             export ENDLESSFS_MIGRATION_FIXTURE_PRODUCER_COMMIT="$1"
-            exec go test ./cmd/endlessfs -run '^TestGenerateSchema007MigrationFixtures$' -count=1
+            exec go test ./cmd/endlessfs -run '^TestGenerateSchema008MigrationFixtures$' -count=1
           '';
 
           fmt =

@@ -35,6 +35,45 @@ func SuperblockKey() objectstore.Key { return fixedKey("superblock.json") }
 func WriterSetKey() objectstore.Key  { return fixedKey("control/writer-set.json") }
 func WriteGateKey() objectstore.Key  { return fixedKey("control/write-gate.json") }
 
+func DomainCatalogHeadKey() objectstore.Key { return fixedKey("domains/catalog/head.json") }
+
+func DomainCatalogPageKey(pageID string) objectstore.Key {
+	validateDomainKeyPart(pageID)
+	return fixedKey("domains/catalog/pages/" + digestPart(pageID) + ".json")
+}
+
+func DomainHeadKey(kind ConsistencyDomainKind, domainID string) objectstore.Key {
+	validateDomainKeyPart(domainID)
+	return fixedKey("domains/" + domainKeyKind(kind) + "/" + digestPart(domainID) + "/head.json")
+}
+
+func DomainPageKey(kind ConsistencyDomainKind, domainID, pageID string) objectstore.Key {
+	validateDomainKeyPart(domainID)
+	validateDomainKeyPart(pageID)
+	return fixedKey("domains/" + domainKeyKind(kind) + "/" + digestPart(domainID) + "/pages/" + digestPart(pageID) + ".json")
+}
+
+func DomainClaimKey(kind ConsistencyDomainKind, domainID, mutationID string) objectstore.Key {
+	validateDomainKeyPart(domainID)
+	validateDomainKeyPart(mutationID)
+	return fixedKey("domains/" + domainKeyKind(kind) + "/" + digestPart(domainID) + "/claims/" + digestPart(mutationID) + ".json")
+}
+
+func DomainPrefix() string { return root + "domains/" }
+
+func ProjectionHeadKey(ownerID string, kind ProjectionKind) objectstore.Key {
+	validateDomainKeyPart(ownerID)
+	return fixedKey("projections/" + digestPart(ownerID) + "/" + projectionKeyKind(kind) + "/head.json")
+}
+
+func ProjectionPageKey(ownerID string, kind ProjectionKind, pageID string) objectstore.Key {
+	validateDomainKeyPart(ownerID)
+	validateDomainKeyPart(pageID)
+	return fixedKey("projections/" + digestPart(ownerID) + "/" + projectionKeyKind(kind) + "/pages/" + digestPart(pageID) + ".json")
+}
+
+func ProjectionPrefix() string { return root + "projections/" }
+
 func StateKey(namespace, logicalKey string) objectstore.Key {
 	if err := ValidateNamespace(namespace); err != nil {
 		panic(err)

@@ -31,10 +31,14 @@ the new design proves the same or stronger guarantees.
 
 Apply these rules:
 
-1. State requirements as observable guarantees and quantitative budgets before
-   prescribing a mechanism. Specifications should say what must remain true,
-   including failure behavior and scale, and constrain implementation shape
-   only where the shape is itself a security or interoperability boundary.
+1. State requirements as observable guarantees, representative workloads, and
+   optimization objectives before prescribing a mechanism. Do not invent a
+   numerical request, cost, or latency ceiling for an architecture that has not
+   been explored. A numeric requirement must come from a product need, provider
+   constraint, proven resource/safety bound, or measured selected design.
+   Specifications should say what must remain true, including failure behavior
+   and scale, and constrain implementation shape only where the shape is itself
+   a security or interoperability boundary.
 2. When measurements expose an architectural limit, fix the architecture. Do
    not normalize an avoidable request count, latency, cost, memory slope,
    storage amplification, or operational burden merely because current tests
@@ -51,10 +55,12 @@ Apply these rules:
    recovery, concurrency, portability, and user-facing property needs an
    explicit new proof. Mechanism-specific tests may be replaced only after
    guarantee-level replacement tests pass.
-6. Make provider economics and asymptotic behavior first-class correctness
-   properties. Request count, modeled marginal cost, modeled latency, bytes
-   transferred, temporary objects, retained history, and foreground memory
-   require ratcheted tests wherever a provider is involved.
+6. Make provider economics and asymptotic behavior first-class engineering
+   evidence. During architectural exploration, measure the complete vector of
+   request count, modeled marginal cost, modeled latency, bytes transferred,
+   temporary objects, retained history, foreground memory, contention, and
+   recovery across credible candidates. After selecting and optimizing a
+   design, turn its demonstrated behavior into ratcheted regression tests.
 7. Keep authoritative state minimal. Derived indexes and projections should be
    rebuildable and kept out of mutation commit paths unless evidence proves
    synchronous participation is unavoidable.
@@ -65,24 +71,27 @@ Apply these rules:
    to change package interfaces, schemas, and contracts together when doing so
    produces a smaller, clearer, better-proven system.
 10. Record rejected alternatives and remaining tradeoffs honestly. Do not call
-    an incremental reduction complete when it still misses an approved budget
-    or scale target.
+    a design complete merely because it crosses a guessed threshold. Reject
+    known dominated designs, document gaps to defensible lower bounds, and keep
+    exploring while a credible material improvement remains untested.
 
-`docs/storage-architecture-v2-proposal.md` records the proposed replacement of
-the current state and namespace format. It is directional, not normative,
-until its guarantee matrix, budgets, and migration design are approved in a
-versioned specification.
+`docs/storage-architecture-v2-proposal.md` defines the evidence-driven research
+program for selecting the replacement state and namespace format. It does not
+approve an architecture or predeclare its request counts. The selected design
+becomes normative only after comparative prototypes, guarantee proofs,
+economics evidence, and migration design support a versioned specification.
 
 ## Required workflow
 
 1. Read the relevant specification sections, acceptance criteria, completion checklist items, measured economics, and known scalability evidence before editing.
 2. Identify which observable guarantees must remain and which internal mechanisms are candidates for replacement.
-3. Express the next behavior, guarantee, or quantitative budget with a failing test and confirm the expected failure.
-4. Implement the smallest coherent design that makes the test pass. Do not force a local patch through an abstraction already proven unfit for the target.
-5. Refactor or replace internal contracts without changing preserved behavior; update the applicable specification and migration design when the architecture changes.
-6. Run focused checks for the changed behavior, then `nix flake check --print-build-logs` before declaring the change complete.
-7. Complete the local commit and push gate below before creating or updating a pull request; every required command must pass locally before CI is started.
-8. Record acceptance evidence, provider-economics changes, compatibility decisions, and remaining limitations in the release record/checklist as those artifacts are introduced.
+3. For observable behavior, guarantees, regressions, and evidence-derived budgets, express the next result with a failing test and confirm the expected failure. For architectural exploration, first build shared instrumentation and representative workloads, state falsifiable hypotheses, and identify the assumptions behind any claimed lower bound; do not create a failing guessed ceiling.
+4. Compare credible alternatives far enough to measure their complete success, failure, recovery, maintenance, and scale behavior. Select by preserved guarantees and Pareto evidence, not by preference for the first design that passes.
+5. Implement the smallest coherent selected design. Do not force a local patch through an abstraction already proven unfit for the objective.
+6. Refactor or replace internal contracts without changing preserved behavior; update the applicable specification and migration design when the architecture changes.
+7. Run focused checks for the changed behavior, then `nix flake check --print-build-logs` before declaring the change complete.
+8. Complete the local commit and push gate below before creating or updating a pull request; every required command must pass locally before CI is started.
+9. Record acceptance evidence, comparative provider economics, compatibility decisions, rejected alternatives, and remaining limitations in the release record/checklist as those artifacts are introduced.
 
 Bug fixes start with a regression test. Security fixes need both an exploit/denial test and a valid-path test. Provider behavior starts in the shared contract suite. Race-sensitive state changes need explicit concurrent tests.
 
@@ -240,11 +249,21 @@ Any change touching authentication, authorization, paths, canonical keys/records
 
 ## Provider economics and scale invariants
 
-Provider traffic is a correctness boundary. Every pathway that can contact a
-storage provider must have deterministic instrumentation and an append-only
-ratchet for request count, modeled marginal request cost, and modeled p50, p95,
-and p99 serial latency. Provider pricing and latency fixtures are reviewed,
-versioned, offline inputs. Unknown request shapes fail closed.
+Provider traffic is an economic and scalability boundary. Every pathway that
+can contact a storage provider must have deterministic instrumentation for
+request count, modeled marginal request cost, modeled p50/p95/p99 latency,
+critical-path depth, transferred bytes, and created/retained objects. Provider
+pricing and latency fixtures are reviewed, versioned, offline inputs. Unknown
+request shapes fail closed.
+
+Do not impose an arbitrary pass/fail request, cost, or latency ceiling on an
+architecture before exploring what is possible. First characterize current
+behavior, provider primitives, representative workloads, and defensible lower
+bounds. Implement multiple credible candidates far enough to measure complete
+foreground, conflict, recovery, maintenance, checkpoint, and migration paths.
+Reject invalid and dominated designs, then select the best supported tradeoff.
+Only after a design is selected and optimized does its measured behavior become
+an append-only regression ratchet.
 
 For storage architecture work:
 
@@ -260,14 +279,18 @@ For storage architecture work:
   approved optional features such as image preview may stream a body;
 - do not synchronously maintain rebuildable derived indexes in a mutation
   merely because the existing schema does;
-- treat fewer observed calls as a required ratchet update, never as permission
-  to retain stale headroom; and
-- reject a design that meets correctness tests but misses its approved request,
-  cost, latency, memory, temporary-object, or retained-storage budget.
+- compare the complete economic vector rather than improving one metric while
+  hiding a worse critical path, byte transfer, contention, recovery path, or
+  maintenance burden;
+- treat an improvement to a selected implementation as a ratchet candidate and
+  update the ratchet when the complete tradeoff is no worse; and
+- reject known dominated designs and never declare a design adequate merely
+  because it falls below a guessed number.
 
-The targets in `docs/storage-architecture-v2-proposal.md` are the direction for
-the replacement format. Until that format is normative, current budget
-fixtures remain honest regression baselines, not endorsements of their cost.
+`docs/storage-architecture-v2-proposal.md` defines the comparative investigation
+for the replacement format. Until a selected design is normative, current
+budget fixtures remain honest regression baselines for current code, not
+targets, lower bounds, endorsements, or acceptance criteria for v2.
 
 ## Test organization
 
@@ -317,4 +340,4 @@ Release tags are `vMAJOR.MINOR.PATCH`. A v1 release needs the evidence in spec s
 
 ## Definition of done
 
-Before handing off a change, verify every item in the applicable specification's definition of done. At minimum: tests prove preserved behavior and intended changes; relevant Nix checks pass; boundaries have success and denial coverage; logs/errors remain safe; no forbidden dependency or service was introduced; canonical format, logical versions, conditional linearization, stale-writer denial, crash recovery, checkpoint quiescence, and raw-copy portability remain intact or have an explicitly reviewed stronger replacement; no native provider value entered authoritative state; no lock relies on one process or timeout-only release; provider-economics and scale budgets pass; UI/theme contracts stay complete; and user/implementation documentation matches reality.
+Before handing off a change, verify every item in the applicable specification's definition of done. At minimum: tests prove preserved behavior and intended changes; relevant Nix checks pass; boundaries have success and denial coverage; logs/errors remain safe; no forbidden dependency or service was introduced; canonical format, logical versions, conditional linearization, stale-writer denial, crash recovery, checkpoint quiescence, and raw-copy portability remain intact or have an explicitly reviewed stronger replacement; no native provider value entered authoritative state; no lock relies on one process or timeout-only release; applicable evidence-derived provider-economics ratchets and scale bounds pass; UI/theme contracts stay complete; and user/implementation documentation matches reality.

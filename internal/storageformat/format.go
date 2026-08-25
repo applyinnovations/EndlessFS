@@ -37,6 +37,7 @@ const (
 	FeatureConsistencyDomains   = "consistency-domains-v1"
 	FeatureOwnerNamespaceGraph  = "owner-namespace-graph-v1"
 	FeatureDerivedProjections   = "rebuildable-derived-projections-v1"
+	FeatureTransactionalState   = "transactional-state-domains-v1"
 )
 
 type Envelope struct {

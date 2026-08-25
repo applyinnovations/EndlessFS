@@ -3,10 +3,153 @@ package identity
 import (
 	"context"
 	"errors"
+	"math"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/model"
+	"github.com/applyinnovations/endlessfs/internal/secret"
+	"github.com/applyinnovations/endlessfs/internal/state"
 )
+
+func appendRegistrationRecordChange(changes *[]state.Change, key state.Key, requirement state.Requirement, version state.Version, record any) error {
+	body, err := state.EncodeJSON(record)
+	if err != nil {
+		return err
+	}
+	*changes = append(*changes, state.Change{Key: key, Requirement: requirement, ExpectedVersion: version, Data: body})
+	return nil
+}
+
+// commitRegistrationAtomic turns verified WebAuthn material and every durable
+// authority change for the selected flow into one state transition. Owner-only
+// flows collapse to one owner-identity CAS; bootstrap, first-user, and invite
+// flows use the helpable cross-domain decision protocol.
+func (s *Service) commitRegistrationAtomic(ctx context.Context, ceremony model.Ceremony, ceremonyVersion state.Version, operation model.RegistrationOperation) error {
+	store, err := s.repository.transactionalStore()
+	if err != nil {
+		return err
+	}
+	if ceremony.UserID == nil || *ceremony.UserID != operation.UserID || ceremony.ConsumedAt != nil || ceremony.OperationID != "" {
+		return domain.NewError(domain.ErrorConflict, "registration ceremony was already consumed")
+	}
+	now := s.clock.Now()
+	operation.Status, operation.CommittedAt = model.OperationCommitted, &now
+	ceremony.ConsumedAt, ceremony.OperationID = &now, operation.OperationID
+	changes := make([]state.Change, 0, 12)
+	if err := appendRegistrationRecordChange(&changes, state.MustKey(state.NamespaceCeremonies, "owner", operation.UserID.String(), secret.Hash(ceremony.CeremonyID)), state.RequirementPresent, ceremonyVersion, &ceremony); err != nil {
+		return err
+	}
+	if err := appendRegistrationRecordChange(&changes, state.MustKey(state.NamespaceOperations, "identity", operation.UserID.String(), operation.OperationID), state.RequirementAbsent, "", &operation); err != nil {
+		return err
+	}
+	if err := appendRegistrationRecordChange(&changes, credentialKey(operation.UserID, operation.Credential.CredentialID), state.RequirementAbsent, "", &operation.Credential); err != nil {
+		return err
+	}
+	index, indexVersion, err := s.repository.CredentialIndex(ctx, operation.UserID)
+	indexRequirement := state.RequirementPresent
+	if errors.Is(err, domain.ErrNotFound) {
+		index = model.CredentialIndex{SchemaVersion: model.SchemaVersion, UserID: operation.UserID}
+		indexVersion, indexRequirement, err = "", state.RequirementAbsent, nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, credentialID := range index.CredentialIDs {
+		if credentialID == operation.Credential.CredentialID {
+			return domain.NewError(domain.ErrorConflict, "credential is already registered")
+		}
+	}
+	index.CredentialIDs = append(index.CredentialIDs, operation.Credential.CredentialID)
+	if err := appendRegistrationRecordChange(&changes, credentialIndexKey(operation.UserID), indexRequirement, indexVersion, &index); err != nil {
+		return err
+	}
+
+	newAccount := ceremony.Flow == model.CeremonyBootstrap || ceremony.Flow == model.CeremonyPublic || ceremony.Flow == model.CeremonyInvite
+	if newAccount {
+		profile := model.Profile{UserID: operation.UserID, DisplayName: operation.DisplayName}
+		account := model.Account{SchemaVersion: model.SchemaVersion, UserID: operation.UserID, Status: model.AccountEnabled, AuthEpoch: 1, CreatedAt: operation.CreatedAt, UpdatedAt: operation.CreatedAt}
+		if err := appendRegistrationRecordChange(&changes, state.MustKey(state.NamespaceUsers, operation.UserID.String()), state.RequirementAbsent, "", &profile); err != nil {
+			return err
+		}
+		if err := appendRegistrationRecordChange(&changes, state.MustKey(state.NamespaceAccounts, operation.UserID.String()), state.RequirementAbsent, "", &account); err != nil {
+			return err
+		}
+	}
+
+	marker, _, markerErr := s.repository.FirstAccountMarker(ctx)
+	if errors.Is(markerErr, domain.ErrNotFound) {
+		marker = model.FirstAccountMarker{SchemaVersion: model.SchemaVersion, Flow: ceremony.Flow, OperationID: operation.OperationID, UserID: operation.UserID, CreatedAt: now}
+		if err := appendRegistrationRecordChange(&changes, state.MustKey(state.NamespaceBootstrap, "first-account"), state.RequirementAbsent, "", &marker); err != nil {
+			return err
+		}
+	} else if markerErr != nil {
+		return markerErr
+	} else if ceremony.Flow == model.CeremonyBootstrap {
+		return domain.NewError(domain.ErrorConflict, "bootstrap was already claimed")
+	}
+
+	switch ceremony.Flow {
+	case model.CeremonyBootstrap:
+		bootstrap := model.BootstrapState{SchemaVersion: model.SchemaVersion, Status: model.OperationCommitted, Operation: operation, CompletedAt: &now}
+		roles := model.AdminRoles{SchemaVersion: model.SchemaVersion, UserIDs: []domain.UserID{operation.UserID}}
+		if err := appendRegistrationRecordChange(&changes, state.MustKey(state.NamespaceBootstrap, "state"), state.RequirementAbsent, "", &bootstrap); err != nil {
+			return err
+		}
+		if err := appendRegistrationRecordChange(&changes, state.MustKey(state.NamespaceRoles, "admins"), state.RequirementAbsent, "", &roles); err != nil {
+			return err
+		}
+	case model.CeremonyInvite:
+		invite, version, err := s.repository.InviteByHash(ctx, ceremony.BearerTokenHash)
+		if err != nil || !s.inviteUsable(invite) {
+			return domain.NewError(domain.ErrorUnavailable, "registration is unavailable")
+		}
+		invite.Uses, invite.UsedAt, invite.UsedByUserID, invite.OperationID = 1, &now, &operation.UserID, operation.OperationID
+		if err := appendRegistrationRecordChange(&changes, state.MustKey(state.NamespaceInvites, invite.TokenHash), state.RequirementPresent, version, &invite); err != nil {
+			return err
+		}
+	case model.CeremonyRecovery:
+		recovery, recoveryVersion, err := s.repository.RecoveryByHash(ctx, operation.UserID, ceremony.BearerTokenHash)
+		if err != nil || !s.recoveryUsable(recovery) || recovery.TargetUserID != operation.UserID {
+			return domain.NewError(domain.ErrorUnavailable, "recovery is unavailable")
+		}
+		recovery.UsedAt, recovery.OperationID = &now, operation.OperationID
+		if err := appendRegistrationRecordChange(&changes, state.MustKey(state.NamespaceRecoveries, operation.UserID.String(), recovery.TokenHash), state.RequirementPresent, recoveryVersion, &recovery); err != nil {
+			return err
+		}
+		account, accountVersion, err := s.repository.Account(ctx, operation.UserID)
+		if err != nil || account.Status != model.AccountEnabled {
+			return domain.NewError(domain.ErrorUnauthorized, "account is unavailable")
+		}
+		if account.AuthEpoch == math.MaxUint64 {
+			return domain.NewError(domain.ErrorInvalid, "account authentication epoch is exhausted")
+		}
+		if account.AuthEpoch == 0 {
+			account.AuthEpoch = 1
+		}
+		account.AuthEpoch++
+		if err := appendRegistrationRecordChange(&changes, state.MustKey(state.NamespaceAccounts, operation.UserID.String()), state.RequirementPresent, accountVersion, &account); err != nil {
+			return err
+		}
+	case model.CeremonyAddPasskey:
+		account, accountVersion, err := s.repository.Account(ctx, operation.UserID)
+		if err != nil || account.Status != model.AccountEnabled {
+			return domain.NewError(domain.ErrorUnauthorized, "account is unavailable")
+		}
+		// The unchanged value is an explicit commit-time authorization guard.
+		if err := appendRegistrationRecordChange(&changes, state.MustKey(state.NamespaceAccounts, operation.UserID.String()), state.RequirementPresent, accountVersion, &account); err != nil {
+			return err
+		}
+	case model.CeremonyPublic:
+	default:
+		return domain.NewError(domain.ErrorInvalid, "unsupported registration operation")
+	}
+	result, err := state.EncodeJSON(&RegistrationComplete{UserID: operation.UserID, CredentialID: operation.Credential.CredentialID, Flow: operation.Flow})
+	if err != nil {
+		return err
+	}
+	_, err = store.Transact(ctx, state.Mutation{ID: "registration:" + operation.OperationID, Changes: changes, Result: result})
+	return err
+}
 
 func (s *Service) inviteUsable(invite model.Invite) bool {
 	return invite.Uses == 0 && invite.RevokedAt == nil && (invite.ExpiresAt == nil || s.clock.Now().Before(*invite.ExpiresAt))

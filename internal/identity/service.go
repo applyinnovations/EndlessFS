@@ -336,18 +336,7 @@ func (s *Service) VerifyRegistration(ctx context.Context, ceremonyID string, bro
 		UserID: user.ID, DisplayName: user.DisplayName,
 		Credential: result.Credential, CreatedAt: now,
 	}
-	if err := s.repository.CreateRegistrationOperation(ctx, operation); err != nil {
-		return RegistrationComplete{}, err
-	}
-	ceremony.ConsumedAt = &now
-	ceremony.OperationID = operationID
-	if _, err := s.repository.UpdateCeremony(ctx, ceremony, ceremonyVersion); err != nil {
-		return RegistrationComplete{}, domain.NewError(domain.ErrorConflict, "ceremony was already consumed")
-	}
-	if err := s.claimRegistration(ctx, ceremony, operation); err != nil {
-		return RegistrationComplete{}, err
-	}
-	if err := s.materializeRegistration(ctx, operation); err != nil {
+	if err := s.commitRegistrationAtomic(ctx, ceremony, ceremonyVersion, operation); err != nil {
 		return RegistrationComplete{}, err
 	}
 	return RegistrationComplete{UserID: operation.UserID, CredentialID: operation.Credential.CredentialID, Flow: operation.Flow}, nil

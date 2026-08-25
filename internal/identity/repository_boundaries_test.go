@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/model"
-	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
 )
 
@@ -18,6 +16,14 @@ type identityFaultStore struct {
 	create func(context.Context, state.Key, []byte) (state.Version, error)
 	cas    func(context.Context, state.Key, state.Version, []byte) (state.Version, error)
 	delete func(context.Context, state.Key, state.Version) error
+	mutate func(context.Context, state.Mutation) (state.MutationOutcome, error)
+}
+
+func (s identityFaultStore) Mutate(ctx context.Context, mutation state.Mutation) (state.MutationOutcome, error) {
+	if s.mutate != nil {
+		return s.mutate(ctx, mutation)
+	}
+	return state.MutationOutcome{}, nil
 }
 
 func (s identityFaultStore) Get(ctx context.Context, key state.Key) (state.Value, error) {
@@ -146,36 +152,35 @@ func TestRepositoryWrappersEncodingAndCredentialConsistency(t *testing.T) {
 func TestRepositorySessionRevocationFaultMatrix(t *testing.T) {
 	owner := userID(t, 0x21)
 	now := identityEpoch
-	session := model.Session{SchemaVersion: model.SchemaVersion, SessionTokenHash: secret.Hash(bearer(0x22)), UserID: owner, CSRFTokenHash: secret.Hash(bearer(0x23)), CreatedAt: now, ExpiresAt: now.Add(time.Hour), AuthnCredentialIDHash: secret.Hash(bearer(0x24))}
-	data, err := state.EncodeJSON(&session)
+	account := model.Account{SchemaVersion: model.SchemaVersion, UserID: owner, Status: model.AccountEnabled, AuthEpoch: 4, CreatedAt: now, UpdatedAt: now}
+	data, err := state.EncodeJSON(&account)
 	if err != nil {
 		t.Fatal(err)
 	}
 	unavailable := domain.NewError(domain.ErrorUnavailable, "fault")
-	store := identityFaultStore{list: func(context.Context, state.Prefix, state.PageRequest) (state.Page, error) {
-		return state.Page{}, unavailable
+	store := identityFaultStore{get: func(context.Context, state.Key) (state.Value, error) {
+		return state.Value{}, unavailable
 	}}
 	if err := NewRepository(store).RevokeUserSessions(context.Background(), owner); !errors.Is(err, unavailable) {
-		t.Fatalf("session list fault = %v", err)
+		t.Fatalf("account read fault = %v", err)
 	}
-	store.list = func(context.Context, state.Prefix, state.PageRequest) (state.Page, error) {
-		return state.Page{Items: []state.Item{{Value: state.Value{Data: []byte(`{"corrupt":true}`), Version: "v1"}}}}, nil
+	store.get = func(context.Context, state.Key) (state.Value, error) {
+		return state.Value{Data: []byte(`{"corrupt":true}`), Version: "v1"}, nil
 	}
 	if err := NewRepository(store).RevokeUserSessions(context.Background(), owner); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("session decode fault = %v", err)
+		t.Fatalf("account decode fault = %v", err)
 	}
-	item := state.Item{Key: state.MustKey(state.NamespaceSessions, "session"), Value: state.Value{Data: data, Version: "v1"}}
-	store.list = func(context.Context, state.Prefix, state.PageRequest) (state.Page, error) {
-		return state.Page{Items: []state.Item{item}}, nil
+	store.get = func(context.Context, state.Key) (state.Value, error) {
+		return state.Value{Data: data, Version: "v1"}, nil
 	}
-	store.delete = func(context.Context, state.Key, state.Version) error { return unavailable }
+	store.mutate = func(context.Context, state.Mutation) (state.MutationOutcome, error) { return state.MutationOutcome{}, unavailable }
 	if err := NewRepository(store).RevokeUserSessions(context.Background(), owner); !errors.Is(err, unavailable) {
-		t.Fatalf("session delete fault = %v", err)
+		t.Fatalf("epoch mutation fault = %v", err)
 	}
-	for _, ignored := range []error{domain.NewError(domain.ErrorNotFound, "race"), domain.NewError(domain.ErrorPreconditionFailed, "race")} {
-		store.delete = func(context.Context, state.Key, state.Version) error { return ignored }
-		if err := NewRepository(store).RevokeUserSessions(context.Background(), owner); err != nil {
-			t.Fatalf("ignored session delete race = %v", err)
-		}
+	store.mutate = func(context.Context, state.Mutation) (state.MutationOutcome, error) {
+		return state.MutationOutcome{}, domain.NewError(domain.ErrorPreconditionFailed, "race")
+	}
+	if err := NewRepository(store).RevokeUserSessions(context.Background(), owner); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("repeated epoch race = %v", err)
 	}
 }

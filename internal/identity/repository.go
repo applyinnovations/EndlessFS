@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"math"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/model"
@@ -130,41 +131,66 @@ func (r *Repository) UpdateCeremony(ctx context.Context, record model.Ceremony, 
 }
 
 func (r *Repository) CreateSession(ctx context.Context, rawToken string, record model.Session) error {
-	return createRecord(ctx, r.store, state.MustKey(state.NamespaceSessions, secret.Hash(rawToken)), &record)
+	owner, _, err := secret.ParseScopedBearerToken(rawToken)
+	if err != nil || owner != record.UserID {
+		return domain.NewError(domain.ErrorInvalid, "session token owner mismatch")
+	}
+	return createRecord(ctx, r.store, sessionKey(owner, rawToken), &record)
 }
 
 func (r *Repository) Session(ctx context.Context, rawToken string) (model.Session, state.Version, error) {
-	return getRecord[model.Session](ctx, r.store, state.MustKey(state.NamespaceSessions, secret.Hash(rawToken)))
+	owner, _, err := secret.ParseScopedBearerToken(rawToken)
+	if err != nil {
+		return model.Session{}, "", domain.NewError(domain.ErrorNotFound, "session not found")
+	}
+	return getRecord[model.Session](ctx, r.store, sessionKey(owner, rawToken))
 }
 
 func (r *Repository) DeleteSession(ctx context.Context, rawToken string, version state.Version) error {
-	return r.store.Delete(ctx, state.MustKey(state.NamespaceSessions, secret.Hash(rawToken)), version)
+	owner, _, err := secret.ParseScopedBearerToken(rawToken)
+	if err != nil {
+		return domain.NewError(domain.ErrorNotFound, "session not found")
+	}
+	return r.store.Delete(ctx, sessionKey(owner, rawToken), version)
 }
 
 func (r *Repository) RevokeUserSessions(ctx context.Context, userID domain.UserID) error {
-	prefix := state.MustPrefix(state.NamespaceSessions)
-	request := state.PageRequest{Limit: 200}
-	for {
-		page, err := r.store.List(ctx, prefix, request)
+	atomic, ok := r.store.(state.AtomicStore)
+	if !ok {
+		return domain.NewError(domain.ErrorUnavailable, "atomic identity state is required")
+	}
+	for attempts := 0; attempts < 8; attempts++ {
+		account, version, err := r.Account(ctx, userID)
 		if err != nil {
 			return err
 		}
-		for _, item := range page.Items {
-			var session model.Session
-			if err := state.DecodeJSON(item.Value.Data, &session); err != nil {
-				return err
-			}
-			if session.UserID == userID {
-				if err := r.store.Delete(ctx, item.Key, item.Value.Version); err != nil && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
-					return err
-				}
-			}
+		if account.AuthEpoch == math.MaxUint64 {
+			return domain.NewError(domain.ErrorInvalid, "account authentication epoch is exhausted")
 		}
-		if page.NextCursor == "" {
+		if account.AuthEpoch == 0 {
+			account.AuthEpoch = 1
+		}
+		account.AuthEpoch++
+		body, err := state.EncodeJSON(&account)
+		if err != nil {
+			return err
+		}
+		_, err = atomic.Mutate(ctx, state.Mutation{
+			ID: "revoke-sessions-" + secret.Hash(userID.String()+"\x00"+string(version)),
+			Changes: []state.Change{{Key: state.MustKey(state.NamespaceAccounts, userID.String()), Requirement: state.RequirementPresent, ExpectedVersion: version, Data: body}},
+		})
+		if err == nil {
 			return nil
 		}
-		request.Cursor = page.NextCursor
+		if !errors.Is(err, domain.ErrPreconditionFailed) {
+			return err
+		}
 	}
+	return domain.NewError(domain.ErrorConflict, "account changed concurrently")
+}
+
+func sessionKey(owner domain.UserID, rawToken string) state.Key {
+	return state.MustKey(state.NamespaceSessions, owner.String(), secret.Hash(rawToken))
 }
 
 func (r *Repository) CreateInvite(ctx context.Context, record model.Invite) error {

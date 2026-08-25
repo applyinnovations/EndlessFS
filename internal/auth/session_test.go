@@ -270,12 +270,16 @@ func TestSessionManagerRejectsInvalidConstructionAndEntropyFailures(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Issue(context.Background(), testUserID(t, 0x92), "credential"); err == nil {
+	entropyUser := testUserID(t, 0x92)
+	repository.accounts[entropyUser] = model.Account{SchemaVersion: model.SchemaVersion, UserID: entropyUser, Status: model.AccountEnabled, AuthEpoch: 1, CreatedAt: clock.Now(), UpdatedAt: clock.Now()}
+	if _, err := manager.Issue(context.Background(), entropyUser, "credential"); err == nil {
 		t.Fatal("Issue succeeded with a failing entropy source")
 	}
 	repository.createErr = domain.ErrUnavailable
 	manager, _ = NewSessionManager(repository, domain.NewIDGenerator(strings.NewReader(strings.Repeat("x", 1024))), clock, time.Hour, "origin", true, key)
-	if _, err := manager.Issue(context.Background(), testUserID(t, 0x93), "credential"); !errors.Is(err, domain.ErrUnavailable) {
+	createUser := testUserID(t, 0x93)
+	repository.accounts[createUser] = model.Account{SchemaVersion: model.SchemaVersion, UserID: createUser, Status: model.AccountEnabled, AuthEpoch: 1, CreatedAt: clock.Now(), UpdatedAt: clock.Now()}
+	if _, err := manager.Issue(context.Background(), createUser, "credential"); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("Issue repository error = %v", err)
 	}
 }

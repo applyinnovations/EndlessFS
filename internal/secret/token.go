@@ -7,6 +7,9 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"log/slog"
+	"strings"
+
+	"github.com/applyinnovations/endlessfs/internal/domain"
 )
 
 const Redacted = "[REDACTED]"
@@ -14,6 +17,33 @@ const Redacted = "[REDACTED]"
 func ValidBearerToken(token string) bool {
 	decoded, err := base64.RawURLEncoding.DecodeString(token)
 	return err == nil && len(decoded) == 32 && base64.RawURLEncoding.EncodeToString(decoded) == token
+}
+
+// ScopeBearerToken embeds only the non-secret owner locator needed to select a
+// bounded consistency domain. The complete token remains authenticated by the
+// keyed hash stored in that domain; parsing the locator never authorizes it.
+func ScopeBearerToken(owner domain.UserID, rawSecret string) (string, error) {
+	if !owner.Valid() || !ValidBearerToken(rawSecret) {
+		return "", domain.NewError(domain.ErrorInvalid, "invalid scoped bearer token material")
+	}
+	return "s1." + owner.String() + "." + rawSecret, nil
+}
+
+func ParseScopedBearerToken(token string) (domain.UserID, Value, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 || parts[0] != "s1" || !ValidBearerToken(parts[2]) {
+		return domain.UserID{}, "", domain.NewError(domain.ErrorInvalid, "invalid scoped bearer token")
+	}
+	owner, err := domain.ParseUserID(parts[1])
+	if err != nil {
+		return domain.UserID{}, "", domain.NewError(domain.ErrorInvalid, "invalid scoped bearer token")
+	}
+	return owner, Value(parts[2]), nil
+}
+
+func ValidScopedBearerToken(token string) bool {
+	_, _, err := ParseScopedBearerToken(token)
+	return err == nil
 }
 
 func Hash(token string) string {

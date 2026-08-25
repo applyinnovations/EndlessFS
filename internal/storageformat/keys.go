@@ -66,6 +66,18 @@ func StateQuerySnapshotKey(digest string) objectstore.Key {
 
 func StateQuerySnapshotPrefix() string { return root + "domains/state-query-snapshots/" }
 
+func TransitionPlanKey(transitionID string) objectstore.Key {
+	validateDomainKeyPart(transitionID)
+	return fixedKey("transitions/plans/" + digestPart(transitionID) + ".json")
+}
+
+func TransitionDecisionKey(transitionID string) objectstore.Key {
+	validateDomainKeyPart(transitionID)
+	return fixedKey("transitions/decisions/" + digestPart(transitionID) + ".json")
+}
+
+func TransitionPrefix() string { return root + "transitions/" }
+
 func DomainPrefix() string { return root + "domains/" }
 
 func Schema008MigrationStageKey(domainIdentity, sourceIdentity string) objectstore.Key {

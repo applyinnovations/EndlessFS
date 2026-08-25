@@ -99,3 +99,68 @@ func TestPortableCrossDomainTransitionRecoversLostDecisionAndEightReplicaReplay(
 		t.Fatalf("transition ID reuse error = %v", err)
 	}
 }
+
+func TestPortableCrossDomainTransitionRestartsAfterEveryDurableBoundary(t *testing.T) {
+	steps := []string{
+		portable.StepTransitionAfterPlan,
+		portable.StepTransitionAfterParticipantPrepared,
+		portable.StepTransitionBeforeDecision,
+		portable.StepTransitionAfterDecision,
+		portable.StepTransitionAfterParticipantFinalized,
+	}
+	for index, step := range steps {
+		t.Run(step, func(t *testing.T) {
+			backend := objectmemory.New()
+			failure := &stepFailure{step: step}
+			engine := openTransactionalEngine(t, backend, byte(220+index), failure)
+			admin, owner, adminVersion, ownerVersion := transactionalFixture(t, engine)
+			mutation := state.Mutation{ID: "restart-transition-" + string(rune('a'+index)), Changes: []state.Change{
+				{Key: admin, Requirement: state.RequirementPresent, ExpectedVersion: adminVersion, Data: []byte(`{"value":"new-admin"}`)},
+				{Key: owner, Requirement: state.RequirementPresent, ExpectedVersion: ownerVersion, Data: []byte(`{"value":"new-owner"}`)},
+			}}
+			_, firstErr := engine.Transact(context.Background(), mutation)
+			// A lost response after the decision may be recovered in the same
+			// call. Every earlier/later injected process boundary may return a
+			// retryable error, but the restarted replica must converge either way.
+			if firstErr != nil && !errors.Is(firstErr, domain.ErrUnavailable) {
+				t.Fatalf("first transition error = %v", firstErr)
+			}
+			restarted := openTransactionalEngine(t, backend, byte(230+index), nil)
+			outcome, err := restarted.Transact(context.Background(), mutation)
+			if err != nil || outcome.ID != mutation.ID {
+				t.Fatalf("restarted transition = %+v, %v", outcome, err)
+			}
+			for key, want := range map[state.Key]string{admin: `{"value":"new-admin"}`, owner: `{"value":"new-owner"}`} {
+				value, err := restarted.Get(context.Background(), key)
+				if err != nil || string(value.Data) != want {
+					t.Fatalf("Get(%s) = %s, %v; want %s", key.String(), value.Data, err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestPortableCrossDomainTransitionAbortsWithoutPartialState(t *testing.T) {
+	backend := objectmemory.New()
+	engine := openTransactionalEngine(t, backend, 241, nil)
+	admin, owner, adminVersion, ownerVersion := transactionalFixture(t, engine)
+	if _, err := engine.CompareAndSwap(context.Background(), owner, ownerVersion, []byte(`{"value":"raced-owner"}`)); err != nil {
+		t.Fatal(err)
+	}
+	mutation := state.Mutation{ID: "aborted-transition-001", Changes: []state.Change{
+		{Key: admin, Requirement: state.RequirementPresent, ExpectedVersion: adminVersion, Data: []byte(`{"value":"must-not-publish"}`)},
+		{Key: owner, Requirement: state.RequirementPresent, ExpectedVersion: ownerVersion, Data: []byte(`{"value":"must-not-publish"}`)},
+	}}
+	if _, err := engine.Transact(context.Background(), mutation); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("stale transition error = %v", err)
+	}
+	adminValue, _ := engine.Get(context.Background(), admin)
+	ownerValue, _ := engine.Get(context.Background(), owner)
+	if string(adminValue.Data) != `{"value":"old-admin"}` || string(ownerValue.Data) != `{"value":"raced-owner"}` {
+		t.Fatalf("aborted transition was partial: admin=%s owner=%s", adminValue.Data, ownerValue.Data)
+	}
+	// An aborted lock cannot strand either domain.
+	if _, err := engine.CompareAndSwap(context.Background(), admin, adminValue.Version, []byte(`{"value":"after-abort"}`)); err != nil {
+		t.Fatalf("admin domain remained locked: %v", err)
+	}
+}

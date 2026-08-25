@@ -44,10 +44,11 @@ type consistencyDomainChange struct {
 }
 
 type consistencyDomainMutation struct {
-	ID          string
-	RetainUntil time.Time
-	Changes     []consistencyDomainChange
-	Result      []byte
+	ID           string
+	TransitionID string
+	RetainUntil  time.Time
+	Changes      []consistencyDomainChange
+	Result       []byte
 }
 
 type consistencyDomainOutcome struct {
@@ -268,6 +269,11 @@ func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, referen
 		}
 		if snapshot.head.Frozen {
 			return consistencyDomainOutcome{}, domain.NewError(domain.ErrorUnavailable, "consistency domain is frozen")
+		}
+		if lock, _, found, lockErr := transitionLockAtHead009(ctx, store, reference, snapshot.head); lockErr != nil {
+			return consistencyDomainOutcome{}, lockErr
+		} else if found && mutation.TransitionID != lock.TransitionID {
+			return consistencyDomainOutcome{}, domain.WrapError(domain.ErrorUnavailable, "consistency domain has a pending transition", errTransitionPending009)
 		}
 		if err := store.validateMutationAtHeadWithSession(ctx, reference, snapshot.head, mutation.Changes, preparedSession); err != nil {
 			return consistencyDomainOutcome{}, err

@@ -3,6 +3,7 @@ package portable
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"time"
 
@@ -214,6 +215,9 @@ func (e *Engine) Get(ctx context.Context, key state.Key) (state.Value, error) {
 	if err != nil {
 		return state.Value{}, err
 	}
+	if err := e.resolveStateTransition009(ctx, reference); err != nil {
+		return state.Value{}, err
+	}
 	value, err := e.stateDomainStore().get(ctx, reference, key.String())
 	if err != nil {
 		return state.Value{}, err
@@ -257,6 +261,11 @@ func (e *Engine) List(ctx context.Context, prefix state.Prefix, request state.Pa
 	}
 	if compositeSnapshot {
 		return state.Page{}, domain.NewError(domain.ErrorInvalid, "state cursor snapshot kind changed")
+	}
+	if snapshotDigest == "" {
+		if err := e.resolveStateTransition009(ctx, reference); err != nil {
+			return state.Page{}, err
+		}
 	}
 	var entries []storageformat.DomainEntry
 	var revision uint64
@@ -304,10 +313,17 @@ func (e *Engine) Create(ctx context.Context, key state.Key, data []byte) (state.
 	if err != nil {
 		return "", err
 	}
-	if _, err := e.stateDomainStore().mutate(ctx, reference, mutation); err != nil {
-		return "", err
+	for attempts := 0; attempts < 8; attempts++ {
+		if err := e.resolveStateTransition009(ctx, reference); err != nil {
+			return "", err
+		}
+		if _, err := e.stateDomainStore().mutate(ctx, reference, mutation); err == nil {
+			return version, nil
+		} else if !errors.Is(err, errTransitionPending009) {
+			return "", err
+		}
 	}
-	return version, nil
+	return "", domain.NewError(domain.ErrorUnavailable, "state create remained transition-contended")
 }
 
 func (e *Engine) CompareAndSwap(ctx context.Context, key state.Key, current state.Version, data []byte) (state.Version, error) {
@@ -325,10 +341,17 @@ func (e *Engine) CompareAndSwap(ctx context.Context, key state.Key, current stat
 	if err != nil {
 		return "", err
 	}
-	if _, err := e.stateDomainStore().mutate(ctx, reference, mutation); err != nil {
-		return "", err
+	for attempts := 0; attempts < 8; attempts++ {
+		if err := e.resolveStateTransition009(ctx, reference); err != nil {
+			return "", err
+		}
+		if _, err := e.stateDomainStore().mutate(ctx, reference, mutation); err == nil {
+			return version, nil
+		} else if !errors.Is(err, errTransitionPending009) {
+			return "", err
+		}
 	}
-	return version, nil
+	return "", domain.NewError(domain.ErrorUnavailable, "state update remained transition-contended")
 }
 
 func (e *Engine) Delete(ctx context.Context, key state.Key, current state.Version) error {
@@ -346,8 +369,17 @@ func (e *Engine) Delete(ctx context.Context, key state.Key, current state.Versio
 	if routeErr != nil {
 		return routeErr
 	}
-	_, err = e.stateDomainStore().mutate(ctx, reference, mutation)
-	return err
+	for attempts := 0; attempts < 8; attempts++ {
+		if err := e.resolveStateTransition009(ctx, reference); err != nil {
+			return err
+		}
+		if _, err = e.stateDomainStore().mutate(ctx, reference, mutation); err == nil {
+			return nil
+		} else if !errors.Is(err, errTransitionPending009) {
+			return err
+		}
+	}
+	return domain.NewError(domain.ErrorUnavailable, "state delete remained transition-contended")
 }
 
 // Mutate applies an idempotent set of state changes through one consistency-
@@ -391,9 +423,21 @@ func (e *Engine) Mutate(ctx context.Context, mutation state.Mutation) (state.Mut
 	if err != nil {
 		return state.MutationOutcome{}, err
 	}
-	domainOutcome, err := e.stateDomainStore().mutate(ctx, reference, canonical)
+	var domainOutcome consistencyDomainOutcome
+	for attempts := 0; attempts < 8; attempts++ {
+		if err := e.resolveStateTransition009(ctx, reference); err != nil {
+			return state.MutationOutcome{}, err
+		}
+		domainOutcome, err = e.stateDomainStore().mutate(ctx, reference, canonical)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, errTransitionPending009) {
+			return state.MutationOutcome{}, err
+		}
+	}
 	if err != nil {
-		return state.MutationOutcome{}, err
+		return state.MutationOutcome{}, domain.NewError(domain.ErrorUnavailable, "atomic state mutation remained transition-contended")
 	}
 	outcome := state.MutationOutcome{
 		ID:       normalized.ID,

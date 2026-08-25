@@ -52,6 +52,9 @@ func (e *Engine) buildStateQuerySnapshot(ctx context.Context, prefix state.Prefi
 		catalog := newDomainCatalog(e.backend, e.scheduler)
 		err = catalog.visitEntries(ctx, catalogSnapshot.head, func(entry storageformat.DomainCatalogEntry) error {
 			reference := consistencyDomainRef{Kind: entry.Kind, ID: entry.DomainID}
+			if err := e.resolveStateTransition009(ctx, reference); err != nil {
+				return err
+			}
 			snapshot, err := e.stateDomainStore().loadHead(ctx, reference)
 			if err != nil {
 				return err

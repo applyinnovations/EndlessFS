@@ -25,10 +25,10 @@ import (
 
 const migrationFixtureProducerCommitEnvironment = "ENDLESSFS_MIGRATION_FIXTURE_PRODUCER_COMMIT"
 
-// TestGenerateSchema008MigrationFixtures is invoked only through the Nix
+// TestGenerateSchema009MigrationFixtures is invoked only through the Nix
 // fixture-generation app after the epoch writer has been committed. Ordinary
 // tests skip it and never mutate the checkout.
-func TestGenerateSchema008MigrationFixtures(t *testing.T) {
+func TestGenerateSchema009MigrationFixtures(t *testing.T) {
 	commit := os.Getenv(migrationFixtureProducerCommitEnvironment)
 	if commit == "" {
 		t.Skip("schema fixture generation was not requested")
@@ -62,12 +62,12 @@ func TestGenerateSchema008MigrationFixtures(t *testing.T) {
 	}
 	for index, profile := range profiles {
 		t.Run(profile.name, func(t *testing.T) {
-			fixture := buildSchema008MigrationFixture(t, commit, byte(0x91+index*17), profile.writer(t))
+			fixture := buildSchema009MigrationFixture(t, commit, byte(0x91+index*17), profile.writer(t))
 			body, err := json.Marshal(fixture)
 			if err != nil {
 				t.Fatal(err)
 			}
-			path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-008-"+profile.name+".json")
+			path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-009-"+profile.name+".json")
 			if err := os.WriteFile(path, body, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -83,7 +83,7 @@ func configureSchema005PreviewProfile(cfg *config.Config) {
 	cfg.PreviewKeySecret = secret.Value(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("p", 32))))
 }
 
-func buildSchema008MigrationFixture(t *testing.T, commit string, seed byte, writer portable.WriterConfiguration) applicationMigrationFixture {
+func buildSchema009MigrationFixture(t *testing.T, commit string, seed byte, writer portable.WriterConfiguration) applicationMigrationFixture {
 	t.Helper()
 	ctx := context.Background()
 	createdAt := time.Date(2046, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -144,7 +144,7 @@ func buildSchema008MigrationFixture(t *testing.T, commit string, seed byte, writ
 		t.Fatal(err)
 	}
 	return applicationMigrationFixture{
-		SchemaVersion: 1, SourceRelease: "schema-008", SourceCommit: commit, CreatedAt: createdAt,
+		SchemaVersion: 1, SourceRelease: "schema-009", SourceCommit: commit, CreatedAt: createdAt,
 		UserID: user.String(), StateObjects: stateBackend.Export(), FileObjects: fileBackend.Export(),
 	}
 }

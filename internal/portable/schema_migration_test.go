@@ -196,6 +196,27 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 		producer: "schema-008", commit: "359ec9fbc9e8020257659c0d91e64372baece1b9",
 		wantEpoch: 1, wantSize: 18, wantFiles: 3,
 	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-009",
+		profile:  "portable-minimal",
+		file:     "schema-009-portable-minimal.json", digest: "41eaccc3880c07ee9457b1afe44d524a610702ef103b9739461a4a709affc04b",
+		producer: "schema-009", commit: "86ad9d8da0e6c45f98d85006f440937557e758dd",
+		wantEpoch: 0, wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-009",
+		profile:  "application-preview-disabled",
+		file:     "schema-009-application-disabled.json", digest: "3ffef665e9698baaa11156cc3eab3de37a308aa671532ca83472ed54ee03c1dc",
+		producer: "schema-009", commit: "86ad9d8da0e6c45f98d85006f440937557e758dd",
+		wantEpoch: 0, wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-009",
+		profile:  "application-preview-gcs",
+		file:     "schema-009-application-gcs.json", digest: "c4cfe1b653f885ca3922f2a7bdf8dfc7016b89923e411eddbc9acf41902a65f9",
+		producer: "schema-009", commit: "86ad9d8da0e6c45f98d85006f440937557e758dd",
+		wantEpoch: 0, wantSize: 18, wantFiles: 3,
+	},
 }
 
 var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.2.0", "v0.2.1", "v0.3.0", "v0.3.1", "v0.3.2"}
@@ -260,7 +281,7 @@ func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *
 					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != wantEpoch {
 						t.Fatalf("upgraded %s %s-backend gate = %+v, %v; want open epoch %d", family.schemaID, topology, gate, err, wantEpoch)
 					}
-					if family.schemaID == "endlessfs-portable-v1/schema-008" {
+					if family.schemaID == "endlessfs-portable-v1/schema-008" || family.schemaID == "endlessfs-portable-v1/schema-009" {
 						assertNoRetiredUploadRecords(t, stateBackend.Export())
 					} else {
 						assertAllUploadRecordsUseCurrentSchema(t, stateBackend.Export())

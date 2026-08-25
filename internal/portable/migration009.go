@@ -256,9 +256,15 @@ func (e *Engine) runStorageMigration008To009(ctx context.Context, transition sto
 	if err != nil {
 		return domain.WrapError(domain.KindOf(err), "stage schema-008 consistency domains", err)
 	}
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterDirectoryPrerequisites)); err != nil {
+		return err
+	}
 	targetRoot, err := e.installSchema009StagedDomains(ctx, gate.Epoch)
 	if err != nil {
 		return domain.WrapError(domain.KindOf(err), "install schema-009 consistency domains", err)
+	}
+	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterDirectoryRoot)); err != nil {
+		return err
 	}
 	if err := e.retireSchema008DomainHeads009(ctx, staging.SourceCatalog, targetRoot, gate.Epoch); err != nil {
 		return domain.WrapError(domain.KindOf(err), "retire schema-008 consistency domains", err)

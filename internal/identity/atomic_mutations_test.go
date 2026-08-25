@@ -221,4 +221,77 @@ func TestAuthenticationCommitIsAtomicAndLostSuccessIsReplayable(t *testing.T) {
 	}
 }
 
+func TestAdministrativeRoleAndAccountChangesHaveOneAtomicBoundary(t *testing.T) {
+	store := &failBeforeAtomicCommit{MemoryStore: state.NewMemoryStore()}
+	repository := NewRepository(store)
+	ids := domain.NewIDGenerator(&deterministicReader{next: 1})
+	clock := domain.NewFixedClock(identityEpoch)
+	sessions, err := auth.NewSessionManager(repository, ids, clock, 12*time.Hour, "https://drive.example.test", true, secret.Value(bearer(0x61)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(repository, fakeWebAuthn{}, sessions, ids, clock, NewMutablePolicy(RegistrationPolicy{AllowInvite: true}), "", "https://drive.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actorID, targetID := userID(t, 0xa1), userID(t, 0xa2)
+	for _, owner := range []domain.UserID{actorID, targetID} {
+		account := model.Account{SchemaVersion: model.SchemaVersion, UserID: owner, Status: model.AccountEnabled, AuthEpoch: 1, CreatedAt: identityEpoch, UpdatedAt: identityEpoch}
+		if err := repository.CreateAccount(ctxbg(), account); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repository.CreateAdminRoles(ctxbg(), model.AdminRoles{SchemaVersion: model.SchemaVersion, UserIDs: []domain.UserID{actorID}}); err != nil {
+		t.Fatal(err)
+	}
+	actor := auth.AuthenticatedSession{Record: model.Session{UserID: actorID}}
+
+	store.fail = true
+	if err := service.GrantAdmin(ctxbg(), actor, targetID); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("injected grant error = %v", err)
+	}
+	roles, _, _ := repository.AdminRoles(ctxbg())
+	target, _, _ := repository.Account(ctxbg(), targetID)
+	if containsUserID(roles.UserIDs, targetID) || target.AuthEpoch != 1 {
+		t.Fatalf("failed grant partially committed roles=%+v account=%+v", roles, target)
+	}
+	if err := service.GrantAdmin(ctxbg(), actor, targetID); err != nil {
+		t.Fatal(err)
+	}
+
+	store.fail = true
+	if err := service.RevokeAdmin(ctxbg(), actor, targetID); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("injected revoke error = %v", err)
+	}
+	roles, _, _ = repository.AdminRoles(ctxbg())
+	target, _, _ = repository.Account(ctxbg(), targetID)
+	if !containsUserID(roles.UserIDs, targetID) || target.AuthEpoch != 2 {
+		t.Fatalf("failed revoke partially committed roles=%+v account=%+v", roles, target)
+	}
+	if err := service.RevokeAdmin(ctxbg(), actor, targetID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.GrantAdmin(ctxbg(), actor, targetID); err != nil {
+		t.Fatal(err)
+	}
+
+	store.fail = true
+	if err := service.DisableUser(ctxbg(), actor, targetID); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("injected disable error = %v", err)
+	}
+	roles, _, _ = repository.AdminRoles(ctxbg())
+	target, _, _ = repository.Account(ctxbg(), targetID)
+	if !containsUserID(roles.UserIDs, targetID) || target.Status != model.AccountEnabled {
+		t.Fatalf("failed disable partially committed roles=%+v account=%+v", roles, target)
+	}
+	if err := service.DisableUser(ctxbg(), actor, targetID); err != nil {
+		t.Fatal(err)
+	}
+	roles, _, _ = repository.AdminRoles(ctxbg())
+	target, _, _ = repository.Account(ctxbg(), targetID)
+	if containsUserID(roles.UserIDs, targetID) || target.Status != model.AccountDisabled || target.AuthEpoch != 5 {
+		t.Fatalf("disable result roles=%+v account=%+v", roles, target)
+	}
+}
+
 func ctxbg() context.Context { return context.Background() }

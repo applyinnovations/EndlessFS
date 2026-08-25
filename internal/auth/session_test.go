@@ -191,6 +191,39 @@ func TestSessionManagerSecurityBoundaryAndCookieLifecycle(t *testing.T) {
 	}
 }
 
+func TestSessionManagerScopesLookupAndRejectsPriorAuthEpochAfterReenable(t *testing.T) {
+	ctx := context.Background()
+	clock := domain.NewFixedClock(time.Date(2035, 2, 3, 4, 5, 6, 0, time.UTC))
+	userID := testUserID(t, 0x92)
+	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x61}, 32)))
+	repository := newSessionRepositoryStub()
+	repository.accounts[userID] = model.Account{SchemaVersion: model.SchemaVersion, UserID: userID, Status: model.AccountEnabled, AuthEpoch: 7, CreatedAt: clock.Now(), UpdatedAt: clock.Now()}
+	manager, err := NewSessionManager(repository, domain.NewIDGenerator(bytes.NewReader(sessionEntropy(4096))), clock, time.Hour, "https://drive.example.test", true, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, err := manager.Issue(ctx, userID, "credential-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := secret.ParseScopedBearerToken(issued.Token.Reveal())
+	if err != nil || owner != userID || issued.Record.AuthEpoch != 7 {
+		t.Fatalf("issued session = %+v owner=%v err=%v", issued.Record, owner, err)
+	}
+	if _, err := manager.Authenticate(ctx, issued.Token.Reveal()); err != nil {
+		t.Fatal(err)
+	}
+	account := repository.accounts[userID]
+	account.Status = model.AccountDisabled
+	account.AuthEpoch++
+	repository.accounts[userID] = account
+	account.Status = model.AccountEnabled
+	repository.accounts[userID] = account
+	if _, err := manager.Authenticate(ctx, issued.Token.Reveal()); !errors.Is(err, domain.ErrUnauthenticated) {
+		t.Fatalf("prior-epoch session after re-enable error = %v", err)
+	}
+}
+
 func sessionEntropy(size int) []byte {
 	value := make([]byte, size)
 	for index := range value {

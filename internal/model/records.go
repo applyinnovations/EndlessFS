@@ -36,6 +36,7 @@ type Account struct {
 	SchemaVersion int           `json:"schemaVersion"`
 	UserID        domain.UserID `json:"userID"`
 	Status        AccountStatus `json:"status"`
+	AuthEpoch     uint64        `json:"authEpoch,omitempty"`
 	CreatedAt     time.Time     `json:"createdAt"`
 	UpdatedAt     time.Time     `json:"updatedAt"`
 }
@@ -338,6 +339,7 @@ type Session struct {
 	SchemaVersion         int           `json:"schemaVersion"`
 	SessionTokenHash      string        `json:"sessionTokenHash"`
 	UserID                domain.UserID `json:"userID"`
+	AuthEpoch             uint64        `json:"authEpoch,omitempty"`
 	CSRFTokenHash         string        `json:"csrfTokenHash"`
 	CreatedAt             time.Time     `json:"createdAt"`
 	ExpiresAt             time.Time     `json:"expiresAt"`

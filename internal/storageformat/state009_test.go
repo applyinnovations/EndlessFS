@@ -23,6 +23,18 @@ func TestSchema009StateRecordCodecBindsCanonicalTypeAndPayload(t *testing.T) {
 	}
 }
 
+func TestSchema009StateRecordCodecPreservesOpaqueStatePayload(t *testing.T) {
+	payload := []byte{0, 1, 2, 0xff, 'n', 'o', 't', '-', 'j', 's', 'o', 'n'}
+	body, err := EncodeStateRecord009(StateRecordSession, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeStateRecord009(body, StateRecordSession)
+	if err != nil || !bytes.Equal(decoded, payload) {
+		t.Fatalf("decoded = %x, %v; want %x", decoded, err, payload)
+	}
+}
+
 func TestSchema009StateRecordCodecRejectsNonCanonicalAndMalformedBodies(t *testing.T) {
 	for name, body := range map[string][]byte{
 		"empty-payload":    []byte(`{"schemaVersion":1,"recordType":"account","payload":null}`),

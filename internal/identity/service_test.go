@@ -180,8 +180,9 @@ func TestIntegrationInviteIsHashedSingleUseAndConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := env.service.CreateInvite(context.Background(), actor, &expiry, "invite-concurrency-0001"); !errors.Is(err, domain.ErrConflict) {
-		t.Fatalf("idempotent invite replay error = %v", err)
+	replayed, err := env.service.CreateInvite(context.Background(), actor, &expiry, "invite-concurrency-0001")
+	if err != nil || replayed.InviteID != created.InviteID || replayed.Link.Reveal() != created.Link.Reveal() {
+		t.Fatalf("idempotent invite replay = %+v, %v", replayed.Record, err)
 	}
 	rawLink := created.Link.Reveal()
 	rawToken := strings.TrimPrefix(rawLink, env.service.baseURL+"/register/invite/")

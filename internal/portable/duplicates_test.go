@@ -10,9 +10,66 @@ import (
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
+	"github.com/applyinnovations/endlessfs/internal/providerbudget"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
+
+func TestDuplicateReconciliationPublishesTheWholePlanOnce(t *testing.T) {
+	base := objectmemory.New()
+	ledger := providerbudget.NewLedger()
+	backend := budgettest.Wrap(providerbudget.RoleState, base, ledger)
+	server := httptest.NewServer(base)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2048, 1, 1, 1, 2, 3, 0, time.UTC))
+	if err := base.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(138, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := portable.Open(context.Background(), portable.Options{
+		Backend: backend, Clock: clock, IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(139, 1<<20))),
+		Writer: portable.WriterConfiguration{WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1", KeyringIdentifiers: []string{"session-v1"}},
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := domain.ParseUserID("YWFhYWFhYWFhYWFhYWFhYQ")
+	live, _ := domain.NewScope(owner, domain.AreaLive)
+	for _, directory := range []string{"/left", "/right"} {
+		if _, err := engine.Files().CreateDirectory(context.Background(), live, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(directory)}); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"a.bin", "b.bin"} {
+			uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath(directory+"/"+name), []byte("identical"))
+		}
+	}
+	preview, err := engine.Files().PreviewDuplicateReconciliation(context.Background(), owner, domain.DuplicateReconciliationPreviewRequest{
+		Left: domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/left")}, Right: domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/right")}, RemoveFrom: domain.DuplicateSideRight,
+	})
+	if err != nil || len(preview.Items) != 1 || preview.PlanToken == "" {
+		t.Fatalf("PreviewDuplicateReconciliation() = %+v, %v", preview, err)
+	}
+	ledger.Reset()
+	result, err := engine.Files().ApplyDuplicateReconciliation(context.Background(), owner, preview.PlanToken, "duplicate-atomic-apply-001")
+	if err != nil || len(result.Items) != 1 || result.Operation.State != domain.OperationSucceeded {
+		t.Fatalf("ApplyDuplicateReconciliation() = %+v, %v", result, err)
+	}
+	headKey := storageformat.DomainHeadKey(storageformat.DomainNamespace, owner.String()).String()
+	headPuts := 0
+	for _, event := range ledger.Events() {
+		if event.Role != providerbudget.RoleState {
+			t.Fatalf("duplicate reconciliation contacted non-state storage: %+v", event)
+		}
+		if event.Kind == providerbudget.RequestObjectPut && event.Target == headKey && !event.Failed {
+			headPuts++
+		}
+	}
+	if headPuts != 1 {
+		t.Fatalf("duplicate reconciliation head publications = %d, want one; events=%+v", headPuts, ledger.Events())
+	}
+}
 
 func TestDuplicateProjectionIsRebuildableAndNeverWrittenByForegroundMutation(t *testing.T) {
 	backend := objectmemory.New()

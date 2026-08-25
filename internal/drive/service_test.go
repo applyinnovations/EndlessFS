@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -86,7 +87,8 @@ type baseStorageOnly struct{ provider.Storage }
 
 type reconciliationStorage struct {
 	provider.NamespaceStorage
-	selection domain.DuplicateReconciliationSelection
+	selection  domain.DuplicateReconciliationSelection
+	applyCalls int
 }
 
 func (s *reconciliationStorage) ListDuplicateGroups(context.Context, domain.UserID, domain.DuplicateGroupRequest) (domain.DuplicateGroupPage, error) {
@@ -122,6 +124,22 @@ func (s *reconciliationStorage) ValidateDuplicateReconciliation(_ context.Contex
 		return domain.DuplicateReconciliationSelection{}, domain.NewError(domain.ErrorInvalid, "invalid plan")
 	}
 	return s.selection, nil
+}
+
+func (s *reconciliationStorage) ApplyDuplicateReconciliation(ctx context.Context, owner domain.UserID, token, idempotencyKey string) (domain.NamespaceBatchResult, error) {
+	s.applyCalls++
+	selection, err := s.ValidateDuplicateReconciliation(ctx, owner, token)
+	if err != nil {
+		return domain.NamespaceBatchResult{}, err
+	}
+	if len(selection.Items) < 1 || len(selection.Items) > drive.MaxBatchItems {
+		return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid bounded reconciliation selection")
+	}
+	requests := make([]domain.TrashRequest, len(selection.Items))
+	for index, item := range selection.Items {
+		requests[index] = domain.TrashRequest{Path: item.Remove.Path, ExpectedVersion: item.Remove.Version, TrashID: fmt.Sprintf("reconcile-%d", index)}
+	}
+	return s.NamespaceStorage.BatchMoveToTrash(ctx, owner, requests, idempotencyKey)
 }
 
 func fixedUserID(t *testing.T, value byte) domain.UserID {
@@ -220,7 +238,7 @@ func TestIntegrationDirectTransfersAndIsolation(t *testing.T) {
 	}
 }
 
-func TestDuplicateReconciliationAppliesPinnedTrashPlanAndRecordsAudit(t *testing.T) {
+func TestDuplicateReconciliationDelegatesOneAtomicProviderMutation(t *testing.T) {
 	env := newDriveEnvironment(t)
 	ctx := context.Background()
 	for _, path := range []string{"/left", "/right"} {
@@ -251,22 +269,17 @@ func TestDuplicateReconciliationAppliesPinnedTrashPlanAndRecordsAudit(t *testing
 	if err != nil || len(result.Items) != 1 || result.Items[0].State != domain.OperationSucceeded || result.Items[0].TrashID == "" {
 		t.Fatalf("ApplyDuplicateReconciliation() = %+v, %v", result, err)
 	}
+	if wrapped.applyCalls != 1 {
+		t.Fatalf("atomic reconciliation calls = %d, want one", wrapped.applyCalls)
+	}
 	if _, err := service.Stat(ctx, env.owner, remove.Path); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("reconciled source remains live: %v", err)
 	}
 	if current, err := service.Stat(ctx, env.owner, keep.Path); err != nil || current.Version != keep.Version {
 		t.Fatalf("preserved occurrence = %+v, %v", current, err)
 	}
-	page, err := env.store.List(ctx, statememory.MustPrefix(statememory.NamespaceOperations, "batch", env.owner.String()), statememory.PageRequest{Limit: 10})
-	if err != nil || len(page.Items) != 1 {
-		t.Fatalf("reconciliation audit page = %+v, %v", page, err)
-	}
-	var audit model.BatchOperation
-	if err := statememory.DecodeJSON(page.Items[0].Value.Data, &audit); err != nil {
-		t.Fatal(err)
-	}
-	if audit.Kind != "duplicate_reconciliation" || audit.ItemCount != 1 || audit.SucceededCount != 1 || audit.ReclaimableBytes != remove.Size || audit.RequestDigest == "" {
-		t.Fatalf("reconciliation audit = %+v", audit)
+	if operation, err := wrapped.GetBatchOperation(ctx, env.owner, result.OperationID); err != nil || operation.State != domain.OperationSucceeded {
+		t.Fatalf("durable reconciliation outcome = %+v, %v", operation, err)
 	}
 }
 

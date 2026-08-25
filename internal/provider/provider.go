@@ -68,4 +68,5 @@ type DuplicateStorage interface {
 	SetDuplicateDirectoryIgnored(context.Context, domain.UserID, domain.SetDuplicateDirectoryIgnoredRequest) (domain.DuplicateDirectoryIgnore, error)
 	PreviewDuplicateReconciliation(context.Context, domain.UserID, domain.DuplicateReconciliationPreviewRequest) (domain.DuplicateReconciliationPreview, error)
 	ValidateDuplicateReconciliation(context.Context, domain.UserID, string) (domain.DuplicateReconciliationSelection, error)
+	ApplyDuplicateReconciliation(context.Context, domain.UserID, string, string) (domain.NamespaceBatchResult, error)
 }

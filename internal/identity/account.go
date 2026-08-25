@@ -104,14 +104,14 @@ func (s *Service) RemovePasskey(ctx context.Context, session auth.AuthenticatedS
 			}
 			return err
 		}
-		credential, credentialVersion, err := s.repository.Credential(ctx, credentialID)
+		credential, credentialVersion, err := s.repository.Credential(ctx, session.Record.UserID, credentialID)
 		if errors.Is(err, domain.ErrNotFound) {
 			return nil
 		}
 		if err != nil || credential.UserID != session.Record.UserID {
 			return domain.NewError(domain.ErrorNotFound, "passkey not found")
 		}
-		if err := s.repository.DeleteCredential(ctx, credentialID, credentialVersion); err != nil && !errors.Is(err, domain.ErrNotFound) {
+		if err := s.repository.DeleteCredential(ctx, session.Record.UserID, credentialID, credentialVersion); err != nil && !errors.Is(err, domain.ErrNotFound) {
 			return err
 		}
 		return nil

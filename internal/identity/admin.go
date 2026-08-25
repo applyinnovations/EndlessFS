@@ -159,7 +159,11 @@ func (s *Service) CreateRecovery(ctx context.Context, actor auth.AuthenticatedSe
 	if err != nil {
 		return CreatedRecovery{}, err
 	}
-	token, err := s.ids.BearerToken()
+	rawToken, err := s.ids.BearerToken()
+	if err != nil {
+		return CreatedRecovery{}, err
+	}
+	token, err := secret.ScopeBearerToken(target, rawToken)
 	if err != nil {
 		return CreatedRecovery{}, err
 	}
@@ -266,7 +270,7 @@ func (s *Service) createOrConfirmRecovery(ctx context.Context, record model.Reco
 	} else if !errors.Is(err, domain.ErrConflict) {
 		return err
 	}
-	existing, _, err := s.repository.RecoveryByHash(ctx, record.TokenHash)
+	existing, _, err := s.repository.RecoveryByHash(ctx, record.TargetUserID, record.TokenHash)
 	if err != nil || existing.RecoveryID != record.RecoveryID {
 		return domain.NewError(domain.ErrorConflict, "recovery materialization conflict")
 	}

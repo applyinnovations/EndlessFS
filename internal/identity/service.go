@@ -165,7 +165,7 @@ func (s *Service) allowPublicRegistrationAttempt(clientKey string) bool {
 }
 
 func (s *Service) StartRecovery(ctx context.Context, recoveryToken secret.Value) (CeremonyStart, error) {
-	if !secret.ValidBearerToken(recoveryToken.Reveal()) {
+	if !secret.ValidScopedBearerToken(recoveryToken.Reveal()) {
 		return CeremonyStart{}, domain.NewError(domain.ErrorUnavailable, "recovery is unavailable")
 	}
 	recovery, _, err := s.repository.RecoveryByToken(ctx, recoveryToken.Reveal())
@@ -240,6 +240,10 @@ func (s *Service) startRegistrationCeremony(ctx context.Context, flow model.Cere
 		return CeremonyStart{}, err
 	}
 	ceremonyID, binding, err := s.newCeremonySecrets()
+	if err != nil {
+		return CeremonyStart{}, err
+	}
+	ceremonyID, err = domain.ScopeOpaqueID(user.ID, ceremonyID)
 	if err != nil {
 		return CeremonyStart{}, err
 	}
@@ -372,7 +376,7 @@ func (s *Service) VerifyAuthentication(ctx context.Context, ceremonyID string, b
 	if err != nil || account.Status != model.AccountEnabled {
 		return auth.IssuedSession{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
 	}
-	stored, credentialVersion, err := s.repository.Credential(ctx, result.Credential.CredentialID)
+	stored, credentialVersion, err := s.repository.Credential(ctx, result.UserID, result.Credential.CredentialID)
 	if err != nil || stored.UserID != result.UserID {
 		return auth.IssuedSession{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
 	}
@@ -429,7 +433,7 @@ func (s *Service) resolveDiscoverable(ctx context.Context) auth.UserResolver {
 		if err != nil {
 			return auth.User{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
 		}
-		credential, _, err := s.repository.CredentialByRawID(ctx, rawCredentialID)
+		credential, _, err := s.repository.CredentialByRawID(ctx, userID, rawCredentialID)
 		if err != nil || credential.UserID != userID {
 			return auth.User{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
 		}

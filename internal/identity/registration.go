@@ -45,7 +45,7 @@ func (s *Service) verifyRegistrationPolicy(ctx context.Context, ceremony model.C
 			return domain.NewError(domain.ErrorUnavailable, "registration is unavailable")
 		}
 	case model.CeremonyRecovery:
-		recovery, _, err := s.repository.RecoveryByHash(ctx, ceremony.BearerTokenHash)
+		recovery, _, err := s.repository.RecoveryByHash(ctx, *ceremony.UserID, ceremony.BearerTokenHash)
 		if err != nil || !s.recoveryUsable(recovery) || ceremony.UserID == nil || recovery.TargetUserID != *ceremony.UserID {
 			return domain.NewError(domain.ErrorUnavailable, "recovery is unavailable")
 		}
@@ -99,7 +99,7 @@ func (s *Service) claimRegistration(ctx context.Context, ceremony model.Ceremony
 			return domain.NewError(domain.ErrorConflict, "invite was already consumed")
 		}
 	case model.CeremonyRecovery:
-		recovery, version, err := s.repository.RecoveryByHash(ctx, ceremony.BearerTokenHash)
+		recovery, version, err := s.repository.RecoveryByHash(ctx, operation.UserID, ceremony.BearerTokenHash)
 		if err != nil || !s.recoveryUsable(recovery) || recovery.TargetUserID != operation.UserID {
 			return domain.NewError(domain.ErrorUnavailable, "recovery is unavailable")
 		}
@@ -120,7 +120,7 @@ func (s *Service) resumeRegistration(ctx context.Context, ceremony model.Ceremon
 	if ceremony.OperationID == "" {
 		return RegistrationComplete{}, domain.NewError(domain.ErrorConflict, "registration ceremony was consumed")
 	}
-	operation, _, err := s.repository.RegistrationOperation(ctx, ceremony.OperationID)
+	operation, _, err := s.repository.RegistrationOperation(ctx, *ceremony.UserID, ceremony.OperationID)
 	if err != nil || operation.UserID != *ceremony.UserID || operation.Flow != ceremony.Flow {
 		return RegistrationComplete{}, domain.NewError(domain.ErrorConflict, "registration operation is unavailable")
 	}
@@ -147,7 +147,7 @@ func (s *Service) registrationClaimOwned(ctx context.Context, ceremony model.Cer
 			return domain.NewError(domain.ErrorConflict, "invite claim is unavailable")
 		}
 	case model.CeremonyRecovery:
-		recovery, _, err := s.repository.RecoveryByHash(ctx, ceremony.BearerTokenHash)
+		recovery, _, err := s.repository.RecoveryByHash(ctx, operation.UserID, ceremony.BearerTokenHash)
 		if err != nil || recovery.OperationID != operation.OperationID || recovery.TargetUserID != operation.UserID {
 			return domain.NewError(domain.ErrorConflict, "recovery claim is unavailable")
 		}
@@ -198,7 +198,7 @@ func (s *Service) createOrConfirmCredential(ctx context.Context, credential mode
 	if err := s.repository.CreateCredential(ctx, credential); err != nil && !errors.Is(err, domain.ErrConflict) {
 		return err
 	}
-	existing, _, err := s.repository.Credential(ctx, credential.CredentialID)
+	existing, _, err := s.repository.Credential(ctx, credential.UserID, credential.CredentialID)
 	if err != nil || existing.UserID != credential.UserID || existing.PublicKey != credential.PublicKey {
 		return domain.NewError(domain.ErrorConflict, "credential is already registered")
 	}
@@ -252,7 +252,7 @@ func (s *Service) createOrConfirmProfile(ctx context.Context, profile model.Prof
 func (s *Service) createOrConfirmAccount(ctx context.Context, operation model.RegistrationOperation) error {
 	account := model.Account{
 		SchemaVersion: model.SchemaVersion, UserID: operation.UserID,
-		Status: model.AccountDisabled, CreatedAt: operation.CreatedAt, UpdatedAt: operation.CreatedAt,
+		Status: model.AccountDisabled, AuthEpoch: 1, CreatedAt: operation.CreatedAt, UpdatedAt: operation.CreatedAt,
 	}
 	if err := s.repository.CreateAccount(ctx, account); err == nil {
 		return nil
@@ -301,7 +301,7 @@ func (s *Service) enableMaterializedAccount(ctx context.Context, userID domain.U
 }
 
 func (s *Service) commitRegistration(ctx context.Context, operation model.RegistrationOperation) error {
-	current, version, err := s.repository.RegistrationOperation(ctx, operation.OperationID)
+	current, version, err := s.repository.RegistrationOperation(ctx, operation.UserID, operation.OperationID)
 	if err != nil {
 		return err
 	}

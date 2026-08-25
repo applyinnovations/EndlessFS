@@ -20,6 +20,8 @@ const (
 	DomainAdmin        ConsistencyDomainKind = "administration"
 	DomainCapability   ConsistencyDomainKind = "capability"
 	DomainShare        ConsistencyDomainKind = "share"
+	DomainIdentity     ConsistencyDomainKind = "owner-identity"
+	DomainOwnerJobs    ConsistencyDomainKind = "owner-jobs"
 )
 
 type ProjectionKind string
@@ -304,7 +306,7 @@ func validateDomainTreeRoot(root DomainTreeRoot) error {
 
 func validDomainKind(kind ConsistencyDomainKind) bool {
 	switch kind {
-	case DomainNamespace, DomainOwnerControl, DomainAdmin, DomainCapability, DomainShare:
+	case DomainNamespace, DomainOwnerControl, DomainAdmin, DomainCapability, DomainShare, DomainIdentity, DomainOwnerJobs:
 		return true
 	default:
 		return false

@@ -103,6 +103,28 @@ func (m *SessionManager) prepare(ctx context.Context, userID domain.UserID, cred
 	return IssuedSession{Token: secret.Value(rawToken), CSRFToken: secret.Value(csrfToken), Record: record}, nil
 }
 
+// PrepareForOperation derives replayable session material from a committed
+// authentication operation. The operation ID is public entropy; secrecy and
+// unlinkability come from the server-held protection key. Raw secrets remain
+// ephemeral and are never written to application state.
+func (m *SessionManager) PrepareForOperation(userID domain.UserID, credentialID, operationID string, createdAt time.Time, authEpoch uint64) (IssuedSession, error) {
+	if !userID.Valid() || credentialID == "" || operationID == "" || createdAt.IsZero() || createdAt.Location() != time.UTC || authEpoch == 0 {
+		return IssuedSession{}, domain.NewError(domain.ErrorInvalid, "invalid deterministic session material")
+	}
+	rawSecret := secret.KeyedHash(m.protectionKey, "endlessfs-session-operation-v1\x00"+userID.String()+"\x00"+operationID)
+	rawToken, err := secret.ScopeBearerToken(userID, rawSecret)
+	if err != nil {
+		return IssuedSession{}, err
+	}
+	csrfToken := secret.KeyedHash(m.protectionKey, "endlessfs-csrf-operation-v1\x00"+userID.String()+"\x00"+operationID)
+	record := model.Session{
+		SchemaVersion: model.SchemaVersion, SessionTokenHash: secret.KeyedHash(m.protectionKey, rawToken),
+		UserID: userID, AuthEpoch: authEpoch, CSRFTokenHash: secret.KeyedHash(m.protectionKey, csrfToken),
+		CreatedAt: createdAt, ExpiresAt: createdAt.Add(m.ttl), AuthnCredentialIDHash: secret.Hash(credentialID),
+	}
+	return IssuedSession{Token: secret.Value(rawToken), CSRFToken: secret.Value(csrfToken), Record: record}, nil
+}
+
 func (m *SessionManager) Authenticate(ctx context.Context, rawToken string) (AuthenticatedSession, error) {
 	owner, _, parseErr := secret.ParseScopedBearerToken(rawToken)
 	if parseErr != nil {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"math"
 
+	"github.com/applyinnovations/endlessfs/internal/auth"
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/model"
 	"github.com/applyinnovations/endlessfs/internal/secret"
@@ -392,6 +393,54 @@ func (r *Repository) CreateRegistrationOperation(ctx context.Context, record mod
 
 func (r *Repository) RegistrationOperation(ctx context.Context, owner domain.UserID, operationID string) (model.RegistrationOperation, state.Version, error) {
 	return getRecord[model.RegistrationOperation](ctx, r.store, state.MustKey(state.NamespaceOperations, "identity", owner.String(), operationID))
+}
+
+func authenticationOperationKey(owner domain.UserID, operationID string) state.Key {
+	return state.MustKey(state.NamespaceOperations, "identity", owner.String(), "authentication", operationID)
+}
+
+func (r *Repository) AuthenticationOperation(ctx context.Context, owner domain.UserID, operationID string) (model.AuthenticationOperation, state.Version, error) {
+	return getRecord[model.AuthenticationOperation](ctx, r.store, authenticationOperationKey(owner, operationID))
+}
+
+// CommitAuthenticationAtomic consumes the one-time ceremony and publishes the
+// credential counter, replay-safe operation outcome, and new session together.
+// The unchanged account write is a commit-time enabled/auth-epoch guard.
+func (r *Repository) CommitAuthenticationAtomic(ctx context.Context, ceremony model.Ceremony, ceremonyVersion state.Version, operation model.AuthenticationOperation, credential model.Credential, credentialVersion state.Version, account model.Account, accountVersion state.Version, issued auth.IssuedSession) error {
+	ceremonyKeyValue, _, err := ceremonyKey(ceremony.CeremonyID)
+	if err != nil || ceremony.Type != model.CeremonyAuthentication || ceremony.ConsumedAt == nil || ceremony.OperationID != operation.OperationID || ceremony.UserID == nil || *ceremony.UserID != operation.UserID || operation.UserID != credential.UserID || operation.UserID != account.UserID || issued.Record.UserID != operation.UserID || ceremonyVersion == "" || credentialVersion == "" || accountVersion == "" {
+		return domain.NewError(domain.ErrorInvalid, "authentication transition binding mismatch")
+	}
+	changes := make([]state.Change, 0, 5)
+	appendRecord := func(key state.Key, requirement state.Requirement, version state.Version, record any) error {
+		body, encodeErr := state.EncodeJSON(record)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		changes = append(changes, state.Change{Key: key, Requirement: requirement, ExpectedVersion: version, Data: body})
+		return nil
+	}
+	if err := appendRecord(ceremonyKeyValue, state.RequirementPresent, ceremonyVersion, &ceremony); err != nil {
+		return err
+	}
+	if err := appendRecord(authenticationOperationKey(operation.UserID, operation.OperationID), state.RequirementAbsent, "", &operation); err != nil {
+		return err
+	}
+	if err := appendRecord(credentialKey(operation.UserID, operation.CredentialID), state.RequirementPresent, credentialVersion, &credential); err != nil {
+		return err
+	}
+	if err := appendRecord(state.MustKey(state.NamespaceAccounts, operation.UserID.String()), state.RequirementPresent, accountVersion, &account); err != nil {
+		return err
+	}
+	if err := appendRecord(sessionKey(operation.UserID, issued.Token.Reveal()), state.RequirementAbsent, "", &issued.Record); err != nil {
+		return err
+	}
+	store, err := r.transactionalStore()
+	if err != nil {
+		return err
+	}
+	_, err = store.Transact(ctx, state.Mutation{ID: "authentication:" + operation.OperationID, Changes: changes})
+	return err
 }
 
 func (r *Repository) UpdateRegistrationOperation(ctx context.Context, record model.RegistrationOperation, version state.Version) (state.Version, error) {

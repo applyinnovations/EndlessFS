@@ -147,8 +147,9 @@ func TestIntegrationCeremonyBindingExpiryReplayAndUsernamelessAuthentication(t *
 	if _, err := env.sessions.Authenticate(context.Background(), issued.Token.Reveal()); err != nil {
 		t.Fatalf("issued login session error = %v", err)
 	}
-	if _, err := env.service.VerifyAuthentication(context.Background(), authStart.CeremonyID, authStart.BrowserBinding, authResponse); !errors.Is(err, domain.ErrUnauthenticated) {
-		t.Fatalf("authentication replay error = %v", err)
+	replayed, err := env.service.VerifyAuthentication(context.Background(), authStart.CeremonyID, authStart.BrowserBinding, authResponse)
+	if err != nil || replayed.Token.Reveal() != issued.Token.Reveal() || replayed.CSRFToken.Reveal() != issued.CSRFToken.Reveal() {
+		t.Fatalf("authentication replay = %+v, %v", replayed.Record, err)
 	}
 }
 

@@ -294,4 +294,64 @@ func TestAdministrativeRoleAndAccountChangesHaveOneAtomicBoundary(t *testing.T) 
 	}
 }
 
+func TestAdministrativeCapabilitiesAreAtomicAndLostSuccessReplayable(t *testing.T) {
+	store := &failBeforeAtomicCommit{MemoryStore: state.NewMemoryStore()}
+	repository := NewRepository(store)
+	ids := domain.NewIDGenerator(&deterministicReader{next: 1})
+	clock := domain.NewFixedClock(identityEpoch)
+	sessions, err := auth.NewSessionManager(repository, ids, clock, 12*time.Hour, "https://drive.example.test", true, secret.Value(bearer(0x61)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(repository, fakeWebAuthn{}, sessions, ids, clock, NewMutablePolicy(RegistrationPolicy{AllowInvite: true}), "", "https://drive.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actorID, targetID := userID(t, 0xb1), userID(t, 0xb2)
+	for _, owner := range []domain.UserID{actorID, targetID} {
+		if err := repository.CreateAccount(ctxbg(), model.Account{SchemaVersion: model.SchemaVersion, UserID: owner, Status: model.AccountEnabled, AuthEpoch: 1, CreatedAt: identityEpoch, UpdatedAt: identityEpoch}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := repository.CreateAdminRoles(ctxbg(), model.AdminRoles{SchemaVersion: model.SchemaVersion, UserIDs: []domain.UserID{actorID}}); err != nil {
+		t.Fatal(err)
+	}
+	actor := auth.AuthenticatedSession{Record: model.Session{UserID: actorID}}
+
+	const inviteKey = "atomic-invite-key-0001"
+	store.fail = true
+	if _, err := service.CreateInvite(ctxbg(), actor, nil, inviteKey); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("injected invite error = %v", err)
+	}
+	if invites, err := repository.Invites(ctxbg()); err != nil || len(invites) != 0 {
+		t.Fatalf("failed invite left records: %+v, %v", invites, err)
+	}
+	store.failAfter = true
+	if _, err := service.CreateInvite(ctxbg(), actor, nil, inviteKey); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("lost-success invite error = %v", err)
+	}
+	invite, err := service.CreateInvite(ctxbg(), actor, nil, inviteKey)
+	if err != nil || invite.Link.Reveal() == "" {
+		t.Fatalf("invite replay = %+v, %v", invite.Record, err)
+	}
+	store.fail = true
+	if err := service.RevokeInvite(ctxbg(), actor, invite.InviteID); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("injected invite revoke error = %v", err)
+	}
+	storedInvite, _, _ := repository.InviteByID(ctxbg(), invite.InviteID)
+	if storedInvite.RevokedAt != nil {
+		t.Fatal("failed revoke changed invite")
+	}
+
+	const recoveryKey = "atomic-recovery-key-0001"
+	store.failAfter = true
+	if _, err := service.CreateRecovery(ctxbg(), actor, targetID, time.Minute, recoveryKey); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("lost-success recovery error = %v", err)
+	}
+	recovery, err := service.CreateRecovery(ctxbg(), actor, targetID, time.Minute, recoveryKey)
+	if err != nil || recovery.Link.Reveal() == "" {
+		t.Fatalf("recovery replay = %+v, %v", recovery.Record, err)
+	}
+}
+
 func ctxbg() context.Context { return context.Background() }

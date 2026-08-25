@@ -38,6 +38,27 @@ func TestKeyedHashBindsProtectionKeyAndValue(t *testing.T) {
 	}
 }
 
+func TestScopedBearerTokenRoundTripAndTamperDenial(t *testing.T) {
+	owner, err := domain.ParseUserID(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x31}, 16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x52}, 32))
+	token, err := ScopeBearerToken(owner, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedOwner, secretPart, err := ParseScopedBearerToken(token)
+	if err != nil || parsedOwner != owner || secretPart.Reveal() != raw || !ValidScopedBearerToken(token) {
+		t.Fatalf("parsed token = %v %v %v", parsedOwner, secretPart, err)
+	}
+	for _, invalid := range []string{"", raw, "s2." + owner.String() + "." + raw, "s1.invalid." + raw, "s1." + owner.String() + ".invalid", token + ".extra"} {
+		if ValidScopedBearerToken(invalid) {
+			t.Errorf("accepted invalid scoped token %q", invalid)
+		}
+	}
+}
+
 func TestSecretValueCannotLeakThroughStringOrStructuredLog(t *testing.T) {
 	t.Parallel()
 

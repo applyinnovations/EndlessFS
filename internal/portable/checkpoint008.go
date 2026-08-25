@@ -41,7 +41,17 @@ func (e *Engine) drainExpiredSchema008Uploads(ctx context.Context) error {
 				if err := decodeCanonicalValue(value.Value, &record); err != nil || storageformat.ValidatePortableUploadRecord(record) != nil || record.OwnerID != reference.ID || uploadRecordKey(record.UploadID) != value.Key {
 					return domain.NewError(domain.ErrorInvalid, "invalid portable upload while closing checkpoint")
 				}
-				if record.State != storageformat.UploadActive {
+				if record.CleanupPending {
+					owner, parseErr := domain.ParseUserID(record.OwnerID)
+					if parseErr != nil {
+						return domain.NewError(domain.ErrorInvalid, "invalid upload cleanup owner")
+					}
+					if err := files.cleanupPortableUpload(ctx, owner, record.UploadID); err != nil {
+						return err
+					}
+					continue
+				}
+				if record.State != storageformat.UploadActive && record.State != storageformat.UploadInitializing {
 					continue
 				}
 				if e.clock.Now().UTC().Before(record.ExpiresAt) {

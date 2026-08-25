@@ -177,13 +177,20 @@ func TestSchema008UploadAndDuplicateProjectionValidationMatrix(t *testing.T) {
 			requireSchema008Invalid(t, ValidatePortableUploadRecord(value))
 		})
 	}
-	for _, state := range []UploadState{UploadCompleted, UploadAborted} {
+	for _, state := range []UploadState{UploadInitializing, UploadCompleted, UploadAborted} {
 		value := upload
 		value.State = state
 		if err := ValidatePortableUploadRecord(value); err != nil {
 			t.Fatalf("terminal upload %q = %v", state, err)
 		}
 	}
+	cleanup := upload
+	cleanup.State, cleanup.CleanupPending = UploadCompleted, true
+	if err := ValidatePortableUploadRecord(cleanup); err != nil {
+		t.Fatalf("cleanup-pending upload: %v", err)
+	}
+	cleanup.State = UploadActive
+	requireSchema008Invalid(t, ValidatePortableUploadRecord(cleanup))
 
 	idempotency := PortableUploadIdempotency{SchemaVersion: 1, OwnerID: "owner", KeyDigest: Digest([]byte("key")), Fingerprint: Digest([]byte("fingerprint")), UploadID: "upload"}
 	if err := ValidatePortableUploadIdempotency(idempotency); err != nil {

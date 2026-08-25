@@ -447,9 +447,10 @@ type DirectoryEntry struct {
 type UploadState string
 
 const (
-	UploadActive    UploadState = "active"
-	UploadCompleted UploadState = "completed"
-	UploadAborted   UploadState = "aborted"
+	UploadInitializing UploadState = "initializing"
+	UploadActive       UploadState = "active"
+	UploadCompleted    UploadState = "completed"
+	UploadAborted      UploadState = "aborted"
 )
 
 type UploadRecord struct {

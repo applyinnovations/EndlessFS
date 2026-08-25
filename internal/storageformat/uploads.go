@@ -21,6 +21,7 @@ type PortableUploadRecord struct {
 	TargetExisted   bool                `json:"targetExisted,omitempty"`
 	Resumable       bool                `json:"resumable,omitempty"`
 	State           UploadState         `json:"state"`
+	CleanupPending  bool                `json:"cleanupPending,omitempty"`
 	CreatedAt       time.Time           `json:"createdAt"`
 	ExpiresAt       time.Time           `json:"expiresAt"`
 }
@@ -34,7 +35,7 @@ type PortableUploadIdempotency struct {
 }
 
 func ValidatePortableUploadRecord(record PortableUploadRecord) error {
-	if record.SchemaVersion != 1 || !validDomainText(record.UploadID) || !validDomainText(record.OwnerID) || record.Area != "live" && record.Area != "trash" || record.RequestedPath == "" || record.ResolvedPath == "" || !validDomainText(record.BlobID) || record.Size < 0 || record.MediaType == "" || !record.Conflict.Valid() || record.State != UploadActive && record.State != UploadCompleted && record.State != UploadAborted || record.CreatedAt.IsZero() || !record.ExpiresAt.After(record.CreatedAt) {
+	if record.SchemaVersion != 1 || !validDomainText(record.UploadID) || !validDomainText(record.OwnerID) || record.Area != "live" && record.Area != "trash" || record.RequestedPath == "" || record.ResolvedPath == "" || !validDomainText(record.BlobID) || record.Size < 0 || record.MediaType == "" || !record.Conflict.Valid() || record.State != UploadInitializing && record.State != UploadActive && record.State != UploadCompleted && record.State != UploadAborted || record.CleanupPending && record.State != UploadCompleted && record.State != UploadAborted || record.CreatedAt.IsZero() || !record.ExpiresAt.After(record.CreatedAt) {
 		return domain.NewError(domain.ErrorInvalid, "invalid portable upload record")
 	}
 	_, err := EncodeCanonical(record)

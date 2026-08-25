@@ -115,7 +115,7 @@ func ValidateNamespaceMutationResult(result NamespaceMutationResult) error {
 			return err
 		}
 	}
-	if result.Upload != nil && (!validDomainText(result.Upload.UploadID) || result.Upload.State != "created" && result.Upload.State != "aborted") {
+	if result.Upload != nil && (!validDomainText(result.Upload.UploadID) || result.Upload.State != "created" && result.Upload.State != "initializing" && result.Upload.State != "active" && result.Upload.State != "completed" && result.Upload.State != "aborted") {
 		return domain.NewError(domain.ErrorInvalid, "invalid namespace upload result")
 	}
 	_, err := EncodeCanonical(result)

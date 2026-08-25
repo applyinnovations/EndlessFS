@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -17,7 +18,8 @@ import (
 
 type failBeforeAtomicCommit struct {
 	*state.MemoryStore
-	fail bool
+	fail      bool
+	failAfter bool
 }
 
 func (store *failBeforeAtomicCommit) Mutate(ctx context.Context, mutation state.Mutation) (state.MutationOutcome, error) {
@@ -25,7 +27,12 @@ func (store *failBeforeAtomicCommit) Mutate(ctx context.Context, mutation state.
 		store.fail = false
 		return state.MutationOutcome{}, domain.NewError(domain.ErrorUnavailable, "injected process loss")
 	}
-	return store.MemoryStore.Mutate(ctx, mutation)
+	outcome, err := store.MemoryStore.Mutate(ctx, mutation)
+	if err == nil && store.failAfter {
+		store.failAfter = false
+		return state.MutationOutcome{}, domain.NewError(domain.ErrorUnavailable, "injected lost success response")
+	}
+	return outcome, err
 }
 
 func (store *failBeforeAtomicCommit) Transact(ctx context.Context, mutation state.Mutation) (state.MutationOutcome, error) {
@@ -150,6 +157,67 @@ func TestRegistrationCommitHasOneCrashSafeTransition(t *testing.T) {
 	credentials, credentialErr := repository.Credentials(context.Background(), complete.UserID)
 	if accountErr != nil || credentialErr != nil || account.Status != model.AccountEnabled || len(credentials) != 1 {
 		t.Fatalf("atomic registration result: account=%+v credentials=%+v errors=%v/%v", account, credentials, accountErr, credentialErr)
+	}
+}
+
+func TestAuthenticationCommitIsAtomicAndLostSuccessIsReplayable(t *testing.T) {
+	store := &failBeforeAtomicCommit{MemoryStore: state.NewMemoryStore()}
+	repository := NewRepository(store)
+	reader := &deterministicReader{next: 1}
+	ids := domain.NewIDGenerator(reader)
+	clock := domain.NewFixedClock(identityEpoch)
+	sessions, err := auth.NewSessionManager(repository, ids, clock, 12*time.Hour, "https://drive.example.test", true, secret.Value(bearer(0x61)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(repository, fakeWebAuthn{}, sessions, ids, clock, NewMutablePolicy(RegistrationPolicy{AllowPublic: true}), "", "https://drive.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err := service.StartRegistration(ctxbg(), RegistrationStartRequest{DisplayName: "Atomic Login", ClientKey: "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, err := service.VerifyRegistration(ctxbg(), registration.CeremonyID, registration.BrowserBinding, fakeRegistrationResponse(0x92))
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, credentialVersion, err := repository.Credential(ctxbg(), registered.UserID, registered.CredentialID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, err := service.StartAuthentication(ctxbg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, _ := json.Marshal(fakeResponse{UserID: registered.UserID.String(), CredentialID: registered.CredentialID})
+	store.fail = true
+	if _, err := service.VerifyAuthentication(ctxbg(), start.CeremonyID, start.BrowserBinding, response); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("injected authentication error = %v", err)
+	}
+	ceremony, _, err := repository.Ceremony(ctxbg(), start.CeremonyID)
+	if err != nil || ceremony.ConsumedAt != nil || ceremony.OperationID != "" || ceremony.UserID != nil {
+		t.Fatalf("failed authentication changed ceremony: %+v, %v", ceremony, err)
+	}
+	unchanged, unchangedVersion, err := repository.Credential(ctxbg(), registered.UserID, registered.CredentialID)
+	if err != nil || unchanged.SignCount != credential.SignCount || unchangedVersion != credentialVersion {
+		t.Fatalf("failed authentication changed credential: %+v/%q, want %+v/%q; %v", unchanged, unchangedVersion, credential, credentialVersion, err)
+	}
+
+	store.failAfter = true
+	if _, err := service.VerifyAuthentication(ctxbg(), start.CeremonyID, start.BrowserBinding, response); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("lost-success authentication error = %v", err)
+	}
+	replayed, err := service.VerifyAuthentication(ctxbg(), start.CeremonyID, start.BrowserBinding, response)
+	if err != nil {
+		t.Fatalf("authentication replay error = %v", err)
+	}
+	if _, err := sessions.Authenticate(ctxbg(), replayed.Token.Reveal()); err != nil {
+		t.Fatalf("replayed session is unusable: %v", err)
+	}
+	committed, _, err := repository.Credential(ctxbg(), registered.UserID, registered.CredentialID)
+	if err != nil || committed.SignCount != credential.SignCount+1 {
+		t.Fatalf("committed credential = %+v, %v", committed, err)
 	}
 }
 

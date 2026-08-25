@@ -47,6 +47,17 @@ func NewMemoryStore() *MemoryStore {
 // Mutate applies all changes while holding the store's single deterministic
 // commit lock. Preconditions are checked in full before any record is changed.
 func (s *MemoryStore) Mutate(ctx context.Context, mutation Mutation) (MutationOutcome, error) {
+	return s.applyMutation(ctx, mutation)
+}
+
+// Transact has the same single-lock implementation in memory because the
+// deterministic backend has one in-process consistency domain. Object-store
+// implementations provide the durable multi-domain decision protocol.
+func (s *MemoryStore) Transact(ctx context.Context, mutation Mutation) (MutationOutcome, error) {
+	return s.applyMutation(ctx, mutation)
+}
+
+func (s *MemoryStore) applyMutation(ctx context.Context, mutation Mutation) (MutationOutcome, error) {
 	if err := contextError(ctx); err != nil {
 		return MutationOutcome{}, err
 	}

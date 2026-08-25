@@ -193,6 +193,15 @@ type AtomicStore interface {
 	Mutate(context.Context, Mutation) (MutationOutcome, error)
 }
 
+// TransactionalStore extends AtomicStore to a mutation whose keys may span
+// several consistency domains. Implementations publish one durable decision,
+// make every participating domain helpable, and expose only the complete old
+// or complete committed state after crashes and lost responses.
+type TransactionalStore interface {
+	AtomicStore
+	Transact(context.Context, Mutation) (MutationOutcome, error)
+}
+
 func normalizePageLimit(limit int) (int, error) {
 	if limit == 0 {
 		return 200, nil

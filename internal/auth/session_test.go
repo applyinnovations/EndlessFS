@@ -57,6 +57,22 @@ func (repository *sessionRepositoryStub) DeleteSession(_ context.Context, token 
 	return nil
 }
 
+func (repository *sessionRepositoryStub) RotateSessionAtomic(_ context.Context, oldToken string, _ state.Version, newToken string, record model.Session) error {
+	if repository.deleteErr != nil {
+		return repository.deleteErr
+	}
+	if _, ok := repository.sessions[oldToken]; !ok {
+		return domain.ErrNotFound
+	}
+	if repository.createErr != nil {
+		return repository.createErr
+	}
+	delete(repository.sessions, oldToken)
+	repository.sessions[newToken] = record
+	repository.versions[newToken] = "v2"
+	return nil
+}
+
 func (repository *sessionRepositoryStub) RevokeUserSessions(_ context.Context, userID domain.UserID) error {
 	repository.revokedUserID = userID
 	return repository.revokeErr

@@ -23,6 +23,7 @@ type SessionRepository interface {
 	CreateSession(context.Context, string, model.Session) error
 	Session(context.Context, string) (model.Session, state.Version, error)
 	DeleteSession(context.Context, string, state.Version) error
+	RotateSessionAtomic(context.Context, string, state.Version, string, model.Session) error
 	RevokeUserSessions(context.Context, domain.UserID) error
 	Account(context.Context, domain.UserID) (model.Account, state.Version, error)
 }
@@ -57,6 +58,17 @@ func NewSessionManager(repository SessionRepository, ids *domain.IDGenerator, cl
 }
 
 func (m *SessionManager) Issue(ctx context.Context, userID domain.UserID, credentialID string) (IssuedSession, error) {
+	issued, err := m.prepare(ctx, userID, credentialID)
+	if err != nil {
+		return IssuedSession{}, err
+	}
+	if err := m.repository.CreateSession(ctx, issued.Token.Reveal(), issued.Record); err != nil {
+		return IssuedSession{}, err
+	}
+	return issued, nil
+}
+
+func (m *SessionManager) prepare(ctx context.Context, userID domain.UserID, credentialID string) (IssuedSession, error) {
 	if !userID.Valid() || credentialID == "" {
 		return IssuedSession{}, domain.NewError(domain.ErrorInvalid, "session owner and credential are required")
 	}
@@ -87,9 +99,6 @@ func (m *SessionManager) Issue(ctx context.Context, userID domain.UserID, creden
 		CreatedAt:             now,
 		ExpiresAt:             now.Add(m.ttl),
 		AuthnCredentialIDHash: secret.Hash(credentialID),
-	}
-	if err := m.repository.CreateSession(ctx, rawToken, record); err != nil {
-		return IssuedSession{}, err
 	}
 	return IssuedSession{Token: secret.Value(rawToken), CSRFToken: secret.Value(csrfToken), Record: record}, nil
 }
@@ -139,10 +148,14 @@ func (m *SessionManager) MatchesProtected(value, protected string) bool {
 }
 
 func (m *SessionManager) Rotate(ctx context.Context, current AuthenticatedSession, credentialID string) (IssuedSession, error) {
-	if err := m.repository.DeleteSession(ctx, current.RawToken.Reveal(), current.Version); err != nil {
+	issued, err := m.prepare(ctx, current.Record.UserID, credentialID)
+	if err != nil {
+		return IssuedSession{}, err
+	}
+	if err := m.repository.RotateSessionAtomic(ctx, current.RawToken.Reveal(), current.Version, issued.Token.Reveal(), issued.Record); err != nil {
 		return IssuedSession{}, domain.NewError(domain.ErrorUnauthenticated, "session rotation failed")
 	}
-	return m.Issue(ctx, current.Record.UserID, credentialID)
+	return issued, nil
 }
 
 func (m *SessionManager) Logout(ctx context.Context, current AuthenticatedSession) error {

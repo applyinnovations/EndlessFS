@@ -34,7 +34,7 @@ func (store *failBeforeAtomicCommit) Transact(ctx context.Context, mutation stat
 func TestCredentialIndexAndCredentialRemovalHaveOneAtomicBoundary(t *testing.T) {
 	store := &failBeforeAtomicCommit{MemoryStore: state.NewMemoryStore()}
 	repository := NewRepository(store)
-	owner, _ := domain.ParseUserID("aWRlbnRpdHktb3duZXIwMQ")
+	owner, _ := domain.ParseUserID(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x71}, 16)))
 	now := time.Date(2049, 2, 3, 4, 5, 6, 0, time.UTC)
 	credentialIDs := []string{base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)), base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))}
 	for index, credentialID := range credentialIDs {
@@ -75,9 +75,9 @@ func TestCredentialIndexAndCredentialRemovalHaveOneAtomicBoundary(t *testing.T) 
 func TestSessionRotationNeverDeletesTheOldSessionWithoutCreatingTheNewOne(t *testing.T) {
 	store := &failBeforeAtomicCommit{MemoryStore: state.NewMemoryStore()}
 	repository := NewRepository(store)
-	owner, _ := domain.ParseUserID("c2Vzc2lvbi1vd25lci0wMQ")
-	oldSecret := secret.Value("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-	newSecret := secret.Value("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+	owner, _ := domain.ParseUserID(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x72}, 16)))
+	oldSecret := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x81}, 32)))
+	newSecret := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x82}, 32)))
 	oldToken, _ := secret.ScopeBearerToken(owner, oldSecret.Reveal())
 	newToken, _ := secret.ScopeBearerToken(owner, newSecret.Reveal())
 	now := time.Date(2049, 2, 3, 4, 5, 6, 0, time.UTC)

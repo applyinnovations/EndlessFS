@@ -77,46 +77,7 @@ func (s *Service) RemovePasskey(ctx context.Context, session auth.AuthenticatedS
 	if now.Before(session.Record.CreatedAt) || now.Sub(session.Record.CreatedAt) > CeremonyLifetime {
 		return domain.NewError(domain.ErrorPreconditionFailed, "recent authentication is required")
 	}
-	for attempts := 0; attempts < 8; attempts++ {
-		index, version, err := s.repository.CredentialIndex(ctx, session.Record.UserID)
-		if err != nil {
-			return err
-		}
-		if len(index.CredentialIDs) <= 1 {
-			return domain.NewError(domain.ErrorPreconditionFailed, "the final passkey cannot be removed")
-		}
-		found := false
-		updated := make([]string, 0, len(index.CredentialIDs)-1)
-		for _, existingID := range index.CredentialIDs {
-			if existingID == credentialID {
-				found = true
-				continue
-			}
-			updated = append(updated, existingID)
-		}
-		if !found {
-			return domain.NewError(domain.ErrorNotFound, "passkey not found")
-		}
-		index.CredentialIDs = updated
-		if _, err := s.repository.UpdateCredentialIndex(ctx, index, version); err != nil {
-			if errors.Is(err, domain.ErrPreconditionFailed) {
-				continue
-			}
-			return err
-		}
-		credential, credentialVersion, err := s.repository.Credential(ctx, session.Record.UserID, credentialID)
-		if errors.Is(err, domain.ErrNotFound) {
-			return nil
-		}
-		if err != nil || credential.UserID != session.Record.UserID {
-			return domain.NewError(domain.ErrorNotFound, "passkey not found")
-		}
-		if err := s.repository.DeleteCredential(ctx, session.Record.UserID, credentialID, credentialVersion); err != nil && !errors.Is(err, domain.ErrNotFound) {
-			return err
-		}
-		return nil
-	}
-	return domain.NewError(domain.ErrorConflict, "passkeys changed concurrently")
+	return s.repository.RemoveCredentialAtomic(ctx, session.Record.UserID, credentialID)
 }
 
 func (s *Service) isAdmin(ctx context.Context, userID domain.UserID) (bool, error) {

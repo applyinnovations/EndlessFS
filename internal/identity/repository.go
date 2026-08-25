@@ -86,6 +86,76 @@ func (r *Repository) DeleteCredential(ctx context.Context, userID domain.UserID,
 	return r.store.Delete(ctx, credentialKey(userID, credentialID), version)
 }
 
+func (r *Repository) atomicStore() (state.AtomicStore, error) {
+	store, ok := r.store.(state.AtomicStore)
+	if !ok {
+		return nil, domain.NewError(domain.ErrorUnavailable, "atomic identity state is required")
+	}
+	return store, nil
+}
+
+func (r *Repository) transactionalStore() (state.TransactionalStore, error) {
+	store, ok := r.store.(state.TransactionalStore)
+	if !ok {
+		return nil, domain.NewError(domain.ErrorUnavailable, "transactional identity state is required")
+	}
+	return store, nil
+}
+
+// RemoveCredentialAtomic changes the credential index and credential record
+// through one owner-identity visibility point. A crash can therefore expose
+// neither a dangling index nor an unindexed credential.
+func (r *Repository) RemoveCredentialAtomic(ctx context.Context, userID domain.UserID, credentialID string) error {
+	store, err := r.atomicStore()
+	if err != nil {
+		return err
+	}
+	for attempts := 0; attempts < 8; attempts++ {
+		index, indexVersion, err := r.CredentialIndex(ctx, userID)
+		if err != nil {
+			return err
+		}
+		if len(index.CredentialIDs) <= 1 {
+			return domain.NewError(domain.ErrorPreconditionFailed, "the final passkey cannot be removed")
+		}
+		found := false
+		updated := make([]string, 0, len(index.CredentialIDs)-1)
+		for _, existingID := range index.CredentialIDs {
+			if existingID == credentialID {
+				found = true
+				continue
+			}
+			updated = append(updated, existingID)
+		}
+		if !found {
+			return domain.NewError(domain.ErrorNotFound, "passkey not found")
+		}
+		credential, credentialVersion, err := r.Credential(ctx, userID, credentialID)
+		if err != nil || credential.UserID != userID {
+			return domain.NewError(domain.ErrorInvalid, "credential index is inconsistent")
+		}
+		index.CredentialIDs = updated
+		indexBody, err := state.EncodeJSON(&index)
+		if err != nil {
+			return err
+		}
+		_, err = store.Mutate(ctx, state.Mutation{
+			ID: "credential-remove:" + secret.Hash(userID.String()+"\x00"+credentialID+"\x00"+string(indexVersion)+"\x00"+string(credentialVersion)),
+			Changes: []state.Change{
+				{Key: credentialIndexKey(userID), Requirement: state.RequirementPresent, ExpectedVersion: indexVersion, Data: indexBody},
+				{Key: credentialKey(userID, credentialID), Requirement: state.RequirementPresent, ExpectedVersion: credentialVersion, Delete: true},
+			},
+		})
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
+			return err
+		}
+	}
+	return domain.NewError(domain.ErrorConflict, "passkeys changed concurrently")
+}
+
 func (r *Repository) Credentials(ctx context.Context, userID domain.UserID) ([]model.Credential, error) {
 	index, _, err := r.CredentialIndex(ctx, userID)
 	if err != nil {
@@ -177,6 +247,30 @@ func (r *Repository) DeleteSession(ctx context.Context, rawToken string, version
 	return r.store.Delete(ctx, sessionKey(owner, rawToken), version)
 }
 
+func (r *Repository) RotateSessionAtomic(ctx context.Context, oldToken string, oldVersion state.Version, newToken string, record model.Session) error {
+	oldOwner, _, oldErr := secret.ParseScopedBearerToken(oldToken)
+	newOwner, _, newErr := secret.ParseScopedBearerToken(newToken)
+	if oldErr != nil || newErr != nil || oldOwner != newOwner || newOwner != record.UserID || oldVersion == "" {
+		return domain.NewError(domain.ErrorInvalid, "session rotation owner binding mismatch")
+	}
+	body, err := state.EncodeJSON(&record)
+	if err != nil {
+		return err
+	}
+	store, err := r.atomicStore()
+	if err != nil {
+		return err
+	}
+	_, err = store.Mutate(ctx, state.Mutation{
+		ID: "session-rotate:" + secret.Hash(oldToken+"\x00"+newToken),
+		Changes: []state.Change{
+			{Key: sessionKey(oldOwner, oldToken), Requirement: state.RequirementPresent, ExpectedVersion: oldVersion, Delete: true},
+			{Key: sessionKey(newOwner, newToken), Requirement: state.RequirementAbsent, Data: body},
+		},
+	})
+	return err
+}
+
 func (r *Repository) RevokeUserSessions(ctx context.Context, userID domain.UserID) error {
 	atomic, ok := r.store.(state.AtomicStore)
 	if !ok {
@@ -199,7 +293,7 @@ func (r *Repository) RevokeUserSessions(ctx context.Context, userID domain.UserI
 			return err
 		}
 		_, err = atomic.Mutate(ctx, state.Mutation{
-			ID: "revoke-sessions-" + secret.Hash(userID.String()+"\x00"+string(version)),
+			ID:      "revoke-sessions-" + secret.Hash(userID.String()+"\x00"+string(version)),
 			Changes: []state.Change{{Key: state.MustKey(state.NamespaceAccounts, userID.String()), Requirement: state.RequirementPresent, ExpectedVersion: version, Data: body}},
 		})
 		if err == nil {

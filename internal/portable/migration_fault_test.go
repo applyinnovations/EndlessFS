@@ -103,7 +103,7 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 					resumeOptions.Writer = currentWriterForSchemaFixture(t, fixture)
 					engine, err := portable.Open(context.Background(), resumeOptions)
 					if err != nil {
-						t.Fatalf("resume after %s interruption %d: %v", target, failAt, err)
+						t.Fatalf("resume after %s interruption %d at %s: %v", target, failAt, faults.failureOperation, err)
 					}
 					gate, err := engine.GateStatus(context.Background())
 					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != family.wantEpoch+1 {

@@ -617,8 +617,23 @@ func (e *Engine) installSchema009Domain(ctx context.Context, reference consisten
 }
 
 func (e *Engine) retireSchema008DomainHeads009(ctx context.Context, source storageformat.DomainCatalogHead, target storageformat.DomainTreeRoot, freezeEpoch uint64) error {
+	catalog := newDomainCatalog(e.backend, e.scheduler)
+	current, err := catalog.load(ctx)
+	if err != nil {
+		return err
+	}
+	if current.head.Root == target {
+		if current.head.FreezeEpoch != freezeEpoch {
+			return domain.NewError(domain.ErrorPreconditionFailed, "schema-009 target catalog has another freeze epoch")
+		}
+		// Publication follows retirement in the first execution. On restart
+		// after checkpoint collection, the published target catalog is durable
+		// proof that retirement already completed; predecessor catalog pages and
+		// inert heads may legitimately have been reclaimed.
+		return nil
+	}
 	catalogSession := newDomainCatalogTreeSession(e.stateDomainStore())
-	return newDomainCatalog(e.backend, e.scheduler).visitEntries(ctx, source, func(entry storageformat.DomainCatalogEntry) error {
+	return catalog.visitEntries(ctx, source, func(entry storageformat.DomainCatalogEntry) error {
 		reference := consistencyDomainRef{Kind: entry.Kind, ID: entry.DomainID}
 		if _, found, err := catalogSession.lookup(ctx, target, catalogEntryKey(reference)); err != nil || found {
 			return err
@@ -626,6 +641,13 @@ func (e *Engine) retireSchema008DomainHeads009(ctx context.Context, source stora
 		store := e.stateDomainStore()
 		for range 16 {
 			snapshot, err := store.loadHead(ctx, reference)
+			if errors.Is(err, domain.ErrNotFound) {
+				// The source was authenticated and fully staged before the durable
+				// staging marker was published. After the target checkpoint, its
+				// already-retired inert head may have been collected before a
+				// restarting replica re-enters this idempotent prefix.
+				return nil
+			}
 			if err != nil {
 				return err
 			}

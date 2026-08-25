@@ -184,6 +184,11 @@ func (e *Engine) OpenWrites(ctx context.Context, checkpointID string) error {
 		return err
 	}
 	if gate.Mode == storageformat.GateClosed {
+		if writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema009, e.writer.RequiredFeatures) {
+			if err := e.runCheckpointGarbageCollection(ctx, checkpoint); err != nil {
+				return err
+			}
+		}
 		if err := e.VerifyCheckpoint(ctx, checkpointID); err != nil {
 			return err
 		}

@@ -35,7 +35,7 @@ func Run(t *testing.T, factory Factory) {
 		if string(again.Data) != `{"value":1}` {
 			t.Fatal("Get() exposed mutable store data")
 		}
-		if _, err := store.Create(context.Background(), key, nil); !errors.Is(err, domain.ErrConflict) {
+		if _, err := store.Create(context.Background(), key, []byte(`{"value":2}`)); !errors.Is(err, domain.ErrConflict) {
 			t.Fatalf("duplicate Create() error = %v", err)
 		}
 	})

@@ -72,3 +72,33 @@ func TestUnknownDownloadCapabilityIsDeniedWithoutProviderLookup(t *testing.T) {
 		t.Fatalf("unknown download status = %d, want %d", recorder.Code, http.StatusNotFound)
 	}
 }
+
+func TestCreateUploadBatchRollsBackEveryNewIntentOnLaterFailure(t *testing.T) {
+	ctx := context.Background()
+	provider, scope, _ := boundaryProvider(t)
+	prior, err := provider.CreateUpload(ctx, scope, domain.CreateUploadRequest{
+		Path: domain.MustParseUserPath("/prior.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "prior-upload-key-0001",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.mu.Lock()
+	beforeUploads, beforeTokens, beforeIdempotency := len(provider.uploads), len(provider.uploadTokens), len(provider.uploadIdempotency)
+	provider.mu.Unlock()
+	_, err = provider.CreateUploadBatch(ctx, scope, []domain.CreateUploadRequest{
+		{Path: domain.MustParseUserPath("/batch-first.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "batch-first-key-0001"},
+		{Path: domain.MustParseUserPath("/"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "batch-invalid-key-01"},
+	})
+	if !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("partially invalid upload batch error = %v; want invalid", err)
+	}
+	provider.mu.Lock()
+	afterUploads, afterTokens, afterIdempotency := len(provider.uploads), len(provider.uploadTokens), len(provider.uploadIdempotency)
+	provider.mu.Unlock()
+	if afterUploads != beforeUploads || afterTokens != beforeTokens || afterIdempotency != beforeIdempotency {
+		t.Fatalf("failed batch leaked state: uploads %d->%d tokens %d->%d idempotency %d->%d", beforeUploads, afterUploads, beforeTokens, afterTokens, beforeIdempotency, afterIdempotency)
+	}
+	if status, err := provider.UploadStatus(ctx, scope, prior.UploadID); err != nil || status.State != domain.UploadStateActive {
+		t.Fatalf("preexisting upload after rollback = %+v, %v", status, err)
+	}
+}

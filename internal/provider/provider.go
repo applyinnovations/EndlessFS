@@ -46,14 +46,23 @@ type BatchStorage interface {
 	GetBatchOperation(context.Context, domain.UserID, domain.OperationID) (domain.Operation, error)
 }
 
+// UploadBatchStorage persists a bounded set of upload intents through one
+// owner-namespace publication before creating provider upload sessions. The
+// unavoidable provider session initiations may run concurrently; an
+// implementation must not execute one complete state transaction per item.
+type UploadBatchStorage interface {
+	CreateUploadBatch(context.Context, domain.Scope, []domain.CreateUploadRequest) ([]domain.UploadCapability, error)
+}
+
 // NamespaceStorage is the complete file-control contract required by the
 // application runtime. Trash placement and bounded batches are mandatory
-// schema-008 namespace mutations, never optional fallbacks to per-item state
+// atomic namespace mutations, never optional fallbacks to per-item state
 // records or repeated provider transactions.
 type NamespaceStorage interface {
 	Storage
 	TrashStorage
 	BatchStorage
+	UploadBatchStorage
 }
 
 // DuplicateStorage is the optional provider-neutral duplicate reconciliation

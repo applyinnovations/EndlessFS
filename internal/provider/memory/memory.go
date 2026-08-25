@@ -140,7 +140,8 @@ type namespaceMutationResult struct {
 }
 
 type Provider struct {
-	mu sync.Mutex
+	mu            sync.Mutex
+	uploadBatchMu sync.Mutex
 
 	clock                domain.Clock
 	ids                  *domain.IDGenerator

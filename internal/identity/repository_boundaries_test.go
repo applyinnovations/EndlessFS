@@ -173,7 +173,9 @@ func TestRepositorySessionRevocationFaultMatrix(t *testing.T) {
 	store.get = func(context.Context, state.Key) (state.Value, error) {
 		return state.Value{Data: data, Version: "v1"}, nil
 	}
-	store.mutate = func(context.Context, state.Mutation) (state.MutationOutcome, error) { return state.MutationOutcome{}, unavailable }
+	store.mutate = func(context.Context, state.Mutation) (state.MutationOutcome, error) {
+		return state.MutationOutcome{}, unavailable
+	}
 	if err := NewRepository(store).RevokeUserSessions(context.Background(), owner); !errors.Is(err, unavailable) {
 		t.Fatalf("epoch mutation fault = %v", err)
 	}

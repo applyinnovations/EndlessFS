@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"mime"
@@ -15,6 +16,12 @@ import (
 )
 
 func (p *Provider) CreateUpload(ctx context.Context, scope domain.Scope, request domain.CreateUploadRequest) (domain.UploadCapability, error) {
+	p.uploadBatchMu.Lock()
+	defer p.uploadBatchMu.Unlock()
+	return p.createUpload(ctx, scope, request)
+}
+
+func (p *Provider) createUpload(ctx context.Context, scope domain.Scope, request domain.CreateUploadRequest) (domain.UploadCapability, error) {
 	if err := validateContextScope(ctx, scope); err != nil {
 		return domain.UploadCapability{}, err
 	}
@@ -117,6 +124,57 @@ func (p *Provider) CreateUpload(ctx context.Context, scope domain.Scope, request
 		p.uploadIdempotency[idempotencyKey(scope.UserID(), OperationCreateUpload, request.IdempotencyKey)] = idempotentUpload{fingerprint: fingerprint, capability: capability}
 	}
 	return capability, nil
+}
+
+func (p *Provider) CreateUploadBatch(ctx context.Context, scope domain.Scope, requests []domain.CreateUploadRequest) ([]domain.UploadCapability, error) {
+	if len(requests) < 1 || len(requests) > 100 {
+		return nil, domain.NewError(domain.ErrorInvalid, "upload batch must contain 1 to 100 items")
+	}
+	p.uploadBatchMu.Lock()
+	defer p.uploadBatchMu.Unlock()
+	p.mu.Lock()
+	uploads := make(map[domain.UploadID]struct{}, len(p.uploads))
+	for id := range p.uploads {
+		uploads[id] = struct{}{}
+	}
+	tokens := make(map[[sha256.Size]byte]struct{}, len(p.uploadTokens))
+	for token := range p.uploadTokens {
+		tokens[token] = struct{}{}
+	}
+	idempotency := make(map[string]struct{}, len(p.uploadIdempotency))
+	for key := range p.uploadIdempotency {
+		idempotency[key] = struct{}{}
+	}
+	p.mu.Unlock()
+	rollback := func() {
+		p.mu.Lock()
+		for id := range p.uploads {
+			if _, existed := uploads[id]; !existed {
+				delete(p.uploads, id)
+			}
+		}
+		for token := range p.uploadTokens {
+			if _, existed := tokens[token]; !existed {
+				delete(p.uploadTokens, token)
+			}
+		}
+		for key := range p.uploadIdempotency {
+			if _, existed := idempotency[key]; !existed {
+				delete(p.uploadIdempotency, key)
+			}
+		}
+		p.mu.Unlock()
+	}
+	capabilities := make([]domain.UploadCapability, len(requests))
+	for index, request := range requests {
+		capability, err := p.createUpload(ctx, scope, request)
+		if err != nil {
+			rollback()
+			return nil, err
+		}
+		capabilities[index] = capability
+	}
+	return capabilities, nil
 }
 
 func (p *Provider) UploadStatus(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) (domain.UploadStatus, error) {

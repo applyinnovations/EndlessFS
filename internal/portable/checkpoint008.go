@@ -89,6 +89,18 @@ func (e *Engine) drainExpiredSchema008Uploads(ctx context.Context) error {
 // builder that follows remains metadata-only; this validation never opens a
 // file body and checks referenced blobs solely through provider metadata.
 func (e *Engine) validateSchema008CheckpointClosure(ctx context.Context, freezeEpoch uint64) error {
+	return e.validateConsistencyDomainCheckpointClosure(ctx, freezeEpoch, false)
+}
+
+// validateSchema009CheckpointClosure additionally enforces the schema-009
+// invariant-aligned route and typed value binding for every application state
+// entry. The schema-008 wrapper remains separate because migration must
+// authenticate predecessor authority using its historical routing law.
+func (e *Engine) validateSchema009CheckpointClosure(ctx context.Context, freezeEpoch uint64) error {
+	return e.validateConsistencyDomainCheckpointClosure(ctx, freezeEpoch, true)
+}
+
+func (e *Engine) validateConsistencyDomainCheckpointClosure(ctx context.Context, freezeEpoch uint64, schema009 bool) error {
 	catalogSnapshot, found, err := e.readDomainCatalogIfPresent(ctx)
 	if err != nil {
 		return err
@@ -106,7 +118,7 @@ func (e *Engine) validateSchema008CheckpointClosure(ctx context.Context, freezeE
 		if !snapshot.exists || !snapshot.head.Registered || !snapshot.head.Frozen || snapshot.head.FreezeEpoch != freezeEpoch {
 			return domain.NewError(domain.ErrorPreconditionFailed, "registered consistency domain is not checkpoint-frozen")
 		}
-		if err := e.validateConsistencyDomainClosure(ctx, reference, snapshot.head); err != nil {
+		if err := e.validateConsistencyDomainClosureForSchema(ctx, reference, snapshot.head, schema009); err != nil {
 			return err
 		}
 		return nil
@@ -121,6 +133,10 @@ func (e *Engine) validateSchema008CheckpointClosure(ctx context.Context, freezeE
 }
 
 func (e *Engine) validateConsistencyDomainClosure(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead) error {
+	return e.validateConsistencyDomainClosureForSchema(ctx, reference, head, false)
+}
+
+func (e *Engine) validateConsistencyDomainClosureForSchema(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead, schema009 bool) error {
 	session := newConsistencyDomainTreeSession(e.stateDomainStore(), reference)
 	rootNames := []string{"base", "outcomes", "outcome-expiry"}
 	for rootIndex, root := range []storageformat.DomainTreeRoot{head.Base, head.Outcomes, head.OutcomeExpiry} {
@@ -142,7 +158,7 @@ func (e *Engine) validateConsistencyDomainClosure(ctx context.Context, reference
 		}
 	}
 	if reference.Kind != storageformat.DomainNamespace {
-		return e.validateKnownControlDomainValues(ctx, reference, head)
+		return e.validateKnownControlDomainValuesForSchema(ctx, reference, head, schema009)
 	}
 	owner, err := domain.ParseUserID(reference.ID)
 	if err != nil {
@@ -168,17 +184,24 @@ func (e *Engine) validateConsistencyDomainClosure(ctx context.Context, reference
 		}
 	}
 	for _, delta := range head.Deltas {
+		if schema009 && schema009NamespaceDeltaHasOpaqueResult(delta) {
+			continue
+		}
 		if err := e.validateNamespaceMutationResultClosure(ctx, session, delta.Result); err != nil {
 			return err
 		}
 	}
-	if err := e.validateNamespaceOutcomeClosure(ctx, session, head.Outcomes); err != nil {
+	if err := e.validateNamespaceOutcomeClosureForSchema(ctx, session, head.Outcomes, schema009); err != nil {
 		return err
 	}
-	return e.validateKnownControlDomainValues(ctx, reference, head)
+	return e.validateKnownControlDomainValuesForSchema(ctx, reference, head, schema009)
 }
 
 func (e *Engine) validateKnownControlDomainValues(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead) error {
+	return e.validateKnownControlDomainValuesForSchema(ctx, reference, head, false)
+}
+
+func (e *Engine) validateKnownControlDomainValuesForSchema(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead, schema009 bool) error {
 	session := newConsistencyDomainTreeSession(e.stateDomainStore(), reference)
 	var namespaceOwner domain.UserID
 	if reference.Kind == storageformat.DomainNamespace {
@@ -220,7 +243,20 @@ func (e *Engine) validateKnownControlDomainValues(ctx context.Context, reference
 						return domain.NewError(domain.ErrorInvalid, "portable upload idempotency target is invalid")
 					}
 				default:
-					return domain.NewError(domain.ErrorInvalid, "unknown namespace authority value")
+					if !schema009 {
+						return domain.NewError(domain.ErrorInvalid, "unknown namespace authority value")
+					}
+					key, err := parseExistingStateKey(value.Key)
+					if err != nil {
+						return domain.NewError(domain.ErrorInvalid, "unknown namespace authority value")
+					}
+					routed, routeErr := stateDomainReferenceForKey009(key)
+					if routeErr != nil || routed != reference {
+						return domain.NewError(domain.ErrorInvalid, "state authority value is stored in the wrong consistency domain")
+					}
+					if _, err := decodeStateValue009(key, value.Value); err != nil {
+						return domain.NewError(domain.ErrorInvalid, "invalid typed namespace state authority")
+					}
 				}
 				continue
 			}
@@ -244,7 +280,13 @@ func (e *Engine) validateKnownControlDomainValues(ctx context.Context, reference
 			if err != nil {
 				return domain.NewError(domain.ErrorInvalid, "unknown consistency-domain authority value")
 			}
-			routed, err := stateDomainReferenceForKey(key)
+			routed, err := stateDomainReferenceForKey008(key)
+			if schema009 {
+				routed, err = stateDomainReferenceForKey009(key)
+				if err == nil {
+					_, err = decodeStateValue009(key, value.Value)
+				}
+			}
 			if err != nil || routed != reference {
 				return domain.NewError(domain.ErrorInvalid, "state authority value is stored in the wrong consistency domain")
 			}
@@ -303,6 +345,10 @@ func (e *Engine) validateNamespaceEntryClosure(ctx context.Context, session *con
 }
 
 func (e *Engine) validateNamespaceOutcomeClosure(ctx context.Context, session *consistencyDomainTreeSession, root storageformat.DomainTreeRoot) error {
+	return e.validateNamespaceOutcomeClosureForSchema(ctx, session, root, false)
+}
+
+func (e *Engine) validateNamespaceOutcomeClosureForSchema(ctx context.Context, session *consistencyDomainTreeSession, root storageformat.DomainTreeRoot, schema009 bool) error {
 	iterator, err := newConsistencyDomainTreeIterator(ctx, session, root)
 	if err != nil {
 		return err
@@ -319,10 +365,34 @@ func (e *Engine) validateNamespaceOutcomeClosure(ctx context.Context, session *c
 		if err := decodeCanonicalValue(value.Value, &outcome); err != nil || storageformat.ValidateDomainOutcome(outcome) != nil || outcome.MutationID != value.Key {
 			return domain.NewError(domain.ErrorInvalid, "invalid namespace outcome closure")
 		}
+		if schema009 && !isRecognizedNamespaceMutationResult(outcome.Result) {
+			// StateStore results are intentionally opaque to the portable engine.
+			// Schema 008 never routed generic state into the namespace domain;
+			// schema 009 does, so only a positively recognized namespace result may
+			// name additional immutable batch pages.
+			continue
+		}
 		if err := e.validateNamespaceMutationResultClosure(ctx, session, outcome.Result); err != nil {
 			return err
 		}
 	}
+}
+
+func schema009NamespaceDeltaHasOpaqueResult(delta storageformat.DomainDelta) bool {
+	for _, change := range delta.Changes {
+		if change.Key == transitionLockKey009 {
+			return true
+		}
+		if _, err := parseExistingStateKey(change.Key); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func isRecognizedNamespaceMutationResult(body []byte) bool {
+	var result storageformat.NamespaceMutationResult
+	return decodeCanonicalValue(body, &result) == nil && validateNamespaceMutationResult(result) == nil
 }
 
 func (e *Engine) validateNamespaceMutationResultClosure(ctx context.Context, session *consistencyDomainTreeSession, body []byte) error {

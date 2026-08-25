@@ -6,9 +6,10 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/domain"
 )
 
-// FileStore's production surface is schema 008 only. Schema-007 decoders and
-// graph readers remain private to the adjacent 007 -> 008 transformer; no
-// ordinary request can select or fall back to the retired backend.
+// FileStore exposes only the current schema-009 runtime. The 008 suffix on
+// implementation helpers records where the owner-namespace graph originated;
+// schema-007/008 migration readers remain private to adjacent transformers and
+// no ordinary request can select or fall back to a retired state layout.
 func (s *FileStore) List(ctx context.Context, scope domain.Scope, request domain.ListRequest) (domain.ListPage, error) {
 	if err := validateFileRequest(ctx, scope); err != nil {
 		return domain.ListPage{}, err
@@ -82,6 +83,13 @@ func (s *FileStore) CreateUpload(ctx context.Context, scope domain.Scope, reques
 		return domain.UploadCapability{}, err
 	}
 	return s.createUpload008(ctx, scope, request)
+}
+
+func (s *FileStore) CreateUploadBatch(ctx context.Context, scope domain.Scope, requests []domain.CreateUploadRequest) ([]domain.UploadCapability, error) {
+	if err := validateFileRequest(ctx, scope); err != nil {
+		return nil, err
+	}
+	return s.createUploadBatch008(ctx, scope, requests)
 }
 
 func (s *FileStore) UploadStatus(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) (domain.UploadStatus, error) {

@@ -84,12 +84,8 @@ func TestNamespaceBatchTrashPublishesTenThousandEdgesThroughOneHead(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	budget, found := ratchet.Latest("trash-batch-10000-schema-008")
-	if !found {
-		t.Fatal("10,000-item trash provider budget is missing")
-	}
-	if _, err := budget.CheckRatchet(economics, events); err != nil {
-		t.Fatalf("10,000-item trash provider budget: %v", err)
+	if report, err := ratchet.CheckExact("trash-batch-10000-schema-009", economics, []providerbudget.Role{providerbudget.RoleState}, events); err != nil {
+		t.Errorf("10,000-item trash provider budget: %v; observed=%+v", err, report.Totals)
 	}
 	t.Logf("measured 10,000-item atomic trash provider budget: %+v", metrics)
 	headKey := storageformat.DomainHeadKey(storageformat.DomainNamespace, live.UserID().String()).String()
@@ -120,7 +116,7 @@ func TestNamespaceBatchTrashPublishesTenThousandEdgesThroughOneHead(t *testing.T
 		t.Fatalf("batch trash head publications = %d, want one; requests=%d", headPuts, len(events))
 	}
 	if len(events) != 125 {
-		t.Fatalf("10,000-item trash requests = %d, want measured schema-008 ratchet 125", len(events))
+		t.Fatalf("10,000-item trash requests = %d, want measured schema-009 calibration 125", len(events))
 	}
 	if parallelPagePuts < 2 || serialPagePuts == 0 {
 		t.Fatalf("10,000-item trash wrote %d immutable pages; want a parallelizable page batch", parallelPagePuts)
@@ -134,6 +130,63 @@ func TestNamespaceBatchTrashPublishesTenThousandEdgesThroughOneHead(t *testing.T
 	trashRoot, err := store.stat(ctx, trash, namespaceRootPath())
 	if err != nil || trashRoot.FileCount != maximumNamespaceBatchItems || trashRoot.Size != maximumNamespaceBatchItems {
 		t.Fatalf("trash root after batch = %+v, %v", trashRoot, err)
+	}
+
+	trashIDs := make([]string, len(result.Items))
+	for index := range result.Items {
+		trashIDs[index] = result.Items[index].TrashID
+	}
+	ledger.Reset()
+	deleted, err := engine.Files().BatchDeleteFromTrash(ctx, live.UserID(), trashIDs, "batch-delete-10000")
+	if err != nil || len(deleted.Items) != maximumNamespaceBatchItems {
+		t.Fatalf("BatchDeleteFromTrash() = %d items, %v", len(deleted.Items), err)
+	}
+	if report, err := ratchet.CheckExact("empty-trash-10000-schema-009", economics, []providerbudget.Role{providerbudget.RoleState}, ledger.Events()); err != nil {
+		t.Errorf("10,000-item permanent-delete provider budget: %v; observed=%+v", err, report.Totals)
+	}
+}
+
+func TestProviderBudgetNamespaceCopyAndMoveTenThousandRoots(t *testing.T) {
+	ctx := context.Background()
+	ledger := providerbudget.NewLedger()
+	engine := openNamespaceTestEngine(t, budgettest.Wrap(providerbudget.RoleState, objectmemory.New(), ledger))
+	store := newNamespaceStore(engine)
+	live := namespaceTestScope(t, domain.AreaLive)
+	entries := seedNamespaceBatchFiles(t, store, live, maximumNamespaceBatchItems)
+	economics, err := gcs.RegionalStandardFlatEconomics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ratchet, err := gcs.RegionalStandardFlatBudgetRatchet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := make([]domain.CopyRequest, len(entries))
+	for index, entry := range entries {
+		requests[index] = domain.CopyRequest{
+			Source: entry.Path, Destination: domain.MustParseUserPath(fmt.Sprintf("/copy-%05d.bin", index)),
+			ExpectedSource: entry.Version, Conflict: domain.ConflictFail,
+		}
+	}
+	ledger.Reset()
+	if result, err := engine.Files().BatchCopyMove(ctx, live.UserID(), requests, false, "batch-copy-10000"); err != nil || len(result.Items) != maximumNamespaceBatchItems {
+		t.Fatalf("BatchCopyMove(copy) = %d items, %v", len(result.Items), err)
+	}
+	if report, err := ratchet.CheckExact("batch-copy-10000-schema-009", economics, []providerbudget.Role{providerbudget.RoleState}, ledger.Events()); err != nil {
+		t.Errorf("10,000-item copy provider budget: %v; observed=%+v", err, report.Totals)
+	}
+	for index, entry := range entries {
+		requests[index] = domain.CopyRequest{
+			Source: entry.Path, Destination: domain.MustParseUserPath(fmt.Sprintf("/moved-%05d.bin", index)),
+			ExpectedSource: entry.Version, Conflict: domain.ConflictFail,
+		}
+	}
+	ledger.Reset()
+	if result, err := engine.Files().BatchCopyMove(ctx, live.UserID(), requests, true, "batch-move-10000"); err != nil || len(result.Items) != maximumNamespaceBatchItems {
+		t.Fatalf("BatchCopyMove(move) = %d items, %v", len(result.Items), err)
+	}
+	if report, err := ratchet.CheckExact("batch-move-10000-schema-009", economics, []providerbudget.Role{providerbudget.RoleState}, ledger.Events()); err != nil {
+		t.Errorf("10,000-item move provider budget: %v; observed=%+v", err, report.Totals)
 	}
 }
 

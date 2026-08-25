@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
+	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
@@ -295,6 +298,61 @@ func (s *FileStore) resumePortableUpload(ctx context.Context, record storageform
 	return domainUploadCapability(record.UploadID, capability), nil
 }
 
+// ensurePortableUploadLease performs the only unavoidable per-object provider
+// work in upload initialization. The canonical intent must already be
+// committed before this function is called. A retained lease makes the step
+// idempotent after a process crash or lost provider response.
+func (s *FileStore) ensurePortableUploadLease(ctx context.Context, intent storageformat.PortableUploadRecord, leaseKnownAbsent bool) (objectstore.UploadCapability, objectstore.Object, error) {
+	transfers, err := s.transferBackend()
+	if err != nil {
+		return objectstore.UploadCapability{}, objectstore.Object{}, err
+	}
+	leaseKey := storageformat.LeaseKey(transfers.BackendKind(), intent.UploadID)
+	var capability objectstore.UploadCapability
+	var leaseObject objectstore.Object
+	var leaseErr error
+	if !leaseKnownAbsent {
+		leaseObject, leaseErr = s.engine.backend.Get(ctx, leaseKey)
+	} else {
+		leaseErr = domain.ErrNotFound
+	}
+	if errors.Is(leaseErr, domain.ErrNotFound) {
+		handle, beginErr := transfers.BeginUpload(ctx, objectstore.UploadRequest{
+			UploadID: intent.UploadID, Key: storageformat.BlobKey(intent.OwnerID, intent.BlobID), Size: intent.Size,
+			MediaType: intent.MediaType, Resumable: intent.Resumable, ExpiresAt: intent.ExpiresAt,
+		})
+		if beginErr != nil {
+			return objectstore.UploadCapability{}, objectstore.Object{}, beginErr
+		}
+		version, putErr := s.engine.backend.Put(ctx, leaseKey, handle.Lease, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
+		if putErr == nil {
+			leaseObject = objectstore.Object{Key: leaseKey, Body: append([]byte(nil), handle.Lease...), Version: version, Size: int64(len(handle.Lease))}
+			capability = handle.Capability
+		} else {
+			_ = transfers.AbortUpload(ctx, handle.Lease)
+			if !errors.Is(putErr, domain.ErrConflict) && !errors.Is(putErr, domain.ErrPreconditionFailed) {
+				return objectstore.UploadCapability{}, objectstore.Object{}, putErr
+			}
+			leaseObject, leaseErr = s.engine.backend.Get(ctx, leaseKey)
+			if leaseErr != nil {
+				return objectstore.UploadCapability{}, objectstore.Object{}, leaseErr
+			}
+		}
+	} else if leaseErr != nil {
+		return objectstore.UploadCapability{}, objectstore.Object{}, leaseErr
+	}
+	if len(leaseObject.Body) == 0 {
+		return objectstore.UploadCapability{}, objectstore.Object{}, domain.NewError(domain.ErrorInvalid, "empty runtime upload lease")
+	}
+	if capability.URL == "" {
+		capability, err = transfers.ResumeUpload(ctx, leaseObject.Body)
+		if err != nil {
+			return objectstore.UploadCapability{}, objectstore.Object{}, err
+		}
+	}
+	return capability, leaseObject, nil
+}
+
 // initializePortableUpload performs the non-transactional provider step only
 // after the canonical intent exists. Concurrent helpers race on the transient
 // lease create; losers revoke their own provider session and resume the winner.
@@ -306,10 +364,6 @@ func (s *FileStore) initializePortableUpload(ctx context.Context, intent storage
 	if err != nil {
 		return domain.UploadCapability{}, domain.NewError(domain.ErrorInvalid, "upload owner is invalid")
 	}
-	transfers, err := s.transferBackend()
-	if err != nil {
-		return domain.UploadCapability{}, err
-	}
 	record, value, snapshot, session, err := s.portableUploadSnapshot(ctx, owner, intent.UploadID)
 	if err != nil {
 		return domain.UploadCapability{}, err
@@ -318,48 +372,9 @@ func (s *FileStore) initializePortableUpload(ctx context.Context, intent storage
 		_ = s.cleanupPortableUpload(ctx, owner, record.UploadID, nil)
 		return domain.UploadCapability{}, domain.NewError(domain.ErrorConflict, "upload initialization was superseded")
 	}
-	leaseKey := storageformat.LeaseKey(transfers.BackendKind(), intent.UploadID)
-	var capability objectstore.UploadCapability
-	var leaseObject objectstore.Object
-	var leaseErr error
-	if !leaseKnownAbsent || record.State == storageformat.UploadActive {
-		leaseObject, leaseErr = s.engine.backend.Get(ctx, leaseKey)
-	} else {
-		leaseErr = domain.ErrNotFound
-	}
-	if errors.Is(leaseErr, domain.ErrNotFound) {
-		handle, beginErr := transfers.BeginUpload(ctx, objectstore.UploadRequest{
-			UploadID: intent.UploadID, Key: storageformat.BlobKey(intent.OwnerID, intent.BlobID), Size: intent.Size,
-			MediaType: intent.MediaType, Resumable: intent.Resumable, ExpiresAt: intent.ExpiresAt,
-		})
-		if beginErr != nil {
-			return domain.UploadCapability{}, beginErr
-		}
-		version, putErr := s.engine.backend.Put(ctx, leaseKey, handle.Lease, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
-		if putErr == nil {
-			leaseObject = objectstore.Object{Key: leaseKey, Body: append([]byte(nil), handle.Lease...), Version: version, Size: int64(len(handle.Lease))}
-			capability = handle.Capability
-		} else {
-			_ = transfers.AbortUpload(ctx, handle.Lease)
-			if !errors.Is(putErr, domain.ErrConflict) && !errors.Is(putErr, domain.ErrPreconditionFailed) {
-				return domain.UploadCapability{}, putErr
-			}
-			leaseObject, leaseErr = s.engine.backend.Get(ctx, leaseKey)
-			if leaseErr != nil {
-				return domain.UploadCapability{}, leaseErr
-			}
-		}
-	} else if leaseErr != nil {
-		return domain.UploadCapability{}, leaseErr
-	}
-	if len(leaseObject.Body) == 0 {
-		return domain.UploadCapability{}, domain.NewError(domain.ErrorInvalid, "empty runtime upload lease")
-	}
-	if capability.URL == "" {
-		capability, err = transfers.ResumeUpload(ctx, leaseObject.Body)
-		if err != nil {
-			return domain.UploadCapability{}, err
-		}
+	capability, _, err := s.ensurePortableUploadLease(ctx, record, leaseKnownAbsent && record.State != storageformat.UploadActive)
+	if err != nil {
+		return domain.UploadCapability{}, err
 	}
 	if record.State == storageformat.UploadActive {
 		return domainUploadCapability(record.UploadID, capability), nil
@@ -477,6 +492,226 @@ func (s *FileStore) createUpload008(ctx context.Context, scope domain.Scope, req
 		return domain.UploadCapability{}, err
 	}
 	return s.initializePortableUpload(ctx, record, true)
+}
+
+type portableUploadBatchItem struct {
+	record      storageformat.PortableUploadRecord
+	fingerprint string
+}
+
+func normalizePortableUploadRequest(scope domain.Scope, request domain.CreateUploadRequest) (domain.CreateUploadRequest, string, error) {
+	if !request.Path.Valid() || request.Path.IsRoot() || request.Size < 0 {
+		return domain.CreateUploadRequest{}, "", domain.NewError(domain.ErrorInvalid, "invalid upload destination or size")
+	}
+	mediaType, err := domain.NormalizeMediaType(request.MediaType)
+	if err != nil {
+		return domain.CreateUploadRequest{}, "", err
+	}
+	conflict, err := domain.NormalizeConflictMode(request.Conflict)
+	if err != nil {
+		return domain.CreateUploadRequest{}, "", err
+	}
+	if err := validatePortableIdempotencyKey(request.IdempotencyKey); err != nil || request.IdempotencyKey == "" {
+		return domain.CreateUploadRequest{}, "", domain.NewError(domain.ErrorInvalid, "batch upload idempotency key is required")
+	}
+	request.MediaType, request.Conflict = mediaType, conflict
+	fingerprint := namespaceRequestFingerprint("upload", areaName(scope.Area()), request.Path.String(), fmt.Sprint(request.Size), mediaType, string(conflict), string(request.ExpectedVersion), fmt.Sprint(request.Resumable))
+	return request, fingerprint, nil
+}
+
+// createUploadBatch008 publishes every canonical upload intent in one owner-
+// namespace mutation, creates only the unavoidable provider upload sessions in
+// parallel, then activates all records in one further namespace mutation. A
+// crash at either boundary is resumed from the immutable idempotency records
+// and disposable lease objects; it never reruns one state transaction per
+// upload.
+func (s *FileStore) createUploadBatch008(ctx context.Context, scope domain.Scope, requests []domain.CreateUploadRequest) ([]domain.UploadCapability, error) {
+	if len(requests) < 1 || len(requests) > 100 {
+		return nil, domain.NewError(domain.ErrorInvalid, "upload batch must contain 1 to 100 items")
+	}
+	normalized := make([]domain.CreateUploadRequest, len(requests))
+	fingerprints := make([]string, len(requests))
+	seenKeys := make(map[string]struct{}, len(requests))
+	for index, request := range requests {
+		var err error
+		normalized[index], fingerprints[index], err = normalizePortableUploadRequest(scope, request)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seenKeys[request.IdempotencyKey]; exists {
+			return nil, domain.NewError(domain.ErrorInvalid, "upload batch repeats an idempotency key")
+		}
+		seenKeys[request.IdempotencyKey] = struct{}{}
+	}
+	batchFingerprint := namespaceRequestFingerprint("upload-batch", strings.Join(fingerprints, "\x00"))
+	items := make([]portableUploadBatchItem, len(requests))
+	created := false
+	intentsReady := false
+	for attempts := 0; attempts < 8; attempts++ {
+		namespace := newNamespaceStore(s.engine)
+		view, err := namespace.loadView(ctx, scope.UserID(), "")
+		if err != nil {
+			return nil, err
+		}
+		existing := 0
+		for index, request := range normalized {
+			record, found, lookupErr := s.portableUploadByIdempotencyAtView(ctx, view, scope.UserID(), request.IdempotencyKey, fingerprints[index])
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			if found {
+				items[index] = portableUploadBatchItem{record: record, fingerprint: fingerprints[index]}
+				existing++
+			}
+		}
+		if existing == len(items) {
+			intentsReady = true
+			break
+		}
+		if existing != 0 {
+			return nil, domain.NewError(domain.ErrorConflict, "upload batch partially overlaps existing idempotency records")
+		}
+		changes := make([]consistencyDomainChange, 0, len(items)*2)
+		seenDestinations := make(map[string]struct{}, len(items))
+		now := s.engine.clock.Now().UTC()
+		for index, request := range normalized {
+			resolved, targetExisted, resolveErr := namespace.prepareDestinationAtView(ctx, view, scope, request.Path, request.Conflict, request.ExpectedVersion)
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			if _, duplicate := seenDestinations[resolved.String()]; duplicate {
+				return nil, domain.NewError(domain.ErrorConflict, "upload batch resolves more than one item to the same destination")
+			}
+			seenDestinations[resolved.String()] = struct{}{}
+			uploadID, idErr := s.engine.ids.OpaqueID()
+			if idErr != nil {
+				return nil, idErr
+			}
+			record := storageformat.PortableUploadRecord{
+				SchemaVersion: 1, UploadID: uploadID, OwnerID: scope.UserID().String(), Area: areaName(scope.Area()), RequestedPath: request.Path.String(), ResolvedPath: resolved.String(), BlobID: uploadID,
+				Size: request.Size, MediaType: request.MediaType, Conflict: request.Conflict, ExpectedVersion: request.ExpectedVersion, TargetExisted: targetExisted, Resumable: request.Resumable,
+				State: storageformat.UploadInitializing, CreatedAt: now, ExpiresAt: now.Add(s.engine.uploadTTL),
+			}
+			recordBody, encodeErr := storageformat.EncodeCanonical(record)
+			if encodeErr != nil {
+				return nil, encodeErr
+			}
+			idempotency := storageformat.PortableUploadIdempotency{SchemaVersion: 1, OwnerID: scope.UserID().String(), KeyDigest: storageformat.Digest([]byte(request.IdempotencyKey)), Fingerprint: fingerprints[index], UploadID: uploadID}
+			idempotencyBody, encodeErr := storageformat.EncodeCanonical(idempotency)
+			if encodeErr != nil {
+				return nil, encodeErr
+			}
+			items[index] = portableUploadBatchItem{record: record, fingerprint: fingerprints[index]}
+			changes = append(changes,
+				consistencyDomainChange{Key: uploadRecordKey(uploadID), Require: domainValueAbsent, Value: recordBody},
+				consistencyDomainChange{Key: uploadIdempotencyKey(request.IdempotencyKey), Require: domainValueAbsent, Value: idempotencyBody},
+			)
+		}
+		resultBody, err := storageformat.EncodeCanonical(storageformat.NamespaceMutationResult{SchemaVersion: 1, RequestFingerprint: batchFingerprint, Upload: &storageformat.NamespaceUploadMutationResult{UploadID: items[0].record.UploadID, State: "initializing"}})
+		if err != nil {
+			return nil, err
+		}
+		_, err = s.engine.stateDomainStore().mutatePrepared(ctx, uploadDomainReference(scope.UserID()), consistencyDomainMutation{
+			ID: "upload-batch-create:" + storageformat.Digest([]byte(strings.Join(fingerprints, "\x00"))), Changes: changes, Result: resultBody,
+		}, view.headSnapshot, view.session)
+		if err == nil {
+			created = true
+			intentsReady = true
+			break
+		}
+		if !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrUnavailable) {
+			return nil, err
+		}
+	}
+	if !intentsReady {
+		return nil, domain.NewError(domain.ErrorUnavailable, "upload batch intent remained contended")
+	}
+	if created {
+		if err := s.engine.step(ctx, StepUploadBatchAfterIntents); err != nil {
+			return nil, err
+		}
+	}
+	return s.activatePortableUploadBatch(ctx, scope.UserID(), items, batchFingerprint, created)
+}
+
+func (s *FileStore) activatePortableUploadBatch(ctx context.Context, owner domain.UserID, items []portableUploadBatchItem, batchFingerprint string, leasesKnownAbsent bool) ([]domain.UploadCapability, error) {
+	capabilities := make([]domain.UploadCapability, len(items))
+	errorsByIndex := make([]error, len(items))
+	var wait sync.WaitGroup
+	for index := range items {
+		index := index
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			traced := providerbudget.WithTrace(ctx, providerbudget.Trace{Operation: "create-upload-batch", Subsystem: "upload-session", ParallelGroup: "upload-session-batch"})
+			capability, _, err := s.ensurePortableUploadLease(traced, items[index].record, leasesKnownAbsent)
+			if err != nil {
+				errorsByIndex[index] = err
+				return
+			}
+			capabilities[index] = domainUploadCapability(items[index].record.UploadID, capability)
+		}()
+	}
+	wait.Wait()
+	for _, err := range errorsByIndex {
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := s.engine.step(ctx, StepUploadBatchAfterSessions); err != nil {
+		return nil, err
+	}
+	activationID := "upload-batch-activate:" + storageformat.Digest([]byte(strings.Join(func() []string {
+		ids := make([]string, len(items))
+		for index := range items {
+			ids[index] = items[index].record.UploadID
+		}
+		return ids
+	}(), "\x00")))
+	for attempts := 0; attempts < 8; attempts++ {
+		view, err := newNamespaceStore(s.engine).loadView(ctx, owner, "")
+		if err != nil {
+			return nil, err
+		}
+		changes := make([]consistencyDomainChange, 0, len(items))
+		for index := range items {
+			record, value, readErr := s.portableUploadAtView(ctx, view, owner, items[index].record.UploadID)
+			if readErr != nil {
+				return nil, readErr
+			}
+			switch record.State {
+			case storageformat.UploadActive:
+				continue
+			case storageformat.UploadInitializing:
+				record.State = storageformat.UploadActive
+				body, encodeErr := storageformat.EncodeCanonical(record)
+				if encodeErr != nil {
+					return nil, encodeErr
+				}
+				changes = append(changes, consistencyDomainChange{Key: uploadRecordKey(record.UploadID), Require: domainValuePresent, ExpectedVersion: value.LogicalVersion, Value: body})
+			default:
+				return nil, domain.NewError(domain.ErrorConflict, "upload batch member is no longer active")
+			}
+		}
+		if len(changes) == 0 {
+			return capabilities, nil
+		}
+		resultBody, err := storageformat.EncodeCanonical(storageformat.NamespaceMutationResult{SchemaVersion: 1, RequestFingerprint: namespaceRequestFingerprint("upload-batch-activate", batchFingerprint), Upload: &storageformat.NamespaceUploadMutationResult{UploadID: items[0].record.UploadID, State: "active"}})
+		if err != nil {
+			return nil, err
+		}
+		_, err = s.engine.stateDomainStore().mutatePrepared(ctx, uploadDomainReference(owner), consistencyDomainMutation{ID: activationID, Changes: changes, Result: resultBody}, view.headSnapshot, view.session)
+		if err == nil {
+			if stepErr := s.engine.step(ctx, StepUploadBatchAfterActivation); stepErr != nil {
+				return nil, stepErr
+			}
+			return capabilities, nil
+		}
+		if !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrUnavailable) {
+			return nil, err
+		}
+	}
+	return nil, domain.NewError(domain.ErrorUnavailable, "upload batch activation remained contended")
 }
 
 func (s *FileStore) uploadStatus008(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) (domain.UploadStatus, error) {

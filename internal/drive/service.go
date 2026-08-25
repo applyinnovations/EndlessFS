@@ -15,7 +15,10 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/state"
 )
 
-const MaxBatchItems = 10_000
+const (
+	MaxBatchItems       = 10_000
+	MaxUploadBatchItems = 100
+)
 
 type AccountReader interface {
 	Account(context.Context, domain.UserID) (model.Account, state.Version, error)
@@ -25,6 +28,7 @@ type Service struct {
 	storage        provider.Storage
 	trash          provider.TrashStorage
 	batch          provider.BatchStorage
+	uploadBatch    provider.UploadBatchStorage
 	repository     *repository
 	accounts       AccountReader
 	ids            *domain.IDGenerator
@@ -43,7 +47,7 @@ func NewService(storage provider.Storage, store state.Store, accounts AccountRea
 	if !ok {
 		return nil, domain.NewError(domain.ErrorInvalid, "storage does not implement atomic namespace trash and batch mutations")
 	}
-	return &Service{storage: namespace, trash: namespace, batch: namespace, repository: newRepository(store), accounts: accounts, ids: ids, clock: clock, tokenKey: tokenKey, baseURL: strings.TrimRight(baseURL, "/"), dataOrigin: strings.TrimRight(dataOrigin, "/"), textPreviewMax: textPreviewMax}, nil
+	return &Service{storage: namespace, trash: namespace, batch: namespace, uploadBatch: namespace, repository: newRepository(store), accounts: accounts, ids: ids, clock: clock, tokenKey: tokenKey, baseURL: strings.TrimRight(baseURL, "/"), dataOrigin: strings.TrimRight(dataOrigin, "/"), textPreviewMax: textPreviewMax}, nil
 }
 
 func (s *Service) DataOrigin() string { return s.dataOrigin }
@@ -175,6 +179,22 @@ func (s *Service) CreateUpload(ctx context.Context, userID domain.UserID, reques
 		return domain.UploadCapability{}, err
 	}
 	return s.storage.CreateUpload(ctx, scope, request)
+}
+
+func (s *Service) CreateUploadBatch(ctx context.Context, userID domain.UserID, requests []domain.CreateUploadRequest) ([]domain.UploadCapability, error) {
+	if len(requests) < 1 || len(requests) > MaxUploadBatchItems {
+		return nil, domain.NewError(domain.ErrorInvalid, "upload batch must contain 1 to 100 items")
+	}
+	for _, request := range requests {
+		if err := validateIdempotencyKey(request.IdempotencyKey); err != nil {
+			return nil, err
+		}
+	}
+	scope, err := liveScope(userID)
+	if err != nil {
+		return nil, err
+	}
+	return s.uploadBatch.CreateUploadBatch(ctx, scope, requests)
 }
 
 func (s *Service) UploadStatus(ctx context.Context, userID domain.UserID, uploadID domain.UploadID) (domain.UploadStatus, error) {
@@ -418,7 +438,7 @@ func (s *Service) EmptyTrash(ctx context.Context, userID domain.UserID, confirme
 		return BatchResult{}, err
 	}
 	if len(records) > MaxBatchItems {
-		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "empty trash is limited to 100 items per request")
+		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "empty trash is limited to 10000 items per request")
 	}
 	if len(records) > 0 {
 		trashIDs := make([]string, len(records))

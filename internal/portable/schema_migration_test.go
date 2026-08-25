@@ -451,8 +451,8 @@ func TestMigrationCheckpointInventoryResumesFromBoundedPagesWithoutReadingFileBo
 	if got := interrupted.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads across interrupted migration = %d; want 0", got)
 	}
-	if got := interrupted.totalAttempts(); got != 18 {
-		t.Fatalf("file metadata list calls across interrupted schema-002-to-008 migration = %d; want measured restart ratchet 18", got)
+	if got := interrupted.totalAttempts(); got != 20 {
+		t.Fatalf("file metadata list calls across interrupted schema-002-to-009 migration = %d; want measured restart ratchet 20", got)
 	}
 	progressRecords := 0
 	inventoryPages := 0
@@ -613,8 +613,8 @@ func TestMigrationDoesNotReadFileBodiesAgainImmediatelyBeforeOpeningWrites(t *te
 	if got := counting.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads during migration = %d; want 0", got)
 	}
-	if got := counting.totalAttempts(); got != 7 {
-		t.Fatalf("file metadata listing calls across schema-002-to-008 checkpoint suffix = %d; want measured ratchet 7", got)
+	if got := counting.totalAttempts(); got != 9 {
+		t.Fatalf("file metadata listing calls across schema-002-to-009 checkpoint suffix = %d; want measured ratchet 9", got)
 	}
 }
 

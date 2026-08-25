@@ -57,8 +57,10 @@ func TestRepositoryFaultDecodeAndPaginationMatrix(t *testing.T) {
 	owner := driveTestUserID(t)
 	unavailable := domain.NewError(domain.ErrorUnavailable, "fault")
 	repository := newRepository(repositoryFaultStore{
-		list: func(context.Context, state.Prefix, state.PageRequest) (state.Page, error) { return state.Page{}, unavailable },
-		get:  func(context.Context, state.Key) (state.Value, error) { return state.Value{}, unavailable },
+		list: func(context.Context, state.Prefix, state.PageRequest) (state.Page, error) {
+			return state.Page{}, unavailable
+		},
+		get: func(context.Context, state.Key) (state.Value, error) { return state.Value{}, unavailable },
 	})
 	if _, err := repository.shares(context.Background(), owner); !errors.Is(err, unavailable) {
 		t.Fatalf("shares list fault = %v", err)

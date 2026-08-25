@@ -79,8 +79,11 @@ type SchedulerFunc func(context.Context, string) error
 func (f SchedulerFunc) Step(ctx context.Context, step string) error { return f(ctx, step) }
 
 const (
-	StepDomainBeforeHeadCommit = "consistency-domain:before-head-commit"
-	StepDomainAfterHeadCommit  = "consistency-domain:after-head-commit"
+	StepDomainBeforeHeadCommit     = "consistency-domain:before-head-commit"
+	StepDomainAfterHeadCommit      = "consistency-domain:after-head-commit"
+	StepUploadBatchAfterIntents    = "upload-batch:after-intents"
+	StepUploadBatchAfterSessions   = "upload-batch:after-sessions"
+	StepUploadBatchAfterActivation = "upload-batch:after-activation"
 )
 
 type Engine struct {
@@ -256,31 +259,66 @@ func (e *Engine) initialize(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	_, _, gate, err := e.readGate(ctx)
+	gateObject, _, gate, err := e.readGate(ctx)
+	if err != nil {
+		return err
+	}
+	gate, err = e.reconcileGateDomainFreeze(ctx, gateObject, gate)
 	if err != nil {
 		return err
 	}
 	if !reflect.DeepEqual(gate.WriterFeatures, e.writer.RequiredFeatures) {
 		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
 	}
-	if catalog, found, err := e.readDomainCatalogIfPresent(ctx); err != nil {
-		return err
-	} else if found && catalog.head.FreezeEpoch != 0 {
+	return nil
+}
+
+// reconcileGateDomainFreeze completes only the idempotent suffix already
+// authorized by a durable gate transition. It never opens a gate or guesses an
+// epoch: an open gate authorizes thawing exactly the immediately preceding
+// freeze, while a closing or closed gate preserves its matching freeze. Every
+// other combination fails closed.
+func (e *Engine) reconcileGateDomainFreeze(ctx context.Context, gateObject objectstore.Object, gate storageformat.WriteGate) (storageformat.WriteGate, error) {
+	for range 16 {
+		catalog, found, err := e.readDomainCatalogIfPresent(ctx)
+		if err != nil {
+			return storageformat.WriteGate{}, err
+		}
+		// An absent or already-thawed catalog cannot disagree with the gate and
+		// needs no second provider read. A concurrent closer is ordered by its
+		// own gate CAS and any stale migration attempt reconciles against the
+		// winner's durable completion markers.
+		if !found || catalog.head.FreezeEpoch == 0 {
+			return gate, nil
+		}
+		latestObject, _, latestGate, err := e.readGate(ctx)
+		if err != nil {
+			return storageformat.WriteGate{}, err
+		}
+		if latestObject.Version != gateObject.Version {
+			gateObject, gate = latestObject, latestGate
+			continue
+		}
 		switch {
 		case gate.Mode == storageformat.GateOpen && gate.Epoch == catalog.head.FreezeEpoch+1:
 			// A prior replica durably authorized checkpoint reopening before
 			// losing the response or process. Finish the idempotent per-domain
-			// unfreeze suffix before this replica serves mutations.
-			if err := newDomainCatalog(e.backend, e.scheduler).unfreeze(ctx, catalog.head.FreezeEpoch); err != nil {
-				return err
+			// unfreeze suffix before this replica serves mutations or begins the
+			// next adjacent schema migration. Recheck both records afterwards so
+			// a concurrent next closure cannot be mistaken for an epoch mismatch.
+			if err := newDomainCatalog(e.backend, e.scheduler).unfreeze(ctx, catalog.head.FreezeEpoch); err != nil && !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) {
+				return storageformat.WriteGate{}, err
 			}
+			gateObject, gate = latestObject, latestGate
+			continue
 		case (gate.Mode == storageformat.GateClosing || gate.Mode == storageformat.GateClosed) && gate.Epoch == catalog.head.FreezeEpoch:
 			// Checkpoint closure is intentionally durable across restarts.
+			return gate, nil
 		default:
-			return domain.NewError(domain.ErrorPreconditionFailed, "write gate and consistency-domain freeze disagree")
+			return storageformat.WriteGate{}, domain.NewError(domain.ErrorPreconditionFailed, "write gate and consistency-domain freeze disagree")
 		}
 	}
-	return nil
+	return storageformat.WriteGate{}, domain.NewError(domain.ErrorUnavailable, "write gate and consistency-domain freeze remained contended")
 }
 
 func validateCompatibleSuperblock(superblock storageformat.Superblock) error {

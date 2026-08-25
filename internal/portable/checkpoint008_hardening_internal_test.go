@@ -413,6 +413,56 @@ func TestSchema008CheckpointClosureBindsEveryNamespaceAndControlAuthorityValue(t
 	}
 }
 
+func TestSchema009CheckpointClosureBindsTypedValuesToInvariantDomains(t *testing.T) {
+	ctx := context.Background()
+	owner := namespaceTestScope(t, domain.AreaLive).UserID()
+	reference := consistencyDomainRef{Kind: storageformat.DomainIdentity, ID: "owner:" + owner.String()}
+	key := state.MustKey(state.NamespaceAccounts, owner.String())
+
+	headFor := func(t *testing.T, body []byte) (*Engine, storageformat.DomainHead) {
+		t.Helper()
+		engine := openNamespaceTestEngine(t, objectmemory.New())
+		if _, err := engine.stateDomainStore().mutate(ctx, reference, consistencyDomainMutation{ID: "seed", Changes: []consistencyDomainChange{{Key: key.String(), Require: domainValueAbsent, Value: body}}}); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := engine.stateDomainStore().loadHead(ctx, reference)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return engine, snapshot.head
+	}
+
+	account, err := storageformat.EncodeStateRecord009(storageformat.StateRecordAccount, []byte("opaque account payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine, head := headFor(t, account)
+	if err := engine.validateKnownControlDomainValuesForSchema(ctx, reference, head, true); err != nil {
+		t.Fatalf("valid schema-009 authority = %v", err)
+	}
+	if err := engine.validateKnownControlDomainValues(ctx, reference, head); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("schema-009 authority accepted by schema-008 routing = %v", err)
+	}
+
+	for name, body := range map[string][]byte{
+		"untyped": []byte("opaque account payload"),
+		"wrong-type": func() []byte {
+			value, encodeErr := storageformat.EncodeStateRecord009(storageformat.StateRecordSession, []byte("opaque account payload"))
+			if encodeErr != nil {
+				t.Fatal(encodeErr)
+			}
+			return value
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			engine, head := headFor(t, body)
+			if err := engine.validateKnownControlDomainValuesForSchema(ctx, reference, head, true); !errors.Is(err, domain.ErrInvalid) {
+				t.Fatalf("invalid schema-009 authority error = %v", err)
+			}
+		})
+	}
+}
+
 func TestSchema008CheckpointClosurePreservesProviderFailureClassification(t *testing.T) {
 	ctx := context.Background()
 	backend := objectmemory.New()

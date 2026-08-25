@@ -11,9 +11,14 @@ bucket pairing, base URL/RP identity, registration policy,
 session-secret-derived keyring identity, stable writer-set ID, writer protocol,
 and canonical features. Startup rejects an incompatible writer before it serves
 bucket-backed requests. There is no leader, process-local lock, admission
-transaction, or lease around an ordinary mutation. Schema 008 partitions
-authority into consistency domains. A mutation writes changed immutable pages
-and conditionally replaces one domain head as its sole visibility point.
+transaction, or lease around an ordinary same-domain mutation. Schema 009
+partitions identity, administration, preview jobs, and the owner namespace by
+their real invariants and binds each state payload to a canonical record type. A
+same-domain mutation writes changed immutable pages and conditionally replaces
+one domain head as its sole visibility point. A genuine cross-domain invariant
+uses a helpable immutable plan, participant locks, and one create-only decision;
+readers and checkpoint closure finish the durable decision before exposing the
+participant state.
 
 If a replica disappears before the head replacement, it has made no visible
 change. If the provider accepted the replacement but its response was lost, the
@@ -26,11 +31,11 @@ immutable pages and unrelated domains continue immediately.
 
 Startup detects one exact epoch in the append-only storage-schema ledger and
 executes every remaining adjacent transformation in order. The current ledger
-contains schemas 001 through 008. Schema 008 is the consistency-domain and
-owner-namespace-graph format and is the only ordinary runtime. A schema-001
-bucket therefore runs `001 -> 002 -> 003 -> 004 -> 005 -> 006 -> 007 -> 008`;
-schema 003 runs the suffix beginning `003 -> 004`; schema 007 runs only
-`007 -> 008`; current schema-008 state performs no migration. No operator
+contains schemas 001 through 009. Schema 009 is the typed transactional-state
+and owner-namespace-graph format and is the only ordinary runtime. A schema-001
+bucket therefore runs `001 -> 002 -> 003 -> 004 -> 005 -> 006 -> 007 -> 008 -> 009`;
+schema 003 runs the suffix beginning `003 -> 004`; schema 008 runs only
+`008 -> 009`; current schema-009 state performs no migration. No operator
 migration command or bucket edit is required. Unknown or contradictory epoch
 markers fail closed.
 
@@ -46,6 +51,14 @@ domains. File bodies are never read. Blob integrity uses provider-attested
 `(size, MD5, CRC32C)` metadata. The edge is restartable after every durable
 boundary and converges under two through eight concurrent migrators.
 
+The `008 -> 009` edge authenticates every source domain and state key, wraps
+unchanged application payloads in typed records, and deterministically
+repartitions them into namespace, owner-identity, owner-jobs, administration,
+and capability domains. It installs and freezes the complete target catalog,
+checkpoints it, advances the `transactional-state-domains-v1` feature binding,
+reopens, and unfreezes. It neither reads nor copies file bodies and is
+restartable/convergent at the same durable migration boundaries.
+
 The `003 -> 004` graph walk persists authenticated transform and verification marks for each completed directory. Every mark is tied to the exact migration checkpoint, parent/root/manifest logical versions, parent entry, aggregates, and content summary. The process holds only the active ancestor stack; after restart, a valid completed mark skips that entire subtree. Several replicas may advance the same deterministic walk through CAS. Stale, forged, misplaced, corrupt, or contradictory marks fail closed and marks are removed only after the independent verification phase succeeds. Provider-ordered scope discovery retains one owner/area at a time. Transforming a historical page manifest retains at most that one legacy directory while deriving its differently ordered persistent indexes; current-index verification and CAS-winner reconciliation are page-bounded.
 
 Every edge is safe to retry after process loss and safe for several new replicas
@@ -54,7 +67,7 @@ An interrupted chain resumes its checkpointed edge and accepts only the
 explicitly reviewed mixture of source, target, and later already-published
 records without downgrading them. Until an edge commits, predecessor records
 remain authoritative and the gate stays closed once migration has begun.
-Immutable schema-004 through schema-008 fixtures cover portable-minimal,
+Immutable schema-004 through schema-009 fixtures cover portable-minimal,
 application-disabled, and application-GCS writer profiles and are pinned to
 their producer revision and fixture digest.
 
@@ -138,7 +151,7 @@ The verifier configuration is strict JSON. For GCS:
   "writerSetID": "BASE64URL_WRITER_SET_ID",
   "configurationDigest": "EXPECTED_CONFIGURATION_DIGEST",
   "keyringIdentifiers": ["EXPECTED_KEYRING_ID"],
-  "requiredFeatures": ["consistency-domains-v1", "directory-content-digests-v1", "directory-manifests", "duplicate-catalog-v1", "fenced-operations", "metadata-only-checkpoints-v1", "owner-namespace-graph-v1", "paged-operation-steps-v1", "persistent-directory-indexes-v1", "persistent-namespace-snapshots-v1", "persistent-state-indexes-v1", "portable-checkpoints", "provider-content-fingerprints-v1", "rebuildable-derived-projections-v1", "recursive-byte-aggregates-v1", "recursive-file-count-aggregates-v1", "resumable-operation-preparation-v1", "user-addressable-duplicate-directories-v1"]
+  "requiredFeatures": ["consistency-domains-v1", "directory-content-digests-v1", "directory-manifests", "duplicate-catalog-v1", "fenced-operations", "metadata-only-checkpoints-v1", "owner-namespace-graph-v1", "paged-operation-steps-v1", "persistent-directory-indexes-v1", "persistent-namespace-snapshots-v1", "persistent-state-indexes-v1", "portable-checkpoints", "provider-content-fingerprints-v1", "rebuildable-derived-projections-v1", "recursive-byte-aggregates-v1", "recursive-file-count-aggregates-v1", "resumable-operation-preparation-v1", "transactional-state-domains-v1", "user-addressable-duplicate-directories-v1"]
 }
 ```
 
@@ -162,8 +175,8 @@ Capability responses and public configuration use `no-store`. Diagnostics omit t
 
 ## Duplicate maintenance foundation
 
-Schema 008 stores each owner's live and Trash trees in one persistent namespace
-graph. A folder move, copy-by-reference, Trash, restore, or logical delete
+Schema 009 preserves each owner's live and Trash trees in one persistent
+namespace graph. A folder move, copy-by-reference, Trash, restore, or logical delete
 rewrites only affected edges and ancestor paths; it never enumerates descendants
 or relocates a blob. Same-owner copies share immutable content. Browser uploads
 target a newly allocated final blob directly and completion publishes its
@@ -173,7 +186,7 @@ Duplicate groups and directory-overlap views are rebuildable projections over a
 specific owner namespace revision. File identity is the provider-attested
 `(size, MD5, CRC32C)` tuple. Exact directory identity also binds recursive
 counts, relative names, kinds, and nested structural digests. Ignore decisions
-remain authoritative owner-control values. Reconciliation binds its projection
+remain authoritative owner-namespace values. Reconciliation binds its projection
 and namespace revisions, revalidates them at apply time, and publishes removals
 through one owner namespace mutation. A stale plan fails closed and no route
 permanently deletes duplicate data.
@@ -195,15 +208,20 @@ Per-group reclaimable bytes count all but one occurrence of that exact group. Do
 Fingerprint-bound mutation outcomes and idempotency bindings are retained in
 bounded domain trees and indexed by expiry. Trash is not subject to that
 window. During gate closure EndlessFS freezes the catalog and all domains,
-drains upload leases, authenticates the exact reachable domain/namespace/blob
-closure, and excludes unreachable immutable pages and rebuildable projections
-from the checkpoint. Reachability uses a disk-backed exact visited set and
-bounded merge chunks, so service memory does not grow with the full graph.
+resolves cross-domain plans, drains upload leases, authenticates the exact
+reachable domain/namespace/blob closure, and excludes unreachable immutable
+pages and rebuildable projections from the checkpoint. The completed
+schema-009 checkpoint is then the immutable mark set for a resumable conditional
+sweep of recognized domain pages, transition residue, projections, leases, and
+blobs. The sweep stores only a portable ordered-key cursor, never reads file
+bodies, and must reach its terminal checkpoint-bound session before writes can
+reopen. Reachability uses a disk-backed exact visited set and bounded merge
+chunks, so service memory does not grow with the full graph.
 
-The schema-008 migration retains terminal predecessor-GC session/mark objects as
+The schema-009 runtime retains terminal predecessor-GC session/mark objects as
 excluded compatibility residue. A lagging supported predecessor may still hold
 a sweeping snapshot, so deleting those marks could let it mistake live schema-
-008 authority for garbage. They are neither runtime authority nor checkpoint
+009 authority for garbage. They are neither runtime authority nor checkpoint
 contents. Do not configure an independent bucket lifecycle rule to approximate
 application reachability collection.
 

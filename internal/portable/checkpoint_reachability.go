@@ -341,6 +341,10 @@ type checkpointReachabilityWalker struct {
 }
 
 func (e *Engine) collectSchema008CheckpointReachability(ctx context.Context) (*checkpointReachabilityStream, error) {
+	return e.collectConsistencyDomainCheckpointReachability(ctx, false)
+}
+
+func (e *Engine) collectConsistencyDomainCheckpointReachability(ctx context.Context, schema009 bool) (*checkpointReachabilityStream, error) {
 	collector, err := newCheckpointReachabilityCollector()
 	if err != nil {
 		return nil, err
@@ -386,13 +390,20 @@ func (e *Engine) collectSchema008CheckpointReachability(ctx context.Context) (*c
 		if err := walker.walkTree(ctx, session, snapshot.head.Base, "base", nil); err != nil {
 			return err
 		}
-		if err := walker.walkTree(ctx, session, snapshot.head.Outcomes, "outcomes", func(value storageformat.DomainEntry) error {
-			var outcome storageformat.DomainOutcome
-			if err := decodeCanonicalValue(value.Value, &outcome); err != nil {
-				return err
+		var outcomeVisitor func(storageformat.DomainEntry) error
+		if reference.Kind == storageformat.DomainNamespace {
+			outcomeVisitor = func(value storageformat.DomainEntry) error {
+				var outcome storageformat.DomainOutcome
+				if err := decodeCanonicalValue(value.Value, &outcome); err != nil {
+					return err
+				}
+				if schema009 && !isRecognizedNamespaceMutationResult(outcome.Result) {
+					return nil
+				}
+				return walker.walkNamespaceMutationResult(ctx, session, outcome.Result)
 			}
-			return walker.walkNamespaceMutationResult(ctx, session, outcome.Result)
-		}); err != nil {
+		}
+		if err := walker.walkTree(ctx, session, snapshot.head.Outcomes, "outcomes", outcomeVisitor); err != nil {
 			return err
 		}
 		if err := walker.walkTree(ctx, session, snapshot.head.OutcomeExpiry, "outcome-expiry", nil); err != nil {
@@ -420,6 +431,9 @@ func (e *Engine) collectSchema008CheckpointReachability(ctx context.Context) (*c
 				}
 			}
 			for _, delta := range snapshot.head.Deltas {
+				if schema009 && schema009NamespaceDeltaHasOpaqueResult(delta) {
+					continue
+				}
 				if err := walker.walkNamespaceMutationResult(ctx, session, delta.Result); err != nil {
 					return err
 				}
@@ -545,7 +559,11 @@ type schema008CheckpointMetadataStream struct {
 }
 
 func newSchema008CheckpointMetadataStream(ctx context.Context, engine *Engine) (*schema008CheckpointMetadataStream, error) {
-	reachable, err := engine.collectSchema008CheckpointReachability(ctx)
+	return newConsistencyDomainCheckpointMetadataStream(ctx, engine, false)
+}
+
+func newConsistencyDomainCheckpointMetadataStream(ctx context.Context, engine *Engine, schema009 bool) (*schema008CheckpointMetadataStream, error) {
+	reachable, err := engine.collectConsistencyDomainCheckpointReachability(ctx, schema009)
 	if err != nil {
 		return nil, err
 	}

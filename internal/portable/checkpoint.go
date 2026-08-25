@@ -104,12 +104,17 @@ func (e *Engine) createCheckpointWhileClosed(ctx context.Context, checkpointID s
 		return storageformat.Checkpoint{}, readErr
 	}
 	schema008 := writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema008, e.writer.RequiredFeatures)
-	if schema008 {
+	schema009 := writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema009, e.writer.RequiredFeatures)
+	if schema009 {
+		if err := e.validateSchema009CheckpointClosure(ctx, gate.Epoch); err != nil {
+			return storageformat.Checkpoint{}, err
+		}
+	} else if schema008 {
 		if err := e.validateSchema008CheckpointClosure(ctx, gate.Epoch); err != nil {
 			return storageformat.Checkpoint{}, err
 		}
 	}
-	summary, err := e.prepareCheckpointInventoryMetadata(ctx, checkpointID, gate.Epoch, schema008)
+	summary, err := e.prepareCheckpointInventoryMetadata(ctx, checkpointID, gate.Epoch, schema008, schema009)
 	if err != nil {
 		return storageformat.Checkpoint{}, err
 	}
@@ -126,6 +131,7 @@ func (e *Engine) createCheckpointWhileClosed(ctx context.Context, checkpointID s
 	if err != nil {
 		return storageformat.Checkpoint{}, err
 	}
+	completed := checkpoint
 	if _, err := e.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
 		if !errors.Is(err, domain.ErrConflict) {
 			return storageformat.Checkpoint{}, err
@@ -137,9 +143,14 @@ func (e *Engine) createCheckpointWhileClosed(ctx context.Context, checkpointID s
 		if err := e.verifyCheckpointV2Summary(existing, gate, summary); err != nil {
 			return storageformat.Checkpoint{}, err
 		}
-		return existing, nil
+		completed = existing
 	}
-	return checkpoint, nil
+	if writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema009, e.writer.RequiredFeatures) {
+		if err := e.runCheckpointGarbageCollection(ctx, completed); err != nil {
+			return storageformat.Checkpoint{}, err
+		}
+	}
+	return completed, nil
 }
 
 // retireLegacyCheckpoint removes only non-authoritative checkpoint artifacts
@@ -258,7 +269,7 @@ type checkpointInventorySummary struct {
 // prepareCheckpointInventoryMetadata builds checkpoint-v3 directly from
 // provider metadata. It deliberately performs no object-body reads and writes
 // no object-per-item journal. Immutable pages make a restart idempotent.
-func (e *Engine) prepareCheckpointInventoryMetadata(ctx context.Context, checkpointID string, gateEpoch uint64, schema008 bool) (checkpointInventorySummary, error) {
+func (e *Engine) prepareCheckpointInventoryMetadata(ctx context.Context, checkpointID string, gateEpoch uint64, schema008, schema009 bool) (checkpointInventorySummary, error) {
 	previousDigest := checkpointInventorySeedV3(checkpointID, gateEpoch)
 	pageIndex := uint64(0)
 	entries := make([]storageformat.CheckpointInventoryEntry, 0, checkpointInventoryPageEntries)
@@ -323,7 +334,7 @@ func (e *Engine) prepareCheckpointInventoryMetadata(ctx context.Context, checkpo
 			CompletedBytes: completedBytes[index], TotalBytes: totalBytes,
 		})
 	}
-	if err := e.walkCheckpointMetadata(ctx, schema008, func(info objectstore.ObjectInfo, fileData bool) error {
+	if err := e.walkCheckpointMetadata(ctx, schema008, schema009, func(info objectstore.ObjectInfo, fileData bool) error {
 		metadataBackend := objectstore.MetadataBackend(e.backend)
 		if fileData {
 			metadataBackend = e.fileBackend
@@ -610,7 +621,12 @@ func (e *Engine) verifyCheckpointV3(ctx context.Context, checkpoint storageforma
 		return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint does not match closed write gate")
 	}
 	schema008 := writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema008, e.writer.RequiredFeatures)
-	if schema008 {
+	schema009 := writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema009, e.writer.RequiredFeatures)
+	if schema009 {
+		if err := e.validateSchema009CheckpointClosure(ctx, gate.Epoch); err != nil {
+			return err
+		}
+	} else if schema008 {
 		if err := e.validateSchema008CheckpointClosure(ctx, gate.Epoch); err != nil {
 			return err
 		}
@@ -619,7 +635,7 @@ func (e *Engine) verifyCheckpointV3(ctx context.Context, checkpoint storageforma
 	var exact *schema008CheckpointMetadataStream
 	if schema008 {
 		var err error
-		exact, err = newSchema008CheckpointMetadataStream(ctx, e)
+		exact, err = newConsistencyDomainCheckpointMetadataStream(ctx, e, schema009)
 		if err != nil {
 			return err
 		}
@@ -794,9 +810,9 @@ func (stream *checkpointMetadataStream) next(ctx context.Context) (objectstore.O
 	return objectstore.ObjectInfo{}, false, false, domain.NewError(domain.ErrorPreconditionFailed, "canonical object is duplicated across backend roles")
 }
 
-func (e *Engine) walkCheckpointMetadata(ctx context.Context, schema008 bool, visit func(objectstore.ObjectInfo, bool) error) error {
+func (e *Engine) walkCheckpointMetadata(ctx context.Context, schema008, schema009 bool, visit func(objectstore.ObjectInfo, bool) error) error {
 	if schema008 {
-		stream, err := newSchema008CheckpointMetadataStream(ctx, e)
+		stream, err := newConsistencyDomainCheckpointMetadataStream(ctx, e, schema009)
 		if err != nil {
 			return err
 		}

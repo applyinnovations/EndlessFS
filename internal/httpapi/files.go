@@ -8,6 +8,7 @@ import (
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/drive"
+	"github.com/applyinnovations/endlessfs/internal/secret"
 	webassets "github.com/applyinnovations/endlessfs/internal/web"
 )
 
@@ -494,7 +495,7 @@ func (api *identityAPI) createUploadBatch(w http.ResponseWriter, r *http.Request
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	if len(request.Uploads) < 1 || len(request.Uploads) > drive.MaxBatchItems {
+	if len(request.Uploads) < 1 || len(request.Uploads) > drive.MaxUploadBatchItems {
 		writeProblem(w, r, domain.NewError(domain.ErrorInvalid, "upload batch must contain 1 to 100 items"))
 		return
 	}
@@ -503,18 +504,29 @@ func (api *identityAPI) createUploadBatch(w http.ResponseWriter, r *http.Request
 		Capability *domain.UploadCapability `json:"capability,omitempty"`
 		ErrorKind  domain.ErrorKind         `json:"errorKind,omitempty"`
 	}
-	results := make([]result, 0, len(request.Uploads))
+	results := make([]result, len(request.Uploads))
+	valid := make([]domain.CreateUploadRequest, 0, len(request.Uploads))
+	validIndexes := make([]int, 0, len(request.Uploads))
 	key := r.Header.Get("Idempotency-Key")
 	for index, item := range request.Uploads {
 		path, err := uploadPath(item)
-		var capability domain.UploadCapability
-		if err == nil {
-			capability, err = api.drive.CreateUpload(r.Context(), current.Record.UserID, domain.CreateUploadRequest{Path: path, Size: item.Size, MediaType: item.MediaType, Conflict: item.Conflict, ExpectedVersion: item.ExpectedVersion, Resumable: item.Resumable, IdempotencyKey: key + ":" + strconv.Itoa(index)})
-		}
 		if err != nil {
-			results = append(results, result{Index: index, ErrorKind: domain.KindOf(err)})
-		} else {
-			results = append(results, result{Index: index, Capability: &capability})
+			results[index] = result{Index: index, ErrorKind: domain.KindOf(err)}
+			continue
+		}
+		valid = append(valid, domain.CreateUploadRequest{Path: path, Size: item.Size, MediaType: item.MediaType, Conflict: item.Conflict, ExpectedVersion: item.ExpectedVersion, Resumable: item.Resumable, IdempotencyKey: "upload-batch:" + secret.Hash(key+"\x00"+strconv.Itoa(index))})
+		validIndexes = append(validIndexes, index)
+	}
+	if len(valid) != 0 {
+		capabilities, err := api.drive.CreateUploadBatch(r.Context(), current.Record.UserID, valid)
+		for offset, index := range validIndexes {
+			results[index].Index = index
+			if err != nil {
+				results[index].ErrorKind = domain.KindOf(err)
+				continue
+			}
+			capability := capabilities[offset]
+			results[index].Capability = &capability
 		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"uploads": results})

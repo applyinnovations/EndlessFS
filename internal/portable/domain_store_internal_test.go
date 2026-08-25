@@ -11,6 +11,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
+	"github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
@@ -187,6 +188,17 @@ func TestConsistencyDomainCompactionPersistsValuesAndOutcomesWithoutClaimReads(t
 	ledger.Reset()
 	if err := store.compact(ctx, reference); err != nil {
 		t.Fatal(err)
+	}
+	economics, err := gcs.RegionalStandardFlatEconomics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ratchet, err := gcs.RegionalStandardFlatBudgetRatchet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report, err := ratchet.CheckExact("maintenance-domain-compaction-300-schema-009", economics, []providerbudget.Role{providerbudget.RoleState}, ledger.Events()); err != nil {
+		t.Errorf("domain compaction provider budget: %v; observed=%+v", err, report.Totals)
 	}
 	snapshot, err := store.loadHead(ctx, reference)
 	if err != nil {

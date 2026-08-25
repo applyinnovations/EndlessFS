@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -21,6 +22,7 @@ import (
 
 func TestProviderBudgetCatalogCoversApplicationContractsAndRatchets(t *testing.T) {
 	workloads := make(map[string]providerbudget.ProductionWorkload)
+	referencedBudgets := make(map[string]bool)
 	for _, workload := range providerbudget.ProductionWorkloads() {
 		if workload.ID == "" || workload.Category == "" || len(workload.Budgets) == 0 {
 			t.Fatalf("incomplete production workload: %+v", workload)
@@ -29,6 +31,9 @@ func TestProviderBudgetCatalogCoversApplicationContractsAndRatchets(t *testing.T
 			t.Fatalf("duplicate production workload %q", workload.ID)
 		}
 		workloads[workload.ID] = workload
+		for _, name := range workload.Budgets {
+			referencedBudgets[name] = true
+		}
 	}
 	ratchet, err := gcs.RegionalStandardFlatBudgetRatchet()
 	if err != nil {
@@ -41,6 +46,12 @@ func TestProviderBudgetCatalogCoversApplicationContractsAndRatchets(t *testing.T
 			}
 		}
 	}
+	for _, budget := range ratchet.Epochs[len(ratchet.Epochs)-1].Budgets {
+		current := strings.HasSuffix(budget.Name, "schema-009") || strings.Contains(budget.Name, "008-to-009") || budget.Name == "preview-validate"
+		if current && !referencedBudgets[budget.Name] {
+			t.Errorf("current provider ratchet %q is absent from the production workload catalog", budget.Name)
+		}
+	}
 
 	contracts := []struct {
 		name    string
@@ -50,10 +61,10 @@ func TestProviderBudgetCatalogCoversApplicationContractsAndRatchets(t *testing.T
 	}{
 		{name: "state.Store", typeOf: reflect.TypeOf((*state.Store)(nil)).Elem(), methods: map[string]string{"Get": "state/get", "List": "state/list", "Create": "state/create", "CompareAndSwap": "state/compare-and-swap", "Delete": "state/delete"}},
 		{name: "state.AtomicStore", typeOf: reflect.TypeOf((*state.AtomicStore)(nil)).Elem(), methods: map[string]string{
-			"Get": "state/get", "List": "state/list", "Create": "state/create", "CompareAndSwap": "state/compare-and-swap", "Delete": "state/delete", "Mutate": "control/atomic-multi-record",
+			"Get": "state/get", "List": "state/list", "Create": "state/create", "CompareAndSwap": "state/compare-and-swap", "Delete": "state/delete", "Mutate": "state/mutate",
 		}},
 		{name: "state.TransactionalStore", typeOf: reflect.TypeOf((*state.TransactionalStore)(nil)).Elem(), methods: map[string]string{
-			"Get": "state/get", "List": "state/list", "Create": "state/create", "CompareAndSwap": "state/compare-and-swap", "Delete": "state/delete", "Mutate": "control/atomic-multi-record", "Transact": "control/atomic-multi-record",
+			"Get": "state/get", "List": "state/list", "Create": "state/create", "CompareAndSwap": "state/compare-and-swap", "Delete": "state/delete", "Mutate": "state/mutate", "Transact": "state/transact",
 		}},
 		{name: "provider.Storage", typeOf: reflect.TypeOf((*provider.Storage)(nil)).Elem(), methods: map[string]string{
 			"List": "namespace/list", "LookupChildren": "namespace/lookup-children", "Stat": "namespace/stat", "CreateDirectory": "namespace/create-directory",
@@ -61,10 +72,13 @@ func TestProviderBudgetCatalogCoversApplicationContractsAndRatchets(t *testing.T
 			"Copy": "namespace/copy", "Move": "namespace/move", "Delete": "namespace/delete", "GetOperation": "namespace/get-operation",
 		}, local: map[string]bool{"Ready": true, "DataOrigin": true, "BackendKind": true}},
 		{name: "provider.TrashStorage", typeOf: reflect.TypeOf((*provider.TrashStorage)(nil)).Elem(), methods: map[string]string{
-			"MoveToTrash": "namespace/move", "ListTrash": "namespace/list", "RestoreFromTrash": "namespace/move", "DeleteFromTrash": "namespace/delete",
+			"MoveToTrash": "namespace/trash", "ListTrash": "namespace/list", "RestoreFromTrash": "namespace/restore", "DeleteFromTrash": "namespace/delete-trash",
 		}},
 		{name: "provider.BatchStorage", typeOf: reflect.TypeOf((*provider.BatchStorage)(nil)).Elem(), methods: map[string]string{
-			"BatchCopyMove": "namespace/copy", "BatchMoveToTrash": "namespace/move", "BatchDeleteFromTrash": "namespace/delete", "GetBatchOperation": "namespace/get-operation",
+			"BatchCopyMove": "namespace/batch-copy-move", "BatchMoveToTrash": "namespace/trash", "BatchDeleteFromTrash": "namespace/delete-trash", "GetBatchOperation": "namespace/get-operation",
+		}},
+		{name: "provider.UploadBatchStorage", typeOf: reflect.TypeOf((*provider.UploadBatchStorage)(nil)).Elem(), methods: map[string]string{
+			"CreateUploadBatch": "transfer/create-upload-batch",
 		}},
 		{name: "provider.DuplicateStorage", typeOf: reflect.TypeOf((*provider.DuplicateStorage)(nil)).Elem(), methods: map[string]string{
 			"ListDuplicateGroups": "duplicates/list-groups", "ListDuplicateOccurrences": "duplicates/list-occurrences", "SetDuplicateGroupIgnored": "duplicates/set-group-ignored",
@@ -91,6 +105,51 @@ func TestProviderBudgetCatalogCoversApplicationContractsAndRatchets(t *testing.T
 			}
 		}
 	}
+}
+
+func TestProviderBudgetCatalogRatchetsAreBackedByExecutableTests(t *testing.T) {
+	literals := providerBudgetTestLiterals(t)
+	for _, workload := range providerbudget.ProductionWorkloads() {
+		for _, budget := range workload.Budgets {
+			if !literals[budget] {
+				t.Errorf("production budget %q for workload %q has no executable test reference", budget, workload.ID)
+			}
+		}
+	}
+}
+
+func providerBudgetTestLiterals(t *testing.T) map[string]bool {
+	t.Helper()
+	_, current, _, _ := runtime.Caller(0)
+	root := filepath.Join(filepath.Dir(current), "..")
+	result := make(map[string]bool)
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, "_test.go") || path == current {
+			return nil
+		}
+		parsed, parseErr := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if parseErr != nil {
+			return parseErr
+		}
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			literal, ok := node.(*ast.BasicLit)
+			if !ok || literal.Kind != token.STRING {
+				return true
+			}
+			if value, err := strconv.Unquote(literal.Value); err == nil {
+				result[value] = true
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func TestProviderBudgetCatalogClassifiesEveryRegisteredHTTPRoute(t *testing.T) {

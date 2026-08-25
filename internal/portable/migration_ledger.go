@@ -566,7 +566,7 @@ func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
 			return err
 		}
 
-		_, _, gate, err := e.readGate(ctx)
+		gateObject, _, gate, err := e.readGate(ctx)
 		if err != nil {
 			return err
 		}
@@ -582,6 +582,23 @@ func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
 		schema, found := detectStorageSchema(superblock.RequiredFeatures, e.writer.RequiredFeatures)
 		if !found {
 			return domain.NewError(domain.ErrorPreconditionFailed, "unregistered portable storage schema")
+		}
+		if gate.Mode == storageformat.GateOpen && schemaAtLeast(superblock.RequiredFeatures, storageSchema008, e.writer.RequiredFeatures) {
+			// Opening a migration checkpoint authorizes the idempotent domain-
+			// unfreeze suffix. Complete that suffix before selecting a following
+			// edge. This is required both after a process restart and when a
+			// concurrent replica observes the opened gate before the winning
+			// replica has finished thawing the catalog.
+			reconciledGate, reconcileErr := e.reconcileGateDomainFreeze(ctx, gateObject, gate)
+			if reconcileErr != nil {
+				return reconcileErr
+			}
+			if reconciledGate.Mode != storageformat.GateOpen || reconciledGate.Epoch != gate.Epoch || reconciledGate.CheckpointID != "" {
+				continue
+			}
+			if !equalStrings(reconciledGate.WriterFeatures, gate.WriterFeatures) {
+				continue
+			}
 		}
 		path, err := storageMigrationPath(schema.id)
 		if err != nil {
@@ -607,16 +624,12 @@ func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
 	return domain.NewError(domain.ErrorUnavailable, "storage schema migration chain did not converge")
 }
 
-// A replica can retain a predecessor object reference while another replica
-// completes the remaining schema suffix and collects that now-unreachable
-// immutable object. Only a not-found result is eligible for winner
-// reconciliation, and it is accepted only after all durable schema markers
-// prove that this edge (or a later edge) completed. Other errors and an
-// incomplete marker set remain fail-closed.
+// A replica can retain a predecessor object reference or lose any provider
+// response while another replica completes the remaining schema suffix. An
+// error is superseded only when independent reads of every durable completion
+// marker prove that this edge (or a later edge) completed. An incomplete or
+// unreadable marker set preserves the original error and remains fail-closed.
 func (e *Engine) resolveMigrationRunError(ctx context.Context, migration storageMigration, runErr error) error {
-	if !errors.Is(runErr, domain.ErrNotFound) {
-		return runErr
-	}
 	complete, err := e.storageMigrationComplete(ctx, migration)
 	if err == nil && complete {
 		return nil

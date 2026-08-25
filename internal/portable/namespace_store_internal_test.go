@@ -87,8 +87,8 @@ func TestNamespaceStoreMoveTrashRestoreDoesNotVisitDescendantsOrFileProvider(t *
 			t.Fatalf("trash performed descendant/file/provider discovery work: %+v", event)
 		}
 	}
-	if len(trashEvents) != 6 {
-		t.Fatalf("trash provider requests=%d, want measured schema-008 ratchet 6 independent of 256 descendants: %+v", len(trashEvents), trashEvents)
+	if len(trashEvents) != 7 {
+		t.Fatalf("trash provider requests=%d, want measured schema-009 ratchet 7 independent of 256 descendants: %+v", len(trashEvents), trashEvents)
 	}
 	if _, err := store.stat(ctx, live, domain.MustParseUserPath("/project")); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("live project after trash error = %v", err)
@@ -103,8 +103,8 @@ func TestNamespaceStoreMoveTrashRestoreDoesNotVisitDescendantsOrFileProvider(t *
 	if err != nil || restored.State != domain.OperationSucceeded {
 		t.Fatalf("restore = %+v, %v", restored, err)
 	}
-	if len(ledger.Events()) != 5 {
-		t.Fatalf("restore requests=%d, want measured schema-008 ratchet 5", len(ledger.Events()))
+	if len(ledger.Events()) != 6 {
+		t.Fatalf("restore requests=%d, want measured schema-009 ratchet 6", len(ledger.Events()))
 	}
 	restoredProject, err := store.stat(ctx, live, domain.MustParseUserPath("/project"))
 	if err != nil || restoredProject.FileCount != 256 || restoredProject.Size != 256 {

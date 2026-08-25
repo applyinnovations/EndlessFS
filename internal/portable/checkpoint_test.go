@@ -29,16 +29,17 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 		t.Fatal(err)
 	}
 	sourceEngine := openEngine(t, source, clock, 81, nil)
+	ownerID := "U1NTU1NTU1NTU1NTU1NTUw"
 	stateValues := map[state.Key][]byte{
-		state.MustKey(state.NamespaceUsers, "portable-user"):                   []byte(`{"displayName":"Portable"}`),
-		state.MustKey(state.NamespaceCredentials, "portable-credential"):       []byte(`{"credential":"portable"}`),
-		state.MustKey(state.NamespaceSessions, "portable-session"):             []byte(`{"session":"portable"}`),
-		state.MustKey(state.NamespaceRoles, "admins"):                          []byte(`{"admins":["portable-user"]}`),
-		state.MustKey(state.NamespaceShares, "portable-share-token-hash"):      []byte(`{"share":"portable"}`),
-		state.MustKey(state.NamespaceTrash, "portable-user", "portable-trash"): []byte(`{"trash":"portable"}`),
-		state.MustKey(state.NamespacePreferences, "portable-user", "theme"):    []byte(`{"themeID":"endlessfs-dark"}`),
-		state.MustKey(state.NamespaceOperations, "portable-operation"):         []byte(`{"state":"succeeded"}`),
-		state.MustKey(state.NamespaceIdempotency, "portable-idempotency"):      []byte(`{"outcome":"portable"}`),
+		state.MustKey(state.NamespaceUsers, ownerID):                                        []byte(`{"displayName":"Portable"}`),
+		state.MustKey(state.NamespaceCredentials, ownerID, "portable-credential"):           []byte(`{"credential":"portable"}`),
+		state.MustKey(state.NamespaceSessions, ownerID, "portable-session"):                 []byte(`{"session":"portable"}`),
+		state.MustKey(state.NamespaceRoles, "admins"):                                       []byte(`{"admins":["portable-user"]}`),
+		state.MustKey(state.NamespaceShares, ownerID, "portable-share-token-hash"):          []byte(`{"share":"portable"}`),
+		state.MustKey(state.NamespaceTrash, ownerID, "portable-trash"):                      []byte(`{"trash":"portable"}`),
+		state.MustKey(state.NamespacePreferences, ownerID, "theme"):                         []byte(`{"themeID":"endlessfs-dark"}`),
+		state.MustKey(state.NamespaceOperations, "batch", ownerID, "portable-operation"):    []byte(`{"state":"succeeded"}`),
+		state.MustKey(state.NamespaceIdempotency, "drive", ownerID, "portable-idempotency"): []byte(`{"outcome":"portable"}`),
 	}
 	stateVersions := make(map[state.Key]state.Version, len(stateValues))
 	for key, value := range stateValues {
@@ -48,7 +49,7 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 		}
 		stateVersions[key] = version
 	}
-	user, _ := domain.ParseUserID("U1NTU1NTU1NTU1NTU1NTUw")
+	user, _ := domain.ParseUserID(ownerID)
 	scope, _ := domain.NewScope(user, domain.AreaLive)
 	trashScope, _ := domain.NewScope(user, domain.AreaTrash)
 	if _, err := sourceEngine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/documents")}); err != nil {

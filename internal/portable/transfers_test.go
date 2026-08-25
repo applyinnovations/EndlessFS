@@ -308,6 +308,89 @@ func TestConcurrentReplicaUploadInitiationHasOneIdempotentOutcome(t *testing.T) 
 	}
 }
 
+func TestPortableUploadBatchResumesEveryCrashBoundary(t *testing.T) {
+	for _, step := range []string{
+		portable.StepUploadBatchAfterIntents,
+		portable.StepUploadBatchAfterSessions,
+		portable.StepUploadBatchAfterActivation,
+	} {
+		t.Run(step, func(t *testing.T) {
+			backend := objectmemory.New()
+			server := httptest.NewServer(backend)
+			t.Cleanup(server.Close)
+			clock := domain.NewFixedClock(time.Date(2039, 1, 5, 3, 4, 5, 0, time.UTC))
+			if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(96, 1<<20)))); err != nil {
+				t.Fatal(err)
+			}
+			crasher := &stepFailure{step: step}
+			first := openEngine(t, backend, clock, 97, crasher)
+			owner, _ := domain.ParseUserID("TE1NTE1NTE1NTE1NTE1NTQ")
+			scope, _ := domain.NewScope(owner, domain.AreaLive)
+			requests := []domain.CreateUploadRequest{
+				{Path: domain.MustParseUserPath("/batch-a.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "batch-crash-item-a"},
+				{Path: domain.MustParseUserPath("/batch-b.bin"), Size: 2, MediaType: "application/octet-stream", IdempotencyKey: "batch-crash-item-b"},
+				{Path: domain.MustParseUserPath("/batch-c.bin"), Size: 3, MediaType: "application/octet-stream", IdempotencyKey: "batch-crash-item-c"},
+			}
+			if _, err := first.Files().CreateUploadBatch(context.Background(), scope, requests); !errors.Is(err, domain.ErrUnavailable) {
+				t.Fatalf("crashed CreateUploadBatch() error = %v", err)
+			}
+			restarted := openEngine(t, backend, clock, 98, nil)
+			capabilities, err := restarted.Files().CreateUploadBatch(context.Background(), scope, requests)
+			if err != nil || len(capabilities) != len(requests) {
+				t.Fatalf("resumed CreateUploadBatch() = %d capabilities, %v", len(capabilities), err)
+			}
+			for index, capability := range capabilities {
+				status, statusErr := restarted.Files().UploadStatus(context.Background(), scope, capability.UploadID)
+				if statusErr != nil || status.State != domain.UploadStateActive || status.Path != requests[index].Path {
+					t.Fatalf("resumed upload %d status = %+v, %v", index, status, statusErr)
+				}
+			}
+		})
+	}
+}
+
+func TestConcurrentReplicaUploadBatchHasOneIdempotentOutcome(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2039, 1, 6, 3, 4, 5, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(99, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engines := []*portable.Engine{openEngine(t, backend, clock, 100, nil), openEngine(t, backend, clock, 101, nil)}
+	owner, _ := domain.ParseUserID("TU5PTU5PTU5PTU5PTU5PTw")
+	scope, _ := domain.NewScope(owner, domain.AreaLive)
+	requests := []domain.CreateUploadRequest{
+		{Path: domain.MustParseUserPath("/concurrent-a.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "concurrent-batch-a"},
+		{Path: domain.MustParseUserPath("/concurrent-b.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "concurrent-batch-b"},
+	}
+	start := make(chan struct{})
+	results := make([][]domain.UploadCapability, len(engines))
+	errorsFound := make([]error, len(engines))
+	var wait sync.WaitGroup
+	for index, engine := range engines {
+		index, engine := index, engine
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			results[index], errorsFound[index] = engine.Files().CreateUploadBatch(context.Background(), scope, requests)
+		}()
+	}
+	close(start)
+	wait.Wait()
+	for index := range results {
+		if errorsFound[index] != nil || len(results[index]) != len(requests) {
+			t.Fatalf("replica %d batch = %+v, %v", index, results[index], errorsFound[index])
+		}
+	}
+	for index := range requests {
+		if results[0][index].UploadID != results[1][index].UploadID || results[0][index].URL != results[1][index].URL {
+			t.Fatalf("batch item %d outcomes differ: %+v / %+v", index, results[0][index], results[1][index])
+		}
+	}
+}
+
 func TestPortableResumableUploadAbortExpiryAndLargeLogicalObject(t *testing.T) {
 	backend := objectmemory.New()
 	server := httptest.NewServer(backend)

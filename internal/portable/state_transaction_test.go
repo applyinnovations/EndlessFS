@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/state"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
 func openTransactionalEngine(t *testing.T, backend *objectmemory.Backend, seed byte, scheduler portable.Scheduler) *portable.Engine {
@@ -190,5 +192,40 @@ func TestCheckpointHelpsPendingTransitionBeforeFreezingDomains(t *testing.T) {
 	replayed, err := engine.Transact(context.Background(), mutation)
 	if err != nil || !replayed.Replayed || string(replayed.Result) != `{"checkpoint":true}` {
 		t.Fatalf("transition replay after checkpoint = %+v, %v", replayed, err)
+	}
+}
+
+func TestCheckpointCollectsExpiredFinalizedTransitionJournals(t *testing.T) {
+	backend := objectmemory.New()
+	clock := domain.NewFixedClock(time.Date(2050, 3, 4, 5, 6, 7, 0, time.UTC))
+	engine, err := portable.Open(context.Background(), portable.Options{
+		Backend: backend, Clock: clock, IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(243, 1<<20))),
+		Writer:   portable.WriterConfiguration{WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1", KeyringIdentifiers: []string{"session-v1"}},
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, owner, adminVersion, ownerVersion := transactionalFixture(t, engine)
+	mutation := state.Mutation{ID: "expired-transition-001", RetainUntil: clock.Now().Add(time.Minute), Changes: []state.Change{
+		{Key: admin, Requirement: state.RequirementPresent, ExpectedVersion: adminVersion, Data: []byte(`{"value":"new-admin"}`)},
+		{Key: owner, Requirement: state.RequirementPresent, ExpectedVersion: ownerVersion, Data: []byte(`{"value":"new-owner"}`)},
+	}}
+	if _, err := engine.Transact(context.Background(), mutation); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []objectstore.Key{storageformat.TransitionPlanKey(mutation.ID), storageformat.TransitionDecisionKey(mutation.ID)} {
+		if _, err := backend.Head(context.Background(), key); err != nil {
+			t.Fatalf("transition journal before retention expiry: %v", err)
+		}
+	}
+	clock.Advance(2 * time.Minute)
+	if _, err := engine.CreateCheckpoint(context.Background(), "expired-transition-checkpoint"); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []objectstore.Key{storageformat.TransitionPlanKey(mutation.ID), storageformat.TransitionDecisionKey(mutation.ID)} {
+		if _, err := backend.Head(context.Background(), key); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("expired transition journal %s error = %v; want not found", key, err)
+		}
 	}
 }

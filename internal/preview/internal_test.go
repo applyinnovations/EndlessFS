@@ -377,12 +377,22 @@ func TestDurableOperationIndexCleansExpiredRecordsAndBoundsContention(t *testing
 	store := state.NewMemoryStore()
 	service := &Service{state: store, clock: clock}
 	firstID, secondID := operationIDsInSameShard()
-	first := operationIndexEntry{OperationID: firstID, IdempotencyDigest: "expired-digest", ExpiresAt: clock.Now().Add(time.Minute)}
+	firstDigestBytes := sha256.Sum256([]byte("expired-digest"))
+	firstDigest := base64.RawURLEncoding.EncodeToString(firstDigestBytes[:])
+	first := operationIndexEntry{OperationID: firstID, IdempotencyDigest: firstDigest, ExpiresAt: clock.Now().Add(time.Minute)}
 	if err := service.registerOperation(context.Background(), owner, first); err != nil {
 		t.Fatal(err)
 	}
 	operationKey := previewOperationKey(owner, firstID)
-	if _, err := store.Create(context.Background(), operationKey, []byte(`{}`)); err != nil {
+	operationBody, err := state.EncodeJSON(operationRecord{
+		SchemaVersion: 1, OwnerID: owner.String(), Fingerprint: "fingerprint", IdempotencyDigest: firstDigest,
+		LeaseEpoch: 1, LeaseExpiresAt: clock.Now().Add(30 * time.Second), ExpiresAt: first.ExpiresAt,
+		Operation: Operation{ID: firstID, State: domain.OperationRunning, StartedAt: clock.Now(), UpdatedAt: clock.Now()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(context.Background(), operationKey, operationBody); err != nil {
 		t.Fatal(err)
 	}
 	idempotencyKey := state.MustKey(state.NamespaceIdempotency, "preview", owner.String(), first.IdempotencyDigest)
@@ -401,11 +411,11 @@ func TestDurableOperationIndexCleansExpiredRecordsAndBoundsContention(t *testing
 	if err := service.registerOperation(context.Background(), owner, second); !errors.Is(err, domain.ErrInternal) {
 		t.Fatalf("operation identity collision error = %v", err)
 	}
-	if err := (&Service{state: &getFailureStore{Store: store, err: domain.ErrUnavailable}, clock: clock}).registerOperation(context.Background(), owner, second); !errors.Is(err, domain.ErrUnavailable) {
+	if err := (&Service{state: &getFailureStore{AtomicStore: store, err: domain.ErrUnavailable}, clock: clock}).registerOperation(context.Background(), owner, second); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("operation index read error = %v", err)
 	}
 	third := operationIndexEntry{OperationID: operationIDForShard(operationShard(second.OperationID), "store-error"), IdempotencyDigest: "store-error", ExpiresAt: clock.Now().Add(time.Hour)}
-	if err := (&Service{state: &compareAndSwapErrorStore{Store: store, err: domain.ErrUnavailable}, clock: clock}).registerOperation(context.Background(), owner, third); !errors.Is(err, domain.ErrUnavailable) {
+	if err := (&Service{state: &compareAndSwapErrorStore{AtomicStore: store, err: domain.ErrUnavailable}, clock: clock}).registerOperation(context.Background(), owner, third); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("operation index write error = %v", err)
 	}
 	if _, err := store.Get(context.Background(), operationKey); !errors.Is(err, domain.ErrNotFound) {
@@ -443,7 +453,7 @@ func TestDurableOperationIndexCleansExpiredRecordsAndBoundsContention(t *testing
 		t.Fatalf("operation index capacity error = %v", err)
 	}
 
-	contentionStore := &compareAndSwapFailureStore{Store: store}
+	contentionStore := &compareAndSwapFailureStore{AtomicStore: store}
 	contentionService := &Service{state: contentionStore, clock: clock}
 	thirdID := operationIDForShard(shard, "contention")
 	if err := contentionService.registerOperation(context.Background(), owner, operationIndexEntry{OperationID: thirdID, IdempotencyDigest: "contention", ExpiresAt: clock.Now().Add(time.Hour)}); !errors.Is(err, domain.ErrUnavailable) {
@@ -589,7 +599,7 @@ func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
 	binding := internalBinding(t)
 	owner := binding.Owner
 	clock := domain.NewFixedClock(time.Date(2047, 4, 5, 6, 7, 8, 0, time.UTC))
-	newService := func(store state.Store) *Service {
+	newService := func(store state.AtomicStore) *Service {
 		return &Service{
 			state: store, clock: clock, ids: domain.NewIDGenerator(bytes.NewReader(make([]byte, 4096))),
 			options: Options{OperationTimeout: time.Minute, OperationRetention: time.Hour},
@@ -636,12 +646,12 @@ func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
 	}
 
 	clock.Advance(2 * time.Minute)
-	preconditionService := newService(&compareAndSwapFailureStore{Store: store})
+	preconditionService := newService(&compareAndSwapFailureStore{AtomicStore: store})
 	claim, err = preconditionService.claimOperation(context.Background(), owner, idempotencyKey, fingerprint)
 	if err != nil || claim.claimed {
 		t.Fatalf("lost durable takeover race = %+v, %v", claim, err)
 	}
-	unavailableService := newService(&compareAndSwapErrorStore{Store: store, err: domain.ErrUnavailable})
+	unavailableService := newService(&compareAndSwapErrorStore{AtomicStore: store, err: domain.ErrUnavailable})
 	if _, err := unavailableService.claimOperation(context.Background(), owner, idempotencyKey, fingerprint); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("durable takeover store error = %v", err)
 	}
@@ -659,6 +669,20 @@ func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
 	if _, err := expiredStore.Create(context.Background(), expiredStateKey, expiredBody); err != nil {
 		t.Fatal(err)
 	}
+	expiredBindingRecord := operationRecord{
+		SchemaVersion: 1, OwnerID: owner.String(), Fingerprint: fingerprint, IdempotencyDigest: expiredDigest, LeaseEpoch: 1,
+		LeaseExpiresAt: clock.Now().Add(-2 * time.Second), ExpiresAt: clock.Now().Add(-time.Second),
+		Operation: Operation{ID: "expired-operation", State: domain.OperationRunning, StartedAt: clock.Now().Add(-time.Hour), UpdatedAt: clock.Now().Add(-time.Minute)},
+	}
+	seedOperationRecord(t, expiredStore, owner, expiredBindingRecord)
+	indexKey := state.MustKey(state.NamespaceOperations, "preview-index", owner.String(), operationShard("expired-operation"))
+	indexBody, err := state.EncodeJSON(operationIndexRecord{SchemaVersion: 1, Entries: []operationIndexEntry{{OperationID: "expired-operation", IdempotencyDigest: expiredDigest, ExpiresAt: expiredBindingRecord.ExpiresAt}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := expiredStore.Create(context.Background(), indexKey, indexBody); err != nil {
+		t.Fatal(err)
+	}
 	claim, err = expiredService.claimOperation(context.Background(), owner, expiredKey, fingerprint)
 	if err != nil || !claim.claimed || claim.record.Operation.ID == "expired-operation" {
 		t.Fatalf("expired idempotency replacement = %+v, %v", claim, err)
@@ -672,10 +696,10 @@ func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
 	if _, _, err := newService(corruptStore).readOperation(context.Background(), owner, "corrupt-operation"); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("corrupt operation read error = %v", err)
 	}
-	if _, _, err := newService(&getFailureStore{Store: corruptStore, err: domain.ErrUnavailable}).readOperation(context.Background(), owner, "corrupt-operation"); !errors.Is(err, domain.ErrUnavailable) {
+	if _, _, err := newService(&getFailureStore{AtomicStore: corruptStore, err: domain.ErrUnavailable}).readOperation(context.Background(), owner, "corrupt-operation"); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("unavailable operation read error = %v", err)
 	}
-	if _, err := newService(&getFailureStore{Store: corruptStore, err: domain.ErrUnavailable}).claimOperation(context.Background(), owner, "preview-state-error-0001", fingerprint); !errors.Is(err, domain.ErrUnavailable) {
+	if _, err := newService(&getFailureStore{AtomicStore: corruptStore, err: domain.ErrUnavailable}).claimOperation(context.Background(), owner, "preview-state-error-0001", fingerprint); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("unavailable idempotency read error = %v", err)
 	}
 
@@ -684,24 +708,34 @@ func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	finishClaim := operationClaim{record: record, operationKey: previewOperationKey(owner, operationID), operationVersion: operationValue.Version, claimed: true}
-	if _, err := newService(&compareAndSwapErrorStore{Store: store, err: domain.ErrUnavailable}).finishOperation(context.Background(), finishClaim, record.Operation); !errors.Is(err, domain.ErrUnavailable) {
+	if _, err := newService(&compareAndSwapErrorStore{AtomicStore: store, err: domain.ErrUnavailable}).finishOperation(context.Background(), finishClaim, record.Operation); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("finish operation store error = %v", err)
 	}
 	invalidOwnerClaim := finishClaim
 	invalidOwnerClaim.record.OwnerID = "invalid"
-	if _, err := newService(&compareAndSwapFailureStore{Store: store}).finishOperation(context.Background(), invalidOwnerClaim, record.Operation); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := newService(&compareAndSwapFailureStore{AtomicStore: store}).finishOperation(context.Background(), invalidOwnerClaim, record.Operation); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("finish operation owner error = %v", err)
 	}
-	readFailureStore := &getFailureStore{Store: &compareAndSwapFailureStore{Store: store}, err: domain.ErrUnavailable}
+	readFailureStore := &getFailureStore{AtomicStore: &compareAndSwapFailureStore{AtomicStore: store}, err: domain.ErrUnavailable}
 	if _, err := newService(readFailureStore).finishOperation(context.Background(), finishClaim, record.Operation); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("finish operation concurrent read error = %v", err)
 	}
 
-	for failAt := 2; failAt <= 3; failAt++ {
-		failureStore := &nthCreateFailureStore{Store: state.NewMemoryStore(), failAt: failAt}
+	for failAt := 1; failAt <= 1; failAt++ {
+		failureStore := &nthCreateFailureStore{AtomicStore: state.NewMemoryStore(), failAt: failAt}
 		failureService := newService(failureStore)
 		if _, err := failureService.claimOperation(context.Background(), owner, fmt.Sprintf("preview-create-failure-%04d", failAt), fingerprint); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("create failure %d error = %v", failAt, err)
+			t.Fatalf("atomic claim failure %d error = %v", failAt, err)
+		}
+		for _, prefix := range []state.Prefix{
+			state.MustPrefix(state.NamespaceOperations, "preview", owner.String()),
+			state.MustPrefix(state.NamespaceOperations, "preview-index", owner.String()),
+			state.MustPrefix(state.NamespaceIdempotency, "preview", owner.String()),
+		} {
+			page, listErr := failureStore.List(context.Background(), prefix, state.PageRequest{})
+			if listErr != nil || len(page.Items) != 0 {
+				t.Fatalf("failed atomic preview claim left records under %q: %+v, %v", prefix.String(), page, listErr)
+			}
 		}
 	}
 	idFailureService := newService(state.NewMemoryStore())
@@ -897,14 +931,18 @@ func operationShard(operationID domain.OperationID) string {
 	return strconv.Itoa(int(digest[0]) % operationIndexShards)
 }
 
-type compareAndSwapFailureStore struct{ state.Store }
+type compareAndSwapFailureStore struct{ state.AtomicStore }
 
 func (*compareAndSwapFailureStore) CompareAndSwap(context.Context, state.Key, state.Version, []byte) (state.Version, error) {
 	return "", domain.NewError(domain.ErrorPreconditionFailed, "injected contention")
 }
 
+func (*compareAndSwapFailureStore) Mutate(context.Context, state.Mutation) (state.MutationOutcome, error) {
+	return state.MutationOutcome{}, domain.NewError(domain.ErrorPreconditionFailed, "injected contention")
+}
+
 type compareAndSwapErrorStore struct {
-	state.Store
+	state.AtomicStore
 	err error
 }
 
@@ -912,15 +950,28 @@ func (s *compareAndSwapErrorStore) CompareAndSwap(context.Context, state.Key, st
 	return "", s.err
 }
 
+func (s *compareAndSwapErrorStore) Mutate(context.Context, state.Mutation) (state.MutationOutcome, error) {
+	return state.MutationOutcome{}, s.err
+}
+
 type getFailureStore struct {
-	state.Store
+	state.AtomicStore
 	err error
 }
 
 type nthCreateFailureStore struct {
-	state.Store
+	state.AtomicStore
 	failAt  int
 	creates int
+	mutates int
+}
+
+func (s *nthCreateFailureStore) Mutate(ctx context.Context, mutation state.Mutation) (state.MutationOutcome, error) {
+	s.mutates++
+	if s.mutates == s.failAt {
+		return state.MutationOutcome{}, domain.NewError(domain.ErrorUnavailable, "injected atomic mutation failure")
+	}
+	return s.AtomicStore.Mutate(ctx, mutation)
 }
 
 func (s *nthCreateFailureStore) Create(ctx context.Context, key state.Key, body []byte) (state.Version, error) {
@@ -928,7 +979,7 @@ func (s *nthCreateFailureStore) Create(ctx context.Context, key state.Key, body 
 	if s.creates == s.failAt {
 		return "", domain.NewError(domain.ErrorUnavailable, "injected create failure")
 	}
-	return s.Store.Create(ctx, key, body)
+	return s.AtomicStore.Create(ctx, key, body)
 }
 
 func (s *getFailureStore) Get(context.Context, state.Key) (state.Value, error) {

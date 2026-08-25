@@ -240,6 +240,28 @@ func TestSessionManagerScopesLookupAndRejectsPriorAuthEpochAfterReenable(t *test
 	}
 }
 
+func TestSessionManagerDeniesUnavailableAccountsAndInvalidOperationMaterial(t *testing.T) {
+	ctx := context.Background()
+	clock := domain.NewFixedClock(time.Date(2035, 3, 4, 5, 6, 7, 0, time.UTC))
+	userID := testUserID(t, 0x93)
+	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x62}, 32)))
+	repository := newSessionRepositoryStub()
+	manager, err := NewSessionManager(repository, domain.NewIDGenerator(bytes.NewReader(sessionEntropy(4096))), clock, time.Hour, "https://drive.example.test", true, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.Issue(ctx, userID, "credential-1"); !errors.Is(err, domain.ErrUnauthenticated) {
+		t.Fatalf("Issue unavailable account error = %v", err)
+	}
+	if _, err := manager.PrepareForOperation(userID, "credential-1", "operation-1", time.Time{}, 1); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("PrepareForOperation invalid creation time error = %v", err)
+	}
+	if _, err := manager.Rotate(ctx, AuthenticatedSession{}, "credential-1"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Rotate invalid current session error = %v", err)
+	}
+}
+
 func sessionEntropy(size int) []byte {
 	value := make([]byte, size)
 	for index := range value {

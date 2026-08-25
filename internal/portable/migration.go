@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"time"
@@ -347,6 +348,9 @@ func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition s
 			if _, err = e.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil && !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
 				return false, err
 			}
+			if err != nil {
+				runtime.Gosched()
+			}
 		case storageformat.GateClosing:
 			if err := e.drainAdmissions(ctx, gate.Epoch); err != nil {
 				return false, err
@@ -368,6 +372,7 @@ func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition s
 			}
 			if _, err = e.backend.Put(ctx, currentObject.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: currentObject.Version}); err != nil {
 				if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+					runtime.Gosched()
 					continue
 				}
 				return false, err
@@ -375,7 +380,7 @@ func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition s
 			return true, nil
 		}
 	}
-	return false, domain.NewError(domain.ErrorUnavailable, "feature-only storage migration gate remained contended")
+	return false, domain.NewError(domain.ErrorUnavailable, fmt.Sprintf("feature-only storage migration gate remained contended for %s", transition.id))
 }
 
 func (e *Engine) runAggregateSchemaMigration(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock, plan aggregateMigrationPlan) error {
@@ -650,7 +655,11 @@ func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition stora
 				return false, encodeErr
 			}
 			_, err = e.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
-			if err == nil || errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+				runtime.Gosched()
 				continue
 			}
 			return false, err
@@ -665,6 +674,7 @@ func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition stora
 				return true, nil
 			}
 			if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+				runtime.Gosched()
 				continue
 			}
 			return false, err
@@ -672,7 +682,35 @@ func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition stora
 			return true, nil
 		}
 	}
-	return false, domain.NewError(domain.ErrorUnavailable, "storage-schema migration gate remained contended")
+	_, _, gate, gateErr := e.readGate(ctx)
+	catalog, catalogFound, catalogErr := e.readDomainCatalogIfPresent(ctx)
+	if gateErr == nil && catalogErr == nil {
+		return false, domain.NewError(domain.ErrorUnavailable, fmt.Sprintf("storage-schema migration gate remained contended for %s (mode=%s epoch=%d catalogFound=%t catalogFreezeEpoch=%d)", transition.id, gate.Mode, gate.Epoch, catalogFound, catalog.head.FreezeEpoch))
+	}
+	return false, domain.NewError(domain.ErrorUnavailable, fmt.Sprintf("storage-schema migration gate remained contended for %s", transition.id))
+}
+
+// readClosedStorageMigrationGate binds migration work to the exact closed gate
+// epoch that authorized it. A lagging replica must not read an already-reopened
+// gate and use its incremented epoch to freeze or transform state. If another
+// replica completed the edge in between closure and this read, the lagging
+// runner has no suffix left to perform.
+func (e *Engine) readClosedStorageMigrationGate(ctx context.Context, transition storageMigration) (storageformat.WriteGate, bool, error) {
+	_, _, gate, err := e.readGate(ctx)
+	if err != nil {
+		return storageformat.WriteGate{}, false, err
+	}
+	if gate.Mode == storageformat.GateClosed && gate.CheckpointID == transition.checkpointID {
+		return gate, true, nil
+	}
+	complete, completeErr := e.storageMigrationComplete(ctx, transition)
+	if completeErr != nil {
+		return storageformat.WriteGate{}, false, completeErr
+	}
+	if complete {
+		return storageformat.WriteGate{}, false, nil
+	}
+	return storageformat.WriteGate{}, false, domain.NewError(domain.ErrorPreconditionFailed, "storage migration gate changed after closure")
 }
 
 func (e *Engine) migrateAllDirectoryAggregatesPhase(ctx context.Context, transition storageMigration, plan aggregateMigrationPlan, phase string) error {
@@ -1370,6 +1408,13 @@ func (e *Engine) activateMigrationWriterSet(ctx context.Context, transition stor
 
 func (e *Engine) activateMigrationSuperblock(ctx context.Context, transition storageMigration, initial objectstore.Object, decoded storageformat.Superblock) error {
 	targetFeatures, _ := schemaFeatures(transition.to, e.writer.RequiredFeatures)
+	boundBody, err := storageformat.EncodeCanonical(decoded)
+	if err != nil {
+		return err
+	}
+	if initial.Key != storageformat.SuperblockKey() || !bytes.Equal(initial.Body, boundBody) {
+		return domain.NewError(domain.ErrorPreconditionFailed, "migration superblock snapshot is not bound to its object")
+	}
 	object, superblock := initial, decoded
 	for range 8 {
 		if err := validateCompatibleSuperblock(superblock); err != nil {
@@ -1379,7 +1424,24 @@ func (e *Engine) activateMigrationSuperblock(ctx context.Context, transition sto
 			return nil
 		}
 		detected, found := detectStorageSchema(superblock.RequiredFeatures, e.writer.RequiredFeatures)
-		if !found || detected.id != transition.from {
+		if !found {
+			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable superblock during migration")
+		}
+		if detected.id != transition.from {
+			detectedIndex, _ := schemaIndex(detected.id)
+			fromIndex, _ := schemaIndex(transition.from)
+			if detectedIndex < fromIndex {
+				var rereadErr error
+				object, rereadErr = e.backend.Get(ctx, storageformat.SuperblockKey())
+				if rereadErr != nil {
+					return rereadErr
+				}
+				if rereadErr = decodeCanonicalSuperblock(object.Body, &superblock); rereadErr != nil {
+					return rereadErr
+				}
+				runtime.Gosched()
+				continue
+			}
 			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable superblock during migration")
 		}
 		superblock.RequiredFeatures = append([]string(nil), targetFeatures...)
@@ -1392,6 +1454,7 @@ func (e *Engine) activateMigrationSuperblock(ctx context.Context, transition sto
 		} else if !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
 			return err
 		}
+		runtime.Gosched()
 		object, err = e.backend.Get(ctx, storageformat.SuperblockKey())
 		if err != nil {
 			return err

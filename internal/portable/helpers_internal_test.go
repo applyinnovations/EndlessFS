@@ -160,6 +160,17 @@ func TestPortableSortingAndOperationHelpers(t *testing.T) {
 	}
 }
 
+func TestPortableCopyAndMoveRejectInvalidDestinationScope(t *testing.T) {
+	engine := openNamespaceTestEngine(t, objectmemory.New())
+	valid := namespaceTestScope(t, domain.AreaLive)
+	if _, err := engine.Files().Copy(context.Background(), valid, domain.Scope{}, domain.CopyRequest{}); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("Copy invalid destination scope error = %v", err)
+	}
+	if _, err := engine.Files().Move(context.Background(), valid, domain.Scope{}, domain.MoveRequest{}); !errors.Is(err, domain.ErrUnauthorized) {
+		t.Fatalf("Move invalid destination scope error = %v", err)
+	}
+}
+
 func TestPortableOpenAndCheckpointInputMatrix(t *testing.T) {
 	base := Options{
 		Backend: objectmemory.New(), Clock: domain.NewFixedClock(time.Now().UTC()), IDs: domain.NewIDGenerator(strings.NewReader(strings.Repeat("x", 4096))),

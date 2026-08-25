@@ -1,8 +1,8 @@
 # Storage schema 009 implementation record
 
-**Status:** phases 1–6 implemented on the schema-009 branch; focused tests pass.
-The repository-wide Nix, race, fuzz, portability, coverage, and release gates are
-deliberately deferred to phase 7.
+**Status:** phases 1–7 are implemented and locally qualified on the schema-009
+branch. Strict coverage, complete race shards, and the composed
+`nix flake check` pass. Phase 8 commits and pushes the implementation for CI.
 
 Schema 009 keeps the schema-008 owner namespace graph and replaces the generic
 application-state placement contract with typed, invariant-aligned consistency
@@ -175,11 +175,43 @@ mutations. Its 480 ms critical estimate records the parallel session wave; the
 20.360 s aggregate is the sum of all modeled provider work and is retained for
 cost/capacity analysis.
 
-## 7. Evidence and remaining boundary
+## 7. Qualification evidence
 
 Focused schema-009 codec, routing, mutation, transition, migration, upload,
-checkpoint-GC, provider-contract, and exact economics tests pass. Phase 7 must
-still run the complete required Nix gate, including migration matrix,
-portability, replica schedules, race, fuzz, coverage, lint/security, browser,
-and release checks. No branch push, merge, migration rollout, or release claim
-is authorized by this implementation record alone.
+checkpoint-GC, provider-contract, and exact economics tests pass. The current
+source tree also has the following local evidence:
+
+| Gate | Result |
+|---|---|
+| Strict repository coverage | 85.613% (19,714/23,027; required ≥85%) |
+| Security-sensitive coverage | Every named group ≥95%; token 100%, configuration 98.328% |
+| Migration coverage | 98.109% (1,764/1,798; required ≥98%) |
+| Exhaustive migration fault matrix under `-race` | Pass, 1,473.393 s under composed-gate load |
+| Every remaining repository test under `-race` | Pass, portable package 552.603 s under composed-gate load |
+| Provider economics | GCS budget catalog and all executable request/count/cost/latency ratchets pass |
+| Browser coverage | Go-controlled Chromium E2E passes in the strict coverage run |
+| Final composed `nix flake check` | Pass, all 24 checks on `aarch64-darwin` |
+
+The race gate deliberately uses two package processes without changing its
+30-minute timeout. The exhaustive migration test restarts the entire schema
+chain at every provider boundary and passes once by itself; the complementary
+invocation uses Go's `-skip` to run every other repository test once. Together
+the shards retain complete race coverage while preventing two unrelated
+portable fault matrices from competing for the same constrained Nix build
+cores.
+
+The schema-008 migration freeze fence was also tightened during qualification.
+One post-CAS gate read per domain is the ordering barrier; an earlier pre-CAS
+read closed no additional race and was removed. If a lagging worker observes
+that another replica already reopened the gate, it retracts its own old-epoch
+head before conditionally thawing the old catalog. An open gate helps every
+non-future catalog freeze, and a closing gate helps every older freeze; future
+epochs and closed-gate epoch mismatches still fail closed. Head cleanup remains
+safe when the catalog already belongs to the next closing epoch, while catalog
+cleanup cannot disturb that next migration. Tests cover the exact
+reopen/next-close and multi-edge late-worker interleavings. The schema-001→009
+eight-replica matrix passes 100 consecutive focused repetitions plus the
+complete migration gate under concurrent strict-coverage load.
+
+No branch merge, migration rollout, or release claim is authorized by this
+implementation record alone.

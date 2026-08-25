@@ -90,8 +90,8 @@ func (e *Engine) runStorageMigration007To008(ctx context.Context, transition sto
 	if err != nil || !closed {
 		return err
 	}
-	_, _, gate, err := e.readGate(ctx)
-	if err != nil {
+	gate, active, err := e.readClosedStorageMigrationGate(ctx, transition)
+	if err != nil || !active {
 		return err
 	}
 	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageGateClosed})
@@ -119,7 +119,7 @@ func (e *Engine) runStorageMigration007To008(ctx context.Context, transition sto
 	if err := e.installSchema008StagedDomains(ctx); err != nil {
 		return domain.WrapError(domain.KindOf(err), "install schema-008 domains", err)
 	}
-	if _, err := newDomainCatalog(e.backend, e.scheduler).freezeDomains(ctx, gate.Epoch); err != nil {
+	if err := e.freezeSchema008MigrationDomains(ctx, transition, gate.Epoch); err != nil {
 		return domain.WrapError(domain.KindOf(err), "freeze migrated schema-008 domains", err)
 	}
 	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterDirectories)); err != nil {
@@ -164,6 +164,44 @@ func (e *Engine) runStorageMigration007To008(ctx context.Context, transition sto
 		return domain.WrapError(domain.KindOf(err), "unfreeze migrated schema-008 domains", err)
 	}
 	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageComplete})
+	return nil
+}
+
+// freezeSchema008MigrationDomains fences each domain-head freeze against the
+// canonical migration gate. The catalog entry list alone is insufficient: a
+// lagging worker can retain that list while the winner opens the gate and
+// unfreezes the same domains. The check after each head CAS is the ordering
+// point: when it still observes the closed gate, a later winner thaw includes
+// the freeze; when it observes completion, this worker removes the complete
+// old-epoch catalog freeze itself. A check before the CAS would not close any
+// additional race window and would double the steady provider reads.
+func (e *Engine) freezeSchema008MigrationDomains(ctx context.Context, transition storageMigration, epoch uint64) error {
+	catalog := newDomainCatalog(e.backend, e.scheduler)
+	entries, err := catalog.freeze(ctx, epoch)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		reference := consistencyDomainRef{Kind: entry.Kind, ID: entry.DomainID}
+		if err := catalog.store.freeze(ctx, reference, epoch); err != nil {
+			return domain.WrapError(domain.KindOf(err), "freeze registered schema-008 consistency domain", err)
+		}
+		if _, active, err := e.readClosedStorageMigrationGate(ctx, transition); err != nil {
+			return err
+		} else if !active {
+			// Always retract this worker's own old-epoch head first. The
+			// catalog may already belong to the next closure, in which case
+			// catalog.unfreeze must (and will) reject the stale epoch while the
+			// head-level cleanup remains both necessary and safe.
+			if unfreezeErr := catalog.store.unfreeze(ctx, reference, epoch); unfreezeErr != nil && !errors.Is(unfreezeErr, domain.ErrConflict) && !errors.Is(unfreezeErr, domain.ErrNotFound) {
+				return unfreezeErr
+			}
+			if unfreezeErr := catalog.unfreeze(ctx, epoch); unfreezeErr != nil && !errors.Is(unfreezeErr, domain.ErrConflict) && !errors.Is(unfreezeErr, domain.ErrNotFound) {
+				return unfreezeErr
+			}
+			return nil
+		}
+	}
 	return nil
 }
 

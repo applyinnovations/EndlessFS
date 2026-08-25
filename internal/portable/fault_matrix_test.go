@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 )
 
 type failNthBackend struct {
+	mu               sync.Mutex
 	backend          *objectmemory.Backend
 	failAt           int
 	calls            int
@@ -26,16 +28,50 @@ type failNthBackend struct {
 }
 
 func (backend *failNthBackend) arm(call int) {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
 	backend.failAt, backend.calls, backend.failureOperation = call, 0, ""
 }
-func (backend *failNthBackend) disable() { backend.failAt = 0 }
+func (backend *failNthBackend) disable() {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	backend.failAt = 0
+}
 func (backend *failNthBackend) fault(operation string) error {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
 	backend.calls++
 	if backend.failAt > 0 && backend.calls == backend.failAt {
 		backend.failureOperation = operation
 		return domain.NewError(domain.ErrorUnavailable, "injected object transport interruption")
 	}
 	return nil
+}
+
+func TestFailNthBackendCountsConcurrentProviderCallsSafely(t *testing.T) {
+	const total = 64
+	backend := &failNthBackend{}
+	backend.arm(17)
+	errorsSeen := make(chan error, total)
+	var wait sync.WaitGroup
+	for call := range total {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			errorsSeen <- backend.fault(fmt.Sprintf("concurrent-%d", call))
+		}()
+	}
+	wait.Wait()
+	close(errorsSeen)
+	failures := 0
+	for err := range errorsSeen {
+		if err != nil {
+			failures++
+		}
+	}
+	if backend.calls != total || failures != 1 {
+		t.Fatalf("concurrent fault count = %d calls, %d failures; want %d, 1", backend.calls, failures, total)
+	}
 }
 
 func (backend *failNthBackend) Head(ctx context.Context, key objectstore.Key) (objectstore.ObjectInfo, error) {

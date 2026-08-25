@@ -17,10 +17,6 @@ type repository struct {
 
 func newRepository(store state.Store) *repository { return &repository{store: store} }
 
-func (r *repository) createBatchOperation(ctx context.Context, record model.BatchOperation) error {
-	return r.create(ctx, state.MustKey(state.NamespaceOperations, "batch", record.OwnerUserID.String(), string(record.OperationID)), &record)
-}
-
 func (r *repository) createShare(ctx context.Context, record model.Share) error {
 	return r.create(ctx, shareKey(record.OwnerUserID, record.ShareID), &record)
 }

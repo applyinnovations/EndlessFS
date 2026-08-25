@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"time"
@@ -300,12 +301,23 @@ func (e *Engine) reconcileGateDomainFreeze(ctx context.Context, gateObject objec
 			continue
 		}
 		switch {
-		case gate.Mode == storageformat.GateOpen && gate.Epoch == catalog.head.FreezeEpoch+1:
-			// A prior replica durably authorized checkpoint reopening before
-			// losing the response or process. Finish the idempotent per-domain
-			// unfreeze suffix before this replica serves mutations or begins the
-			// next adjacent schema migration. Recheck both records afterwards so
-			// a concurrent next closure cannot be mistaken for an epoch mismatch.
+		case gate.Mode == storageformat.GateOpen && catalog.head.FreezeEpoch <= gate.Epoch:
+			// An open gate authorizes no domain freeze. Usually the catalog is
+			// from the immediately preceding closure, but an arbitrarily late
+			// migration helper can republish an even older epoch after multiple
+			// adjacent edges have completed. Any non-future freeze is therefore
+			// stale and safe to help; a future epoch still fails closed below.
+			if err := newDomainCatalog(e.backend, e.scheduler).unfreeze(ctx, catalog.head.FreezeEpoch); err != nil && !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) {
+				return storageformat.WriteGate{}, err
+			}
+			gateObject, gate = latestObject, latestGate
+			continue
+		case gate.Mode == storageformat.GateClosing && catalog.head.FreezeEpoch < gate.Epoch:
+			// A lagging worker from the preceding migration may publish its
+			// idempotent freeze after one or more later migrations won their
+			// closing CAS. The current closer cannot freeze at its own epoch
+			// until every older suffix is removed, so helping the old unfreeze
+			// is both safe and required for forward progress.
 			if err := newDomainCatalog(e.backend, e.scheduler).unfreeze(ctx, catalog.head.FreezeEpoch); err != nil && !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) {
 				return storageformat.WriteGate{}, err
 			}
@@ -315,7 +327,7 @@ func (e *Engine) reconcileGateDomainFreeze(ctx context.Context, gateObject objec
 			// Checkpoint closure is intentionally durable across restarts.
 			return gate, nil
 		default:
-			return storageformat.WriteGate{}, domain.NewError(domain.ErrorPreconditionFailed, "write gate and consistency-domain freeze disagree")
+			return storageformat.WriteGate{}, domain.NewError(domain.ErrorPreconditionFailed, fmt.Sprintf("write gate and consistency-domain freeze disagree (gateMode=%s gateEpoch=%d catalogFreezeEpoch=%d)", gate.Mode, gate.Epoch, catalog.head.FreezeEpoch))
 		}
 	}
 	return storageformat.WriteGate{}, domain.NewError(domain.ErrorUnavailable, "write gate and consistency-domain freeze remained contended")

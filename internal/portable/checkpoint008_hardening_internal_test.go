@@ -541,6 +541,126 @@ func TestSchema008CheckpointAuthorityKeyAllowlistExcludesRetiredAndProjectionSta
 	}
 }
 
+func TestSchema009NamespaceDeltaOpaqueResultClassification(t *testing.T) {
+	if schema009NamespaceDeltaHasOpaqueResult(storageformat.DomainDelta{}) {
+		t.Fatal("empty namespace delta was classified as opaque")
+	}
+	if !schema009NamespaceDeltaHasOpaqueResult(storageformat.DomainDelta{Changes: []storageformat.DomainChange{{Key: transitionLockKey009}}}) {
+		t.Fatal("transition-lock delta was not classified as opaque")
+	}
+	key := state.MustKey(state.NamespaceTrash, "owner", "record")
+	if !schema009NamespaceDeltaHasOpaqueResult(storageformat.DomainDelta{Changes: []storageformat.DomainChange{{Key: key.String()}}}) {
+		t.Fatal("state delta was not classified as opaque")
+	}
+	if schema009NamespaceDeltaHasOpaqueResult(storageformat.DomainDelta{Changes: []storageformat.DomainChange{{Key: "namespace/live"}}}) {
+		t.Fatal("namespace-only delta was classified as opaque")
+	}
+}
+
+func TestSchema009TransitionReachabilityRejectsProviderAndBindingGaps(t *testing.T) {
+	ctx := context.Background()
+	newCollector := func(t *testing.T) *checkpointReachabilityCollector {
+		t.Helper()
+		collector, err := newCheckpointReachabilityCollector()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = collector.Close() })
+		return collector
+	}
+
+	t.Run("list", func(t *testing.T) {
+		memory := objectmemory.New()
+		engine := openNamespaceTestEngine(t, memory)
+		engine.backend = &hookedBackend{Backend: memory, list: func(context.Context, objectstore.ListRequest) (objectstore.ListPage, error) {
+			return objectstore.ListPage{}, domain.NewError(domain.ErrorUnavailable, "transition list failed")
+		}}
+		if err := engine.collectTransitionReachability009(ctx, newCollector(t)); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("transition list error = %v", err)
+		}
+	})
+
+	t.Run("decision-read", func(t *testing.T) {
+		memory := objectmemory.New()
+		engine := openNamespaceTestEngine(t, memory)
+		key := storageformat.TransitionDecisionKey("read-failure")
+		if _, err := memory.Put(ctx, key, []byte("body"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+		engine.backend = &hookedBackend{Backend: memory, get: func(callCtx context.Context, requested objectstore.Key) (objectstore.Object, error) {
+			if requested == key {
+				return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "transition decision read failed")
+			}
+			return memory.Get(callCtx, requested)
+		}}
+		if err := engine.collectTransitionReachability009(ctx, newCollector(t)); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("transition decision read error = %v", err)
+		}
+	})
+
+	t.Run("invalid-decision", func(t *testing.T) {
+		memory := objectmemory.New()
+		engine := openNamespaceTestEngine(t, memory)
+		key := storageformat.TransitionDecisionKey("invalid-decision")
+		if _, err := memory.Put(ctx, key, []byte("invalid"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+		if err := engine.collectTransitionReachability009(ctx, newCollector(t)); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid transition decision error = %v", err)
+		}
+	})
+
+	t.Run("missing-plan", func(t *testing.T) {
+		memory := objectmemory.New()
+		engine := openNamespaceTestEngine(t, memory)
+		decision := storageformat.TransitionDecision009{SchemaVersion: 1, TransitionID: "missing-plan", Fingerprint: storageformat.Digest([]byte("missing-plan")), Committed: true, DecidedAt: engine.clock.Now().UTC()}
+		key := storageformat.TransitionDecisionKey(decision.TransitionID)
+		body := encodeInternalEnvelope(t, transitionDecisionSchema009, key, 1, decision)
+		if _, err := memory.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+		if err := engine.collectTransitionReachability009(ctx, newCollector(t)); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("decision without plan error = %v", err)
+		}
+	})
+}
+
+func TestSchema009CheckpointDrainAndTypedNamespaceStateBoundaries(t *testing.T) {
+	ctx := context.Background()
+	owner := namespaceTestScope(t, domain.AreaLive).UserID()
+
+	t.Run("terminal-cleanup", func(t *testing.T) {
+		engine := openNamespaceTestEngine(t, objectmemory.New())
+		record := checkpointUploadRecord(engine, owner, "checkpoint-cleanup", engine.clock.Now().Add(time.Hour))
+		record.State, record.CleanupPending = storageformat.UploadCompleted, true
+		seedCheckpointUploadRecord(t, engine, owner, record)
+		if err := engine.drainExpiredSchema008Uploads(ctx); err != nil {
+			t.Fatal(err)
+		}
+		current, _, err := engine.Files().portableUpload(ctx, owner, record.UploadID)
+		if err != nil || current.CleanupPending {
+			t.Fatalf("drained terminal upload = %+v, %v", current, err)
+		}
+	})
+
+	t.Run("typed-state", func(t *testing.T) {
+		engine := openNamespaceTestEngine(t, objectmemory.New())
+		reference := namespaceReference(owner)
+		for name, change := range map[string]storageformat.DomainChange{
+			"unknown-key":  {Key: "unknown", Value: []byte("value"), LogicalVersion: "version"},
+			"wrong-route":  {Key: state.MustKey(state.NamespaceAccounts, owner.String()).String(), Value: []byte("value"), LogicalVersion: "version"},
+			"invalid-type": {Key: state.MustKey(state.NamespaceTrash, owner.String(), "record").String(), Value: []byte("invalid"), LogicalVersion: "version"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				head := storageformat.DomainHead{SchemaVersion: 1, Registered: true, DomainID: reference.ID, Kind: reference.Kind, Revision: 1, Deltas: []storageformat.DomainDelta{{MutationID: "mutation", Fingerprint: storageformat.Digest([]byte("mutation")), Revision: 1, RetainUntil: engine.clock.Now().Add(time.Hour), Changes: []storageformat.DomainChange{change}}}}
+				if err := engine.validateKnownControlDomainValuesForSchema(ctx, reference, head, true); !errors.Is(err, domain.ErrInvalid) {
+					t.Fatalf("typed namespace state error = %v", err)
+				}
+			})
+		}
+	})
+}
+
 func TestSchema008CheckpointRejectsRegisteredHeadMissingFromCatalog(t *testing.T) {
 	ctx := context.Background()
 	backend := objectmemory.New()

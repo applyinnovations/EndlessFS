@@ -61,6 +61,13 @@ func TestOwnerScopedOpaqueIDRoundTrip(t *testing.T) {
 			t.Errorf("invalid scoped ID %q error = %v", invalid, err)
 		}
 	}
+	oversizedOwner, err := ParseUserID(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x4f}, 1<<16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ScopeOpaqueID(oversizedOwner, raw); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("oversized owner scoped ID error = %v", err)
+	}
 }
 
 func TestIDGeneratorSerializesConcurrentEntropyReads(t *testing.T) {

@@ -244,8 +244,8 @@ func (e *Engine) runStorageMigration008To009(ctx context.Context, transition sto
 	if err != nil || !closed {
 		return err
 	}
-	_, _, gate, err := e.readGate(ctx)
-	if err != nil {
+	gate, active, err := e.readClosedStorageMigrationGate(ctx, transition)
+	if err != nil || !active {
 		return err
 	}
 	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageGateClosed})

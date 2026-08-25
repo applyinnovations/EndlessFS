@@ -86,6 +86,22 @@ func (e *Engine) finishClosingWrites(ctx context.Context, checkpointID string) e
 		return err
 	}
 	entries, err := catalog.freeze(ctx, initialGate.Epoch)
+	if errors.Is(err, domain.ErrConflict) {
+		// A lagging preceding migration can retain an old catalog snapshot
+		// across reopen. Keep reconciliation off the ordinary closure path and
+		// pay for it only when the catalog proves that race occurred.
+		gateObject, _, currentGate, gateErr := e.readGate(ctx)
+		if gateErr != nil {
+			return gateErr
+		}
+		if currentGate.Mode != storageformat.GateClosing || currentGate.Epoch != initialGate.Epoch || currentGate.CheckpointID != checkpointID {
+			return domain.NewError(domain.ErrorPreconditionFailed, "write gate changed before consistency-domain freeze")
+		}
+		if _, reconcileErr := e.reconcileGateDomainFreeze(ctx, gateObject, currentGate); reconcileErr != nil {
+			return reconcileErr
+		}
+		entries, err = catalog.freeze(ctx, initialGate.Epoch)
+	}
 	if err != nil {
 		return err
 	}

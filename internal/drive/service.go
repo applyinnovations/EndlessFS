@@ -362,15 +362,6 @@ func (s *Service) Trash(ctx context.Context, userID domain.UserID, paths []domai
 	return driveBatchResult(result), nil
 }
 
-func (s *Service) trashOneExpected(ctx context.Context, userID domain.UserID, path domain.UserPath, expected domain.Version, key string) (ItemResult, error) {
-	trashID := s.derivedID("trash", userID, key)
-	operation, err := s.trash.MoveToTrash(ctx, userID, domain.TrashRequest{Path: path, ExpectedVersion: expected, TrashID: trashID, IdempotencyKey: key})
-	if err != nil {
-		return ItemResult{}, err
-	}
-	return ItemResult{Path: path, TrashID: trashID, OperationID: operation.ID, State: operation.State, ErrorKind: operation.ErrorKind}, nil
-}
-
 func (s *Service) TrashList(ctx context.Context, userID domain.UserID) ([]model.Trash, error) {
 	var records []model.Trash
 	request := domain.TrashListRequest{Limit: 1000}

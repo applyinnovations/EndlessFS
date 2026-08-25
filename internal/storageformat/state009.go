@@ -11,7 +11,7 @@ const (
 	StateRecordProfile                 = "profile"
 	StateRecordAccount                 = "account"
 	StateRecordCredential              = "credential"
-	StateRecordCredentialIndex         = "credential-index"
+	StateRecordCredentialIndex         = "credential-index" // #nosec G101 -- canonical record-type label, never credential material.
 	StateRecordCeremony                = "ceremony"
 	StateRecordRegistrationOperation   = "registration-operation"
 	StateRecordAuthenticationOperation = "authentication-operation"

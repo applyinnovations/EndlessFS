@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -46,6 +47,7 @@ type transferConfiguration struct {
 	insecure       bool
 	aead           cipher.AEAD
 	random         io.Reader
+	randomMu       sync.Mutex
 	clock          domain.Clock
 }
 
@@ -386,8 +388,11 @@ func (b *Backend) sealLease(lease uploadLease) ([]byte, error) {
 		return nil, domain.NewError(domain.ErrorInternal, "encode GCS upload lease")
 	}
 	nonce := make([]byte, b.transfer.aead.NonceSize())
-	if _, err := io.ReadFull(b.transfer.random, nonce); err != nil {
-		return nil, domain.WrapError(domain.ErrorInternal, "generate GCS upload lease nonce", err)
+	b.transfer.randomMu.Lock()
+	_, randomErr := io.ReadFull(b.transfer.random, nonce)
+	b.transfer.randomMu.Unlock()
+	if randomErr != nil {
+		return nil, domain.WrapError(domain.ErrorInternal, "generate GCS upload lease nonce", randomErr)
 	}
 	return b.transfer.aead.Seal(nonce, nonce, plaintext, []byte(leaseAssociatedData)), nil
 }

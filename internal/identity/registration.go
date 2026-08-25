@@ -203,62 +203,6 @@ func (s *Service) verifyRegistrationPolicy(ctx context.Context, ceremony model.C
 	return nil
 }
 
-func (s *Service) claimRegistration(ctx context.Context, ceremony model.Ceremony, operation model.RegistrationOperation) error {
-	now := s.clock.Now()
-	if ceremony.Flow == model.CeremonyBootstrap || ceremony.Flow == model.CeremonyPublic || ceremony.Flow == model.CeremonyInvite {
-		marker := model.FirstAccountMarker{
-			SchemaVersion: model.SchemaVersion, Flow: ceremony.Flow,
-			OperationID: operation.OperationID, UserID: operation.UserID, CreatedAt: now,
-		}
-		if err := s.repository.CreateFirstAccountMarker(ctx, marker); err != nil && !errors.Is(err, domain.ErrConflict) {
-			return err
-		}
-		existing, _, err := s.repository.FirstAccountMarker(ctx)
-		if err != nil {
-			return err
-		}
-		if ceremony.Flow == model.CeremonyBootstrap && existing.OperationID != operation.OperationID {
-			return domain.NewError(domain.ErrorConflict, "bootstrap was already claimed")
-		}
-	}
-	switch ceremony.Flow {
-	case model.CeremonyBootstrap:
-		claim := model.BootstrapState{
-			SchemaVersion: model.SchemaVersion, Status: model.OperationClaimed, Operation: operation,
-		}
-		if err := s.repository.CreateBootstrap(ctx, claim); err != nil {
-			return domain.NewError(domain.ErrorConflict, "bootstrap was already claimed")
-		}
-	case model.CeremonyInvite:
-		invite, version, err := s.repository.InviteByHash(ctx, ceremony.BearerTokenHash)
-		if err != nil || !s.inviteUsable(invite) {
-			return domain.NewError(domain.ErrorUnavailable, "registration is unavailable")
-		}
-		invite.Uses = 1
-		invite.UsedAt = &now
-		invite.UsedByUserID = &operation.UserID
-		invite.OperationID = operation.OperationID
-		if _, err := s.repository.UpdateInvite(ctx, invite, version); err != nil {
-			return domain.NewError(domain.ErrorConflict, "invite was already consumed")
-		}
-	case model.CeremonyRecovery:
-		recovery, version, err := s.repository.RecoveryByHash(ctx, operation.UserID, ceremony.BearerTokenHash)
-		if err != nil || !s.recoveryUsable(recovery) || recovery.TargetUserID != operation.UserID {
-			return domain.NewError(domain.ErrorUnavailable, "recovery is unavailable")
-		}
-		recovery.UsedAt = &now
-		recovery.OperationID = operation.OperationID
-		if _, err := s.repository.UpdateRecovery(ctx, recovery, version); err != nil {
-			return domain.NewError(domain.ErrorConflict, "recovery was already consumed")
-		}
-	case model.CeremonyPublic, model.CeremonyAddPasskey:
-		// The consumed ceremony record is the conditional claim.
-	default:
-		return domain.NewError(domain.ErrorInvalid, "unsupported registration flow")
-	}
-	return nil
-}
-
 func (s *Service) resumeRegistration(ctx context.Context, ceremony model.Ceremony) (RegistrationComplete, error) {
 	if ceremony.OperationID == "" {
 		return RegistrationComplete{}, domain.NewError(domain.ErrorConflict, "registration ceremony was consumed")

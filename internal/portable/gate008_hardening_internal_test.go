@@ -195,6 +195,171 @@ func TestSchema008GateTransitionStateAndFailureMatrix(t *testing.T) {
 	})
 }
 
+func TestSchema008ClosingGateReconcilesPrecedingMigrationFreeze(t *testing.T) {
+	ctx := context.Background()
+	memory := objectmemory.New()
+	engine := openNamespaceTestEngine(t, memory)
+	catalog := newDomainCatalog(memory, nil)
+	if _, err := catalog.freeze(ctx, 9); err != nil {
+		t.Fatal(err)
+	}
+	rewriteCurrentGate(t, memory, func(gate *storageformat.WriteGate) {
+		gate.Mode = storageformat.GateClosing
+		gate.CheckpointID = "next-migration"
+		gate.Epoch = 10
+	})
+	gateObject, _, gate, err := engine.readGate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := engine.reconcileGateDomainFreeze(ctx, gateObject, gate)
+	if err != nil || reconciled.Mode != storageformat.GateClosing || reconciled.Epoch != 10 {
+		t.Fatalf("reconciled gate = %+v, %v", reconciled, err)
+	}
+	snapshot, err := catalog.load(ctx)
+	if err != nil || snapshot.head.FreezeEpoch != 0 {
+		t.Fatalf("catalog after reconciliation = %+v, %v", snapshot.head, err)
+	}
+
+	if _, err := catalog.freeze(ctx, 8); err != nil {
+		t.Fatal(err)
+	}
+	gateObject, _, gate, err = engine.readGate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.reconcileGateDomainFreeze(ctx, gateObject, gate); err != nil {
+		t.Fatalf("older non-adjacent freeze reconciliation error = %v", err)
+	}
+	if _, err := catalog.freeze(ctx, 11); err != nil {
+		t.Fatal(err)
+	}
+	gateObject, _, gate, err = engine.readGate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.reconcileGateDomainFreeze(ctx, gateObject, gate); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("future freeze mismatch error = %v", err)
+	}
+}
+
+func TestSchema008OpenGateReconcilesAnyNonFutureFreeze(t *testing.T) {
+	ctx := context.Background()
+	memory := objectmemory.New()
+	engine := openNamespaceTestEngine(t, memory)
+	catalog := newDomainCatalog(memory, nil)
+	if _, err := catalog.freeze(ctx, 7); err != nil {
+		t.Fatal(err)
+	}
+	rewriteCurrentGate(t, memory, func(gate *storageformat.WriteGate) {
+		gate.Mode, gate.CheckpointID, gate.Epoch = storageformat.GateOpen, "", 9
+	})
+	gateObject, _, gate, err := engine.readGate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.reconcileGateDomainFreeze(ctx, gateObject, gate); err != nil {
+		t.Fatalf("old open-gate freeze reconciliation error = %v", err)
+	}
+	snapshot, err := catalog.load(ctx)
+	if err != nil || snapshot.head.FreezeEpoch != 0 {
+		t.Fatalf("catalog after old open-gate reconciliation = %+v, %v", snapshot.head, err)
+	}
+}
+
+func TestSchema008FinishClosingWritesReconcilesStaleCatalogFreeze(t *testing.T) {
+	ctx := context.Background()
+	prepare := func(t *testing.T) (*objectmemory.Backend, *Engine) {
+		t.Helper()
+		memory := objectmemory.New()
+		engine := openNamespaceTestEngine(t, memory)
+		if _, err := newDomainCatalog(memory, nil).freeze(ctx, 9); err != nil {
+			t.Fatal(err)
+		}
+		rewriteCurrentGate(t, memory, func(gate *storageformat.WriteGate) {
+			gate.Mode, gate.CheckpointID, gate.Epoch = storageformat.GateClosing, "checkpoint", 10
+		})
+		return memory, engine
+	}
+
+	t.Run("reconciles-and-closes", func(t *testing.T) {
+		memory, engine := prepare(t)
+		if err := engine.finishClosingWrites(ctx, "checkpoint"); err != nil {
+			t.Fatal(err)
+		}
+		gate, err := engine.GateStatus(ctx)
+		if err != nil || gate.Mode != storageformat.GateClosed || gate.CheckpointID != "checkpoint" {
+			t.Fatalf("reconciled gate = %+v, %v", gate, err)
+		}
+		catalog, err := newDomainCatalog(memory, nil).load(ctx)
+		if err != nil || catalog.head.FreezeEpoch != 10 {
+			t.Fatalf("reconciled catalog = %+v, %v", catalog.head, err)
+		}
+	})
+
+	t.Run("winner-read-failure", func(t *testing.T) {
+		memory, engine := prepare(t)
+		gateReads := 0
+		engine.backend = &hookedBackend{Backend: memory, get: func(callCtx context.Context, key objectstore.Key) (objectstore.Object, error) {
+			if key == storageformat.WriteGateKey() {
+				gateReads++
+				if gateReads == 2 {
+					return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "stale-freeze winner read failed")
+				}
+			}
+			return memory.Get(callCtx, key)
+		}}
+		if err := engine.finishClosingWrites(ctx, "checkpoint"); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("stale-freeze winner read error = %v", err)
+		}
+	})
+
+	t.Run("winner-changed-gate", func(t *testing.T) {
+		memory, engine := prepare(t)
+		gateReads := 0
+		engine.backend = &hookedBackend{Backend: memory, get: func(callCtx context.Context, key objectstore.Key) (objectstore.Object, error) {
+			if key == storageformat.WriteGateKey() {
+				gateReads++
+				if gateReads == 2 {
+					rewriteCurrentGate(t, memory, func(gate *storageformat.WriteGate) {
+						gate.Mode, gate.CheckpointID = storageformat.GateOpen, ""
+						gate.Epoch++
+					})
+				}
+			}
+			return memory.Get(callCtx, key)
+		}}
+		if err := engine.finishClosingWrites(ctx, "checkpoint"); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("changed stale-freeze gate error = %v", err)
+		}
+	})
+}
+
+func TestSchema008GateFreezeReconciliationPropagatesLatestGateReadFailure(t *testing.T) {
+	ctx := context.Background()
+	memory := objectmemory.New()
+	engine := openNamespaceTestEngine(t, memory)
+	if _, err := newDomainCatalog(memory, nil).freeze(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	rewriteCurrentGate(t, memory, func(gate *storageformat.WriteGate) {
+		gate.Mode, gate.CheckpointID, gate.Epoch = storageformat.GateOpen, "", 2
+	})
+	gateObject, _, gate, err := engine.readGate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.backend = &hookedBackend{Backend: memory, get: func(callCtx context.Context, key objectstore.Key) (objectstore.Object, error) {
+		if key == storageformat.WriteGateKey() {
+			return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "latest gate read failed")
+		}
+		return memory.Get(callCtx, key)
+	}}
+	if _, err := engine.reconcileGateDomainFreeze(ctx, gateObject, gate); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("latest gate read error = %v", err)
+	}
+}
+
 func TestSchema008CancelClosingGateRetriesOnlyConditionalRaces(t *testing.T) {
 	ctx := context.Background()
 	t.Run("open-and-misbound", func(t *testing.T) {
@@ -307,6 +472,27 @@ func TestSchema008DomainCatalogCorruptionAndFreezeDenials(t *testing.T) {
 
 func TestSchema008GateAndCatalogProviderFailureBranches(t *testing.T) {
 	ctx := context.Background()
+	t.Run("finish-and-open-read", func(t *testing.T) {
+		memory := objectmemory.New()
+		engine := openNamespaceTestEngine(t, memory)
+		engine.backend = &hookedBackend{Backend: memory, get: func(context.Context, objectstore.Key) (objectstore.Object, error) {
+			return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "gate read failed")
+		}}
+		if err := engine.finishClosingWrites(ctx, "checkpoint"); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("finish gate read error = %v", err)
+		}
+		if err := engine.openClosedWriteGate(ctx, "checkpoint"); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("open gate read error = %v", err)
+		}
+	})
+
+	t.Run("open-requires-matching-closed-gate", func(t *testing.T) {
+		engine := openNamespaceTestEngine(t, objectmemory.New())
+		if err := engine.openClosedWriteGate(ctx, "checkpoint"); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("open live gate error = %v", err)
+		}
+	})
+
 	t.Run("close-gate-put", func(t *testing.T) {
 		memory := objectmemory.New()
 		hooks := &hookedBackend{Backend: memory}
@@ -421,4 +607,29 @@ func TestSchema008GateAndCatalogProviderFailureBranches(t *testing.T) {
 			t.Fatalf("visitor error = %v", err)
 		}
 	})
+}
+
+func TestSchema008FreezeDomainsPropagatesCatalogAndDomainFailures(t *testing.T) {
+	ctx := context.Background()
+	if _, err := newDomainCatalog(objectmemory.New(), nil).freezeDomains(ctx, 0); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("zero freezeDomains epoch error = %v", err)
+	}
+	memory := objectmemory.New()
+	store := newConsistencyDomainStore(memory, nil)
+	reference := consistencyDomainRef{Kind: storageformat.DomainNamespace, ID: "freeze-domain-error"}
+	if _, err := store.mutate(ctx, reference, consistencyDomainMutation{ID: "seed", Changes: []consistencyDomainChange{{Key: "value", Require: domainValueAbsent, Value: []byte("value")}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.freeze(ctx, reference, 8); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newDomainCatalog(memory, nil).freezeDomains(ctx, 9); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("domain freeze conflict error = %v", err)
+	}
+
+	catalog := newDomainCatalog(memory, nil)
+	missingRoot := storageformat.DomainCatalogHead{Root: storageformat.DomainTreeRoot{Digest: storageformat.Digest([]byte("missing")), Level: 0, EntryCount: 1}}
+	if _, err := catalog.entries(ctx, missingRoot); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("catalog entries traversal error = %v", err)
+	}
 }

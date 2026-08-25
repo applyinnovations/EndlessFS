@@ -58,6 +58,9 @@ func TestScopedBearerTokenRoundTripAndTamperDenial(t *testing.T) {
 			t.Errorf("accepted invalid scoped token %q", invalid)
 		}
 	}
+	if _, err := ScopeBearerToken(domain.UserID{}, raw); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("ScopeBearerToken invalid owner error = %v", err)
+	}
 }
 
 func TestScopedCapabilityTokenBindsOwnerLocatorAndSecret(t *testing.T) {
@@ -76,6 +79,19 @@ func TestScopedCapabilityTokenBindsOwnerLocatorAndSecret(t *testing.T) {
 		if _, _, _, err := ParseScopedCapabilityToken(invalid); !errors.Is(err, domain.ErrInvalid) {
 			t.Errorf("invalid capability %q error = %v", invalid, err)
 		}
+	}
+	if _, err := ScopeCapabilityToken(owner, "short", raw); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("ScopeCapabilityToken invalid locator error = %v", err)
+	}
+	if _, _, _, err := ParseScopedCapabilityToken("c1." + owner.String() + ".short." + raw); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("ParseScopedCapabilityToken invalid locator error = %v", err)
+	}
+}
+
+func TestMatchesKeyedHashRejectsMalformedDigest(t *testing.T) {
+	key := Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x41}, 32)))
+	if MatchesKeyedHash(key, "browser binding", "invalid") {
+		t.Fatal("malformed keyed hash matched")
 	}
 }
 

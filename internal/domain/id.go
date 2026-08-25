@@ -122,13 +122,16 @@ func (g *IDGenerator) BearerToken() (string, error) {
 func ScopeOpaqueID(owner UserID, opaque string) (string, error) {
 	ownerBytes, ownerErr := base64.RawURLEncoding.DecodeString(owner.String())
 	opaqueBytes, opaqueErr := base64.RawURLEncoding.DecodeString(opaque)
-	if !owner.Valid() || ownerErr != nil || len(ownerBytes) < 16 || len(ownerBytes) > 65535 || base64.RawURLEncoding.EncodeToString(ownerBytes) != owner.String() || opaqueErr != nil || len(opaqueBytes) < 16 || base64.RawURLEncoding.EncodeToString(opaqueBytes) != opaque {
+	if !owner.Valid() || ownerErr != nil || len(ownerBytes) < 16 || base64.RawURLEncoding.EncodeToString(ownerBytes) != owner.String() || opaqueErr != nil || len(opaqueBytes) < 16 || base64.RawURLEncoding.EncodeToString(opaqueBytes) != opaque {
+		return "", NewError(ErrorInvalid, "invalid owner-scoped opaque ID material")
+	}
+	if len(ownerBytes) > int(^uint16(0)) {
 		return "", NewError(ErrorInvalid, "invalid owner-scoped opaque ID material")
 	}
 	encoded := make([]byte, 0, len(scopedOpaqueIDPrefix)+2+len(ownerBytes)+len(opaqueBytes))
 	encoded = append(encoded, scopedOpaqueIDPrefix...)
 	length := make([]byte, 2)
-	binary.BigEndian.PutUint16(length, uint16(len(ownerBytes)))
+	binary.BigEndian.PutUint16(length, uint16(len(ownerBytes))) // #nosec G115 -- the immediately preceding MaxUint16 check proves this conversion lossless.
 	encoded = append(encoded, length...)
 	encoded = append(encoded, ownerBytes...)
 	encoded = append(encoded, opaqueBytes...)

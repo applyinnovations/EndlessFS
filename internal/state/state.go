@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
@@ -138,6 +139,58 @@ type Store interface {
 	Create(context.Context, Key, []byte) (Version, error)
 	CompareAndSwap(context.Context, Key, Version, []byte) (Version, error)
 	Delete(context.Context, Key, Version) error
+}
+
+// Requirement describes the value precondition checked at the same
+// linearization point as every other change in a Mutation.
+type Requirement uint8
+
+const (
+	RequirementAny Requirement = iota + 1
+	RequirementAbsent
+	RequirementPresent
+)
+
+// Change is one member of an atomic state-domain mutation. ExpectedVersion is
+// valid only with RequirementPresent. Delete requires an existing value and
+// carries no Data.
+type Change struct {
+	Key             Key
+	Requirement     Requirement
+	ExpectedVersion Version
+	Delete          bool
+	Data            []byte
+}
+
+// Mutation is an idempotent, all-or-nothing change to one consistency domain.
+// ID is scoped to that domain. Reusing it with different changes or Result is
+// rejected. RetainUntil controls how long an exact retry is guaranteed to
+// recover the original outcome; a zero value selects the store policy.
+type Mutation struct {
+	ID          string
+	RetainUntil time.Time
+	Changes     []Change
+	Result      []byte
+}
+
+type ChangeResult struct {
+	Key     Key
+	Version Version
+}
+
+type MutationOutcome struct {
+	ID       string
+	Changes  []ChangeResult
+	Result   []byte
+	Replayed bool
+}
+
+// AtomicStore publishes every change in a Mutation through one durable
+// linearization point. Implementations MUST reject cross-domain mutations
+// before making any provider write.
+type AtomicStore interface {
+	Store
+	Mutate(context.Context, Mutation) (MutationOutcome, error)
 }
 
 func normalizePageLimit(limit int) (int, error) {

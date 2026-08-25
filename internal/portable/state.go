@@ -236,12 +236,21 @@ func (e *Engine) Get(ctx context.Context, key state.Key) (state.Value, error) {
 	if err != nil {
 		return state.Value{}, err
 	}
-	if err := e.resolveStateTransition009(ctx, reference); err != nil {
-		return state.Value{}, err
+	var value consistencyDomainValue
+	for attempts := 0; attempts < 8; attempts++ {
+		value, err = e.stateDomainStore().get(ctx, reference, key.String())
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, errTransitionPending009) {
+			return state.Value{}, err
+		}
+		if err := e.resolveStateTransition009(ctx, reference); err != nil {
+			return state.Value{}, err
+		}
 	}
-	value, err := e.stateDomainStore().get(ctx, reference, key.String())
 	if err != nil {
-		return state.Value{}, err
+		return state.Value{}, domain.NewError(domain.ErrorUnavailable, "state read remained transition-contended")
 	}
 	data, err := decodeStateValue009(key, value.Data)
 	if err != nil {
@@ -287,15 +296,21 @@ func (e *Engine) List(ctx context.Context, prefix state.Prefix, request state.Pa
 	if compositeSnapshot {
 		return state.Page{}, domain.NewError(domain.ErrorInvalid, "state cursor snapshot kind changed")
 	}
-	if snapshotDigest == "" {
-		if err := e.resolveStateTransition009(ctx, reference); err != nil {
-			return state.Page{}, err
-		}
-	}
 	var entries []storageformat.DomainEntry
 	var revision uint64
 	if snapshotDigest == "" {
-		entries, revision, snapshotDigest, err = e.stateDomainStore().list(ctx, reference, prefix.String(), after, limit+1, expiresAt)
+		for attempts := 0; attempts < 8; attempts++ {
+			entries, revision, snapshotDigest, err = e.stateDomainStore().list(ctx, reference, prefix.String(), after, limit+1, expiresAt)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, errTransitionPending009) {
+				return state.Page{}, err
+			}
+			if err := e.resolveStateTransition009(ctx, reference); err != nil {
+				return state.Page{}, err
+			}
+		}
 	} else {
 		entries, revision, err = e.stateDomainStore().listSnapshot(ctx, reference, snapshotDigest, prefix.String(), after, limit+1)
 	}
@@ -343,12 +358,11 @@ func (e *Engine) Create(ctx context.Context, key state.Key, data []byte) (state.
 		return "", err
 	}
 	for attempts := 0; attempts < 8; attempts++ {
-		if err := e.resolveStateTransition009(ctx, reference); err != nil {
-			return "", err
-		}
 		if _, err := e.stateDomainStore().mutate(ctx, reference, mutation); err == nil {
 			return version, nil
 		} else if !errors.Is(err, errTransitionPending009) {
+			return "", err
+		} else if err := e.resolveStateTransition009(ctx, reference); err != nil {
 			return "", err
 		}
 	}
@@ -371,12 +385,11 @@ func (e *Engine) CompareAndSwap(ctx context.Context, key state.Key, current stat
 		return "", err
 	}
 	for attempts := 0; attempts < 8; attempts++ {
-		if err := e.resolveStateTransition009(ctx, reference); err != nil {
-			return "", err
-		}
 		if _, err := e.stateDomainStore().mutate(ctx, reference, mutation); err == nil {
 			return version, nil
 		} else if !errors.Is(err, errTransitionPending009) {
+			return "", err
+		} else if err := e.resolveStateTransition009(ctx, reference); err != nil {
 			return "", err
 		}
 	}
@@ -399,12 +412,11 @@ func (e *Engine) Delete(ctx context.Context, key state.Key, current state.Versio
 		return routeErr
 	}
 	for attempts := 0; attempts < 8; attempts++ {
-		if err := e.resolveStateTransition009(ctx, reference); err != nil {
-			return err
-		}
 		if _, err = e.stateDomainStore().mutate(ctx, reference, mutation); err == nil {
 			return nil
 		} else if !errors.Is(err, errTransitionPending009) {
+			return err
+		} else if err := e.resolveStateTransition009(ctx, reference); err != nil {
 			return err
 		}
 	}
@@ -461,14 +473,14 @@ func (e *Engine) Mutate(ctx context.Context, mutation state.Mutation) (state.Mut
 	}
 	var domainOutcome consistencyDomainOutcome
 	for attempts := 0; attempts < 8; attempts++ {
-		if err := e.resolveStateTransition009(ctx, reference); err != nil {
-			return state.MutationOutcome{}, err
-		}
 		domainOutcome, err = e.stateDomainStore().mutate(ctx, reference, canonical)
 		if err == nil {
 			break
 		}
 		if !errors.Is(err, errTransitionPending009) {
+			return state.MutationOutcome{}, err
+		}
+		if err := e.resolveStateTransition009(ctx, reference); err != nil {
 			return state.MutationOutcome{}, err
 		}
 	}

@@ -52,15 +52,20 @@ func (e *Engine) buildStateQuerySnapshot(ctx context.Context, prefix state.Prefi
 		catalog := newDomainCatalog(e.backend, e.scheduler)
 		err = catalog.visitEntries(ctx, catalogSnapshot.head, func(entry storageformat.DomainCatalogEntry) error {
 			reference := consistencyDomainRef{Kind: entry.Kind, ID: entry.DomainID}
-			if err := e.resolveStateTransition009(ctx, reference); err != nil {
-				return err
-			}
 			snapshot, err := e.stateDomainStore().loadHead(ctx, reference)
 			if err != nil {
 				return err
 			}
 			if !snapshot.exists || !snapshot.head.Registered {
 				return nil
+			}
+			if lock, _, found, lockErr := transitionLockAtHead009(ctx, e.stateDomainStore(), reference, snapshot.head); lockErr != nil {
+				return lockErr
+			} else if found {
+				if helpErr := e.helpTransition009(ctx, lock.TransitionID); helpErr != nil {
+					return helpErr
+				}
+				return errTransitionPending009
 			}
 			builder := newConsistencyDomainTreeBuilder(ctx, querySession)
 			after, count := "", 0
@@ -173,7 +178,12 @@ func (e *Engine) listStateAcrossDomains(ctx context.Context, prefix state.Prefix
 	var snapshot storageformat.StateQuerySnapshot
 	var err error
 	if digest == "" {
-		snapshot, digest, err = e.buildStateQuerySnapshot(ctx, prefix, expiresAt)
+		for attempts := 0; attempts < 8; attempts++ {
+			snapshot, digest, err = e.buildStateQuerySnapshot(ctx, prefix, expiresAt)
+			if !errors.Is(err, errTransitionPending009) {
+				break
+			}
+		}
 	} else {
 		snapshot, err = e.loadStateQuerySnapshot(ctx, prefix, digest)
 	}

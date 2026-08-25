@@ -555,6 +555,11 @@ func (store *consistencyDomainStore) get(ctx context.Context, reference consiste
 	if !snapshot.exists || !snapshot.head.Registered {
 		return consistencyDomainValue{}, domain.NewError(domain.ErrorNotFound, "consistency-domain value does not exist")
 	}
+	if _, _, found, lockErr := transitionLockAtHead009(ctx, store, reference, snapshot.head); lockErr != nil {
+		return consistencyDomainValue{}, lockErr
+	} else if found {
+		return consistencyDomainValue{}, domain.WrapError(domain.ErrorUnavailable, "consistency domain has a pending transition", errTransitionPending009)
+	}
 	value, found, err := store.lookupAtHead(ctx, reference, snapshot.head, key)
 	if err != nil {
 		return consistencyDomainValue{}, err
@@ -575,6 +580,11 @@ func (store *consistencyDomainStore) list(ctx context.Context, reference consist
 	}
 	if !snapshot.exists || !snapshot.head.Registered {
 		return nil, 0, "", nil
+	}
+	if _, _, found, lockErr := transitionLockAtHead009(ctx, store, reference, snapshot.head); lockErr != nil {
+		return nil, 0, "", lockErr
+	} else if found {
+		return nil, 0, "", domain.WrapError(domain.ErrorUnavailable, "consistency domain has a pending transition", errTransitionPending009)
 	}
 	entries, err := store.listAtHead(ctx, reference, snapshot.head, prefix, after, limit)
 	if err != nil || len(entries) < limit {

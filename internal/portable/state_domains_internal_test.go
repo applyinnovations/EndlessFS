@@ -18,7 +18,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
-func TestStateRoutingUsesOwnerAndShardedCapabilityDomains(t *testing.T) {
+func TestSchema008StateRoutingRemainsFrozenForMigration(t *testing.T) {
 	ownerA := "WVhXWVhXWVhXWVhXWVhXWQ"
 	ownerB := "aGhoaGhoaGhoaGhoaGhoaA"
 	cases := []struct {
@@ -42,17 +42,17 @@ func TestStateRoutingUsesOwnerAndShardedCapabilityDomains(t *testing.T) {
 		{state.MustKey(state.NamespaceRoles, "admins"), storageformat.DomainAdmin, "administration"},
 	}
 	for _, test := range cases {
-		reference, err := stateDomainReferenceForKey(test.key)
+		reference, err := stateDomainReferenceForKey008(test.key)
 		if err != nil || reference.Kind != test.kind || reference.ID != test.id {
 			t.Errorf("route %q = %+v, %v; want %s/%s", test.key.String(), reference, err, test.kind, test.id)
 		}
 	}
 
-	first, err := stateDomainReferenceForKey(state.MustKey(state.NamespaceSessions, "aaa-token"))
+	first, err := stateDomainReferenceForKey008(state.MustKey(state.NamespaceSessions, "aaa-token"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := stateDomainReferenceForKey(state.MustKey(state.NamespaceSessions, "bbb-token"))
+	second, err := stateDomainReferenceForKey008(state.MustKey(state.NamespaceSessions, "bbb-token"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,17 +66,19 @@ func TestStateRoutingUsesOwnerAndShardedCapabilityDomains(t *testing.T) {
 		state.MustKey(state.NamespaceRecoveries, "recovery-id"),
 		state.MustKey(state.NamespaceOperations, "operation-id"),
 	} {
-		reference, err := stateDomainReferenceForKey(key)
+		reference, err := stateDomainReferenceForKey008(key)
 		if err != nil || reference.Kind != storageformat.DomainCapability || !strings.HasPrefix(reference.ID, "state:") {
 			t.Fatalf("capability route %q = %+v, %v", key.String(), reference, err)
 		}
 	}
-	share, err := stateDomainReferenceForKey(state.MustKey(state.NamespaceShares, "share-token"))
+	share, err := stateDomainReferenceForKey008(state.MustKey(state.NamespaceShares, "share-token"))
 	if err != nil || share.Kind != storageformat.DomainShare || !strings.HasPrefix(share.ID, "state:") {
 		t.Fatalf("share route = %+v, %v", share, err)
 	}
-	if reference, exact, err := stateDomainReferenceForPrefix(state.MustPrefix(state.NamespaceAccounts, ownerA)); err != nil || !exact || reference.ID != "owner:"+ownerA {
-		t.Fatalf("exact state prefix route = %+v, %v, %v", reference, exact, err)
+	namespace, parts, err := decodedStatePath(state.MustPrefix(state.NamespaceAccounts, ownerA).String(), true)
+	route := stateRouteForPath008(namespace, parts)
+	if err != nil || !route.exact || route.reference.ID != "owner:"+ownerA {
+		t.Fatalf("exact schema-008 state prefix route = %+v, %v", route, err)
 	}
 	if reference, exact, err := stateDomainReferenceForPrefix(state.MustPrefix(state.NamespaceAccounts)); err != nil || exact || reference != (consistencyDomainRef{}) {
 		t.Fatalf("cross-domain state prefix route = %+v, %v, %v", reference, exact, err)

@@ -615,7 +615,7 @@ func isSchema008CollectableAuthorityGarbageKey(key string) bool {
 		return false
 	}
 	switch storageformat.ConsistencyDomainKind(segments[3]) {
-	case storageformat.DomainNamespace, storageformat.DomainOwnerControl, storageformat.DomainAdmin, storageformat.DomainCapability, storageformat.DomainShare:
+	case storageformat.DomainNamespace, storageformat.DomainOwnerControl, storageformat.DomainAdmin, storageformat.DomainCapability, storageformat.DomainShare, storageformat.DomainIdentity, storageformat.DomainOwnerJobs:
 		return true
 	default:
 		return false

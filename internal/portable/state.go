@@ -52,7 +52,9 @@ func stateCapabilityReference(namespace state.Namespace, discriminator string, k
 	return consistencyDomainRef{Kind: kind, ID: "state:" + string(namespace) + ":" + digest[:2]}
 }
 
-func stateRouteForPath(namespace state.Namespace, parts []string) stateRoute {
+// stateRouteForPath008 is frozen to the released schema-008 partition. The
+// adjacent 008 -> 009 transformer uses it when authenticating its source.
+func stateRouteForPath008(namespace state.Namespace, parts []string) stateRoute {
 	switch namespace {
 	case state.NamespaceBootstrap, state.NamespaceRoles:
 		return stateRoute{reference: consistencyDomainRef{Kind: storageformat.DomainAdmin, ID: "administration"}, exact: true}
@@ -94,7 +96,74 @@ func stateRouteForPath(namespace state.Namespace, parts []string) stateRoute {
 	return stateRoute{}
 }
 
-func stateDomainReferenceForKey(key state.Key) (consistencyDomainRef, error) {
+func stateRouteForPath009(namespace state.Namespace, parts []string) stateRoute {
+	ownerReference := func(kind storageformat.ConsistencyDomainKind, owner string) stateRoute {
+		return stateRoute{reference: consistencyDomainRef{Kind: kind, ID: "owner:" + owner}, exact: true}
+	}
+	namespaceReference := func(owner string) stateRoute {
+		return stateRoute{reference: consistencyDomainRef{Kind: storageformat.DomainNamespace, ID: owner}, exact: true}
+	}
+	switch namespace {
+	case state.NamespaceBootstrap, state.NamespaceRoles, state.NamespaceInvites:
+		if len(parts) > 0 {
+			return stateRoute{reference: consistencyDomainRef{Kind: storageformat.DomainAdmin, ID: "administration"}, exact: true}
+		}
+	case state.NamespaceUsers, state.NamespaceAccounts, state.NamespacePreferences:
+		if len(parts) > 0 {
+			return ownerReference(storageformat.DomainIdentity, parts[0])
+		}
+	case state.NamespaceCredentials, state.NamespaceSessions, state.NamespaceRecoveries:
+		if len(parts) > 1 {
+			return ownerReference(storageformat.DomainIdentity, parts[0])
+		}
+	case state.NamespaceCeremonies:
+		if len(parts) > 2 && parts[0] == "owner" {
+			return ownerReference(storageformat.DomainIdentity, parts[1])
+		}
+		if len(parts) > 1 && parts[0] == "capability" {
+			return stateRoute{reference: stateCapabilityReference(namespace, parts[1], storageformat.DomainCapability), exact: true}
+		}
+	case state.NamespaceTrash, state.NamespaceUploads, state.NamespaceShares:
+		if len(parts) > 1 {
+			return namespaceReference(parts[0])
+		}
+	case state.NamespaceIdempotency:
+		if len(parts) > 2 {
+			switch parts[0] {
+			case "preview":
+				return ownerReference(storageformat.DomainOwnerJobs, parts[1])
+			case "drive":
+				return namespaceReference(parts[1])
+			case "identity":
+				return ownerReference(storageformat.DomainIdentity, parts[1])
+			}
+		}
+	case state.NamespaceOperations:
+		if len(parts) > 2 {
+			switch parts[0] {
+			case "preview", "preview-index":
+				return ownerReference(storageformat.DomainOwnerJobs, parts[1])
+			case "batch":
+				return namespaceReference(parts[1])
+			case "identity":
+				return ownerReference(storageformat.DomainIdentity, parts[1])
+			}
+		}
+		if len(parts) > 1 && parts[0] == "admin" {
+			return stateRoute{reference: consistencyDomainRef{Kind: storageformat.DomainAdmin, ID: "administration"}, exact: true}
+		}
+	}
+	return stateRoute{}
+}
+
+// stateRouteForPath remains schema-008 until every application repository has
+// switched to owner-scoped schema-009 keys. The migration cutover changes this
+// one runtime selector after preserving the source router above.
+func stateRouteForPath(namespace state.Namespace, parts []string) stateRoute {
+	return stateRouteForPath008(namespace, parts)
+}
+
+func stateDomainReferenceForKeyWithRouter(key state.Key, router func(state.Namespace, []string) stateRoute) (consistencyDomainRef, error) {
 	if !key.Valid() {
 		return consistencyDomainRef{}, domain.NewError(domain.ErrorInvalid, "invalid state key")
 	}
@@ -102,11 +171,23 @@ func stateDomainReferenceForKey(key state.Key) (consistencyDomainRef, error) {
 	if err != nil {
 		return consistencyDomainRef{}, err
 	}
-	route := stateRouteForPath(namespace, parts)
+	route := router(namespace, parts)
 	if !route.exact {
 		return consistencyDomainRef{}, domain.NewError(domain.ErrorInvalid, "state key has no consistency-domain route")
 	}
 	return route.reference, nil
+}
+
+func stateDomainReferenceForKey008(key state.Key) (consistencyDomainRef, error) {
+	return stateDomainReferenceForKeyWithRouter(key, stateRouteForPath008)
+}
+
+func stateDomainReferenceForKey009(key state.Key) (consistencyDomainRef, error) {
+	return stateDomainReferenceForKeyWithRouter(key, stateRouteForPath009)
+}
+
+func stateDomainReferenceForKey(key state.Key) (consistencyDomainRef, error) {
+	return stateDomainReferenceForKeyWithRouter(key, stateRouteForPath)
 }
 
 func stateDomainReferenceForPrefix(prefix state.Prefix) (consistencyDomainRef, bool, error) {

@@ -98,7 +98,7 @@ func validateConsistencyDomainRef(reference consistencyDomainRef) error {
 		return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain reference")
 	}
 	switch reference.Kind {
-	case storageformat.DomainNamespace, storageformat.DomainOwnerControl, storageformat.DomainAdmin, storageformat.DomainCapability, storageformat.DomainShare:
+	case storageformat.DomainNamespace, storageformat.DomainOwnerControl, storageformat.DomainAdmin, storageformat.DomainCapability, storageformat.DomainShare, storageformat.DomainIdentity, storageformat.DomainOwnerJobs:
 		return nil
 	default:
 		return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain reference")

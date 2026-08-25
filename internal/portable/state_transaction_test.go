@@ -164,3 +164,31 @@ func TestPortableCrossDomainTransitionAbortsWithoutPartialState(t *testing.T) {
 		t.Fatalf("admin domain remained locked: %v", err)
 	}
 }
+
+func TestCheckpointHelpsPendingTransitionBeforeFreezingDomains(t *testing.T) {
+	backend := objectmemory.New()
+	failure := &stepFailure{step: portable.StepTransitionAfterParticipantPrepared}
+	engine := openTransactionalEngine(t, backend, 242, failure)
+	admin, owner, adminVersion, ownerVersion := transactionalFixture(t, engine)
+	mutation := state.Mutation{ID: "checkpoint-transition-001", Result: []byte(`{"checkpoint":true}`), Changes: []state.Change{
+		{Key: admin, Requirement: state.RequirementPresent, ExpectedVersion: adminVersion, Data: []byte(`{"value":"new-admin"}`)},
+		{Key: owner, Requirement: state.RequirementPresent, ExpectedVersion: ownerVersion, Data: []byte(`{"value":"new-owner"}`)},
+	}}
+	if _, err := engine.Transact(context.Background(), mutation); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("interrupted transition error = %v", err)
+	}
+	checkpoint, err := engine.CreateCheckpoint(context.Background(), "pending-transition-checkpoint")
+	if err != nil {
+		t.Fatalf("checkpoint did not help pending transition: %v", err)
+	}
+	if err := engine.VerifyCheckpoint(context.Background(), checkpoint.CheckpointID); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.OpenWrites(context.Background(), checkpoint.CheckpointID); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := engine.Transact(context.Background(), mutation)
+	if err != nil || !replayed.Replayed || string(replayed.Result) != `{"checkpoint":true}` {
+		t.Fatalf("transition replay after checkpoint = %+v, %v", replayed, err)
+	}
+}

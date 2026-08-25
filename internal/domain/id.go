@@ -1,13 +1,17 @@
 package domain
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"sync"
 	"time"
 )
+
+var scopedOpaqueIDPrefix = []byte("EFSOID1\x00")
 
 type UserID struct {
 	value string
@@ -110,6 +114,44 @@ func (g *IDGenerator) OpaqueID() (string, error) {
 
 func (g *IDGenerator) BearerToken() (string, error) {
 	return g.bytes(32)
+}
+
+// ScopeOpaqueID creates a canonical opaque locator that can select an owner's
+// consistency domain without exposing a provider key. The locator itself is
+// not authorization and must still be bound to authenticated state.
+func ScopeOpaqueID(owner UserID, opaque string) (string, error) {
+	ownerBytes, ownerErr := base64.RawURLEncoding.DecodeString(owner.String())
+	opaqueBytes, opaqueErr := base64.RawURLEncoding.DecodeString(opaque)
+	if !owner.Valid() || ownerErr != nil || len(ownerBytes) < 16 || len(ownerBytes) > 65535 || base64.RawURLEncoding.EncodeToString(ownerBytes) != owner.String() || opaqueErr != nil || len(opaqueBytes) < 16 || base64.RawURLEncoding.EncodeToString(opaqueBytes) != opaque {
+		return "", NewError(ErrorInvalid, "invalid owner-scoped opaque ID material")
+	}
+	encoded := make([]byte, 0, len(scopedOpaqueIDPrefix)+2+len(ownerBytes)+len(opaqueBytes))
+	encoded = append(encoded, scopedOpaqueIDPrefix...)
+	length := make([]byte, 2)
+	binary.BigEndian.PutUint16(length, uint16(len(ownerBytes)))
+	encoded = append(encoded, length...)
+	encoded = append(encoded, ownerBytes...)
+	encoded = append(encoded, opaqueBytes...)
+	return base64.RawURLEncoding.EncodeToString(encoded), nil
+}
+
+func ParseScopedOpaqueID(value string) (UserID, string, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || base64.RawURLEncoding.EncodeToString(decoded) != value || len(decoded) < len(scopedOpaqueIDPrefix)+2+16+16 || !bytes.HasPrefix(decoded, scopedOpaqueIDPrefix) {
+		return UserID{}, "", NewError(ErrorInvalid, "invalid owner-scoped opaque ID")
+	}
+	offset := len(scopedOpaqueIDPrefix)
+	ownerLength := int(binary.BigEndian.Uint16(decoded[offset : offset+2]))
+	offset += 2
+	if ownerLength < 16 || offset+ownerLength+16 > len(decoded) {
+		return UserID{}, "", NewError(ErrorInvalid, "invalid owner-scoped opaque ID")
+	}
+	owner, err := ParseUserID(base64.RawURLEncoding.EncodeToString(decoded[offset : offset+ownerLength]))
+	if err != nil {
+		return UserID{}, "", NewError(ErrorInvalid, "invalid owner-scoped opaque ID")
+	}
+	opaque := base64.RawURLEncoding.EncodeToString(decoded[offset+ownerLength:])
+	return owner, opaque, nil
 }
 
 func (g *IDGenerator) bytes(size int) (string, error) {

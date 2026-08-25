@@ -5,6 +5,23 @@ import (
 	"testing"
 )
 
+func TestCalibrateRecordsExactMetricsAndZeroAllowedRoles(t *testing.T) {
+	model, err := ParseModel(
+		[]byte(`{"schemaVersion":1,"provider":"test","profile":"p","currency":"USD","sourceURL":"https://provider.example/pricing","effectiveDate":"2040-01-02","assumptions":["test"],"requests":{"object_get":{"billingClass":"read","unitRequests":1,"unitPricePicoUSD":10}}}`),
+		[]byte(`{"schemaVersion":1,"provider":"test","profile":"p","sourceURL":"https://provider.example/latency","researchedDate":"2040-01-03","methodology":"test","limitations":["test"],"supportingSourceURLs":["https://provider.example/guidance"],"requests":{"object_get":{"p50Micros":1,"p95Micros":2,"p99Micros":3}}}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget, err := Calibrate("read", model, []Role{RoleState, RoleFile}, []Event{{Role: RoleState, Kind: RequestObjectGet}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if budget.Maximum != (Limits{Requests: 1, CostPicoUSD: 10, P50Micros: 1, P95Micros: 2, P99Micros: 3, CriticalP50Micros: 1, CriticalP95Micros: 2, CriticalP99Micros: 3}) || budget.Roles[RoleState].Requests != 1 || budget.Roles[RoleFile] != (Limits{}) {
+		t.Fatalf("Calibrate() = %+v", budget)
+	}
+}
+
 func TestBudgetChecksIndependentCountCostAndLatencyLimits(t *testing.T) {
 	model, err := ParseModel(
 		[]byte(`{"schemaVersion":1,"provider":"test","profile":"p","currency":"USD","sourceURL":"https://provider.example/pricing","effectiveDate":"2040-01-02","assumptions":["test"],"requests":{"object_get":{"billingClass":"class-b","unitRequests":1,"unitPricePicoUSD":10}}}`),

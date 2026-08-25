@@ -705,7 +705,7 @@
 
           test-provider-budget = goTask "endlessfs-test-provider-budget" ''
             go test ./internal/providerbudget ./internal/objectstore/budgettest ./internal/objectstore/gcs -count=1
-            go test ./internal/portable ./internal/drive ./internal/preview/... -run 'ProviderBudget' -count=1
+            go test ./internal/portable ./internal/drive ./internal/identity ./internal/theme ./internal/httpapi ./internal/preview/... -run 'ProviderBudget' -count=1
           '';
           test-migration = mkTask "endlessfs-test-migration" (goTools ++ [ pkgs.gawk ]) ''
             export CGO_ENABLED=0

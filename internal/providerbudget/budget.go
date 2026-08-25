@@ -29,6 +29,39 @@ type Report struct {
 	Totals Totals
 }
 
+// Calibrate constructs the exact, zero-headroom budget represented by one
+// deterministic workload. Callers must name every provider role that the
+// workload is allowed to touch; named but unused roles are retained with zero
+// limits so an unexpected cross-backend request fails closed.
+func Calibrate(name string, model Model, roles []Role, events []Event) (Budget, error) {
+	if name == "" || len(roles) == 0 {
+		return Budget{}, errors.New("provider budget calibration identity is invalid")
+	}
+	allowed := make(map[Role]Limits, len(roles))
+	for _, role := range roles {
+		if !role.valid() {
+			return Budget{}, fmt.Errorf("provider budget calibration has invalid role %q", role)
+		}
+		if _, exists := allowed[role]; exists {
+			return Budget{}, fmt.Errorf("provider budget calibration repeats role %q", role)
+		}
+		allowed[role] = Limits{}
+	}
+	for _, event := range events {
+		if _, ok := allowed[event.Role]; !ok {
+			return Budget{}, fmt.Errorf("provider budget calibration observed unapproved role %q", event.Role)
+		}
+	}
+	totals, err := model.Estimate(events)
+	if err != nil {
+		return Budget{}, err
+	}
+	for role := range allowed {
+		allowed[role] = roleTotalsToLimits(totals.ByRole[role])
+	}
+	return Budget{Name: name, Provider: model.Provider(), Profile: model.Profile(), Maximum: totalsToLimits(totals), Roles: allowed}, nil
+}
+
 func (budget Budget) Check(model Model, events []Event) (Report, error) {
 	if budget.Name == "" || budget.Provider == "" || budget.Profile == "" || budget.Provider != model.Provider() || budget.Profile != model.Profile() || len(budget.Roles) == 0 {
 		return Report{}, errors.New("provider budget identity is invalid")

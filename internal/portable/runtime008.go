@@ -144,3 +144,7 @@ func (s *FileStore) PreviewDuplicateReconciliation(ctx context.Context, userID d
 func (s *FileStore) ValidateDuplicateReconciliation(ctx context.Context, userID domain.UserID, token string) (domain.DuplicateReconciliationSelection, error) {
 	return s.validateDuplicateReconciliation008(ctx, userID, token)
 }
+
+func (s *FileStore) ApplyDuplicateReconciliation(ctx context.Context, userID domain.UserID, token, idempotencyKey string) (domain.NamespaceBatchResult, error) {
+	return s.applyDuplicateReconciliation008(ctx, userID, token, idempotencyKey)
+}

@@ -29,7 +29,7 @@ func TestDuplicateReconciliationPublishesTheWholePlanOnce(t *testing.T) {
 	}
 	engine, err := portable.Open(context.Background(), portable.Options{
 		Backend: backend, Clock: clock, IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(139, 1<<20))),
-		Writer: portable.WriterConfiguration{WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1", KeyringIdentifiers: []string{"session-v1"}},
+		Writer:   portable.WriterConfiguration{WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1", KeyringIdentifiers: []string{"session-v1"}},
 		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
 	})
 	if err != nil {

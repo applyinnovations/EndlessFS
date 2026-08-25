@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -505,7 +506,7 @@ func (s *FileStore) listDuplicateOccurrences008(ctx context.Context, userID doma
 func duplicateIgnoreKey008(groupID string) string { return "duplicates/ignore/group/" + groupID }
 
 func (s *FileStore) duplicateGroupIgnoreState008(ctx context.Context, owner domain.UserID, groupID string) (bool, uint64, error) {
-	value, err := newConsistencyDomainStore(s.engine.backend, s.engine.scheduler, s.engine.clock).get(ctx, consistencyDomainRef{Kind: storageformat.DomainOwnerControl, ID: "owner:" + owner.String()}, duplicateIgnoreKey008(groupID))
+	value, err := newConsistencyDomainStore(s.engine.backend, s.engine.scheduler, s.engine.clock).get(ctx, namespaceReference(owner), duplicateIgnoreKey008(groupID))
 	if errors.Is(err, domain.ErrNotFound) {
 		return false, 0, nil
 	}
@@ -524,7 +525,7 @@ func (s *FileStore) setDuplicateGroupIgnored008(ctx context.Context, owner domai
 		return domain.DuplicateIgnore{}, domain.NewError(domain.ErrorInvalid, "invalid duplicate ignore request")
 	}
 	store := newConsistencyDomainStore(s.engine.backend, s.engine.scheduler, s.engine.clock)
-	reference := consistencyDomainRef{Kind: storageformat.DomainOwnerControl, ID: "owner:" + owner.String()}
+	reference := namespaceReference(owner)
 	key := duplicateIgnoreKey008(request.GroupID)
 	current, err := store.get(ctx, reference, key)
 	revision := uint64(1)
@@ -924,7 +925,7 @@ func (s *FileStore) setDuplicateDirectoryIgnored008(ctx context.Context, owner d
 		return domain.DuplicateDirectoryIgnore{}, err
 	}
 	store := newConsistencyDomainStore(s.engine.backend, s.engine.scheduler, s.engine.clock)
-	reference := consistencyDomainRef{Kind: storageformat.DomainOwnerControl, ID: "owner:" + owner.String()}
+	reference := namespaceReference(owner)
 	key := duplicateDirectoryIgnoreKey008(preference.PairID)
 	current, err := store.get(ctx, reference, key)
 	requirement, expected := domainValueAbsent, ""
@@ -1082,12 +1083,16 @@ type duplicateIgnoreReader008 struct {
 
 func (s *FileStore) newDuplicateIgnoreReader008(ctx context.Context, owner domain.UserID) (duplicateIgnoreReader008, error) {
 	store := newConsistencyDomainStore(s.engine.backend, s.engine.scheduler, s.engine.clock)
-	reference := consistencyDomainRef{Kind: storageformat.DomainOwnerControl, ID: "owner:" + owner.String()}
+	reference := namespaceReference(owner)
 	snapshot, err := store.loadHead(ctx, reference)
 	if err != nil {
 		return duplicateIgnoreReader008{}, err
 	}
 	return duplicateIgnoreReader008{store: store, reference: reference, head: snapshot.head}, nil
+}
+
+func (s *FileStore) duplicateIgnoreReaderAtNamespaceView008(view *namespaceView) duplicateIgnoreReader008 {
+	return duplicateIgnoreReader008{store: newConsistencyDomainStore(s.engine.backend, s.engine.scheduler, s.engine.clock), reference: view.reference, head: view.head}
 }
 
 func (reader duplicateIgnoreReader008) group(ctx context.Context, groupID string) (bool, uint64, error) {
@@ -1304,30 +1309,33 @@ func restoreDuplicateComparisonAreas008(comparison *domain.DuplicateDirectoryCom
 	return restoreDuplicateOccurrenceArea008(&comparison.Right)
 }
 
-func (s *FileStore) validateDuplicateReconciliation008(ctx context.Context, owner domain.UserID, token string) (domain.DuplicateReconciliationSelection, error) {
+func (s *FileStore) decodeDuplicateReconciliationPlan008(owner domain.UserID, token string) (duplicateReconciliationPlan008, error) {
 	if !owner.Valid() || token == "" {
-		return domain.DuplicateReconciliationSelection{}, domain.NewError(domain.ErrorInvalid, "duplicate reconciliation plan is required")
+		return duplicateReconciliationPlan008{}, domain.NewError(domain.ErrorInvalid, "duplicate reconciliation plan is required")
 	}
 	var plan duplicateReconciliationPlan008
 	if err := s.decodeDuplicateCursor(token, &plan); err != nil || plan.SchemaVersion != 8 || plan.OwnerID != owner.String() || !plan.RemoveFrom.Valid() || len(plan.Items) < 1 || len(plan.Items) > 100 || !s.engine.clock.Now().Before(plan.ExpiresAt) {
-		return domain.DuplicateReconciliationSelection{}, domain.NewError(domain.ErrorInvalid, "invalid or expired duplicate reconciliation plan")
+		return duplicateReconciliationPlan008{}, domain.NewError(domain.ErrorInvalid, "invalid or expired duplicate reconciliation plan")
 	}
 	for _, occurrence := range []*domain.DuplicateOccurrence{&plan.Left, &plan.Right} {
 		if err := restoreDuplicateOccurrenceArea008(occurrence); err != nil {
-			return domain.DuplicateReconciliationSelection{}, err
+			return duplicateReconciliationPlan008{}, err
 		}
 	}
 	for index := range plan.Items {
 		if err := restoreDuplicateOccurrenceArea008(&plan.Items[index].Remove); err != nil {
-			return domain.DuplicateReconciliationSelection{}, err
+			return duplicateReconciliationPlan008{}, err
 		}
 		if err := restoreDuplicateOccurrenceArea008(&plan.Items[index].Keep); err != nil {
-			return domain.DuplicateReconciliationSelection{}, err
+			return duplicateReconciliationPlan008{}, err
 		}
 	}
-	view, err := newNamespaceStore(s.engine).loadView(ctx, owner, "")
-	if err != nil {
-		return domain.DuplicateReconciliationSelection{}, err
+	return plan, nil
+}
+
+func (s *FileStore) validateDuplicateReconciliationPlanAtView008(ctx context.Context, owner domain.UserID, view *namespaceView, plan duplicateReconciliationPlan008) (domain.DuplicateReconciliationSelection, error) {
+	if view == nil || view.reference != namespaceReference(owner) {
+		return domain.DuplicateReconciliationSelection{}, domain.NewError(domain.ErrorInvalid, "duplicate reconciliation snapshot is invalid")
 	}
 	for _, selected := range []struct {
 		occurrence domain.DuplicateOccurrence
@@ -1348,10 +1356,7 @@ func (s *FileStore) validateDuplicateReconciliation008(ctx context.Context, owne
 			return domain.DuplicateReconciliationSelection{}, domain.NewError(domain.ErrorPreconditionFailed, "duplicate reconciliation directory changed")
 		}
 	}
-	ignore, err := s.newDuplicateIgnoreReader008(ctx, owner)
-	if err != nil {
-		return domain.DuplicateReconciliationSelection{}, err
-	}
+	ignore := s.duplicateIgnoreReaderAtNamespaceView008(view)
 	seen := make(map[string]struct{}, len(plan.Items))
 	for _, item := range plan.Items {
 		if item.GroupID == "" || item.Remove.GroupID != item.GroupID || item.Keep.GroupID != item.GroupID || item.Remove.Area != domain.AreaLive || item.Keep.Area != domain.AreaLive || item.Remove.Path == item.Keep.Path {
@@ -1382,4 +1387,55 @@ func (s *FileStore) validateDuplicateReconciliation008(ctx context.Context, owne
 		}
 	}
 	return domain.DuplicateReconciliationSelection{Left: plan.Left, Right: plan.Right, RemoveFrom: plan.RemoveFrom, Items: append([]domain.DuplicateReconciliationItem(nil), plan.Items...)}, nil
+}
+
+func (s *FileStore) validateDuplicateReconciliation008(ctx context.Context, owner domain.UserID, token string) (domain.DuplicateReconciliationSelection, error) {
+	plan, err := s.decodeDuplicateReconciliationPlan008(owner, token)
+	if err != nil {
+		return domain.DuplicateReconciliationSelection{}, err
+	}
+	view, err := newNamespaceStore(s.engine).loadView(ctx, owner, "")
+	if err != nil {
+		return domain.DuplicateReconciliationSelection{}, err
+	}
+	return s.validateDuplicateReconciliationPlanAtView008(ctx, owner, view, plan)
+}
+
+func duplicateReconciliationTrashID008(owner domain.UserID, idempotencyKey string, index int, path domain.UserPath) string {
+	return storageformat.Digest([]byte(fmt.Sprintf("endlessfs-duplicate-reconciliation-trash-v1\x00%s\x00%s\x00%08x\x00%s", owner.String(), idempotencyKey, index, path.String())))
+}
+
+func (s *FileStore) applyDuplicateReconciliation008(ctx context.Context, owner domain.UserID, token, idempotencyKey string) (domain.NamespaceBatchResult, error) {
+	plan, err := s.decodeDuplicateReconciliationPlan008(owner, token)
+	if err != nil {
+		return domain.NamespaceBatchResult{}, err
+	}
+	if err := validatePortableIdempotencyKey(idempotencyKey); err != nil {
+		return domain.NamespaceBatchResult{}, err
+	}
+	live, err := domain.NewScope(owner, domain.AreaLive)
+	if err != nil {
+		return domain.NamespaceBatchResult{}, err
+	}
+	trash, err := domain.NewScope(owner, domain.AreaTrash)
+	if err != nil {
+		return domain.NamespaceBatchResult{}, err
+	}
+	specs := make([]namespaceBatchMoveSpec, len(plan.Items))
+	for index, item := range plan.Items {
+		trashID := duplicateReconciliationTrashID008(owner, idempotencyKey, index, item.Remove.Path)
+		destination, parseErr := domain.ParseUserPath("/" + trashID)
+		if parseErr != nil {
+			return domain.NamespaceBatchResult{}, parseErr
+		}
+		specs[index] = namespaceBatchMoveSpec{
+			from: live, to: trash, trashID: trashID, attachTrash: true,
+			request: domain.CopyRequest{Source: item.Remove.Path, Destination: destination, Conflict: domain.ConflictFail, ExpectedSource: item.Remove.Version},
+		}
+	}
+	validate := func(ctx context.Context, view *namespaceView) error {
+		_, err := s.validateDuplicateReconciliationPlanAtView008(ctx, owner, view, plan)
+		return err
+	}
+	return newNamespaceStore(s.engine).batchCopyOrMoveValidated(ctx, owner, specs, true, "duplicate-reconciliation", idempotencyKey, storageformat.Digest([]byte(token)), validate)
 }

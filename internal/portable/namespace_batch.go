@@ -35,6 +35,8 @@ type namespaceBatchMovePlan struct {
 	placed           storageformat.NamespaceEntry
 }
 
+type namespaceBatchViewValidator func(context.Context, *namespaceView) error
+
 func (s *FileStore) BatchCopyMove(ctx context.Context, owner domain.UserID, requests []domain.CopyRequest, move bool, idempotencyKey string) (domain.NamespaceBatchResult, error) {
 	live, err := domain.NewScope(owner, domain.AreaLive)
 	if err != nil {
@@ -142,6 +144,10 @@ func rejectOverlappingNamespaceBatchPaths(plans []namespaceBatchMovePlan, move b
 }
 
 func (store *namespaceStore) batchCopyOrMove(ctx context.Context, owner domain.UserID, specs []namespaceBatchMoveSpec, move bool, kind, idempotencyKey string) (domain.NamespaceBatchResult, error) {
+	return store.batchCopyOrMoveValidated(ctx, owner, specs, move, kind, idempotencyKey, "", nil)
+}
+
+func (store *namespaceStore) batchCopyOrMoveValidated(ctx context.Context, owner domain.UserID, specs []namespaceBatchMoveSpec, move bool, kind, idempotencyKey, intentBinding string, validate namespaceBatchViewValidator) (domain.NamespaceBatchResult, error) {
 	if !owner.Valid() || kind == "" {
 		return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid namespace batch owner")
 	}
@@ -154,6 +160,9 @@ func (store *namespaceStore) batchCopyOrMove(ctx context.Context, owner domain.U
 	fingerprint, err := namespaceBatchFingerprint(kind, specs)
 	if err != nil {
 		return domain.NamespaceBatchResult{}, err
+	}
+	if intentBinding != "" {
+		fingerprint = storageformat.Digest([]byte("endlessfs-namespace-batch-bound-intent-v1\x00" + fingerprint + "\x00" + intentBinding))
 	}
 	operationID := namespaceOperationID(owner, kind, idempotencyKey)
 	mutationID := string(operationID)
@@ -169,6 +178,11 @@ func (store *namespaceStore) batchCopyOrMove(ctx context.Context, owner domain.U
 				return domain.NamespaceBatchResult{}, err
 			}
 			return *replay, err
+		}
+		if validate != nil {
+			if err := validate(ctx, view); err != nil {
+				return domain.NamespaceBatchResult{}, err
+			}
 		}
 
 		plans := make([]namespaceBatchMovePlan, 0, len(specs))

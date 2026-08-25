@@ -135,8 +135,19 @@ func (s *reconciliationStorage) ApplyDuplicateReconciliation(ctx context.Context
 	if len(selection.Items) < 1 || len(selection.Items) > drive.MaxBatchItems {
 		return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid bounded reconciliation selection")
 	}
+	live, err := domain.NewScope(owner, domain.AreaLive)
+	if err != nil {
+		return domain.NamespaceBatchResult{}, err
+	}
 	requests := make([]domain.TrashRequest, len(selection.Items))
 	for index, item := range selection.Items {
+		keep, statErr := s.NamespaceStorage.Stat(ctx, live, item.Keep.Path)
+		if statErr != nil {
+			return domain.NamespaceBatchResult{}, statErr
+		}
+		if keep.Version != item.Keep.Version {
+			return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorPreconditionFailed, "duplicate keep occurrence changed")
+		}
 		requests[index] = domain.TrashRequest{Path: item.Remove.Path, ExpectedVersion: item.Remove.Version, TrashID: fmt.Sprintf("reconcile-%d", index)}
 	}
 	return s.NamespaceStorage.BatchMoveToTrash(ctx, owner, requests, idempotencyKey)
@@ -394,14 +405,14 @@ func TestDuplicateReconciliationRejectsInvalidOrStalePlans(t *testing.T) {
 		Keep:    domain.DuplicateOccurrence{Path: keep.Path, Version: "stale-version", Size: keep.Size},
 	}}
 	result, err := service.ApplyDuplicateReconciliation(ctx, env.owner, "valid-plan-token", "duplicate-stale-plan-001")
-	if err != nil || len(result.Items) != 1 || result.Items[0].State != domain.OperationFailed || result.Items[0].ErrorKind != domain.ErrorPreconditionFailed {
+	if !errors.Is(err, domain.ErrPreconditionFailed) || len(result.Items) != 0 {
 		t.Fatalf("stale plan result = %+v, %v", result, err)
 	}
 	if _, err := service.Stat(ctx, env.owner, remove.Path); err != nil {
 		t.Fatalf("stale plan removed source: %v", err)
 	}
 	wrapped.selection.Items[0].Keep.Path = domain.MustParseUserPath("/missing-keep.bin")
-	if result, err := service.ApplyDuplicateReconciliation(ctx, env.owner, "valid-plan-token", "duplicate-missing-keep-01"); err != nil || result.Items[0].ErrorKind != domain.ErrorNotFound {
+	if result, err := service.ApplyDuplicateReconciliation(ctx, env.owner, "valid-plan-token", "duplicate-missing-keep-01"); !errors.Is(err, domain.ErrNotFound) || len(result.Items) != 0 {
 		t.Fatalf("missing keep result = %+v, %v", result, err)
 	}
 }

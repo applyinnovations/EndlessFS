@@ -3,6 +3,7 @@ package secret
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -55,6 +56,25 @@ func TestScopedBearerTokenRoundTripAndTamperDenial(t *testing.T) {
 	for _, invalid := range []string{"", raw, "s2." + owner.String() + "." + raw, "s1.invalid." + raw, "s1." + owner.String() + ".invalid", token + ".extra"} {
 		if ValidScopedBearerToken(invalid) {
 			t.Errorf("accepted invalid scoped token %q", invalid)
+		}
+	}
+}
+
+func TestScopedCapabilityTokenBindsOwnerLocatorAndSecret(t *testing.T) {
+	owner, _ := domain.ParseUserID(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x31}, 16)))
+	locator := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 16))
+	raw := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x53}, 32))
+	token, err := ScopeCapabilityToken(owner, locator, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedOwner, parsedLocator, parsedSecret, err := ParseScopedCapabilityToken(token)
+	if err != nil || parsedOwner != owner || parsedLocator != locator || parsedSecret.Reveal() != raw {
+		t.Fatalf("parsed capability = %v %q %v %v", parsedOwner, parsedLocator, parsedSecret, err)
+	}
+	for _, invalid := range []string{"", raw, "c2." + owner.String() + "." + locator + "." + raw, token + ".extra"} {
+		if _, _, _, err := ParseScopedCapabilityToken(invalid); !errors.Is(err, domain.ErrInvalid) {
+			t.Errorf("invalid capability %q error = %v", invalid, err)
 		}
 	}
 }

@@ -2,37 +2,38 @@ package storageformat
 
 import (
 	"bytes"
-	"encoding/json"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/state"
 )
 
 const (
-	StateRecordProfile               = "profile"
-	StateRecordAccount               = "account"
-	StateRecordCredential            = "credential"
-	StateRecordCredentialIndex       = "credential-index"
-	StateRecordCeremony              = "ceremony"
-	StateRecordRegistrationOperation = "registration-operation"
-	StateRecordBootstrap             = "bootstrap"
-	StateRecordFirstAccount          = "first-account"
-	StateRecordIdempotency           = "idempotency"
-	StateRecordSession               = "session"
-	StateRecordInvite                = "invite"
-	StateRecordRecovery              = "recovery"
-	StateRecordShare                 = "share"
-	StateRecordTrash                 = "trash"
-	StateRecordBatchOperation        = "batch-operation"
-	StateRecordMutationOutcome       = "mutation-outcome"
-	StateRecordThemePreference       = "theme-preference"
-	StateRecordAdminRoles            = "admin-roles"
-	StateRecordPreviewOperation      = "preview-operation"
-	StateRecordPreviewIdempotency    = "preview-idempotency"
-	StateRecordPreviewIndex          = "preview-index"
-	StateRecordTransitionDecision    = "transition-decision"
-	StateRecordCleanupTask           = "cleanup-task"
-	StateRecordGarbageCollection     = "garbage-collection"
+	StateRecordProfile                 = "profile"
+	StateRecordAccount                 = "account"
+	StateRecordCredential              = "credential"
+	StateRecordCredentialIndex         = "credential-index"
+	StateRecordCeremony                = "ceremony"
+	StateRecordRegistrationOperation   = "registration-operation"
+	StateRecordAuthenticationOperation = "authentication-operation"
+	StateRecordBootstrap               = "bootstrap"
+	StateRecordFirstAccount            = "first-account"
+	StateRecordIdempotency             = "idempotency"
+	StateRecordSession                 = "session"
+	StateRecordInvite                  = "invite"
+	StateRecordRecovery                = "recovery"
+	StateRecordShare                   = "share"
+	StateRecordTrash                   = "trash"
+	StateRecordUpload                  = "upload"
+	StateRecordBatchOperation          = "batch-operation"
+	StateRecordMutationOutcome         = "mutation-outcome"
+	StateRecordThemePreference         = "theme-preference"
+	StateRecordAdminRoles              = "admin-roles"
+	StateRecordPreviewOperation        = "preview-operation"
+	StateRecordPreviewIdempotency      = "preview-idempotency"
+	StateRecordPreviewIndex            = "preview-index"
+	StateRecordTransitionDecision      = "transition-decision"
+	StateRecordCleanupTask             = "cleanup-task"
+	StateRecordGarbageCollection       = "garbage-collection"
 )
 
 // StateRecord009 is the typed canonical envelope for application state stored
@@ -40,28 +41,23 @@ const (
 // application record's strict JSON so the state interface does not expose
 // storage-format details to callers.
 type StateRecord009 struct {
-	SchemaVersion int             `json:"schemaVersion"`
-	RecordType    string          `json:"recordType"`
-	Payload       json.RawMessage `json:"payload"`
+	SchemaVersion int    `json:"schemaVersion"`
+	RecordType    string `json:"recordType"`
+	Payload       []byte `json:"payload"`
 }
 
 func validateStateRecord009(record StateRecord009, expectedType string) error {
 	if record.SchemaVersion != 1 || !validDomainText(record.RecordType) || expectedType != "" && record.RecordType != expectedType {
 		return domain.NewError(domain.ErrorInvalid, "invalid schema-009 state record binding")
 	}
-	payload := bytes.TrimSpace(record.Payload)
-	if len(payload) < 2 || payload[0] != '{' || payload[len(payload)-1] != '}' {
+	if len(record.Payload) == 0 || len(record.Payload) > state.MaxRecordBytes {
 		return domain.NewError(domain.ErrorInvalid, "invalid schema-009 state record payload")
-	}
-	var raw json.RawMessage
-	if err := state.DecodeJSONWithLimit(payload, &raw, state.MaxRecordBytes); err != nil {
-		return err
 	}
 	return nil
 }
 
 func EncodeStateRecord009(recordType string, payload []byte) ([]byte, error) {
-	record := StateRecord009{SchemaVersion: 1, RecordType: recordType, Payload: append(json.RawMessage(nil), payload...)}
+	record := StateRecord009{SchemaVersion: 1, RecordType: recordType, Payload: append([]byte(nil), payload...)}
 	if err := validateStateRecord009(record, recordType); err != nil {
 		return nil, err
 	}

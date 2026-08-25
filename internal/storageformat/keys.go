@@ -113,6 +113,20 @@ func Schema008MigrationSubtreePrefix() string {
 	return root + "migrations/schema-007-to-008/subtrees/"
 }
 
+func Schema009MigrationStageKey(domainIdentity, sourceIdentity string) objectstore.Key {
+	validateDomainKeyPart(domainIdentity)
+	validateDomainKeyPart(sourceIdentity)
+	return fixedKey("migrations/schema-008-to-009/staged/" + digestPart(domainIdentity) + "/" + digestPart(sourceIdentity) + ".json")
+}
+
+func Schema009MigrationStagePrefix() string {
+	return root + "migrations/schema-008-to-009/staged/"
+}
+
+func Schema009MigrationStageCompleteKey() objectstore.Key {
+	return fixedKey("migrations/schema-008-to-009/staging-complete.json")
+}
+
 func ProjectionHeadKey(ownerID string, kind ProjectionKind) objectstore.Key {
 	validateDomainKeyPart(ownerID)
 	return fixedKey("projections/" + digestPart(ownerID) + "/" + projectionKeyKind(kind) + "/head.json")

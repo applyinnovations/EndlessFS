@@ -503,7 +503,7 @@ func (e *Engine) transitionOutcome009(normalized state.Mutation, plan storagefor
 // decision objects are portable; one create-only decision is the global
 // linearization point, and every participant lock is finalized by any replica.
 func (e *Engine) Transact(ctx context.Context, mutation state.Mutation) (state.MutationOutcome, error) {
-	normalized, fingerprint, err := state.NormalizeMutation(mutation)
+	normalized, _, err := state.NormalizeMutation(mutation)
 	if err != nil {
 		return state.MutationOutcome{}, err
 	}
@@ -526,7 +526,22 @@ func (e *Engine) Transact(ctx context.Context, mutation state.Mutation) (state.M
 	if len(references) == 1 {
 		return e.Mutate(ctx, normalized)
 	}
-	plan, err := e.transitionPlan009(normalized, fingerprint)
+	wrapped := normalized
+	wrapped.Changes = append([]state.Change(nil), normalized.Changes...)
+	for index := range wrapped.Changes {
+		if wrapped.Changes[index].Delete {
+			continue
+		}
+		wrapped.Changes[index].Data, err = encodeStateValue009(wrapped.Changes[index].Key, wrapped.Changes[index].Data)
+		if err != nil {
+			return state.MutationOutcome{}, err
+		}
+	}
+	wrapped, fingerprint, err := state.NormalizeMutation(wrapped)
+	if err != nil {
+		return state.MutationOutcome{}, err
+	}
+	plan, err := e.transitionPlan009(wrapped, fingerprint)
 	if err != nil {
 		return state.MutationOutcome{}, err
 	}

@@ -160,7 +160,11 @@ func statePageFromEntries(entries []storageformat.DomainEntry) (state.Page, erro
 		if err != nil {
 			return state.Page{}, err
 		}
-		page.Items = append(page.Items, state.Item{Key: logical, Value: state.Value{Data: append([]byte(nil), entry.Value...), Version: state.Version(entry.LogicalVersion)}})
+		data, err := decodeStateValue009(logical, entry.Value)
+		if err != nil {
+			return state.Page{}, err
+		}
+		page.Items = append(page.Items, state.Item{Key: logical, Value: state.Value{Data: data, Version: state.Version(entry.LogicalVersion)}})
 	}
 	return page, nil
 }

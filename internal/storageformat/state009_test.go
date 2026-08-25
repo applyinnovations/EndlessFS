@@ -37,12 +37,12 @@ func TestSchema009StateRecordCodecPreservesOpaqueStatePayload(t *testing.T) {
 
 func TestSchema009StateRecordCodecRejectsNonCanonicalAndMalformedBodies(t *testing.T) {
 	for name, body := range map[string][]byte{
-		"empty-payload":    []byte(`{"schemaVersion":1,"recordType":"account","payload":null}`),
-		"duplicate-field": []byte(`{"schemaVersion":1,"recordType":"account","recordType":"session","payload":{}}`),
-		"unknown-field":   []byte(`{"schemaVersion":1,"recordType":"account","payload":{},"extra":true}`),
-		"wrong-version":   []byte(`{"schemaVersion":2,"recordType":"account","payload":{}}`),
-		"trailing":        []byte(`{"schemaVersion":1,"recordType":"account","payload":{}} {}`),
-		"non-canonical":   []byte(`{ "schemaVersion":1,"recordType":"account","payload":{} }`),
+		"empty-payload":   []byte(`{"schemaVersion":1,"recordType":"account","payload":null}`),
+		"duplicate-field": []byte(`{"schemaVersion":1,"recordType":"account","recordType":"session","payload":"e30="}`),
+		"unknown-field":   []byte(`{"schemaVersion":1,"recordType":"account","payload":"e30=","extra":true}`),
+		"wrong-version":   []byte(`{"schemaVersion":2,"recordType":"account","payload":"e30="}`),
+		"trailing":        []byte(`{"schemaVersion":1,"recordType":"account","payload":"e30="} {}`),
+		"non-canonical":   []byte(`{ "schemaVersion":1,"recordType":"account","payload":"e30=" }`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := DecodeStateRecord009(body, StateRecordAccount); !errors.Is(err, domain.ErrInvalid) {

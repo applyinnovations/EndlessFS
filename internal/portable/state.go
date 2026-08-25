@@ -157,11 +157,32 @@ func stateRouteForPath009(namespace state.Namespace, parts []string) stateRoute 
 	return stateRoute{}
 }
 
-// stateRouteForPath remains schema-008 until every application repository has
-// switched to owner-scoped schema-009 keys. The migration cutover changes this
-// one runtime selector after preserving the source router above.
 func stateRouteForPath(namespace state.Namespace, parts []string) stateRoute {
-	return stateRouteForPath008(namespace, parts)
+	return stateRouteForPath009(namespace, parts)
+}
+
+func encodeStateValue009(key state.Key, data []byte) ([]byte, error) {
+	namespace, parts, err := decodedStatePath(key.String(), false)
+	if err != nil {
+		return nil, err
+	}
+	recordType, err := stateRecordType009(namespace, parts)
+	if err != nil {
+		return nil, err
+	}
+	return storageformat.EncodeStateRecord009(recordType, data)
+}
+
+func decodeStateValue009(key state.Key, data []byte) ([]byte, error) {
+	namespace, parts, err := decodedStatePath(key.String(), false)
+	if err != nil {
+		return nil, err
+	}
+	recordType, err := stateRecordType009(namespace, parts)
+	if err != nil {
+		return nil, err
+	}
+	return storageformat.DecodeStateRecord009(data, recordType)
 }
 
 func stateDomainReferenceForKeyWithRouter(key state.Key, router func(state.Namespace, []string) stateRoute) (consistencyDomainRef, error) {
@@ -222,7 +243,11 @@ func (e *Engine) Get(ctx context.Context, key state.Key) (state.Value, error) {
 	if err != nil {
 		return state.Value{}, err
 	}
-	return state.Value{Data: append([]byte(nil), value.Data...), Version: state.Version(value.LogicalVersion)}, nil
+	data, err := decodeStateValue009(key, value.Data)
+	if err != nil {
+		return state.Value{}, err
+	}
+	return state.Value{Data: data, Version: state.Version(value.LogicalVersion)}, nil
 }
 
 func (e *Engine) List(ctx context.Context, prefix state.Prefix, request state.PageRequest) (state.Page, error) {
@@ -290,7 +315,11 @@ func (e *Engine) List(ctx context.Context, prefix state.Prefix, request state.Pa
 		if err != nil {
 			return state.Page{}, err
 		}
-		page.Items = append(page.Items, state.Item{Key: logical, Value: state.Value{Data: append([]byte(nil), entry.Value...), Version: state.Version(entry.LogicalVersion)}})
+		data, err := decodeStateValue009(logical, entry.Value)
+		if err != nil {
+			return state.Page{}, err
+		}
+		page.Items = append(page.Items, state.Item{Key: logical, Value: state.Value{Data: data, Version: state.Version(entry.LogicalVersion)}})
 	}
 	if hasMore {
 		page.NextCursor, err = e.encodeStateListCursor(stateListCursor{SchemaVersion: 4, Prefix: prefix.String(), Limit: limit, Namespace: namespace, Revision: revision, Snapshot: snapshotDigest, After: entries[len(entries)-1].Key, ExpiresAt: expiresAt})
@@ -409,13 +438,20 @@ func (e *Engine) Mutate(ctx context.Context, mutation state.Mutation) (state.Mut
 		} else if resolved != reference {
 			return state.MutationOutcome{}, domain.NewError(domain.ErrorInvalid, "atomic state mutation spans consistency domains")
 		}
+		value := append([]byte(nil), change.Data...)
+		if !change.Delete {
+			value, err = encodeStateValue009(change.Key, change.Data)
+			if err != nil {
+				return state.MutationOutcome{}, err
+			}
+		}
 		requirement := domainValueRequirement(change.Requirement)
 		changes[index] = consistencyDomainChange{
 			Key:             change.Key.String(),
 			Require:         requirement,
 			ExpectedVersion: string(change.ExpectedVersion),
 			Delete:          change.Delete,
-			Value:           append([]byte(nil), change.Data...),
+			Value:           value,
 		}
 	}
 	domainMutation := consistencyDomainMutation{ID: normalized.ID, RetainUntil: normalized.RetainUntil, Changes: changes, Result: append([]byte(nil), normalized.Result...)}
@@ -464,7 +500,14 @@ func (e *Engine) newStateDomainMutation(key state.Key, expected state.Version, d
 	if expected != "" || remove {
 		requirement = domainValuePresent
 	}
-	change := consistencyDomainChange{Key: key.String(), Require: requirement, ExpectedVersion: string(expected), Delete: remove, Value: append([]byte(nil), data...)}
+	value := append([]byte(nil), data...)
+	if !remove {
+		value, err = encodeStateValue009(key, data)
+		if err != nil {
+			return consistencyDomainMutation{}, "", err
+		}
+	}
+	change := consistencyDomainChange{Key: key.String(), Require: requirement, ExpectedVersion: string(expected), Delete: remove, Value: value}
 	mutation := consistencyDomainMutation{ID: mutationID, Changes: []consistencyDomainChange{change}}
 	normalized, fingerprint, err := normalizeConsistencyDomainMutation(mutation)
 	if err != nil {

@@ -30,6 +30,117 @@ type transitionPlanSnapshot009 struct {
 	object objectstore.Object
 }
 
+func decodeTransitionPlanObject009(object objectstore.Object) (storageformat.TransitionPlan009, error) {
+	var envelope storageformat.Envelope
+	var plan storageformat.TransitionPlan009
+	if err := storageformat.DecodeEnvelope(object.Body, object.Key, transitionPlanSchema009, &envelope, &plan); err != nil || storageformat.ValidateTransitionPlan009(plan) != nil || storageformat.TransitionPlanKey(plan.TransitionID) != object.Key {
+		return storageformat.TransitionPlan009{}, domain.NewError(domain.ErrorInvalid, "invalid transition plan authority")
+	}
+	return plan, nil
+}
+
+func (e *Engine) visitTransitionPlans009(ctx context.Context, visit func(storageformat.TransitionPlan009, objectstore.Object) error) error {
+	if visit == nil {
+		return domain.NewError(domain.ErrorInvalid, "transition plan visitor is required")
+	}
+	return visitObjectPages(ctx, e.backend, storageformat.TransitionPrefix()+"plans/", func(info objectstore.ObjectInfo) error {
+		object, err := e.backend.Get(ctx, info.Key)
+		if err != nil {
+			return err
+		}
+		plan, err := decodeTransitionPlanObject009(object)
+		if err != nil {
+			return err
+		}
+		return visit(plan, object)
+	})
+}
+
+// resolveAllTransitions009 is the checkpoint/maintenance help path. A caller
+// may disappear after any durable response; listing immutable plans gives a
+// replacement replica enough information to publish the decision and remove
+// every participant lock before domains are frozen.
+func (e *Engine) resolveAllTransitions009(ctx context.Context) error {
+	return e.visitTransitionPlans009(ctx, func(plan storageformat.TransitionPlan009, object objectstore.Object) error {
+		if e.clock.Now().UTC().Before(plan.RetainUntil) {
+			_, err := e.executeTransition009(ctx, plan)
+			return err
+		}
+		return e.collectExpiredTransition009(ctx, plan, object)
+	})
+}
+
+func (e *Engine) transitionHasLocks009(ctx context.Context, plan storageformat.TransitionPlan009) (bool, error) {
+	store := e.stateDomainStore()
+	for _, participant := range plan.Participants {
+		reference := transitionReference009(participant)
+		snapshot, err := store.loadHead(ctx, reference)
+		if errors.Is(err, domain.ErrNotFound) || !snapshot.exists || !snapshot.head.Registered {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		lock, _, found, err := transitionLockAtHead009(ctx, store, reference, snapshot.head)
+		if err != nil {
+			return false, err
+		}
+		if found {
+			if lock.TransitionID != plan.TransitionID || lock.Fingerprint != plan.Fingerprint {
+				return false, domain.NewError(domain.ErrorInvalid, "transition participant is locked by another plan")
+			}
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (e *Engine) collectExpiredTransition009(ctx context.Context, plan storageformat.TransitionPlan009, planObject objectstore.Object) error {
+	decision, decided, err := e.readTransitionDecision009(ctx, plan)
+	if err != nil {
+		return err
+	}
+	locked, err := e.transitionHasLocks009(ctx, plan)
+	if err != nil {
+		return err
+	}
+	if locked && !decided {
+		decision, err = e.decideTransition009(ctx, plan, false, domain.NewError(domain.ErrorPreconditionFailed, "expired transition was aborted"))
+		if err != nil {
+			if winner, found, readErr := e.readTransitionDecision009(ctx, plan); readErr != nil || !found {
+				return err
+			} else {
+				decision, decided, err = winner, true, nil
+			}
+		} else {
+			decided = true
+		}
+	}
+	if locked && decided {
+		for _, participant := range plan.Participants {
+			if err := e.finalizeTransitionParticipant009(ctx, plan, participant, decision); err != nil {
+				return err
+			}
+		}
+	}
+	if decided {
+		key := storageformat.TransitionDecisionKey(plan.TransitionID)
+		object, getErr := e.backend.Get(ctx, key)
+		if getErr != nil && !errors.Is(getErr, domain.ErrNotFound) {
+			return getErr
+		}
+		if getErr == nil {
+			if deleteErr := e.backend.Delete(ctx, key, objectstore.DeleteCondition{Version: object.Version}); deleteErr != nil && !errors.Is(deleteErr, domain.ErrNotFound) && !errors.Is(deleteErr, domain.ErrPreconditionFailed) {
+				return deleteErr
+			}
+		}
+	}
+	if deleteErr := e.backend.Delete(ctx, planObject.Key, objectstore.DeleteCondition{Version: planObject.Version}); deleteErr != nil && !errors.Is(deleteErr, domain.ErrNotFound) && !errors.Is(deleteErr, domain.ErrPreconditionFailed) {
+		return deleteErr
+	}
+	return nil
+}
+
 func transitionReference009(participant storageformat.TransitionParticipant009) consistencyDomainRef {
 	return consistencyDomainRef{Kind: participant.Kind, ID: participant.DomainID}
 }
@@ -113,9 +224,8 @@ func (e *Engine) readTransitionPlan009(ctx context.Context, transitionID string)
 	if err != nil {
 		return transitionPlanSnapshot009{}, err
 	}
-	var envelope storageformat.Envelope
-	var plan storageformat.TransitionPlan009
-	if err := storageformat.DecodeEnvelope(object.Body, key, transitionPlanSchema009, &envelope, &plan); err != nil || storageformat.ValidateTransitionPlan009(plan) != nil || plan.TransitionID != transitionID {
+	plan, err := decodeTransitionPlanObject009(object)
+	if err != nil || plan.TransitionID != transitionID {
 		return transitionPlanSnapshot009{}, domain.NewError(domain.ErrorInvalid, "invalid transition plan authority")
 	}
 	return transitionPlanSnapshot009{plan: plan, object: object}, nil
@@ -202,6 +312,9 @@ func (e *Engine) prepareTransitionParticipant009(ctx context.Context, plan stora
 			return err
 		}
 		if snapshot.exists && snapshot.head.Registered {
+			if snapshot.head.Frozen {
+				return domain.NewError(domain.ErrorPreconditionFailed, "consistency domain is frozen")
+			}
 			lock, _, found, err := transitionLockAtHead009(ctx, store, reference, snapshot.head)
 			if err != nil {
 				return err
@@ -272,6 +385,9 @@ func (e *Engine) finalizeTransitionParticipant009(ctx context.Context, plan stor
 		}
 		if !found {
 			if decision.Committed {
+				if !e.clock.Now().UTC().Before(plan.RetainUntil) {
+					return nil
+				}
 				return domain.NewError(domain.ErrorInvalid, "committed transition lock is missing")
 			}
 			return nil

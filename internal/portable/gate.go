@@ -82,8 +82,30 @@ func (e *Engine) finishClosingWrites(ctx context.Context, checkpointID string) e
 	// final publication. No schema-007 admissions, mutable operation records,
 	// synchronous duplicate roots, or state-version objects participate.
 	catalog := newDomainCatalog(e.backend, e.scheduler)
-	if _, err := catalog.freezeDomains(ctx, initialGate.Epoch); err != nil {
+	if err := e.resolveAllTransitions009(ctx); err != nil {
 		return err
+	}
+	entries, err := catalog.freeze(ctx, initialGate.Epoch)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		reference := consistencyDomainRef{Kind: entry.Kind, ID: entry.DomainID}
+		for attempts := 0; attempts < 32; attempts++ {
+			freezeErr := e.stateDomainStore().freeze(ctx, reference, initialGate.Epoch)
+			if freezeErr == nil {
+				break
+			}
+			if !errors.Is(freezeErr, errTransitionPending009) {
+				return domain.WrapError(domain.KindOf(freezeErr), "freeze registered consistency domain "+entry.DomainID, freezeErr)
+			}
+			if resolveErr := e.resolveStateTransition009(ctx, reference); resolveErr != nil {
+				return resolveErr
+			}
+			if attempts == 31 {
+				return domain.NewError(domain.ErrorUnavailable, "consistency-domain transition remained freeze-contended")
+			}
+		}
 	}
 	if err := e.drainExpiredSchema008Uploads(ctx); err != nil {
 		if errors.Is(err, domain.ErrUnavailable) {

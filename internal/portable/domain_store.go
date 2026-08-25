@@ -808,6 +808,16 @@ func (store *consistencyDomainStore) freeze(ctx context.Context, reference consi
 		if !snapshot.exists || !snapshot.head.Registered {
 			return domain.NewError(domain.ErrorNotFound, "consistency domain does not exist")
 		}
+		_, _, transitionPending, lockErr := transitionLockAtHead009(ctx, store, reference, snapshot.head)
+		if lockErr != nil {
+			return lockErr
+		}
+		if transitionPending {
+			if snapshot.head.Frozen {
+				return domain.NewError(domain.ErrorInvalid, "frozen consistency domain contains a transition lock")
+			}
+			return errTransitionPending009
+		}
 		if snapshot.head.Frozen {
 			if snapshot.head.FreezeEpoch == epoch {
 				return nil

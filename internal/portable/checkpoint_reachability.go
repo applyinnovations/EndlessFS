@@ -429,6 +429,9 @@ func (e *Engine) collectSchema008CheckpointReachability(ctx context.Context) (*c
 	}); err != nil {
 		return fail(err)
 	}
+	if err := e.collectTransitionReachability009(ctx, collector); err != nil {
+		return fail(err)
+	}
 	if err := visited.Close(); err != nil {
 		return fail(err)
 	}
@@ -437,6 +440,30 @@ func (e *Engine) collectSchema008CheckpointReachability(ctx context.Context) (*c
 		return fail(err)
 	}
 	return stream, nil
+}
+
+func (e *Engine) collectTransitionReachability009(ctx context.Context, collector *checkpointReachabilityCollector) error {
+	if err := e.visitTransitionPlans009(ctx, func(_ storageformat.TransitionPlan009, object objectstore.Object) error {
+		return collector.Add(object.Key)
+	}); err != nil {
+		return err
+	}
+	return visitObjectPages(ctx, e.backend, storageformat.TransitionPrefix()+"decisions/", func(info objectstore.ObjectInfo) error {
+		object, err := e.backend.Get(ctx, info.Key)
+		if err != nil {
+			return err
+		}
+		var envelope storageformat.Envelope
+		var decision storageformat.TransitionDecision009
+		if err := storageformat.DecodeEnvelope(object.Body, object.Key, transitionDecisionSchema009, &envelope, &decision); err != nil || storageformat.ValidateTransitionDecision009(decision) != nil || storageformat.TransitionDecisionKey(decision.TransitionID) != object.Key {
+			return domain.NewError(domain.ErrorInvalid, "invalid transition decision authority")
+		}
+		plan, err := e.readTransitionPlan009(ctx, decision.TransitionID)
+		if err != nil || plan.plan.Fingerprint != decision.Fingerprint {
+			return domain.NewError(domain.ErrorInvalid, "transition decision has no matching plan")
+		}
+		return collector.Add(object.Key)
+	})
 }
 
 func (walker *checkpointReachabilityWalker) walkTree(ctx context.Context, session *consistencyDomainTreeSession, root storageformat.DomainTreeRoot, purpose string, visit func(storageformat.DomainEntry) error) error {

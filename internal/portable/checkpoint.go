@@ -412,6 +412,9 @@ func isSchema008AuthorityStateKey(key string) bool {
 	if key == storageformat.SuperblockKey().String() || key == storageformat.WriterSetKey().String() || key == storageformat.WriteGateKey().String() || key == storageformat.DomainCatalogHeadKey().String() {
 		return true
 	}
+	if strings.HasPrefix(key, storageformat.TransitionPrefix()+"plans/") || strings.HasPrefix(key, storageformat.TransitionPrefix()+"decisions/") {
+		return strings.HasSuffix(key, ".json")
+	}
 	segments := strings.Split(key, "/")
 	if len(segments) == 6 && segments[0] == "endlessfs" && segments[1] == "v1" && segments[2] == "domains" && segments[3] == "catalog" && segments[4] == "pages" && strings.HasSuffix(segments[5], ".json") {
 		return true

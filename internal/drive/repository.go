@@ -22,39 +22,19 @@ func (r *repository) createBatchOperation(ctx context.Context, record model.Batc
 }
 
 func (r *repository) createShare(ctx context.Context, record model.Share) error {
-	return r.create(ctx, state.MustKey(state.NamespaceShares, record.TokenHash), &record)
+	return r.create(ctx, shareKey(record.OwnerUserID, record.ShareID), &record)
 }
 
-func (r *repository) shareByTokenHash(ctx context.Context, tokenHash string) (model.Share, state.Version, error) {
-	return getRecord[model.Share](ctx, r.store, state.MustKey(state.NamespaceShares, tokenHash))
+func shareKey(owner domain.UserID, shareID string) state.Key {
+	return state.MustKey(state.NamespaceShares, owner.String(), shareID)
 }
 
 func (r *repository) shareByID(ctx context.Context, owner domain.UserID, shareID string) (model.Share, state.Version, error) {
-	records, err := r.shares(ctx, owner)
-	if err != nil {
-		return model.Share{}, "", err
-	}
-	for _, record := range records {
-		if record.ShareID == shareID {
-			value, version, err := r.shareByTokenHash(ctx, record.TokenHash)
-			return value, version, err
-		}
-	}
-	return model.Share{}, "", domain.NewError(domain.ErrorNotFound, "share not found")
+	return getRecord[model.Share](ctx, r.store, shareKey(owner, shareID))
 }
 
 func (r *repository) shares(ctx context.Context, owner domain.UserID) ([]model.Share, error) {
-	records, err := listRecords[model.Share](ctx, r.store, state.MustPrefix(state.NamespaceShares))
-	if err != nil {
-		return nil, err
-	}
-	owned := make([]model.Share, 0, len(records))
-	for _, record := range records {
-		if record.OwnerUserID == owner {
-			owned = append(owned, record)
-		}
-	}
-	return owned, nil
+	return listRecords[model.Share](ctx, r.store, state.MustPrefix(state.NamespaceShares, owner.String()))
 }
 
 func (r *repository) updateShare(ctx context.Context, record model.Share, version state.Version) error {
@@ -62,7 +42,7 @@ func (r *repository) updateShare(ctx context.Context, record model.Share, versio
 	if err != nil {
 		return err
 	}
-	_, err = r.store.CompareAndSwap(ctx, state.MustKey(state.NamespaceShares, record.TokenHash), version, data)
+	_, err = r.store.CompareAndSwap(ctx, shareKey(record.OwnerUserID, record.ShareID), version, data)
 	return err
 }
 

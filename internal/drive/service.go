@@ -516,7 +516,10 @@ func (s *Service) CreateShare(ctx context.Context, userID domain.UserID, path do
 		return CreatedShare{}, domain.NewError(domain.ErrorInvalid, "share expiry must be in the future")
 	}
 	shareID := s.derivedID("share-id", userID, idempotencyKey)
-	token := s.derivedID("share-token", userID, idempotencyKey)
+	token, err := secret.ScopeCapabilityToken(userID, shareID, s.derivedID("share-token", userID, idempotencyKey))
+	if err != nil {
+		return CreatedShare{}, err
+	}
 	if prior, _, err := s.repository.shareByID(ctx, userID, shareID); err == nil {
 		if prior.RootPath != path || !sameTime(prior.ExpiresAt, expiresAt) {
 			return CreatedShare{}, domain.NewError(domain.ErrorConflict, "idempotency key was used for a different request")
@@ -663,11 +666,12 @@ func (s *Service) PublicDownload(ctx context.Context, token, relative string, ve
 }
 
 func (s *Service) authorizeShare(ctx context.Context, token string) (model.Share, domain.Entry, domain.Scope, error) {
-	if !secret.ValidBearerToken(token) {
+	owner, shareID, _, parseErr := secret.ParseScopedCapabilityToken(token)
+	if parseErr != nil {
 		return model.Share{}, domain.Entry{}, domain.Scope{}, publicShareError()
 	}
-	record, _, err := s.repository.shareByTokenHash(ctx, secret.Hash(token))
-	if err != nil {
+	record, _, err := s.repository.shareByID(ctx, owner, shareID)
+	if err != nil || record.OwnerUserID != owner || !secret.MatchesHash(token, record.TokenHash) {
 		return model.Share{}, domain.Entry{}, domain.Scope{}, publicShareError()
 	}
 	if record.RevokedAt != nil || (record.ExpiresAt != nil && !s.clock.Now().Before(*record.ExpiresAt)) {

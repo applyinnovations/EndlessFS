@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/applyinnovations/endlessfs/internal/auth"
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/model"
 	"github.com/applyinnovations/endlessfs/internal/secret"
@@ -106,6 +107,49 @@ func TestSessionRotationNeverDeletesTheOldSessionWithoutCreatingTheNewOne(t *tes
 	}
 	if _, _, err := repository.Session(context.Background(), newToken); err != nil {
 		t.Fatalf("new session after rotation = %v", err)
+	}
+}
+
+func TestRegistrationCommitHasOneCrashSafeTransition(t *testing.T) {
+	store := &failBeforeAtomicCommit{MemoryStore: state.NewMemoryStore()}
+	repository := NewRepository(store)
+	reader := &deterministicReader{next: 1}
+	ids := domain.NewIDGenerator(reader)
+	clock := domain.NewFixedClock(identityEpoch)
+	sessions, err := auth.NewSessionManager(repository, ids, clock, 12*time.Hour, "https://drive.example.test", true, secret.Value(bearer(0x61)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(repository, fakeWebAuthn{}, sessions, ids, clock, NewMutablePolicy(RegistrationPolicy{AllowPublic: true}), "", "https://drive.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, err := service.StartRegistration(context.Background(), RegistrationStartRequest{DisplayName: "Atomic User", ClientKey: "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.fail = true
+	if _, err := service.VerifyRegistration(context.Background(), start.CeremonyID, start.BrowserBinding, fakeRegistrationResponse(0x91)); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("injected registration error = %v", err)
+	}
+	ceremony, _, err := repository.Ceremony(context.Background(), start.CeremonyID)
+	if err != nil || ceremony.ConsumedAt != nil || ceremony.OperationID != "" {
+		t.Fatalf("failed transition consumed ceremony: %+v, %v", ceremony, err)
+	}
+	if _, _, err := repository.Profile(context.Background(), *ceremony.UserID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("failed transition materialized profile: %v", err)
+	}
+	if _, err := repository.Credentials(context.Background(), *ceremony.UserID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("failed transition materialized credentials: %v", err)
+	}
+	complete, err := service.VerifyRegistration(context.Background(), start.CeremonyID, start.BrowserBinding, fakeRegistrationResponse(0x91))
+	if err != nil || complete.UserID != *ceremony.UserID {
+		t.Fatalf("registration retry = %+v, %v", complete, err)
+	}
+	account, _, accountErr := repository.Account(context.Background(), complete.UserID)
+	credentials, credentialErr := repository.Credentials(context.Background(), complete.UserID)
+	if accountErr != nil || credentialErr != nil || account.Status != model.AccountEnabled || len(credentials) != 1 {
+		t.Fatalf("atomic registration result: account=%+v credentials=%+v errors=%v/%v", account, credentials, accountErr, credentialErr)
 	}
 }
 

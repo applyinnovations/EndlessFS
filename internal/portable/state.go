@@ -269,6 +269,67 @@ func (e *Engine) Delete(ctx context.Context, key state.Key, current state.Versio
 	return err
 }
 
+// Mutate applies an idempotent set of state changes through one consistency-
+// domain head. Every key is resolved before the backend is touched so a
+// cross-domain request cannot partially publish.
+func (e *Engine) Mutate(ctx context.Context, mutation state.Mutation) (state.MutationOutcome, error) {
+	normalized, _, err := state.NormalizeMutation(mutation)
+	if err != nil {
+		return state.MutationOutcome{}, err
+	}
+	var reference consistencyDomainRef
+	changes := make([]consistencyDomainChange, len(normalized.Changes))
+	for index, change := range normalized.Changes {
+		if change.Delete {
+			if err := validateStateKey(change.Key); err != nil {
+				return state.MutationOutcome{}, err
+			}
+		} else if err := validateStateMutation(change.Key, change.Data); err != nil {
+			return state.MutationOutcome{}, err
+		}
+		resolved, routeErr := stateDomainReferenceForKey(change.Key)
+		if routeErr != nil {
+			return state.MutationOutcome{}, routeErr
+		}
+		if index == 0 {
+			reference = resolved
+		} else if resolved != reference {
+			return state.MutationOutcome{}, domain.NewError(domain.ErrorInvalid, "atomic state mutation spans consistency domains")
+		}
+		requirement := domainValueRequirement(change.Requirement)
+		changes[index] = consistencyDomainChange{
+			Key:             change.Key.String(),
+			Require:         requirement,
+			ExpectedVersion: string(change.ExpectedVersion),
+			Delete:          change.Delete,
+			Value:           append([]byte(nil), change.Data...),
+		}
+	}
+	domainMutation := consistencyDomainMutation{ID: normalized.ID, RetainUntil: normalized.RetainUntil, Changes: changes, Result: append([]byte(nil), normalized.Result...)}
+	canonical, fingerprint, err := normalizeConsistencyDomainMutation(domainMutation)
+	if err != nil {
+		return state.MutationOutcome{}, err
+	}
+	domainOutcome, err := e.stateDomainStore().mutate(ctx, reference, canonical)
+	if err != nil {
+		return state.MutationOutcome{}, err
+	}
+	outcome := state.MutationOutcome{
+		ID:       normalized.ID,
+		Result:   append([]byte(nil), domainOutcome.Result...),
+		Replayed: domainOutcome.Replayed,
+		Changes:  make([]state.ChangeResult, len(normalized.Changes)),
+	}
+	for index, change := range normalized.Changes {
+		version := state.Version("")
+		if !change.Delete {
+			version = state.Version(consistencyDomainLogicalVersion(normalized.ID, fingerprint, canonical.Changes[index]))
+		}
+		outcome.Changes[index] = state.ChangeResult{Key: change.Key, Version: version}
+	}
+	return outcome, nil
+}
+
 func (e *Engine) newStateDomainMutation(key state.Key, expected state.Version, data []byte, remove bool) (consistencyDomainMutation, state.Version, error) {
 	mutationID, err := e.ids.OpaqueID()
 	if err != nil {

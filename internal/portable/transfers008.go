@@ -42,6 +42,37 @@ func (s *FileStore) portableUpload(ctx context.Context, owner domain.UserID, upl
 	return record, value, err
 }
 
+// portableUploadSnapshot authenticates the upload record and returns the
+// exact domain head that made it visible. Helpers that subsequently publish a
+// state transition can reuse that snapshot as their CAS precondition instead
+// of issuing a redundant second provider read.
+func (s *FileStore) portableUploadSnapshot(ctx context.Context, owner domain.UserID, uploadID string) (storageformat.PortableUploadRecord, consistencyDomainValue, consistencyDomainHeadSnapshot, *consistencyDomainTreeSession, error) {
+	store := s.engine.stateDomainStore()
+	reference := uploadDomainReference(owner)
+	snapshot, err := store.loadHead(ctx, reference)
+	if err != nil {
+		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, consistencyDomainHeadSnapshot{}, nil, err
+	}
+	if !snapshot.exists || !snapshot.head.Registered {
+		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, consistencyDomainHeadSnapshot{}, nil, domain.NewError(domain.ErrorNotFound, "upload does not exist")
+	}
+	if _, _, found, lockErr := transitionLockAtHead009(ctx, store, reference, snapshot.head); lockErr != nil {
+		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, consistencyDomainHeadSnapshot{}, nil, lockErr
+	} else if found {
+		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, consistencyDomainHeadSnapshot{}, nil, domain.WrapError(domain.ErrorUnavailable, "upload domain has a pending transition", errTransitionPending009)
+	}
+	session := newConsistencyDomainTreeSession(store, reference)
+	value, found, err := store.lookupAtHeadWithSession(ctx, reference, snapshot.head, uploadRecordKey(uploadID), session)
+	if err != nil {
+		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, consistencyDomainHeadSnapshot{}, nil, err
+	}
+	if !found {
+		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, consistencyDomainHeadSnapshot{}, nil, domain.NewError(domain.ErrorNotFound, "upload does not exist")
+	}
+	record, err := decodePortableUploadRecord(value.Data, owner, uploadID)
+	return record, value, snapshot, session, err
+}
+
 func (s *FileStore) portableUploadAtView(ctx context.Context, view *namespaceView, owner domain.UserID, uploadID string) (storageformat.PortableUploadRecord, consistencyDomainValue, error) {
 	if view == nil || view.reference != uploadDomainReference(owner) {
 		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, domain.NewError(domain.ErrorInvalid, "upload view is misbound")
@@ -173,14 +204,27 @@ func (s *FileStore) abortAndDeleteRuntimeUploadLease(ctx context.Context, upload
 // cleanupPortableUpload is an idempotent, helpable external-effect task. The
 // terminal logical state is already authoritative; provider cleanup failure is
 // retained as CleanupPending and can be retried by any replica or checkpoint.
-func (s *FileStore) cleanupPortableUpload(ctx context.Context, owner domain.UserID, uploadID string) error {
-	record, value, err := s.portableUpload(ctx, owner, uploadID)
+func (s *FileStore) cleanupPortableUpload(ctx context.Context, owner domain.UserID, uploadID string, knownLease *objectstore.Object) error {
+	record, value, snapshot, session, err := s.portableUploadSnapshot(ctx, owner, uploadID)
 	if err != nil || !record.CleanupPending {
 		return err
 	}
 	switch record.State {
 	case storageformat.UploadCompleted:
-		if err := s.deleteRuntimeUploadLease(ctx, uploadID); err != nil {
+		if knownLease != nil {
+			transfers, transferErr := s.transferBackend()
+			if transferErr != nil {
+				return transferErr
+			}
+			expected := storageformat.LeaseKey(transfers.BackendKind(), uploadID)
+			if knownLease.Key != expected || len(knownLease.Body) == 0 {
+				return domain.NewError(domain.ErrorInvalid, "known runtime upload lease is misbound")
+			}
+			err = s.deleteKnownRuntimeUploadLease(ctx, *knownLease)
+		} else {
+			err = s.deleteRuntimeUploadLease(ctx, uploadID)
+		}
+		if err != nil {
 			return err
 		}
 	case storageformat.UploadAborted:
@@ -199,10 +243,10 @@ func (s *FileStore) cleanupPortableUpload(ctx context.Context, owner domain.User
 	if err != nil {
 		return err
 	}
-	_, err = s.engine.stateDomainStore().mutate(ctx, uploadDomainReference(owner), consistencyDomainMutation{
+	_, err = s.engine.stateDomainStore().mutatePrepared(ctx, uploadDomainReference(owner), consistencyDomainMutation{
 		ID:      "upload-cleanup:" + record.UploadID + ":" + string(record.State),
 		Changes: []consistencyDomainChange{{Key: uploadRecordKey(record.UploadID), Require: domainValuePresent, ExpectedVersion: value.LogicalVersion, Value: body}}, Result: result,
-	})
+	}, &snapshot, session)
 	if err != nil {
 		current, _, readErr := s.portableUpload(ctx, owner, uploadID)
 		if readErr == nil && current.State == record.State && !current.CleanupPending {
@@ -212,11 +256,15 @@ func (s *FileStore) cleanupPortableUpload(ctx context.Context, owner domain.User
 	return err
 }
 
-func (s *FileStore) finishUploadCleanup(ctx context.Context, owner domain.UserID, uploadID string) {
+func (s *FileStore) finishUploadCleanup(ctx context.Context, owner domain.UserID, uploadID string, knownLease ...objectstore.Object) {
 	// A single transient provider response should not leave routine operations
 	// dirty. Persistent outages remain represented durably by CleanupPending.
 	for attempts := 0; attempts < 2; attempts++ {
-		if err := s.cleanupPortableUpload(ctx, owner, uploadID); err == nil {
+		var lease *objectstore.Object
+		if attempts == 0 && len(knownLease) != 0 {
+			lease = &knownLease[0]
+		}
+		if err := s.cleanupPortableUpload(ctx, owner, uploadID, lease); err == nil {
 			return
 		}
 	}
@@ -227,7 +275,7 @@ func (s *FileStore) resumePortableUpload(ctx context.Context, record storageform
 		return domain.UploadCapability{}, domain.NewError(domain.ErrorConflict, "upload is no longer active")
 	}
 	if record.State == storageformat.UploadInitializing {
-		return s.initializePortableUpload(ctx, record)
+		return s.initializePortableUpload(ctx, record, false)
 	}
 	if record.State != storageformat.UploadActive {
 		return domain.UploadCapability{}, domain.NewError(domain.ErrorConflict, "upload is no longer active")
@@ -250,7 +298,7 @@ func (s *FileStore) resumePortableUpload(ctx context.Context, record storageform
 // initializePortableUpload performs the non-transactional provider step only
 // after the canonical intent exists. Concurrent helpers race on the transient
 // lease create; losers revoke their own provider session and resume the winner.
-func (s *FileStore) initializePortableUpload(ctx context.Context, intent storageformat.PortableUploadRecord) (domain.UploadCapability, error) {
+func (s *FileStore) initializePortableUpload(ctx context.Context, intent storageformat.PortableUploadRecord, leaseKnownAbsent bool) (domain.UploadCapability, error) {
 	if intent.State != storageformat.UploadInitializing || !s.engine.clock.Now().Before(intent.ExpiresAt) {
 		return domain.UploadCapability{}, domain.NewError(domain.ErrorConflict, "upload is no longer initializable")
 	}
@@ -262,9 +310,23 @@ func (s *FileStore) initializePortableUpload(ctx context.Context, intent storage
 	if err != nil {
 		return domain.UploadCapability{}, err
 	}
+	record, value, snapshot, session, err := s.portableUploadSnapshot(ctx, owner, intent.UploadID)
+	if err != nil {
+		return domain.UploadCapability{}, err
+	}
+	if record.State != storageformat.UploadInitializing && record.State != storageformat.UploadActive {
+		_ = s.cleanupPortableUpload(ctx, owner, record.UploadID, nil)
+		return domain.UploadCapability{}, domain.NewError(domain.ErrorConflict, "upload initialization was superseded")
+	}
 	leaseKey := storageformat.LeaseKey(transfers.BackendKind(), intent.UploadID)
 	var capability objectstore.UploadCapability
-	leaseObject, leaseErr := s.engine.backend.Get(ctx, leaseKey)
+	var leaseObject objectstore.Object
+	var leaseErr error
+	if !leaseKnownAbsent || record.State == storageformat.UploadActive {
+		leaseObject, leaseErr = s.engine.backend.Get(ctx, leaseKey)
+	} else {
+		leaseErr = domain.ErrNotFound
+	}
 	if errors.Is(leaseErr, domain.ErrNotFound) {
 		handle, beginErr := transfers.BeginUpload(ctx, objectstore.UploadRequest{
 			UploadID: intent.UploadID, Key: storageformat.BlobKey(intent.OwnerID, intent.BlobID), Size: intent.Size,
@@ -299,16 +361,8 @@ func (s *FileStore) initializePortableUpload(ctx context.Context, intent storage
 			return domain.UploadCapability{}, err
 		}
 	}
-	record, value, err := s.portableUpload(ctx, owner, intent.UploadID)
-	if err != nil {
-		return domain.UploadCapability{}, err
-	}
 	if record.State == storageformat.UploadActive {
 		return domainUploadCapability(record.UploadID, capability), nil
-	}
-	if record.State != storageformat.UploadInitializing {
-		_ = s.cleanupPortableUpload(ctx, owner, record.UploadID)
-		return domain.UploadCapability{}, domain.NewError(domain.ErrorConflict, "upload initialization was superseded")
 	}
 	record.State = storageformat.UploadActive
 	body, err := storageformat.EncodeCanonical(record)
@@ -319,16 +373,16 @@ func (s *FileStore) initializePortableUpload(ctx context.Context, intent storage
 	if err != nil {
 		return domain.UploadCapability{}, err
 	}
-	_, err = s.engine.stateDomainStore().mutate(ctx, uploadDomainReference(owner), consistencyDomainMutation{
+	_, err = s.engine.stateDomainStore().mutatePrepared(ctx, uploadDomainReference(owner), consistencyDomainMutation{
 		ID: record.UploadID + "-activate", Changes: []consistencyDomainChange{{Key: uploadRecordKey(record.UploadID), Require: domainValuePresent, ExpectedVersion: value.LogicalVersion, Value: body}}, Result: resultBody,
-	})
+	}, &snapshot, session)
 	if err != nil {
 		current, _, readErr := s.portableUpload(ctx, owner, record.UploadID)
 		if readErr == nil && current.State == storageformat.UploadActive {
 			return domainUploadCapability(record.UploadID, capability), nil
 		}
 		if readErr == nil && current.State != storageformat.UploadInitializing {
-			_ = s.cleanupPortableUpload(ctx, owner, record.UploadID)
+			_ = s.cleanupPortableUpload(ctx, owner, record.UploadID, nil)
 			return domain.UploadCapability{}, domain.NewError(domain.ErrorConflict, "upload initialization was superseded")
 		}
 		return domain.UploadCapability{}, err
@@ -422,7 +476,7 @@ func (s *FileStore) createUpload008(ctx context.Context, scope domain.Scope, req
 		}
 		return domain.UploadCapability{}, err
 	}
-	return s.resumePortableUpload(ctx, record)
+	return s.initializePortableUpload(ctx, record, true)
 }
 
 func (s *FileStore) uploadStatus008(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) (domain.UploadStatus, error) {
@@ -519,7 +573,7 @@ func (s *FileStore) completeUpload008(ctx context.Context, scope domain.Scope, r
 	if record.State != storageformat.UploadActive || !s.engine.clock.Now().Before(record.ExpiresAt) {
 		return domain.Entry{}, domain.NewError(domain.ErrorConflict, "upload is not active")
 	}
-	lease, _, err := s.runtimeUploadLease(ctx, record.UploadID)
+	lease, leaseObject, err := s.runtimeUploadLease(ctx, record.UploadID)
 	if err != nil {
 		return domain.Entry{}, err
 	}
@@ -551,7 +605,7 @@ func (s *FileStore) completeUpload008(ctx context.Context, scope domain.Scope, r
 	if err != nil {
 		return domain.Entry{}, err
 	}
-	s.finishUploadCleanup(ctx, scope.UserID(), record.UploadID)
+	s.finishUploadCleanup(ctx, scope.UserID(), record.UploadID, leaseObject)
 	return entry, nil
 }
 

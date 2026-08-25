@@ -218,6 +218,14 @@ func (e *Engine) runStorageMigration005To006(ctx context.Context, transition sto
 	return e.runFeatureOnlyStorageMigration(ctx, transition, superblockObject, superblock)
 }
 
+// Schema 007 narrows duplicate-directory candidates to user-addressable
+// directories. Historical area-root similarity records remain immutable
+// compatibility residue and are ignored by schema-007 readers; new writes no
+// longer mutate them. No schema-006 authoritative object body is rewritten.
+func (e *Engine) runStorageMigration006To007(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
+	return e.runFeatureOnlyStorageMigration(ctx, transition, superblockObject, superblock)
+}
+
 func (e *Engine) runFeatureOnlyStorageMigration(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
 	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageStarted})
 	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterDetection)); err != nil {

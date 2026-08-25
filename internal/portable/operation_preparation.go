@@ -30,6 +30,10 @@ type operationPreparationRunCollector struct {
 	maxBuffered int
 }
 
+type operationPreparationItemCollector interface {
+	Add(context.Context, storageformat.FileOperationPreparationItem) error
+}
+
 func newOperationPreparationRunCollector(store *FileStore, operation storageformat.FileOperation, generation uint64) (*operationPreparationRunCollector, error) {
 	if store == nil || store.engine == nil || store.engine.backend == nil || operation.UserID == "" || operation.OperationID == "" || operation.Preparation == nil || operation.Preparation.SchemaVersion != 1 || operation.Preparation.RunSetID == "" {
 		return nil, domain.NewError(domain.ErrorInvalid, "invalid operation preparation collector")
@@ -391,7 +395,7 @@ func (s *FileStore) sealFileOperationPreparation(ctx context.Context, object obj
 	return nil
 }
 
-func (s *FileStore) addCatalogChangePreparationItems(ctx context.Context, collector *operationPreparationRunCollector, userID domain.UserID, change catalogChange) error {
+func (s *FileStore) addCatalogChangePreparationItems(ctx context.Context, collector operationPreparationItemCollector, userID domain.UserID, change catalogChange) error {
 	if collector == nil || !userID.Valid() {
 		return domain.NewError(domain.ErrorInvalid, "invalid prepared catalog change")
 	}

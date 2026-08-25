@@ -107,6 +107,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#test` / `.#test-unit` | Run the current Go suite. |
 | `nix run .#test-integration` | Run tests named as integration tests. |
 | `nix run .#test-contract` | Run reusable provider and state-store contract suites. |
+| `nix run .#test-provider-budget` | Run exact GCS request-count, modeled-cost, and modeled-latency ratchets for state, file, data-plane, and preview pathways. |
 | `nix run .#test-migration` | Run the complete historical migration matrix and enforce 98% migration-ledger/implementation statement coverage. Pass a candidate release tag to verify its ledger mapping. |
 | `nix run .#test-replica` | Run deterministic multi-replica admission, fencing, takeover, and recovery tests. |
 | `nix run .#test-portability` | Run canonical-format, checkpoint, raw-copy/reopen, and continued-mutation tests. |

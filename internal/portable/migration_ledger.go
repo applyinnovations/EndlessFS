@@ -27,12 +27,14 @@ const (
 	storageSchema004 storageSchemaID = "endlessfs-portable-v1/schema-004"
 	storageSchema005 storageSchemaID = "endlessfs-portable-v1/schema-005"
 	storageSchema006 storageSchemaID = "endlessfs-portable-v1/schema-006"
+	storageSchema007 storageSchemaID = "endlessfs-portable-v1/schema-007"
 
 	storageMigration001To002 storageMigrationID = "schema-001-to-002"
 	storageMigration002To003 storageMigrationID = "schema-002-to-003"
 	storageMigration003To004 storageMigrationID = "schema-003-to-004"
 	storageMigration004To005 storageMigrationID = "schema-004-to-005"
 	storageMigration005To006 storageMigrationID = "schema-005-to-006"
+	storageMigration006To007 storageMigrationID = "schema-006-to-007"
 )
 
 type storageSchemaReleaseBoundary struct {
@@ -116,6 +118,11 @@ var schemaMigration005To006 = storageMigration{
 	checkpointID: "automatic-storage-schema-005-to-006",
 }
 
+var schemaMigration006To007 = storageMigration{
+	id: storageMigration006To007, from: storageSchema006, to: storageSchema007,
+	checkpointID: "automatic-storage-schema-006-to-007",
+}
+
 // storageSchemaLedger is append-only. Extend it by adding one definition whose
 // migrationFromPrevious connects the prior terminal epoch to the new epoch;
 // never insert, reorder, or rewrite an existing entry.
@@ -182,6 +189,25 @@ var storageSchemaLedger = []storageSchemaDefinition{
 		gateBinding:           storageGateFeatureBound,
 		migrationFromPrevious: &schemaMigration005To006,
 	},
+	{
+		id: storageSchema007,
+		features: []string{
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureNamespaceSnapshots,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+			storageformat.FeatureResumableOperations,
+			storageformat.FeatureUserDirectoryCatalog,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration006To007,
+	},
 }
 
 // storageSchemaReleaseLedger is also append-only. A boundary is the first
@@ -204,6 +230,7 @@ func init() {
 	schemaMigration003To004.run = (*Engine).runStorageMigration003To004
 	schemaMigration004To005.run = (*Engine).runStorageMigration004To005
 	schemaMigration005To006.run = (*Engine).runStorageMigration005To006
+	schemaMigration006To007.run = (*Engine).runStorageMigration006To007
 }
 
 func currentStorageSchema() storageSchemaDefinition {

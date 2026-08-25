@@ -236,7 +236,7 @@ func terminalOperationExpired(object objectstore.Object, cutoff time.Time) (bool
 		if err := storageformat.DecodeEnvelope(object.Body, object.Key, fileOperationSchema, &envelope, &operation); err != nil {
 			return false, err
 		}
-		if operation.SchemaVersion != 1 && operation.SchemaVersion != 2 || storageformat.OperationKey(operation.UserID, operation.OperationID) != object.Key || operation.UpdatedAt.IsZero() {
+		if operation.SchemaVersion != 1 && operation.SchemaVersion != 2 && operation.SchemaVersion != 3 || storageformat.OperationKey(operation.UserID, operation.OperationID) != object.Key || operation.UpdatedAt.IsZero() {
 			return false, domain.NewError(domain.ErrorInvalid, "invalid file operation during retention pruning")
 		}
 		terminal := operation.State == storageformat.FileOperationSucceeded || operation.State == storageformat.FileOperationFailed

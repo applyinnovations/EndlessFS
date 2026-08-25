@@ -147,11 +147,29 @@ func (s *FileStore) copyOrMove(ctx context.Context, move bool, from, to domain.S
 	if err != nil {
 		return domain.Operation{}, err
 	}
+	now := s.engine.clock.Now().UTC()
+	directSeed := storageformat.FileOperation{
+		SchemaVersion: 1, OperationID: operationID, UserID: from.UserID().String(), Kind: kind,
+		IntentFingerprint: fingerprint,
+		State:             storageformat.FileOperationRunning, Attempt: 1, Fence: 1, ReplicaAttemptID: ownerID,
+		ExpiresAt: now.Add(s.engine.leaseTTL), StartedAt: now, UpdatedAt: now,
+	}
+	directErr := errDirectOperationTooLarge
+	var direct storageformat.FileOperation
+	var directBody []byte
+	if !s.engine.forceResumableOperationPreparation {
+		direct, directBody, directErr = s.buildDirectMoveOrDelete(ctx, directSeed, from.UserID(), from, to, request.Source, resolved, sourceTrail, destinationTrail, sourceEntry, destinationExisting, move)
+	}
+	if directErr == nil {
+		return s.startFileOperation(ctx, direct, directBody, request.IdempotencyKey, fingerprint)
+	}
+	if !errors.Is(directErr, errDirectOperationTooLarge) {
+		return domain.Operation{}, directErr
+	}
 	_, gateEnvelope, gate, err := s.engine.readGate(ctx)
 	if err != nil {
 		return domain.Operation{}, err
 	}
-	now := s.engine.clock.Now().UTC()
 	preparationRequest := &storageformat.FileOperationPreparationRequest{
 		FromArea: areaName(from.Area()), ToArea: areaName(to.Area()), Source: request.Source.String(),
 		Destination: request.Destination.String(), ResolvedDestination: resolved.String(), Conflict: conflict,
@@ -227,11 +245,29 @@ func (s *FileStore) Delete(ctx context.Context, scope domain.Scope, request doma
 	if err != nil {
 		return domain.Operation{}, err
 	}
+	now := s.engine.clock.Now().UTC()
+	directSeed := storageformat.FileOperation{
+		SchemaVersion: 1, OperationID: operationID, UserID: scope.UserID().String(), Kind: operationDelete,
+		IntentFingerprint: fingerprint,
+		State:             storageformat.FileOperationRunning, Attempt: 1, Fence: 1, ReplicaAttemptID: ownerID,
+		ExpiresAt: now.Add(s.engine.leaseTTL), StartedAt: now, UpdatedAt: now,
+	}
+	directErr := errDirectOperationTooLarge
+	var direct storageformat.FileOperation
+	var directBody []byte
+	if !s.engine.forceResumableOperationPreparation {
+		direct, directBody, directErr = s.buildDirectMoveOrDelete(ctx, directSeed, scope.UserID(), scope, scope, request.Path, domain.UserPath{}, parentTrail, nil, entry, nil, false)
+	}
+	if directErr == nil {
+		return s.startFileOperation(ctx, direct, directBody, request.IdempotencyKey, fingerprint)
+	}
+	if !errors.Is(directErr, errDirectOperationTooLarge) {
+		return domain.Operation{}, directErr
+	}
 	_, gateEnvelope, gate, err := s.engine.readGate(ctx)
 	if err != nil {
 		return domain.Operation{}, err
 	}
-	now := s.engine.clock.Now().UTC()
 	operation := storageformat.FileOperation{
 		SchemaVersion: 2, OperationID: operationID, UserID: scope.UserID().String(), Kind: operationDelete,
 		IntentFingerprint: fingerprint,
@@ -510,9 +546,12 @@ func (s *FileStore) forEachFileOperationStepPage(ctx context.Context, operation 
 		if operation.StepSetID != "" || operation.StepDigest != "" || len(operation.Roots) == 0 {
 			return domain.NewError(domain.ErrorInvalid, "invalid legacy file operation steps")
 		}
-		references := make([]storageformat.MutationObjectReference, 0, len(operation.Prerequisites))
-		for _, prerequisite := range operation.Prerequisites {
-			references = append(references, storageformat.MutationObjectReference{Key: prerequisite.Key, BodyDigest: storageformat.Digest(prerequisite.Body)})
+		references := append([]storageformat.MutationObjectReference(nil), operation.PrerequisiteRefs...)
+		if operation.SchemaVersion != 3 {
+			references = make([]storageformat.MutationObjectReference, 0, len(operation.Prerequisites))
+			for _, prerequisite := range operation.Prerequisites {
+				references = append(references, storageformat.MutationObjectReference{Key: prerequisite.Key, BodyDigest: storageformat.Digest(prerequisite.Body)})
+			}
 		}
 		return visit(storageformat.FileOperationStepPage{SchemaVersion: 1, UserID: operation.UserID, OperationID: operation.OperationID, Roots: operation.Roots, Prerequisites: references, Copies: operation.Copies})
 	}
@@ -652,7 +691,7 @@ func (s *FileStore) startFileOperation(ctx context.Context, operation storagefor
 			}
 			return err
 		}
-		return s.executeFileOperation(ctx, operationKey)
+		return s.executeFileOperationReady(ctx, operationKey, operation.StepPageCount == 0)
 	})
 	if err != nil {
 		return domain.Operation{}, err
@@ -665,6 +704,10 @@ func (s *FileStore) startFileOperation(ctx context.Context, operation storagefor
 }
 
 func (s *FileStore) executeFileOperation(ctx context.Context, key objectstore.Key) error {
+	return s.executeFileOperationReady(ctx, key, false)
+}
+
+func (s *FileStore) executeFileOperationReady(ctx context.Context, key objectstore.Key, prerequisitesReady bool) error {
 	object, envelope, operation, err := s.readFileOperationObject(ctx, key)
 	if err != nil {
 		return err
@@ -680,7 +723,7 @@ func (s *FileStore) executeFileOperation(ctx context.Context, key objectstore.Ke
 				}
 				return err
 			}
-			return s.executeFileOperation(ctx, key)
+			return s.executeFileOperationReady(ctx, key, false)
 		}
 		if err := s.sealFileOperationPreparation(ctx, object, envelope, operation); err != nil {
 			if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
@@ -691,12 +734,23 @@ func (s *FileStore) executeFileOperation(ctx context.Context, key objectstore.Ke
 		if err := s.engine.step(ctx, StepOperationAfterPreparationSealed); err != nil {
 			return err
 		}
-		return s.executeFileOperation(ctx, key)
+		return s.executeFileOperationReady(ctx, key, false)
 	}
 	if operation.State == storageformat.FileOperationRunning {
 		ownedFence := operation.Fence
 		ownedAttempt := operation.ReplicaAttemptID
-		if operation.StepPageCount == 0 {
+		if prerequisitesReady {
+			// startFileOperation authenticated and published every immutable
+			// prerequisite immediately before creating this operation record.
+			// Recovery enters through executeFileOperation and revalidates them.
+		} else if operation.SchemaVersion == 3 {
+			if err := s.engine.ensureMutationPrerequisiteReferences(ctx, operation.PrerequisiteRefs); err != nil {
+				return err
+			}
+			if err := s.engine.ensureMutationCopies(ctx, operation.Copies); err != nil {
+				return err
+			}
+		} else if operation.StepPageCount == 0 {
 			if err := s.engine.ensureMutationPrerequisites(ctx, operation.Prerequisites); err != nil {
 				return err
 			}
@@ -739,7 +793,7 @@ func (s *FileStore) executeFileOperation(ctx context.Context, key objectstore.Ke
 			return err
 		}
 		if operation.State != storageformat.FileOperationRunning {
-			return s.executeFileOperation(ctx, key)
+			return s.executeFileOperationReady(ctx, key, false)
 		}
 		if operation.Fence != ownedFence || operation.ReplicaAttemptID != ownedAttempt {
 			return domain.NewError(domain.ErrorUnavailable, "file operation ownership was superseded")
@@ -1017,13 +1071,23 @@ func (s *FileStore) readFileOperationObject(ctx context.Context, key objectstore
 	if err := storageformat.DecodeEnvelope(object.Body, key, fileOperationSchema, &envelope, &operation); err != nil {
 		return objectstore.Object{}, storageformat.Envelope{}, storageformat.FileOperation{}, err
 	}
-	legacySteps := operation.SchemaVersion == 1 && operation.Preparation == nil && operation.StepSetID == "" && operation.StepPageCount == 0 && operation.StepDigest == "" && len(operation.Roots) != 0
-	pagedSteps := operation.Preparation == nil && operation.StepSetID != "" && operation.StepPageCount != 0 && operation.StepDigest != "" && len(operation.Roots) == 0 && len(operation.Prerequisites) == 0 && len(operation.Copies) == 0
+	legacySteps := operation.SchemaVersion == 1 && operation.Preparation == nil && operation.StepSetID == "" && operation.StepPageCount == 0 && operation.StepDigest == "" && len(operation.Roots) != 0 && len(operation.PrerequisiteRefs) == 0
+	inlineSteps := operation.SchemaVersion == 3 && operation.Preparation == nil && operation.StepSetID == "" && operation.StepPageCount == 0 && operation.StepDigest == "" && len(operation.Roots) != 0 && len(operation.Prerequisites) == 0
+	pagedSteps := operation.Preparation == nil && operation.StepSetID != "" && operation.StepPageCount != 0 && operation.StepDigest != "" && len(operation.Roots) == 0 && len(operation.Prerequisites) == 0 && len(operation.PrerequisiteRefs) == 0 && len(operation.Copies) == 0
 	preparationState := operation.State == storageformat.FileOperationPreparing || operation.State == storageformat.FileOperationFailed
 	preparingBuild := operation.SchemaVersion == 2 && preparationState && operation.Preparation != nil && operation.Preparation.SchemaVersion == 1 && operation.Preparation.RunSetID != "" && operation.Preparation.Phase == "build" && operation.Preparation.Request != nil && operation.Preparation.GateVersion != "" && operation.StepSetID == "" && operation.StepPageCount == 0 && operation.StepDigest == "" && len(operation.Roots) == 0 && len(operation.Prerequisites) == 0 && len(operation.Copies) == 0
 	preparingSeal := operation.SchemaVersion == 2 && preparationState && operation.Preparation != nil && operation.Preparation.SchemaVersion == 1 && operation.Preparation.RunSetID != "" && operation.Preparation.Phase == "seal" && operation.Preparation.Request == nil && operation.Preparation.RunCount != 0 && operation.StepSetID == "" && operation.StepPageCount == 0 && operation.StepDigest == "" && len(operation.Roots) == 0 && len(operation.Prerequisites) == 0 && len(operation.Copies) == 0
+	validInlineRefs := true
+	previousReference := ""
+	for _, reference := range operation.PrerequisiteRefs {
+		if reference.Key <= previousReference || reference.BodyDigest == "" || reference.StagingKey != "" {
+			validInlineRefs = false
+			break
+		}
+		previousReference = reference.Key
+	}
 	validState := operation.State == storageformat.FileOperationPreparing || operation.State == storageformat.FileOperationRunning || operation.State == storageformat.FileOperationCommitted || operation.State == storageformat.FileOperationSucceeded || operation.State == storageformat.FileOperationFailed
-	if operation.SchemaVersion != 1 && operation.SchemaVersion != 2 || operation.SchemaVersion == 2 && operation.IntentFingerprint == "" || operation.OperationID == "" || operation.UserID == "" || operation.Fence == 0 || operation.Attempt == 0 || operation.StartedAt.IsZero() || operation.UpdatedAt.IsZero() || operation.ExpiresAt.IsZero() || !validState || !legacySteps && !pagedSteps && !preparingBuild && !preparingSeal {
+	if operation.SchemaVersion != 1 && operation.SchemaVersion != 2 && operation.SchemaVersion != 3 || operation.SchemaVersion == 2 && operation.IntentFingerprint == "" || operation.OperationID == "" || operation.UserID == "" || operation.Fence == 0 || operation.Attempt == 0 || operation.StartedAt.IsZero() || operation.UpdatedAt.IsZero() || operation.ExpiresAt.IsZero() || !validState || !validInlineRefs || !legacySteps && !inlineSteps && !pagedSteps && !preparingBuild && !preparingSeal {
 		return objectstore.Object{}, storageformat.Envelope{}, storageformat.FileOperation{}, domain.NewError(domain.ErrorInvalid, "invalid file operation")
 	}
 	return object, envelope, operation, nil

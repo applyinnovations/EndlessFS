@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -364,25 +365,39 @@ func (s *Service) adminCursorOffset(cursor string) (int, error) {
 }
 
 func (s *Service) DisableUser(ctx context.Context, actor auth.AuthenticatedSession, target domain.UserID) error {
-	if err := s.requireAdmin(ctx, actor.Record.UserID); err != nil {
-		return err
-	}
-	if err := s.removeAdminForDisable(ctx, target); err != nil {
-		return err
-	}
 	for attempts := 0; attempts < 8; attempts++ {
-		account, version, err := s.repository.Account(ctx, target)
+		roles, rolesVersion, actorAccount, actorVersion, err := s.adminAuthoritySnapshot(ctx, actor.Record.UserID)
 		if err != nil {
 			return err
 		}
-		if account.Status == model.AccountDisabled {
-			return s.sessions.RevokeUser(ctx, target)
+		targetAccount, targetVersion, err := s.repository.Account(ctx, target)
+		if err != nil {
+			return err
 		}
-		account.Status = model.AccountDisabled
-		account.UpdatedAt = s.clock.Now()
-		if _, err := s.repository.UpdateAccount(ctx, account, version); err == nil {
-			return s.sessions.RevokeUser(ctx, target)
-		} else if !errors.Is(err, domain.ErrPreconditionFailed) {
+		wasAdmin := containsUserID(roles.UserIDs, target)
+		if targetAccount.Status == model.AccountDisabled && !wasAdmin {
+			return nil
+		}
+		if wasAdmin {
+			enabledAdmins, countErr := s.enabledAdminCount(ctx, roles)
+			if countErr != nil {
+				return countErr
+			}
+			if enabledAdmins <= 1 {
+				return domain.NewError(domain.ErrorPreconditionFailed, "the final enabled administrator cannot be removed")
+			}
+			roles.UserIDs = withoutUserID(roles.UserIDs, target)
+		}
+		if targetAccount.Status != model.AccountDisabled {
+			targetAccount.Status = model.AccountDisabled
+			targetAccount.UpdatedAt = s.clock.Now()
+			if err := advanceAuthEpoch(&targetAccount); err != nil {
+				return err
+			}
+		}
+		if err := s.commitAdminAccountMutation(ctx, "disable", actor.Record.UserID, target, roles, rolesVersion, actorAccount, actorVersion, targetAccount, targetVersion); err == nil {
+			return nil
+		} else if !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
 			return err
 		}
 	}
@@ -390,10 +405,11 @@ func (s *Service) DisableUser(ctx context.Context, actor auth.AuthenticatedSessi
 }
 
 func (s *Service) EnableUser(ctx context.Context, actor auth.AuthenticatedSession, target domain.UserID) error {
-	if err := s.requireAdmin(ctx, actor.Record.UserID); err != nil {
-		return err
-	}
 	for attempts := 0; attempts < 8; attempts++ {
+		roles, rolesVersion, actorAccount, actorVersion, err := s.adminAuthoritySnapshot(ctx, actor.Record.UserID)
+		if err != nil {
+			return err
+		}
 		account, version, err := s.repository.Account(ctx, target)
 		if err != nil {
 			return err
@@ -403,9 +419,9 @@ func (s *Service) EnableUser(ctx context.Context, actor auth.AuthenticatedSessio
 		}
 		account.Status = model.AccountEnabled
 		account.UpdatedAt = s.clock.Now()
-		if _, err := s.repository.UpdateAccount(ctx, account, version); err == nil {
+		if err := s.commitAdminAccountMutation(ctx, "enable", actor.Record.UserID, target, roles, rolesVersion, actorAccount, actorVersion, account, version); err == nil {
 			return nil
-		} else if !errors.Is(err, domain.ErrPreconditionFailed) {
+		} else if !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
 			return err
 		}
 	}
@@ -413,25 +429,25 @@ func (s *Service) EnableUser(ctx context.Context, actor auth.AuthenticatedSessio
 }
 
 func (s *Service) GrantAdmin(ctx context.Context, actor auth.AuthenticatedSession, target domain.UserID) error {
-	if err := s.requireAdmin(ctx, actor.Record.UserID); err != nil {
-		return err
-	}
-	account, _, err := s.repository.Account(ctx, target)
-	if err != nil || account.Status != model.AccountEnabled {
-		return domain.NewError(domain.ErrorPreconditionFailed, "only enabled users can become administrators")
-	}
 	for attempts := 0; attempts < 8; attempts++ {
-		roles, version, err := s.repository.AdminRoles(ctx)
+		roles, rolesVersion, actorAccount, actorVersion, err := s.adminAuthoritySnapshot(ctx, actor.Record.UserID)
 		if err != nil {
 			return err
+		}
+		account, accountVersion, err := s.repository.Account(ctx, target)
+		if err != nil || account.Status != model.AccountEnabled {
+			return domain.NewError(domain.ErrorPreconditionFailed, "only enabled users can become administrators")
 		}
 		if containsUserID(roles.UserIDs, target) {
 			return nil
 		}
 		roles.UserIDs = append(roles.UserIDs, target)
-		if _, err := s.repository.UpdateAdminRoles(ctx, roles, version); err == nil {
-			return s.sessions.RevokeUser(ctx, target)
-		} else if !errors.Is(err, domain.ErrPreconditionFailed) {
+		if err := advanceAuthEpoch(&account); err != nil {
+			return err
+		}
+		if err := s.commitAdminAccountMutation(ctx, "grant", actor.Record.UserID, target, roles, rolesVersion, actorAccount, actorVersion, account, accountVersion); err == nil {
+			return nil
+		} else if !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
 			return err
 		}
 	}
@@ -439,56 +455,111 @@ func (s *Service) GrantAdmin(ctx context.Context, actor auth.AuthenticatedSessio
 }
 
 func (s *Service) RevokeAdmin(ctx context.Context, actor auth.AuthenticatedSession, target domain.UserID) error {
-	if err := s.requireAdmin(ctx, actor.Record.UserID); err != nil {
-		return err
-	}
-	if err := s.removeAdminRole(ctx, target); err != nil {
-		return err
-	}
-	return s.sessions.RevokeUser(ctx, target)
-}
-
-func (s *Service) removeAdminForDisable(ctx context.Context, target domain.UserID) error {
-	admin, err := s.isAdmin(ctx, target)
-	if err != nil || !admin {
-		return err
-	}
-	return s.removeAdminRole(ctx, target)
-}
-
-func (s *Service) removeAdminRole(ctx context.Context, target domain.UserID) error {
 	for attempts := 0; attempts < 8; attempts++ {
-		roles, version, err := s.repository.AdminRoles(ctx)
+		roles, rolesVersion, actorAccount, actorVersion, err := s.adminAuthoritySnapshot(ctx, actor.Record.UserID)
 		if err != nil {
 			return err
 		}
 		if !containsUserID(roles.UserIDs, target) {
 			return nil
 		}
-		enabledAdmins := 0
-		for _, userID := range roles.UserIDs {
-			account, _, accountErr := s.repository.Account(ctx, userID)
-			if accountErr == nil && account.Status == model.AccountEnabled {
-				enabledAdmins++
-			}
+		enabledAdmins, err := s.enabledAdminCount(ctx, roles)
+		if err != nil {
+			return err
 		}
 		if enabledAdmins <= 1 {
 			return domain.NewError(domain.ErrorPreconditionFailed, "the final enabled administrator cannot be removed")
 		}
-		updated := make([]domain.UserID, 0, len(roles.UserIDs)-1)
-		for _, userID := range roles.UserIDs {
-			if userID != target {
-				updated = append(updated, userID)
-			}
+		account, accountVersion, err := s.repository.Account(ctx, target)
+		if err != nil {
+			return err
 		}
-		roles.UserIDs = updated
-		if _, err := s.repository.UpdateAdminRoles(ctx, roles, version); err == nil {
+		roles.UserIDs = withoutUserID(roles.UserIDs, target)
+		if err := advanceAuthEpoch(&account); err != nil {
+			return err
+		}
+		if err := s.commitAdminAccountMutation(ctx, "revoke", actor.Record.UserID, target, roles, rolesVersion, actorAccount, actorVersion, account, accountVersion); err == nil {
 			return nil
-		} else if !errors.Is(err, domain.ErrPreconditionFailed) {
+		} else if !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
 			return err
 		}
 	}
 	return domain.NewError(domain.ErrorConflict, "administrator roles changed concurrently")
+}
+
+func (s *Service) adminAuthoritySnapshot(ctx context.Context, actor domain.UserID) (model.AdminRoles, state.Version, model.Account, state.Version, error) {
+	account, accountVersion, err := s.repository.Account(ctx, actor)
+	if err != nil || account.Status != model.AccountEnabled {
+		return model.AdminRoles{}, "", model.Account{}, "", domain.NewError(domain.ErrorUnauthorized, "administrator access required")
+	}
+	roles, rolesVersion, err := s.repository.AdminRoles(ctx)
+	if err != nil || !containsUserID(roles.UserIDs, actor) {
+		return model.AdminRoles{}, "", model.Account{}, "", domain.NewError(domain.ErrorUnauthorized, "administrator access required")
+	}
+	return roles, rolesVersion, account, accountVersion, nil
+}
+
+func (s *Service) enabledAdminCount(ctx context.Context, roles model.AdminRoles) (int, error) {
+	enabled := 0
+	for _, userID := range roles.UserIDs {
+		account, _, err := s.repository.Account(ctx, userID)
+		if err != nil {
+			return 0, domain.NewError(domain.ErrorInvalid, "administrator role references a missing account")
+		}
+		if account.Status == model.AccountEnabled {
+			enabled++
+		}
+	}
+	return enabled, nil
+}
+
+func withoutUserID(values []domain.UserID, target domain.UserID) []domain.UserID {
+	updated := make([]domain.UserID, 0, len(values))
+	for _, value := range values {
+		if value != target {
+			updated = append(updated, value)
+		}
+	}
+	return updated
+}
+
+func advanceAuthEpoch(account *model.Account) error {
+	if account.AuthEpoch == math.MaxUint64 {
+		return domain.NewError(domain.ErrorInvalid, "account authentication epoch is exhausted")
+	}
+	if account.AuthEpoch == 0 {
+		account.AuthEpoch = 1
+	}
+	account.AuthEpoch++
+	return nil
+}
+
+func (s *Service) commitAdminAccountMutation(ctx context.Context, action string, actor, target domain.UserID, roles model.AdminRoles, rolesVersion state.Version, actorAccount model.Account, actorVersion state.Version, targetAccount model.Account, targetVersion state.Version) error {
+	changes := make([]state.Change, 0, 3)
+	rolesBody, err := state.EncodeJSON(&roles)
+	if err != nil {
+		return err
+	}
+	changes = append(changes, state.Change{Key: state.MustKey(state.NamespaceRoles, "admins"), Requirement: state.RequirementPresent, ExpectedVersion: rolesVersion, Data: rolesBody})
+	targetBody, err := state.EncodeJSON(&targetAccount)
+	if err != nil {
+		return err
+	}
+	changes = append(changes, state.Change{Key: state.MustKey(state.NamespaceAccounts, target.String()), Requirement: state.RequirementPresent, ExpectedVersion: targetVersion, Data: targetBody})
+	if actor != target {
+		actorBody, encodeErr := state.EncodeJSON(&actorAccount)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		changes = append(changes, state.Change{Key: state.MustKey(state.NamespaceAccounts, actor.String()), Requirement: state.RequirementPresent, ExpectedVersion: actorVersion, Data: actorBody})
+	}
+	store, err := s.repository.transactionalStore()
+	if err != nil {
+		return err
+	}
+	mutationID := "admin-" + action + ":" + secret.Hash(actor.String()+"\x00"+target.String()+"\x00"+string(rolesVersion)+"\x00"+string(targetVersion))
+	_, err = store.Transact(ctx, state.Mutation{ID: mutationID, Changes: changes})
+	return err
 }
 
 func (s *Service) requireAdmin(ctx context.Context, userID domain.UserID) error {

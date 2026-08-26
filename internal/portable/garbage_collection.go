@@ -10,6 +10,8 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
+var errGarbageCollectionContended = errors.New("garbage collection session CAS contended")
+
 const (
 	garbageCollectionSessionSchema = "garbage-collection-session-v1"
 	garbageCollectionMarkSchema    = "garbage-collection-mark-v1"
@@ -27,6 +29,25 @@ type garbageCollectionSessionSnapshot struct {
 }
 
 func (e *Engine) runGarbageCollection(ctx context.Context, checkpointID string, gateEpoch uint64, gateVersion string) error {
+	for range 32 {
+		err := e.runGarbageCollectionAttempt(ctx, checkpointID, gateEpoch, gateVersion)
+		if !errors.Is(err, errGarbageCollectionContended) {
+			return err
+		}
+		// Older binaries removed a completed session. Accept that historical
+		// terminal state, but current writers retain the terminal session and
+		// marks so a lagging sweeper can never mistake cleaned-up marks for
+		// unreachable authority.
+		if _, getErr := e.backend.Get(ctx, storageformat.GarbageCollectionSessionKey(checkpointID)); errors.Is(getErr, domain.ErrNotFound) {
+			return nil
+		} else if getErr != nil {
+			return getErr
+		}
+	}
+	return domain.WrapError(domain.ErrorUnavailable, "garbage collection session remained contended", errGarbageCollectionContended)
+}
+
+func (e *Engine) runGarbageCollectionAttempt(ctx context.Context, checkpointID string, gateEpoch uint64, gateVersion string) error {
 	session, err := e.readOrCreateGarbageCollectionSession(ctx, checkpointID, gateEpoch, gateVersion)
 	if err != nil {
 		return err
@@ -52,17 +73,12 @@ func (e *Engine) runGarbageCollection(ctx context.Context, checkpointID string, 
 	if session.value.Phase != garbageCollectionCleanup {
 		return domain.NewError(domain.ErrorInvalid, "invalid garbage collection phase")
 	}
-	if err := visitObjectPages(ctx, e.backend, storageformat.GarbageCollectionMarkPrefix(checkpointID), func(info objectstore.ObjectInfo) error {
-		if err := e.backend.Delete(ctx, info.Key, objectstore.DeleteCondition{Version: info.Version}); err != nil && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
-			return err
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	if err := e.backend.Delete(ctx, session.object.Key, objectstore.DeleteCondition{Version: session.object.Version}); err != nil && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
-		return err
-	}
+	// The terminal marks are deliberately durable migration residue. Deleting
+	// them here races with a lagging replica that already read the sweeping
+	// phase: that replica can otherwise interpret the missing marks as proof
+	// that live objects are garbage. Checkpoints exclude maintenance keys, and
+	// a future epoch may collect these records only after proving no supported
+	// predecessor can still hold a sweeping snapshot.
 	return nil
 }
 
@@ -110,7 +126,7 @@ func (e *Engine) updateGarbageCollectionSession(ctx context.Context, session gar
 	version, err := e.backend.Put(ctx, session.object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: session.object.Version})
 	if err != nil {
 		if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrNotFound) {
-			return garbageCollectionSessionSnapshot{}, domain.NewError(domain.ErrorUnavailable, "garbage collection session changed concurrently")
+			return garbageCollectionSessionSnapshot{}, domain.WrapError(domain.ErrorUnavailable, "garbage collection session changed concurrently", errGarbageCollectionContended)
 		}
 		return garbageCollectionSessionSnapshot{}, err
 	}

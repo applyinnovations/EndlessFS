@@ -209,6 +209,47 @@ func Run(t *testing.T, factory Factory) {
 		}
 	})
 
+	t.Run("upload batch atomicity and idempotency", func(t *testing.T) {
+		harness := factory(t)
+		batchStorage, ok := harness.Storage.(provider.UploadBatchStorage)
+		if !ok {
+			t.Fatal("provider storage does not implement the required upload batch contract")
+		}
+		scope := testScope(t, 0x42, domain.AreaLive)
+		requests := []domain.CreateUploadRequest{
+			{Path: domain.MustParseUserPath("/batch-a.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "contract-batch-a-0001"},
+			{Path: domain.MustParseUserPath("/batch-b.bin"), Size: 2, MediaType: "application/octet-stream", IdempotencyKey: "contract-batch-b-0001"},
+		}
+		created, err := batchStorage.CreateUploadBatch(context.Background(), scope, requests)
+		if err != nil || len(created) != len(requests) || created[0].UploadID == "" || created[1].UploadID == "" || created[0].UploadID == created[1].UploadID {
+			t.Fatalf("CreateUploadBatch() = %+v, %v", created, err)
+		}
+		replayed, err := batchStorage.CreateUploadBatch(context.Background(), scope, requests)
+		if err != nil || len(replayed) != len(created) || replayed[0].UploadID != created[0].UploadID || replayed[1].UploadID != created[1].UploadID {
+			t.Fatalf("replayed CreateUploadBatch() = %+v, %v; created=%+v", replayed, err, created)
+		}
+		changed := append([]domain.CreateUploadRequest(nil), requests...)
+		changed[1].Size++
+		if _, err := batchStorage.CreateUploadBatch(context.Background(), scope, changed); !errors.Is(err, domain.ErrConflict) {
+			t.Fatalf("changed idempotent upload batch error = %v", err)
+		}
+
+		partialKey := "contract-batch-rollback-0001"
+		if _, err := batchStorage.CreateUploadBatch(context.Background(), scope, []domain.CreateUploadRequest{
+			{Path: domain.MustParseUserPath("/batch-rollback.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: partialKey},
+			{Path: domain.MustParseUserPath("/"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "contract-batch-invalid-0001"},
+		}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("partially invalid upload batch error = %v", err)
+		}
+		// A changed retry can succeed only if the failed batch left no upload
+		// intent or idempotency record behind.
+		if _, err := harness.Storage.CreateUpload(context.Background(), scope, domain.CreateUploadRequest{
+			Path: domain.MustParseUserPath("/batch-rollback.bin"), Size: 2, MediaType: "application/octet-stream", IdempotencyKey: partialKey,
+		}); err != nil {
+			t.Fatalf("failed upload batch was not atomic: changed retry error = %v", err)
+		}
+	})
+
 	t.Run("resumable retry checksum and abort", func(t *testing.T) {
 		harness := factory(t)
 		scope := testScope(t, 0x51, domain.AreaLive)

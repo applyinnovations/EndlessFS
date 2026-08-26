@@ -504,7 +504,7 @@ type previewEnvironment struct {
 	generator        *fakeGenerator
 	clock            *domain.FixedClock
 	ids              *domain.IDGenerator
-	applicationState state.Store
+	applicationState state.AtomicStore
 	owner            domain.UserID
 	scope            domain.Scope
 }

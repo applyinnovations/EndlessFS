@@ -1,8 +1,16 @@
 # EndlessFS storage architecture replacement research proposal
 
-**Status:** architectural investigation proposal; not normative
+**Status:** completed investigation; schema 008 is the implemented selection
 **Scope:** discover and prove the best replacement for the authoritative state
 and namespace architecture without weakening product or reliability guarantees
+
+**Implementation status (2026-08-25):** the comparative prototype, fault
+schedules, provider-economics instrumentation, scale curves, and selection
+evidence are recorded in `storage-architecture-experiment-2026-08-24.md`.
+Schema 008 implements the selected paged-delta family and replaces the ordinary
+runtime backend. The exact cutover design, migration, fixtures, tests, and
+measured production ratchets are recorded in
+`storage-schema-008-implementation.md`.
 
 ## Purpose
 

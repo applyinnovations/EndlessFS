@@ -28,6 +28,8 @@ const (
 	storageSchema005 storageSchemaID = "endlessfs-portable-v1/schema-005"
 	storageSchema006 storageSchemaID = "endlessfs-portable-v1/schema-006"
 	storageSchema007 storageSchemaID = "endlessfs-portable-v1/schema-007"
+	storageSchema008 storageSchemaID = "endlessfs-portable-v1/schema-008"
+	storageSchema009 storageSchemaID = "endlessfs-portable-v1/schema-009"
 
 	storageMigration001To002 storageMigrationID = "schema-001-to-002"
 	storageMigration002To003 storageMigrationID = "schema-002-to-003"
@@ -35,6 +37,8 @@ const (
 	storageMigration004To005 storageMigrationID = "schema-004-to-005"
 	storageMigration005To006 storageMigrationID = "schema-005-to-006"
 	storageMigration006To007 storageMigrationID = "schema-006-to-007"
+	storageMigration007To008 storageMigrationID = "schema-007-to-008"
+	storageMigration008To009 storageMigrationID = "schema-008-to-009"
 )
 
 type storageSchemaReleaseBoundary struct {
@@ -123,6 +127,16 @@ var schemaMigration006To007 = storageMigration{
 	checkpointID: "automatic-storage-schema-006-to-007",
 }
 
+var schemaMigration007To008 = storageMigration{
+	id: storageMigration007To008, from: storageSchema007, to: storageSchema008,
+	checkpointID: "automatic-storage-schema-007-to-008",
+}
+
+var schemaMigration008To009 = storageMigration{
+	id: storageMigration008To009, from: storageSchema008, to: storageSchema009,
+	checkpointID: "automatic-storage-schema-008-to-009",
+}
+
 // storageSchemaLedger is append-only. Extend it by adding one definition whose
 // migrationFromPrevious connects the prior terminal epoch to the new epoch;
 // never insert, reorder, or rewrite an existing entry.
@@ -208,6 +222,51 @@ var storageSchemaLedger = []storageSchemaDefinition{
 		gateBinding:           storageGateFeatureBound,
 		migrationFromPrevious: &schemaMigration006To007,
 	},
+	{
+		id: storageSchema008,
+		features: []string{
+			storageformat.FeatureConsistencyDomains,
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeatureOwnerNamespaceGraph,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureNamespaceSnapshots,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureDerivedProjections,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+			storageformat.FeatureResumableOperations,
+			storageformat.FeatureUserDirectoryCatalog,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration007To008,
+	},
+	{
+		id: storageSchema009,
+		features: []string{
+			storageformat.FeatureConsistencyDomains,
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeatureOwnerNamespaceGraph,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureNamespaceSnapshots,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureDerivedProjections,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+			storageformat.FeatureResumableOperations,
+			storageformat.FeatureTransactionalState,
+			storageformat.FeatureUserDirectoryCatalog,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration008To009,
+	},
 }
 
 // storageSchemaReleaseLedger is also append-only. A boundary is the first
@@ -231,6 +290,8 @@ func init() {
 	schemaMigration004To005.run = (*Engine).runStorageMigration004To005
 	schemaMigration005To006.run = (*Engine).runStorageMigration005To006
 	schemaMigration006To007.run = (*Engine).runStorageMigration006To007
+	schemaMigration007To008.run = (*Engine).runStorageMigration007To008
+	schemaMigration008To009.run = (*Engine).runStorageMigration008To009
 }
 
 func currentStorageSchema() storageSchemaDefinition {
@@ -505,7 +566,7 @@ func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
 			return err
 		}
 
-		_, _, gate, err := e.readGate(ctx)
+		gateObject, _, gate, err := e.readGate(ctx)
 		if err != nil {
 			return err
 		}
@@ -521,6 +582,23 @@ func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
 		schema, found := detectStorageSchema(superblock.RequiredFeatures, e.writer.RequiredFeatures)
 		if !found {
 			return domain.NewError(domain.ErrorPreconditionFailed, "unregistered portable storage schema")
+		}
+		if gate.Mode == storageformat.GateOpen && schemaAtLeast(superblock.RequiredFeatures, storageSchema008, e.writer.RequiredFeatures) {
+			// Opening a migration checkpoint authorizes the idempotent domain-
+			// unfreeze suffix. Complete that suffix before selecting a following
+			// edge. This is required both after a process restart and when a
+			// concurrent replica observes the opened gate before the winning
+			// replica has finished thawing the catalog.
+			reconciledGate, reconcileErr := e.reconcileGateDomainFreeze(ctx, gateObject, gate)
+			if reconcileErr != nil {
+				return reconcileErr
+			}
+			if reconciledGate.Mode != storageformat.GateOpen || reconciledGate.Epoch != gate.Epoch || reconciledGate.CheckpointID != "" {
+				continue
+			}
+			if !equalStrings(reconciledGate.WriterFeatures, gate.WriterFeatures) {
+				continue
+			}
 		}
 		path, err := storageMigrationPath(schema.id)
 		if err != nil {
@@ -546,16 +624,12 @@ func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
 	return domain.NewError(domain.ErrorUnavailable, "storage schema migration chain did not converge")
 }
 
-// A replica can retain a predecessor object reference while another replica
-// completes the remaining schema suffix and collects that now-unreachable
-// immutable object. Only a not-found result is eligible for winner
-// reconciliation, and it is accepted only after all durable schema markers
-// prove that this edge (or a later edge) completed. Other errors and an
-// incomplete marker set remain fail-closed.
+// A replica can retain a predecessor object reference or lose any provider
+// response while another replica completes the remaining schema suffix. An
+// error is superseded only when independent reads of every durable completion
+// marker prove that this edge (or a later edge) completed. An incomplete or
+// unreadable marker set preserves the original error and remains fail-closed.
 func (e *Engine) resolveMigrationRunError(ctx context.Context, migration storageMigration, runErr error) error {
-	if !errors.Is(runErr, domain.ErrNotFound) {
-		return runErr
-	}
 	complete, err := e.storageMigrationComplete(ctx, migration)
 	if err == nil && complete {
 		return nil

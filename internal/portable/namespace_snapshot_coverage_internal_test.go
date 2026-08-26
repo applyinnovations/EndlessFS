@@ -1,7 +1,6 @@
 package portable
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -149,41 +148,6 @@ func TestPinnedDirectoryScopeAndLazyPreparationDenials(t *testing.T) {
 	accumulator, digest, err := directoryContentIdentity(nil)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, err := engine.Files().prepareDirectoryWithLazyContent(live, "directory", -1, 0, 0, 1, storageformat.DirectoryIndexChild{}, nil, nil, nil, nil, nil, accumulator, digest, clock.Now(), "manifest"); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("negative aggregate error = %v", err)
-	}
-	if _, err := engine.Files().prepareDirectoryWithLazyContent(live, "directory", 0, 0, 0, 1, storageformat.DirectoryIndexChild{}, nil, nil, nil, nil, nil, "invalid", digest, clock.Now(), "manifest"); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid accumulator error = %v", err)
-	}
-	if _, err := engine.Files().prepareDirectoryWithLazyContent(live, "directory", 0, 0, 0, 1, storageformat.DirectoryIndexChild{}, nil, nil, nil, nil, nil, accumulator, "wrong", clock.Now(), "manifest"); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("content identity mismatch error = %v", err)
-	}
-	engine.ids = domain.NewIDGenerator(strings.NewReader(""))
-	if _, err := engine.Files().prepareDirectoryWithLazyContent(live, "directory", 0, 0, 0, 1, storageformat.DirectoryIndexChild{}, nil, nil, nil, nil, nil, accumulator, digest, clock.Now(), ""); !errors.Is(err, domain.ErrInternal) {
-		t.Fatalf("manifest ID generation error = %v", err)
-	}
-	engine.ids = domain.NewIDGenerator(strings.NewReader(strings.Repeat("restored-ids", 1<<16)))
-	hugeBase := &storageformat.DirectoryContentBase{Area: "live", DirectoryID: strings.Repeat("x", storageformat.MaxCanonicalBytes), ManifestID: "manifest"}
-	if _, err := engine.Files().prepareDirectoryWithLazyContent(live, "directory", 0, 0, 1, 1, storageformat.DirectoryIndexChild{}, nil, nil, hugeBase, nil, nil, accumulator, digest, clock.Now(), "manifest"); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("oversized manifest error = %v", err)
-	}
-	if _, err := engine.Files().prepareDirectoryWithLazyContent(live, "directory", 0, 0, 0, 0, storageformat.DirectoryIndexChild{}, nil, nil, nil, nil, nil, accumulator, digest, clock.Now(), "manifest-revision-zero"); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid root revision error = %v", err)
-	}
-
-	prepared, err := engine.Files().prepareDirectory(ctx, live, "directory", nil, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, prerequisite := range prepared.prerequisites {
-		if _, err := backend.Put(ctx, objectstore.MustKey(prerequisite.Key), prerequisite.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	entry := storageformat.DirectoryEntry{Kind: domain.EntryDirectory, DirectoryID: "directory", ManifestID: prepared.manifestID, ContentDigest: prepared.contentDigest, Size: 1}
-	if _, err := engine.Files().readDirectoryEntryMetadata(ctx, live, entry); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("pinned aggregate mismatch error = %v", err)
 	}
 
 	operation := func(operationID string) storageformat.FileOperation {
@@ -495,56 +459,4 @@ func TestFileOperationFailureAndFencingBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("step-page-encoding-denied", func(t *testing.T) {
-		_, engine := newEngine(t)
-		operation := storageformat.FileOperation{UserID: user.String(), OperationID: "operation", ReplicaAttemptID: "attempt", Roots: []storageformat.FileOperationRoot{{Key: "root", PendingBody: bytes.Repeat([]byte{'x'}, storageformat.MaxCanonicalBytes), FinalBody: []byte("final")}}}
-		if err := engine.Files().persistFileOperationStepPages(ctx, &operation); !errors.Is(err, domain.ErrInvalid) {
-			t.Fatalf("oversized step page error = %v", err)
-		}
-	})
-	t.Run("copy-step-page-write-denied", func(t *testing.T) {
-		backend, engine := newEngine(t)
-		operation := storageformat.FileOperation{UserID: user.String(), OperationID: "operation", ReplicaAttemptID: "attempt", Roots: []storageformat.FileOperationRoot{{Key: "root", PendingBody: []byte("pending"), FinalBody: []byte("final")}}, Copies: []storageformat.MutationCopy{{SourceKey: "source", DestinationKey: "destination", Size: 1}}}
-		keyOperation := operation
-		keyOperation.StepSetID = operation.ReplicaAttemptID
-		failedKey := stagedFileOperationStepPageKey(keyOperation, 1)
-		engine.backend = &hookedBackend{Backend: backend, put: func(_ context.Context, target objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
-			if target == failedKey {
-				return "", domain.NewError(domain.ErrorUnavailable, "write denied")
-			}
-			return backend.Put(ctx, target, body, condition)
-		}}
-		if err := engine.Files().persistFileOperationStepPages(ctx, &operation); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("copy step-page error = %v", err)
-		}
-	})
-
-	t.Run("pin-prepared-directory-denials", func(t *testing.T) {
-		userScope, _ := domain.NewScope(user, domain.AreaLive)
-		child := directoryUpdate{scope: userScope, path: domain.MustParseUserPath("/child"), directoryID: "child"}
-		if err := pinPreparedDirectoryInParent(nil, child, preparedDirectory{}); !errors.Is(err, domain.ErrInvalid) {
-			t.Fatalf("missing parent error = %v", err)
-		}
-		rootKey := storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID).String()
-		updates := map[string]directoryUpdate{rootKey: {path: domain.MustParseUserPath("/"), changes: map[string]directoryEntryMutation{}}}
-		if err := pinPreparedDirectoryInParent(updates, child, preparedDirectory{}); !errors.Is(err, domain.ErrInvalid) {
-			t.Fatalf("missing parent change error = %v", err)
-		}
-		huge := storageformat.DirectoryEntry{Name: strings.Repeat("x", storageformat.MaxCanonicalBytes), Kind: domain.EntryDirectory, DirectoryID: "child"}
-		updates[rootKey] = directoryUpdate{path: domain.MustParseUserPath("/"), changes: map[string]directoryEntryMutation{"child": {after: &huge}}}
-		if err := pinPreparedDirectoryInParent(updates, child, preparedDirectory{}); !errors.Is(err, domain.ErrInvalid) {
-			t.Fatalf("oversized pinned entry error = %v", err)
-		}
-	})
-
-	t.Run("equal-depth-operation-sort", func(t *testing.T) {
-		_, engine := newEngine(t)
-		updates := map[string]directoryUpdate{
-			"endlessfs/v1/test/a": {path: domain.MustParseUserPath("/a"), snapshot: directorySnapshot{pending: true}},
-			"endlessfs/v1/test/b": {path: domain.MustParseUserPath("/b"), snapshot: directorySnapshot{pending: true}},
-		}
-		if _, _, err := engine.Files().buildFileOperation(ctx, user, "operation", "owner", operationDelete, updates, nil, nil); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("pending operation error = %v", err)
-		}
-	})
 }

@@ -57,6 +57,22 @@ func (repository *sessionRepositoryStub) DeleteSession(_ context.Context, token 
 	return nil
 }
 
+func (repository *sessionRepositoryStub) RotateSessionAtomic(_ context.Context, oldToken string, _ state.Version, newToken string, record model.Session) error {
+	if repository.deleteErr != nil {
+		return repository.deleteErr
+	}
+	if _, ok := repository.sessions[oldToken]; !ok {
+		return domain.ErrNotFound
+	}
+	if repository.createErr != nil {
+		return repository.createErr
+	}
+	delete(repository.sessions, oldToken)
+	repository.sessions[newToken] = record
+	repository.versions[newToken] = "v2"
+	return nil
+}
+
 func (repository *sessionRepositoryStub) RevokeUserSessions(_ context.Context, userID domain.UserID) error {
 	repository.revokedUserID = userID
 	return repository.revokeErr
@@ -191,6 +207,61 @@ func TestSessionManagerSecurityBoundaryAndCookieLifecycle(t *testing.T) {
 	}
 }
 
+func TestSessionManagerScopesLookupAndRejectsPriorAuthEpochAfterReenable(t *testing.T) {
+	ctx := context.Background()
+	clock := domain.NewFixedClock(time.Date(2035, 2, 3, 4, 5, 6, 0, time.UTC))
+	userID := testUserID(t, 0x92)
+	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x61}, 32)))
+	repository := newSessionRepositoryStub()
+	repository.accounts[userID] = model.Account{SchemaVersion: model.SchemaVersion, UserID: userID, Status: model.AccountEnabled, AuthEpoch: 7, CreatedAt: clock.Now(), UpdatedAt: clock.Now()}
+	manager, err := NewSessionManager(repository, domain.NewIDGenerator(bytes.NewReader(sessionEntropy(4096))), clock, time.Hour, "https://drive.example.test", true, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, err := manager.Issue(ctx, userID, "credential-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := secret.ParseScopedBearerToken(issued.Token.Reveal())
+	if err != nil || owner != userID || issued.Record.AuthEpoch != 7 {
+		t.Fatalf("issued session = %+v owner=%v err=%v", issued.Record, owner, err)
+	}
+	if _, err := manager.Authenticate(ctx, issued.Token.Reveal()); err != nil {
+		t.Fatal(err)
+	}
+	account := repository.accounts[userID]
+	account.Status = model.AccountDisabled
+	account.AuthEpoch++
+	repository.accounts[userID] = account
+	account.Status = model.AccountEnabled
+	repository.accounts[userID] = account
+	if _, err := manager.Authenticate(ctx, issued.Token.Reveal()); !errors.Is(err, domain.ErrUnauthenticated) {
+		t.Fatalf("prior-epoch session after re-enable error = %v", err)
+	}
+}
+
+func TestSessionManagerDeniesUnavailableAccountsAndInvalidOperationMaterial(t *testing.T) {
+	ctx := context.Background()
+	clock := domain.NewFixedClock(time.Date(2035, 3, 4, 5, 6, 7, 0, time.UTC))
+	userID := testUserID(t, 0x93)
+	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x62}, 32)))
+	repository := newSessionRepositoryStub()
+	manager, err := NewSessionManager(repository, domain.NewIDGenerator(bytes.NewReader(sessionEntropy(4096))), clock, time.Hour, "https://drive.example.test", true, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.Issue(ctx, userID, "credential-1"); !errors.Is(err, domain.ErrUnauthenticated) {
+		t.Fatalf("Issue unavailable account error = %v", err)
+	}
+	if _, err := manager.PrepareForOperation(userID, "credential-1", "operation-1", time.Time{}, 1); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("PrepareForOperation invalid creation time error = %v", err)
+	}
+	if _, err := manager.Rotate(ctx, AuthenticatedSession{}, "credential-1"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("Rotate invalid current session error = %v", err)
+	}
+}
+
 func sessionEntropy(size int) []byte {
 	value := make([]byte, size)
 	for index := range value {
@@ -237,12 +308,16 @@ func TestSessionManagerRejectsInvalidConstructionAndEntropyFailures(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := manager.Issue(context.Background(), testUserID(t, 0x92), "credential"); err == nil {
+	entropyUser := testUserID(t, 0x92)
+	repository.accounts[entropyUser] = model.Account{SchemaVersion: model.SchemaVersion, UserID: entropyUser, Status: model.AccountEnabled, AuthEpoch: 1, CreatedAt: clock.Now(), UpdatedAt: clock.Now()}
+	if _, err := manager.Issue(context.Background(), entropyUser, "credential"); err == nil {
 		t.Fatal("Issue succeeded with a failing entropy source")
 	}
 	repository.createErr = domain.ErrUnavailable
 	manager, _ = NewSessionManager(repository, domain.NewIDGenerator(strings.NewReader(strings.Repeat("x", 1024))), clock, time.Hour, "origin", true, key)
-	if _, err := manager.Issue(context.Background(), testUserID(t, 0x93), "credential"); !errors.Is(err, domain.ErrUnavailable) {
+	createUser := testUserID(t, 0x93)
+	repository.accounts[createUser] = model.Account{SchemaVersion: model.SchemaVersion, UserID: createUser, Status: model.AccountEnabled, AuthEpoch: 1, CreatedAt: clock.Now(), UpdatedAt: clock.Now()}
+	if _, err := manager.Issue(context.Background(), createUser, "credential"); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("Issue repository error = %v", err)
 	}
 }

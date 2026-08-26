@@ -13,12 +13,15 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/state"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
 func TestProviderBudgetStateStoreContract(t *testing.T) {
 	ctx := context.Background()
 	ledger := providerbudget.NewLedger()
-	backend := budgettest.Wrap(providerbudget.RoleState, objectmemory.New(), ledger)
+	backend := budgettest.WrapClassified(providerbudget.RoleState, objectmemory.New(), ledger, func(_ providerbudget.RequestKind, target string) string {
+		return storageformat.ClassifyEconomicsTarget(target)
+	})
 	clock := domain.NewFixedClock(time.Date(2050, 1, 2, 3, 4, 5, 0, time.UTC))
 	engine, err := portable.Open(ctx, portable.Options{
 		Backend: backend, FileBackend: objectmemory.New(), Clock: clock,
@@ -39,12 +42,8 @@ func TestProviderBudgetStateStoreContract(t *testing.T) {
 	}
 	check := func(name string) {
 		t.Helper()
-		budget, ok := ratchet.Latest(name)
-		if !ok {
-			t.Fatalf("provider budget %q is missing", name)
-		}
-		if report, err := budget.CheckRatchet(economics, ledger.Events()); err != nil {
-			t.Errorf("%s: %v; observed=%+v", name, err, report.Totals)
+		if report, err := ratchet.CheckExact(name, economics, []providerbudget.Role{providerbudget.RoleState}, ledger.Events()); err != nil {
+			t.Errorf("%s: %v; observed=%+v; events=%+v", name, err, report.Totals, ledger.Events())
 		}
 	}
 	key := state.MustKey(state.NamespacePreferences, "budget-user")
@@ -53,37 +52,64 @@ func TestProviderBudgetStateStoreContract(t *testing.T) {
 	if _, err := engine.Get(ctx, key); err == nil {
 		t.Fatal("Get(missing) unexpectedly succeeded")
 	}
-	check("state-get-missing")
+	check("state-get-missing-schema-009")
 
 	ledger.Reset()
 	if _, err := engine.List(ctx, state.MustPrefix(state.NamespacePreferences), state.PageRequest{Limit: 10}); err != nil {
 		t.Fatal(err)
 	}
-	check("state-list-empty")
+	check("state-list-empty-schema-009")
 
 	ledger.Reset()
 	version, err := engine.Create(ctx, key, []byte("one"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("state-create")
+	check("state-create-schema-009")
 
 	ledger.Reset()
 	if _, err := engine.Get(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	check("state-get")
+	check("state-get-schema-009")
 
 	ledger.Reset()
 	version, err = engine.CompareAndSwap(ctx, key, version, []byte("two"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("state-compare-and-swap")
+	check("state-compare-and-swap-schema-009")
 
 	ledger.Reset()
 	if err := engine.Delete(ctx, key, version); err != nil {
 		t.Fatal(err)
 	}
-	check("state-delete")
+	check("state-delete-schema-009")
+
+	owner := "YnVkZ2V0LXVzZXItMDAwMDAwMA"
+	ledger.Reset()
+	if _, err := engine.Mutate(ctx, state.Mutation{
+		ID: "budget-owner-atomic-create",
+		Changes: []state.Change{
+			{Key: state.MustKey(state.NamespaceUsers, owner), Requirement: state.RequirementAbsent, Data: []byte("profile")},
+			{Key: state.MustKey(state.NamespaceAccounts, owner), Requirement: state.RequirementAbsent, Data: []byte("account")},
+		},
+		Result: []byte("created"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	check("state-mutate-two-records-schema-009")
+
+	ledger.Reset()
+	if _, err := engine.Transact(ctx, state.Mutation{
+		ID: "budget-cross-domain-create",
+		Changes: []state.Change{
+			{Key: state.MustKey(state.NamespacePreferences, owner), Requirement: state.RequirementAbsent, Data: []byte("preference")},
+			{Key: state.MustKey(state.NamespaceRoles, "administrators"), Requirement: state.RequirementAbsent, Data: []byte("roles")},
+		},
+		Result: []byte("committed"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	check("state-transact-two-domains-schema-009")
 }

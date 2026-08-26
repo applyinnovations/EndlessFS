@@ -6,27 +6,86 @@ This guide covers the provider-portable, multi-replica v1 runtime and its locall
 
 EndlessFS runs one Go control-plane binary. Application use cases always use one portable storage engine; only the thin atomic-object backends change. The `mock` backend holds canonical records in memory and starts empty after a restart. The `gcs` backend stores the same canonical keys and bodies in a private state/file storage set. By default both authoritative roles use one bucket. `ENDLESSFS_GCS_STATE_BUCKET` can select a distinct bucket for state, filesystem metadata, operations, leases, and checkpoints; immutable blobs, unpublished direct-final uploads, and decode-only legacy upload staging remain in `ENDLESSFS_GCS_FILE_BUCKET`. Optional generated previews use provider-neutral preview-store semantics over the same thin object-store interface, with a separate disposable GCS bucket rather than duplicating the transport adapter.
 
-Several replicas may share one storage set. They must use the same state/file bucket pairing, base URL/RP identity, registration policy, session-secret-derived keyring identity, stable writer-set ID, writer protocol, and canonical features. Startup rejects an incompatible writer before it serves bucket-backed requests. There is no leader or process-local lock: every mutation uses a durable state-bucket candidate/admitted ticket, canonical operation intent, conditional object updates, and a monotonically increasing fence.
+Several replicas may share one storage set. They must use the same state/file
+bucket pairing, base URL/RP identity, registration policy,
+session-secret-derived keyring identity, stable writer-set ID, writer protocol,
+and canonical features. Startup rejects an incompatible writer before it serves
+bucket-backed requests. There is no leader, process-local lock, admission
+transaction, or lease around an ordinary same-domain mutation. Schema 009
+partitions identity, administration, preview jobs, and the owner namespace by
+their real invariants and binds each state payload to a canonical record type. A
+same-domain mutation writes changed immutable pages and conditionally replaces
+one domain head as its sole visibility point. A genuine cross-domain invariant
+uses a helpable immutable plan, participant locks, and one create-only decision;
+readers and checkpoint closure finish the durable decision before exposing the
+participant state.
 
-If a replica disappears while it owns a mutation, the durable operation remains. The affected resource can be temporarily unavailable until the lease expires. One competing replica wins the takeover CAS, increments the fence, reconciles any ambiguous provider result, and resumes the same intent. A returning stale replica cannot commit, unlock, or replace the recovered result; its old fence and object preconditions fail.
+If a replica disappears before the head replacement, it has made no visible
+change. If the provider accepted the replacement but its response was lost, the
+same or another replica rereads the head and returns the retained
+fingerprint-bound outcome. A returning stale replica cannot publish through the
+old native head condition. Interrupted preparation leaves only unreachable
+immutable pages and unrelated domains continue immediately.
 
 ## Automatic storage-schema migration chain
 
-Startup detects one exact epoch in the append-only storage-schema ledger and executes every remaining adjacent transformation in order. The current ledger is schema 001 (v0.1.0–v0.1.4 pre-aggregate state), schema 002 (the historical byte-aggregate intermediate), schema 003 (byte and file-count aggregates from v0.1.5–v0.1.14), schema 004 (the untagged indexed metadata-only intermediate), schema 005 (resumable operation preparation from v0.2.x), schema 006 (persistent namespace snapshots and direct-final uploads from v0.3.0), then the untagged schema 007 (bounded inline operation plans and user-addressable duplicate-directory similarity). A schema-001 bucket therefore runs `001 -> 002 -> 003 -> 004 -> 005 -> 006 -> 007`; schema 003 runs `003 -> 004 -> 005 -> 006 -> 007`; schema 006 runs only `006 -> 007`; current schema-007 state performs no migration. No operator migration command or bucket edit is required. Unknown or contradictory epoch markers fail closed.
+Startup detects one exact epoch in the append-only storage-schema ledger and
+executes every remaining adjacent transformation in order. The current ledger
+contains schemas 001 through 009. Schema 009 is the typed transactional-state
+and owner-namespace-graph format and is the only ordinary runtime. A schema-001
+bucket therefore runs `001 -> 002 -> 003 -> 004 -> 005 -> 006 -> 007 -> 008 -> 009`;
+schema 003 runs the suffix beginning `003 -> 004`; schema 008 runs only
+`008 -> 009`; current schema-009 state performs no migration. No operator
+migration command or bucket edit is required. Unknown or contradictory epoch
+markers fail closed.
 
-Each edge owns a stable checkpoint and CAS-closes the durable write gate before changing state. When the persisted gate still carries predecessor writer features, gate closure conditionally fails an expired operation that remains in the unsealed `preparing` state and leaves its namespace visibility unchanged; it never replays predecessor preparation pages under newer namespace semantics. A stale predecessor worker is denied by the changed operation CAS. Same-schema preparations resume normally. Sealed running or committed operations are recovered from their immutable step pages before migration continues. The earlier edges upgrade aggregate records. The `003 -> 004` edge obtains file `(size, MD5, CRC32C)` through provider metadata only, converts directory pages and mutable state namespaces to persistent copy-on-write indexes, builds incremental directory content summaries and duplicate occurrences, and writes metadata-only checkpoint v3. Each directory has bounded immutable roots for name, modified time, size, kind, and group/path-ordered descendant file occurrences. Browser ordering uses keyset pagination, and selected-folder comparison merge-walks the two descendant indexes instead of loading either subtree. It never opens or streams a stored file body. A provider/object class that cannot attest both normalized checksums fails closed instead of downloading the object. The feature-only `004 -> 005` edge enables durable paged operation preparation. The feature-only `005 -> 006` edge freezes schema-005 roots as immutable snapshot sources for new copy-on-write namespace references. The feature-only `006 -> 007` edge admits bounded inline operation plans and stops treating live/trash area roots as duplicate-directory candidates; historical schema-006 root postings remain immutable and are ignored by schema-007 readers. These feature-only edges close and drain the gate and advance the feature binding/checkpoint without repeating the directory graph walk.
+Each edge owns a stable checkpoint and CAS-closes the durable write gate before
+changing state. Schemas 001 through 007 and their operation/preparation records
+are migration input only; their edge-specific recovery rules remain implemented
+and tested so every released predecessor can advance safely. The `007 -> 008`
+edge deterministically imports mutable state into owner-control,
+administration, capability, share, and owner-namespace domains; installs
+content-addressed pages; freezes the installed domains; creates the migration
+checkpoint; advances the feature binding; reopens the gate; and unfreezes the
+domains. File bodies are never read. Blob integrity uses provider-attested
+`(size, MD5, CRC32C)` metadata. The edge is restartable after every durable
+boundary and converges under two through eight concurrent migrators.
+
+The `008 -> 009` edge authenticates every source domain and state key, wraps
+unchanged application payloads in typed records, and deterministically
+repartitions them into namespace, owner-identity, owner-jobs, administration,
+and capability domains. It installs and freezes the complete target catalog,
+checkpoints it, advances the `transactional-state-domains-v1` feature binding,
+reopens, and unfreezes. It neither reads nor copies file bodies and is
+restartable/convergent at the same durable migration boundaries.
 
 The `003 -> 004` graph walk persists authenticated transform and verification marks for each completed directory. Every mark is tied to the exact migration checkpoint, parent/root/manifest logical versions, parent entry, aggregates, and content summary. The process holds only the active ancestor stack; after restart, a valid completed mark skips that entire subtree. Several replicas may advance the same deterministic walk through CAS. Stale, forged, misplaced, corrupt, or contradictory marks fail closed and marks are removed only after the independent verification phase succeeds. Provider-ordered scope discovery retains one owner/area at a time. Transforming a historical page manifest retains at most that one legacy directory while deriving its differently ordered persistent indexes; current-index verification and CAS-winner reconciliation are page-bounded.
 
-Every edge is safe to retry after process loss and safe for several new replicas to attempt concurrently. A replica that loses a CAS follows the durable winner. An interrupted chain resumes its checkpointed edge and can accept the explicitly reviewed mixture of source, target, and later already-published records without downgrading them. Gate feature binding fences an old process whose admitted writer features no longer match. Until an edge commits, predecessor records remain authoritative and the gate stays closed once migration has begun. Immutable schema-004 through schema-007 fixtures cover portable-minimal, application-disabled, and application-GCS writer profiles and are pinned to their producer revision and fixture digest.
+Every edge is safe to retry after process loss and safe for several new replicas
+to attempt concurrently. A replica that loses a CAS follows the durable winner.
+An interrupted chain resumes its checkpointed edge and accepts only the
+explicitly reviewed mixture of source, target, and later already-published
+records without downgrading them. Until an edge commits, predecessor records
+remain authoritative and the gate stays closed once migration has begun.
+Immutable schema-004 through schema-009 fixtures cover portable-minimal,
+application-disabled, and application-GCS writer profiles and are pinned to
+their producer revision and fixture digest.
 
-An unexpired upload or admitted operation can temporarily prevent startup; allow it to finish or its lease to expire and retry startup. Missing roots, cycles, multiple parents, unreachable roots, malformed canonical records, overflow, an unrelated closed-gate maintenance operation, an unknown epoch, or unrelated feature/configuration drift fails closed. The chain supports both single- and split-bucket storage sets. It does not discover or import arbitrary provider objects outside the canonical `endlessfs/v1` graph.
+A live upload capability can temporarily prevent checkpoint closure; allow it
+to finish or expire and retry. Missing roots, cycles, multiple parents,
+unreachable roots, malformed canonical records, overflow, an unrelated
+closed-gate maintenance operation, an unknown epoch, or unrelated
+feature/configuration drift fails closed. The chain supports both single- and
+split-bucket storage sets. It does not discover or import arbitrary provider
+objects outside the canonical `endlessfs/v1` graph.
 
 ## Local start and stop
 
 Generate independent bootstrap and session secrets, export them only in the process environment, and start through Nix as shown in the README. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after the first administrator exists. Use HTTPS with a matching base URL and RP ID for any non-loopback listener.
 
-`SIGTERM` and `SIGINT` stop admission and give the HTTP listeners up to ten seconds to shut down. The in-memory backend is intentionally ephemeral, so shutdown does not make it durable.
+`SIGTERM` and `SIGINT` stop accepting requests and give the HTTP listeners up
+to ten seconds to shut down. The in-memory backend is intentionally ephemeral,
+so shutdown does not make it durable.
 
 ## GCS identity and bucket policy
 
@@ -57,12 +116,27 @@ Bucket creation, IAM, CORS, lifecycle, retention, monitoring, regional design, a
 
 Canonical state deliberately contains no bucket/account identifier, GCS generation, S3 version ID, Azure ETag, provider metadata, signed URL, or resumable session URL. A supported cutover copies bytes; it never converts state:
 
-1. Close the canonical write gate. Every replica stops admitting new mutations.
-2. Allow fenced recovery to finish admitted operations and drain or abort live data-plane capabilities and native leases. A crashed operation may delay closure; do not delete its lock or force the gate closed.
-3. Create the closed-gate metadata checkpoint and copy exactly its paged authoritative key/body inventory plus the state-bucket checkpoint root and every inventory page. The root and each page remain independently bounded; their count may grow with the storage set. Inventory entries contain role, key, size, MD5, and CRC32C taken from provider metadata. Checkpoint construction and verification do not fetch object bodies. Do not copy admissions, staging garbage, backend leases, or maintenance records; schema 004 creates no per-object checkpoint-work journal.
+1. Close the canonical write gate. Every replica stops accepting new mutations,
+   freezes the complete domain catalog, and conditionally freezes every
+   registered domain head.
+2. Drain or abort expired data-plane capabilities and native leases. Closure
+   refuses to proceed while a live capability remains. A writer holding a
+   pre-freeze head condition cannot publish after freeze; there is no operation
+   lock to delete or force.
+3. Create the closed-gate metadata checkpoint and copy exactly its paged
+   authoritative key/body inventory plus the state-bucket checkpoint root and
+   every inventory page. The root and each page remain independently bounded;
+   their count may grow with the reachable graph. Inventory entries contain
+   role, key, size, MD5, and CRC32C taken from provider metadata. Checkpoint
+   construction and verification do not fetch object bodies. Do not copy
+   historical admissions/operations, unreachable pages, provider leases,
+   derived projections, or maintenance records.
 4. Copy each key and body unchanged to its destination role: blob keys to the file bucket and all other authoritative keys to the state bucket. In single-bucket mode both roles name the same destination. Destination-native versions and metadata may differ and are not preserved.
 5. Run the read-only destination verifier against both configured roles. It performs ordered metadata traversals and compares exact `(size, MD5, CRC32C)` tuples. Missing, extra-authoritative, misplaced, fingerprint-mismatched, mixed-version, or unsupported objects fail closed without a body-download fallback.
-6. Reconfigure compatible replicas to the destination while retaining the same provider-independent application secrets and writer-set identity. Verify the checkpoint, increment/open the destination gate epoch, and continue mutations.
+6. Reconfigure compatible replicas to the destination while retaining the same
+   provider-independent application secrets and writer-set identity. Verify the
+   checkpoint, increment/open the destination gate epoch, idempotently unfreeze
+   every domain, and continue mutations.
 
 The source remains closed. Online dual writes and reconciliation of mutations made outside EndlessFS are not supported. A pre-copy may reduce downtime, but the final checkpoint-authorized copy must be taken after quiescence.
 
@@ -77,7 +151,7 @@ The verifier configuration is strict JSON. For GCS:
   "writerSetID": "BASE64URL_WRITER_SET_ID",
   "configurationDigest": "EXPECTED_CONFIGURATION_DIGEST",
   "keyringIdentifiers": ["EXPECTED_KEYRING_ID"],
-  "requiredFeatures": ["directory-content-digests-v1", "directory-manifests", "duplicate-catalog-v1", "fenced-operations", "metadata-only-checkpoints-v1", "paged-operation-steps-v1", "persistent-directory-indexes-v1", "persistent-namespace-snapshots-v1", "persistent-state-indexes-v1", "portable-checkpoints", "provider-content-fingerprints-v1", "recursive-byte-aggregates-v1", "recursive-file-count-aggregates-v1", "resumable-operation-preparation-v1", "user-addressable-duplicate-directories-v1"]
+  "requiredFeatures": ["consistency-domains-v1", "directory-content-digests-v1", "directory-manifests", "duplicate-catalog-v1", "fenced-operations", "metadata-only-checkpoints-v1", "owner-namespace-graph-v1", "paged-operation-steps-v1", "persistent-directory-indexes-v1", "persistent-namespace-snapshots-v1", "persistent-state-indexes-v1", "portable-checkpoints", "provider-content-fingerprints-v1", "rebuildable-derived-projections-v1", "recursive-byte-aggregates-v1", "recursive-file-count-aggregates-v1", "resumable-operation-preparation-v1", "transactional-state-domains-v1", "user-addressable-duplicate-directories-v1"]
 }
 ```
 
@@ -101,13 +175,27 @@ Capability responses and public configuration use `no-store`. Diagnostics omit t
 
 ## Duplicate maintenance foundation
 
-Schema 004 maintains owner-scoped file and exact-directory duplicate groups incrementally as filesystem mutations commit. File identity is the provider-attested `(size, MD5, CRC32C)` tuple. Exact directory identity additionally binds recursive counts and a name/structure-sensitive content digest. Each directory content tree carries 16 deletion-safe MinHash minima and publishes inverted postings only for those values. A mutation rewrites only positions whose minima change; another occurrence of an existing content group changes no posting. The catalog contains no provider key and does not deduplicate blobs across owners.
+Schema 009 preserves each owner's live and Trash trees in one persistent
+namespace graph. A folder move, copy-by-reference, Trash, restore, or logical delete
+rewrites only affected edges and ancestor paths; it never enumerates descendants
+or relocates a blob. Same-owner copies share immutable content. Browser uploads
+target a newly allocated final blob directly and completion publishes its
+reference through the owner namespace head without GCS rewrite/copy.
 
-Schema 005 prepares recursive copy/move and non-empty directory replacement only after admitting a bounded durable header. Progress, sorted deltas, and prerequisite/copy references are emitted as bounded authenticated runs and fixed-fan-in merges in the state backend. A replacement replica resumes already-completed runs instead of repeating the subtree; the final sealed operation uses the ordinary multi-root commit protocol. Preparation therefore needs no process-local scratch directory and does not scale service memory with subtree size.
+Duplicate groups and directory-overlap views are rebuildable projections over a
+specific owner namespace revision. File identity is the provider-attested
+`(size, MD5, CRC32C)` tuple. Exact directory identity also binds recursive
+counts, relative names, kinds, and nested structural digests. Ignore decisions
+remain authoritative owner-namespace values. Reconciliation binds its projection
+and namespace revisions, revalidates them at apply time, and publishes removals
+through one owner namespace mutation. A stale plan fails closed and no route
+permanently deletes duplicate data.
 
-Schema 006 removes descendant traversal from ordinary namespace mutation altogether. Copy, move, live-to-trash, restore, and permanent deletion attach or detach one immutable directory snapshot and rewrite only the changed namespace paths and their ancestor manifests. Moving a directory between live and trash preserves its snapshot metadata in its original storage area; the virtual namespace entry carries that storage-area pointer. Exact recursive byte/file aggregates and the descendant-content view are reused, so provider-call counts are independent of descendant count. Same-owner file copy reuses the immutable blob ID, and upload capabilities target their final newly allocated blob ID; neither path invokes GCS rewrite/copy. Legacy schema-001 upload completion remains the only compatibility path that may promote staging through provider-side copy. Unpublished direct-final blobs are unreachable and become eligible for the closed-gate collector.
-
-Schema 007 reduces small ordinary copy/move/delete plans in bounded memory and stores only their visibility roots plus prerequisite key/digest references in the canonical operation record. At more than 64 preparation items or the canonical body limit it falls back to schema-005's resumable paged preparation. Area roots remain navigation containers but no longer publish 16 similarity postings on every namespace mutation; only non-empty user-addressable directories do. These changes preserve recovery validation and descendant-independent request counts while reducing fixed state-provider traffic.
+Projection pages are immutable and do not participate in ordinary namespace
+commits. This prevents a bucket-wide duplicate index from adding synchronous
+provider traffic to every upload or move. Exact and partial comparisons merge
+bounded persistent trees lazily; there is no directory-pair matrix and no file
+body read.
 
 Provider economics are an executable architecture gate. `nix run .#test-provider-budget` classifies actual GCS wire requests and checks exact request-count, price, and modeled-latency ratchets for state, file, data-plane, and preview pathways. See `docs/provider-economics-budgets.md` for fixture provenance, limitations, and the append-only tightening law.
 
@@ -117,9 +205,25 @@ Per-group reclaimable bytes count all but one occurrence of that exact group. Do
 
 ## Closed-gate retention and collection
 
-Terminal operation results and idempotency bindings are retained for 30 days. Trash is not subject to that window. During gate closure EndlessFS resolves active work, removes expired operation and legacy-upload staging and leases, and runs a resumable reachability collector over persistent directory/state indexes, selected manifests and state versions, and committed or unpublished final blobs. Its session and marks bind the exact checkpoint ID, gate epoch, and gate logical version. It deletes only unmarked objects from explicitly collectible namespaces. Do not configure an independent bucket lifecycle rule to approximate this collector.
+Fingerprint-bound mutation outcomes and idempotency bindings are retained in
+bounded domain trees and indexed by expiry. Trash is not subject to that
+window. During gate closure EndlessFS freezes the catalog and all domains,
+resolves cross-domain plans, drains upload leases, authenticates the exact
+reachable domain/namespace/blob closure, and excludes unreachable immutable
+pages and rebuildable projections from the checkpoint. The completed
+schema-009 checkpoint is then the immutable mark set for a resumable conditional
+sweep of recognized domain pages, transition residue, projections, leases, and
+blobs. The sweep stores only a portable ordered-key cursor, never reads file
+bodies, and must reach its terminal checkpoint-bound session before writes can
+reopen. Reachability uses a disk-backed exact visited set and bounded merge
+chunks, so service memory does not grow with the full graph.
 
-After all file operations drain, the same closed-gate phase validates duplicate roots and conditionally removes finalized nil occurrence, summary, and similarity roots. An unresolved transition or malformed key/body fails closure; group and directory-pair preferences are retained.
+The schema-009 runtime retains terminal predecessor-GC session/mark objects as
+excluded compatibility residue. A lagging supported predecessor may still hold
+a sweeping snapshot, so deleting those marks could let it mistake live schema-
+009 authority for garbage. They are neither runtime authority nor checkpoint
+contents. Do not configure an independent bucket lifecycle rule to approximate
+application reachability collection.
 
 ## Optional v1.1 previews
 

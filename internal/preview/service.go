@@ -53,7 +53,7 @@ type Options struct {
 	StartupTimeout     time.Duration
 	OperationRetention time.Duration
 	HardMaxSourceBytes int64
-	ApplicationState   state.Store
+	ApplicationState   state.AtomicStore
 }
 
 type ItemRequest struct {
@@ -138,7 +138,7 @@ type Service struct {
 	client     *http.Client
 	ids        *domain.IDGenerator
 	clock      domain.Clock
-	state      state.Store
+	state      state.AtomicStore
 	global     chan struct{}
 
 	mu       sync.Mutex
@@ -359,67 +359,96 @@ func (s *Service) claimOperation(ctx context.Context, owner domain.UserID, idemp
 	digestBytes := sha256.Sum256([]byte(owner.String() + "\x00" + idempotencyKey))
 	idempotencyDigest := base64.RawURLEncoding.EncodeToString(digestBytes[:])
 	idempotencyStateKey := state.MustKey(state.NamespaceIdempotency, "preview", owner.String(), idempotencyDigest)
-	if existing, err := s.state.Get(ctx, idempotencyStateKey); err == nil {
-		var record idempotencyRecord
-		if err := state.DecodeJSON(existing.Data, &record); err != nil || !validIdempotencyRecord(record) {
-			return operationClaim{}, domain.NewError(domain.ErrorInvalid, "invalid preview idempotency state")
-		}
-		if record.Fingerprint != fingerprint {
-			return operationClaim{}, domain.NewError(domain.ErrorConflict, "idempotency key was already used for another preview request")
-		}
-		claim, claimErr := s.claimExistingOperation(ctx, owner, idempotencyStateKey, existing.Version, idempotencyDigest, record)
-		if errors.Is(claimErr, domain.ErrNotFound) {
-			_ = s.state.Delete(ctx, idempotencyStateKey, existing.Version)
-			return s.claimOperation(ctx, owner, idempotencyKey, fingerprint)
-		}
-		return claim, claimErr
-	} else if !errors.Is(err, domain.ErrNotFound) {
-		return operationClaim{}, err
-	}
-
 	operationIDValue, err := s.ids.OpaqueID()
 	if err != nil {
 		return operationClaim{}, err
 	}
-	now := s.clock.Now().UTC()
 	operationID := domain.OperationID(operationIDValue)
-	operationStateKey := previewOperationKey(owner, operationID)
-	operationRecordValue := operationRecord{
-		SchemaVersion: 1, OwnerID: owner.String(), Fingerprint: fingerprint, IdempotencyDigest: idempotencyDigest,
-		LeaseEpoch: 1, LeaseExpiresAt: now.Add(s.options.OperationTimeout), ExpiresAt: now.Add(s.options.OperationRetention),
-		Operation: Operation{ID: operationID, State: domain.OperationRunning, StartedAt: now, UpdatedAt: now},
-	}
-	operationBody, err := state.EncodeJSON(operationRecordValue)
-	if err != nil {
-		return operationClaim{}, err
-	}
-	if err := s.registerOperation(ctx, owner, operationIndexEntry{OperationID: operationID, IdempotencyDigest: idempotencyDigest, ExpiresAt: operationRecordValue.ExpiresAt}); err != nil {
-		return operationClaim{}, err
-	}
-	operationVersion, err := s.state.Create(ctx, operationStateKey, operationBody)
-	if err != nil {
-		return operationClaim{}, err
-	}
-	idempotencyValue := idempotencyRecord{SchemaVersion: 1, Fingerprint: fingerprint, OperationID: operationID, ExpiresAt: operationRecordValue.ExpiresAt}
-	idempotencyBody, err := state.EncodeJSON(idempotencyValue)
-	if err != nil {
-		_ = s.state.Delete(ctx, operationStateKey, operationVersion)
-		return operationClaim{}, err
-	}
-	if _, err = s.state.Create(ctx, idempotencyStateKey, idempotencyBody); err != nil {
-		_ = s.state.Delete(ctx, operationStateKey, operationVersion)
-		if errors.Is(err, domain.ErrConflict) {
-			return s.claimOperation(ctx, owner, idempotencyKey, fingerprint)
+	for attempt := 0; attempt < 16; attempt++ {
+		if existing, getErr := s.state.Get(ctx, idempotencyStateKey); getErr == nil {
+			var record idempotencyRecord
+			if decodeErr := state.DecodeJSON(existing.Data, &record); decodeErr != nil || !validIdempotencyRecord(record) {
+				return operationClaim{}, domain.NewError(domain.ErrorInvalid, "invalid preview idempotency state")
+			}
+			if record.Fingerprint != fingerprint {
+				return operationClaim{}, domain.NewError(domain.ErrorConflict, "idempotency key was already used for another preview request")
+			}
+			claim, claimErr := s.claimExistingOperation(ctx, owner, idempotencyStateKey, existing.Version, idempotencyDigest, record)
+			if errors.Is(claimErr, domain.ErrNotFound) {
+				continue
+			}
+			return claim, claimErr
+		} else if !errors.Is(getErr, domain.ErrNotFound) {
+			return operationClaim{}, getErr
 		}
-		return operationClaim{}, err
+
+		now := s.clock.Now().UTC()
+		operationStateKey := previewOperationKey(owner, operationID)
+		operationRecordValue := operationRecord{
+			SchemaVersion: 1, OwnerID: owner.String(), Fingerprint: fingerprint, IdempotencyDigest: idempotencyDigest,
+			LeaseEpoch: 1, LeaseExpiresAt: now.Add(s.options.OperationTimeout), ExpiresAt: now.Add(s.options.OperationRetention),
+			Operation: Operation{ID: operationID, State: domain.OperationRunning, StartedAt: now, UpdatedAt: now},
+		}
+		operationBody, encodeErr := state.EncodeJSON(operationRecordValue)
+		if encodeErr != nil {
+			return operationClaim{}, encodeErr
+		}
+		idempotencyBody, encodeErr := state.EncodeJSON(idempotencyRecord{SchemaVersion: 1, Fingerprint: fingerprint, OperationID: operationID, ExpiresAt: operationRecordValue.ExpiresAt})
+		if encodeErr != nil {
+			return operationClaim{}, encodeErr
+		}
+		index, loadErr := s.loadOperationIndex(ctx, owner, operationID)
+		if loadErr != nil {
+			return operationClaim{}, loadErr
+		}
+		if index.hasExpired(now) {
+			if cleanupErr := s.cleanupExpiredOperationIndex(ctx, owner, index, now); cleanupErr != nil && !errors.Is(cleanupErr, domain.ErrPreconditionFailed) {
+				return operationClaim{}, cleanupErr
+			}
+			continue
+		}
+		if len(index.record.Entries) >= maxOperationsPerShard {
+			return operationClaim{}, domain.NewError(domain.ErrorUnavailable, "preview operation retention capacity reached")
+		}
+		index.record.Entries = append(index.record.Entries, operationIndexEntry{OperationID: operationID, IdempotencyDigest: idempotencyDigest, ExpiresAt: operationRecordValue.ExpiresAt})
+		indexBody, encodeErr := state.EncodeJSON(index.record)
+		if encodeErr != nil {
+			return operationClaim{}, encodeErr
+		}
+		indexRequirement := state.RequirementAbsent
+		if index.exists {
+			indexRequirement = state.RequirementPresent
+		}
+		outcome, mutateErr := s.state.Mutate(ctx, state.Mutation{
+			ID:          "preview-claim-" + string(operationID) + "-" + string(index.version),
+			RetainUntil: operationRecordValue.ExpiresAt,
+			Changes: []state.Change{
+				{Key: operationStateKey, Requirement: state.RequirementAbsent, Data: operationBody},
+				{Key: idempotencyStateKey, Requirement: state.RequirementAbsent, Data: idempotencyBody},
+				{Key: index.key, Requirement: indexRequirement, ExpectedVersion: index.version, Data: indexBody},
+			},
+		})
+		if errors.Is(mutateErr, domain.ErrConflict) || errors.Is(mutateErr, domain.ErrPreconditionFailed) {
+			continue
+		}
+		if mutateErr != nil {
+			return operationClaim{}, mutateErr
+		}
+		operationVersion := mutationVersion(outcome, operationStateKey)
+		if operationVersion == "" {
+			return operationClaim{}, domain.NewError(domain.ErrorInternal, "atomic preview claim omitted operation version")
+		}
+		return operationClaim{record: operationRecordValue, operationKey: operationStateKey, operationVersion: operationVersion, claimed: true}, nil
 	}
-	return operationClaim{record: operationRecordValue, operationKey: operationStateKey, operationVersion: operationVersion, claimed: true}, nil
+	return operationClaim{}, domain.NewError(domain.ErrorUnavailable, "preview operation claim contention")
 }
 
 func (s *Service) claimExistingOperation(ctx context.Context, owner domain.UserID, idempotencyKey state.Key, idempotencyVersion state.Version, idempotencyDigest string, idempotency idempotencyRecord) (operationClaim, error) {
 	now := s.clock.Now().UTC()
 	if !now.Before(idempotency.ExpiresAt) {
-		_ = s.state.Delete(ctx, idempotencyKey, idempotencyVersion)
+		if err := s.cleanupExpiredPreviewBinding(ctx, owner, idempotencyKey, idempotencyVersion, idempotency); err != nil && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
+			return operationClaim{}, err
+		}
 		return operationClaim{}, domain.NewError(domain.ErrorNotFound, "preview idempotency record expired")
 	}
 	record, version, err := s.readOperation(ctx, owner, idempotency.OperationID)
@@ -614,75 +643,179 @@ func (s *Service) readOperation(ctx context.Context, owner domain.UserID, operat
 	return record, value.Version, nil
 }
 
-func (s *Service) registerOperation(ctx context.Context, owner domain.UserID, entry operationIndexEntry) error {
-	digest := sha256.Sum256([]byte(entry.OperationID))
+type operationIndexSnapshot struct {
+	key     state.Key
+	record  operationIndexRecord
+	version state.Version
+	exists  bool
+}
+
+func (snapshot operationIndexSnapshot) hasExpired(now time.Time) bool {
+	for _, entry := range snapshot.record.Entries {
+		if !now.Before(entry.ExpiresAt) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Service) loadOperationIndex(ctx context.Context, owner domain.UserID, operationID domain.OperationID) (operationIndexSnapshot, error) {
+	digest := sha256.Sum256([]byte(operationID))
 	shard := strconv.Itoa(int(digest[0]) % operationIndexShards)
 	indexKey := state.MustKey(state.NamespaceOperations, "preview-index", owner.String(), shard)
-	for attempt := 0; attempt < 16; attempt++ {
-		value, err := s.state.Get(ctx, indexKey)
-		record := operationIndexRecord{SchemaVersion: 1, Entries: make([]operationIndexEntry, 0, maxOperationsPerShard)}
-		if err == nil {
-			var decoded operationIndexRecord
-			if decodeErr := state.DecodeJSON(value.Data, &decoded); decodeErr != nil || !validOperationIndex(decoded) {
-				return domain.NewError(domain.ErrorInvalid, "invalid preview operation index")
+	value, err := s.state.Get(ctx, indexKey)
+	if errors.Is(err, domain.ErrNotFound) {
+		return operationIndexSnapshot{key: indexKey, record: operationIndexRecord{SchemaVersion: 1, Entries: []operationIndexEntry{}}}, nil
+	}
+	if err != nil {
+		return operationIndexSnapshot{}, err
+	}
+	var record operationIndexRecord
+	if decodeErr := state.DecodeJSON(value.Data, &record); decodeErr != nil || !validOperationIndex(record) {
+		return operationIndexSnapshot{}, domain.NewError(domain.ErrorInvalid, "invalid preview operation index")
+	}
+	return operationIndexSnapshot{key: indexKey, record: record, version: value.Version, exists: true}, nil
+}
+
+func mutationVersion(outcome state.MutationOutcome, key state.Key) state.Version {
+	for _, change := range outcome.Changes {
+		if change.Key.String() == key.String() {
+			return change.Version
+		}
+	}
+	return ""
+}
+
+func previewMutationID(label string, values ...string) string {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("endlessfs-preview-state-mutation-v1\x00" + label))
+	for _, value := range values {
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(value))
+	}
+	return label + "-" + base64.RawURLEncoding.EncodeToString(hash.Sum(nil))
+}
+
+// cleanupExpiredOperationIndex removes one complete operation binding per
+// call. The index, operation, and idempotency record disappear at the same
+// owner-jobs linearization point; a malformed or partial binding fails closed.
+func (s *Service) cleanupExpiredOperationIndex(ctx context.Context, owner domain.UserID, index operationIndexSnapshot, now time.Time) error {
+	for _, entry := range index.record.Entries {
+		if now.Before(entry.ExpiresAt) {
+			continue
+		}
+		idempotencyKey := state.MustKey(state.NamespaceIdempotency, "preview", owner.String(), entry.IdempotencyDigest)
+		value, err := s.state.Get(ctx, idempotencyKey)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				return domain.NewError(domain.ErrorInvalid, "preview operation index has no idempotency binding")
 			}
-			record = decoded
-		} else if !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
+		var record idempotencyRecord
+		if state.DecodeJSON(value.Data, &record) != nil || !validIdempotencyRecord(record) || record.OperationID != entry.OperationID || !record.ExpiresAt.Equal(entry.ExpiresAt) {
+			return domain.NewError(domain.ErrorInvalid, "preview operation index binding is invalid")
+		}
+		return s.cleanupExpiredPreviewBinding(ctx, owner, idempotencyKey, value.Version, record)
+	}
+	return nil
+}
+
+func (s *Service) cleanupExpiredPreviewBinding(ctx context.Context, owner domain.UserID, idempotencyKey state.Key, idempotencyVersion state.Version, idempotency idempotencyRecord) error {
+	operationKey := previewOperationKey(owner, idempotency.OperationID)
+	operationValue, err := s.state.Get(ctx, operationKey)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return domain.NewError(domain.ErrorInvalid, "preview idempotency binding has no operation")
+		}
+		return err
+	}
+	var operation operationRecord
+	if state.DecodeJSON(operationValue.Data, &operation) != nil || !validOperationRecord(operation, owner, idempotency.OperationID) || operation.Fingerprint != idempotency.Fingerprint || operation.IdempotencyDigest == "" || !operation.ExpiresAt.Equal(idempotency.ExpiresAt) {
+		return domain.NewError(domain.ErrorInvalid, "preview idempotency operation binding is invalid")
+	}
+	expectedIdempotencyKey := state.MustKey(state.NamespaceIdempotency, "preview", owner.String(), operation.IdempotencyDigest)
+	if expectedIdempotencyKey.String() != idempotencyKey.String() {
+		return domain.NewError(domain.ErrorInvalid, "preview idempotency key binding is invalid")
+	}
+	index, err := s.loadOperationIndex(ctx, owner, idempotency.OperationID)
+	if err != nil {
+		return err
+	}
+	if !index.exists {
+		return domain.NewError(domain.ErrorInvalid, "preview operation has no index binding")
+	}
+	found := false
+	retained := make([]operationIndexEntry, 0, len(index.record.Entries)-1)
+	for _, entry := range index.record.Entries {
+		if entry.OperationID == idempotency.OperationID {
+			if found || entry.IdempotencyDigest != operation.IdempotencyDigest || !entry.ExpiresAt.Equal(idempotency.ExpiresAt) {
+				return domain.NewError(domain.ErrorInvalid, "preview operation index binding is invalid")
+			}
+			found = true
+			continue
+		}
+		retained = append(retained, entry)
+	}
+	if !found {
+		return domain.NewError(domain.ErrorInvalid, "preview operation has no index entry")
+	}
+	index.record.Entries = retained
+	indexBody, err := state.EncodeJSON(index.record)
+	if err != nil {
+		return err
+	}
+	_, err = s.state.Mutate(ctx, state.Mutation{
+		ID: previewMutationID("preview-cleanup", owner.String(), string(idempotency.OperationID), string(idempotencyVersion), string(operationValue.Version), string(index.version)),
+		Changes: []state.Change{
+			{Key: idempotencyKey, Requirement: state.RequirementPresent, ExpectedVersion: idempotencyVersion, Delete: true},
+			{Key: operationKey, Requirement: state.RequirementPresent, ExpectedVersion: operationValue.Version, Delete: true},
+			{Key: index.key, Requirement: state.RequirementPresent, ExpectedVersion: index.version, Data: indexBody},
+		},
+	})
+	return err
+}
+
+func (s *Service) registerOperation(ctx context.Context, owner domain.UserID, entry operationIndexEntry) error {
+	for attempt := 0; attempt < 16; attempt++ {
+		index, err := s.loadOperationIndex(ctx, owner, entry.OperationID)
+		if err != nil {
 			return err
 		}
 		now := s.clock.Now().UTC()
-		expired := make([]operationIndexEntry, 0)
-		retained := record.Entries[:0]
-		for _, current := range record.Entries {
-			if now.Before(current.ExpiresAt) {
-				if current.OperationID == entry.OperationID {
-					return domain.NewError(domain.ErrorInternal, "preview operation identity collision")
-				}
-				retained = append(retained, current)
-			} else {
-				expired = append(expired, current)
+		if index.hasExpired(now) {
+			if err := s.cleanupExpiredOperationIndex(ctx, owner, index, now); err != nil && !errors.Is(err, domain.ErrPreconditionFailed) {
+				return err
+			}
+			continue
+		}
+		for _, current := range index.record.Entries {
+			if current.OperationID == entry.OperationID {
+				return domain.NewError(domain.ErrorInternal, "preview operation identity collision")
 			}
 		}
-		record.Entries = retained
-		if len(record.Entries) >= maxOperationsPerShard {
+		if len(index.record.Entries) >= maxOperationsPerShard {
 			return domain.NewError(domain.ErrorUnavailable, "preview operation retention capacity reached")
 		}
-		record.Entries = append(record.Entries, entry)
-		body, encodeErr := state.EncodeJSON(record)
+		index.record.Entries = append(index.record.Entries, entry)
+		body, encodeErr := state.EncodeJSON(index.record)
 		if encodeErr != nil {
 			return encodeErr
 		}
-		if errors.Is(err, domain.ErrNotFound) {
-			_, err = s.state.Create(ctx, indexKey, body)
-		} else {
-			_, err = s.state.CompareAndSwap(ctx, indexKey, value.Version, body)
+		requirement := state.RequirementAbsent
+		if index.exists {
+			requirement = state.RequirementPresent
 		}
+		_, err = s.state.Mutate(ctx, state.Mutation{ID: "preview-index-" + string(entry.OperationID) + "-" + string(index.version), RetainUntil: entry.ExpiresAt, Changes: []state.Change{{Key: index.key, Requirement: requirement, ExpectedVersion: index.version, Data: body}}})
 		if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrPreconditionFailed) {
 			continue
 		}
 		if err != nil {
 			return err
 		}
-		for _, expiredEntry := range expired {
-			s.deleteIndexedOperation(ctx, owner, expiredEntry)
-		}
 		return nil
 	}
 	return domain.NewError(domain.ErrorUnavailable, "preview operation index contention")
-}
-
-func (s *Service) deleteIndexedOperation(ctx context.Context, owner domain.UserID, entry operationIndexEntry) {
-	operationKey := previewOperationKey(owner, entry.OperationID)
-	if value, err := s.state.Get(ctx, operationKey); err == nil {
-		_ = s.state.Delete(ctx, operationKey, value.Version)
-	}
-	idempotencyKey := state.MustKey(state.NamespaceIdempotency, "preview", owner.String(), entry.IdempotencyDigest)
-	if value, err := s.state.Get(ctx, idempotencyKey); err == nil {
-		var record idempotencyRecord
-		if state.DecodeJSON(value.Data, &record) == nil && record.OperationID == entry.OperationID {
-			_ = s.state.Delete(ctx, idempotencyKey, value.Version)
-		}
-	}
 }
 
 func previewOperationKey(owner domain.UserID, operationID domain.OperationID) state.Key {
@@ -743,6 +876,7 @@ func validOperationIndex(record operationIndexRecord) bool {
 		return false
 	}
 	seen := make(map[domain.OperationID]struct{}, len(record.Entries))
+	seenIdempotency := make(map[string]struct{}, len(record.Entries))
 	for _, entry := range record.Entries {
 		if entry.OperationID == "" || entry.IdempotencyDigest == "" || entry.ExpiresAt.IsZero() {
 			return false
@@ -750,7 +884,11 @@ func validOperationIndex(record operationIndexRecord) bool {
 		if _, exists := seen[entry.OperationID]; exists {
 			return false
 		}
+		if _, exists := seenIdempotency[entry.IdempotencyDigest]; exists {
+			return false
+		}
 		seen[entry.OperationID] = struct{}{}
+		seenIdempotency[entry.IdempotencyDigest] = struct{}{}
 	}
 	return true
 }

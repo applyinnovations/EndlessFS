@@ -3,6 +3,7 @@ package secret
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -35,6 +36,62 @@ func TestKeyedHashBindsProtectionKeyAndValue(t *testing.T) {
 	}
 	if MatchesKeyedHash(otherKey, "browser binding", encoded) || MatchesKeyedHash(key, "other", encoded) {
 		t.Fatal("keyed hash did not bind key and value")
+	}
+}
+
+func TestScopedBearerTokenRoundTripAndTamperDenial(t *testing.T) {
+	owner, err := domain.ParseUserID(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x31}, 16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x52}, 32))
+	token, err := ScopeBearerToken(owner, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedOwner, secretPart, err := ParseScopedBearerToken(token)
+	if err != nil || parsedOwner != owner || secretPart.Reveal() != raw || !ValidScopedBearerToken(token) {
+		t.Fatalf("parsed token = %v %v %v", parsedOwner, secretPart, err)
+	}
+	for _, invalid := range []string{"", raw, "s2." + owner.String() + "." + raw, "s1.invalid." + raw, "s1." + owner.String() + ".invalid", token + ".extra"} {
+		if ValidScopedBearerToken(invalid) {
+			t.Errorf("accepted invalid scoped token %q", invalid)
+		}
+	}
+	if _, err := ScopeBearerToken(domain.UserID{}, raw); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("ScopeBearerToken invalid owner error = %v", err)
+	}
+}
+
+func TestScopedCapabilityTokenBindsOwnerLocatorAndSecret(t *testing.T) {
+	owner, _ := domain.ParseUserID(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x31}, 16)))
+	locator := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 16))
+	raw := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x53}, 32))
+	token, err := ScopeCapabilityToken(owner, locator, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedOwner, parsedLocator, parsedSecret, err := ParseScopedCapabilityToken(token)
+	if err != nil || parsedOwner != owner || parsedLocator != locator || parsedSecret.Reveal() != raw {
+		t.Fatalf("parsed capability = %v %q %v %v", parsedOwner, parsedLocator, parsedSecret, err)
+	}
+	for _, invalid := range []string{"", raw, "c2." + owner.String() + "." + locator + "." + raw, token + ".extra"} {
+		if _, _, _, err := ParseScopedCapabilityToken(invalid); !errors.Is(err, domain.ErrInvalid) {
+			t.Errorf("invalid capability %q error = %v", invalid, err)
+		}
+	}
+	if _, err := ScopeCapabilityToken(owner, "short", raw); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("ScopeCapabilityToken invalid locator error = %v", err)
+	}
+	if _, _, _, err := ParseScopedCapabilityToken("c1." + owner.String() + ".short." + raw); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("ParseScopedCapabilityToken invalid locator error = %v", err)
+	}
+}
+
+func TestMatchesKeyedHashRejectsMalformedDigest(t *testing.T) {
+	key := Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x41}, 32)))
+	if MatchesKeyedHash(key, "browser binding", "invalid") {
+		t.Fatal("malformed keyed hash matched")
 	}
 }
 

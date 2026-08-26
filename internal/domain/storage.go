@@ -222,6 +222,49 @@ type DeleteRequest struct {
 	IdempotencyKey  string
 }
 
+type TrashRequest struct {
+	Path            UserPath
+	ExpectedVersion Version
+	TrashID         string
+	IdempotencyKey  string
+}
+
+type TrashEntry struct {
+	TrashID         string    `json:"trashID"`
+	OwnerUserID     UserID    `json:"ownerUserID"`
+	OriginalPath    UserPath  `json:"originalPath"`
+	TrashedPath     UserPath  `json:"trashedPath"`
+	Entry           Entry     `json:"entry"`
+	TrashedAt       time.Time `json:"trashedAt"`
+	OriginalVersion Version   `json:"originalVersion"`
+}
+
+type TrashListRequest struct {
+	Limit  int
+	Cursor string
+}
+
+type TrashListPage struct {
+	Items      []TrashEntry `json:"items"`
+	NextCursor string       `json:"nextCursor,omitempty"`
+}
+
+// NamespaceBatchItemResult is one item in an atomically published owner
+// namespace batch. All items share the batch operation ID and visibility
+// point; a returned result never represents a partially published batch.
+type NamespaceBatchItemResult struct {
+	Source      UserPath       `json:"source"`
+	Destination UserPath       `json:"destination,omitempty"`
+	TrashID     string         `json:"trashID,omitempty"`
+	OperationID OperationID    `json:"operationID"`
+	State       OperationState `json:"state"`
+}
+
+type NamespaceBatchResult struct {
+	Operation Operation                  `json:"operation"`
+	Items     []NamespaceBatchItemResult `json:"items"`
+}
+
 type OperationState string
 
 const (

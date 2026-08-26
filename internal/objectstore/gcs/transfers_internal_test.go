@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -275,6 +276,40 @@ func TestTransferLeaseRandomFailureAndSingleResume(t *testing.T) {
 	capability, err := backend.ResumeUpload(context.Background(), sealed)
 	if err != nil || capability.Protocol != domain.UploadSingle || capability.ChunkRules != nil || capability.DeclaredSize != 1 {
 		t.Fatalf("single resume = %+v, %v", capability, err)
+	}
+}
+
+func TestTransferLeaseSealingSerializesInjectedEntropyReader(t *testing.T) {
+	configuration, err := newTransferConfiguration(TransferOptions{
+		LeaseKey: bytes.Repeat([]byte{9}, 32),
+		Random:   bytes.NewReader(bytes.Repeat([]byte{1}, 4096)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &Backend{transfer: configuration}
+	const workers = 64
+	sealed := make([][]byte, workers)
+	errorsFound := make([]error, workers)
+	var wait sync.WaitGroup
+	for index := range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			lease := uploadLease{SchemaVersion: 1, UploadID: fmt.Sprintf("upload-%d", index), Key: fmt.Sprintf("endlessfs/v1/staging/user/op-%d/data", index), Size: 1, MediaType: "text/plain", Protocol: domain.UploadSingle, ExpiresAt: time.Now().Add(time.Hour)}
+			sealed[index], errorsFound[index] = backend.sealLease(lease)
+		}()
+	}
+	wait.Wait()
+	seen := make(map[string]struct{}, workers)
+	for index, err := range errorsFound {
+		if err != nil {
+			t.Fatalf("seal worker %d: %v", index, err)
+		}
+		if _, found := seen[string(sealed[index])]; found {
+			t.Fatalf("seal worker %d reused a nonce", index)
+		}
+		seen[string(sealed[index])] = struct{}{}
 	}
 }
 

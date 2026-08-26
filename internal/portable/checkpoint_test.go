@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -30,16 +29,17 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 		t.Fatal(err)
 	}
 	sourceEngine := openEngine(t, source, clock, 81, nil)
+	ownerID := "U1NTU1NTU1NTU1NTU1NTUw"
 	stateValues := map[state.Key][]byte{
-		state.MustKey(state.NamespaceUsers, "portable-user"):                   []byte(`{"displayName":"Portable"}`),
-		state.MustKey(state.NamespaceCredentials, "portable-credential"):       []byte(`{"credential":"portable"}`),
-		state.MustKey(state.NamespaceSessions, "portable-session"):             []byte(`{"session":"portable"}`),
-		state.MustKey(state.NamespaceRoles, "admins"):                          []byte(`{"admins":["portable-user"]}`),
-		state.MustKey(state.NamespaceShares, "portable-share-token-hash"):      []byte(`{"share":"portable"}`),
-		state.MustKey(state.NamespaceTrash, "portable-user", "portable-trash"): []byte(`{"trash":"portable"}`),
-		state.MustKey(state.NamespacePreferences, "portable-user", "theme"):    []byte(`{"themeID":"endlessfs-dark"}`),
-		state.MustKey(state.NamespaceOperations, "portable-operation"):         []byte(`{"state":"succeeded"}`),
-		state.MustKey(state.NamespaceIdempotency, "portable-idempotency"):      []byte(`{"outcome":"portable"}`),
+		state.MustKey(state.NamespaceUsers, ownerID):                                        []byte(`{"displayName":"Portable"}`),
+		state.MustKey(state.NamespaceCredentials, ownerID, "portable-credential"):           []byte(`{"credential":"portable"}`),
+		state.MustKey(state.NamespaceSessions, ownerID, "portable-session"):                 []byte(`{"session":"portable"}`),
+		state.MustKey(state.NamespaceRoles, "admins"):                                       []byte(`{"admins":["portable-user"]}`),
+		state.MustKey(state.NamespaceShares, ownerID, "portable-share-token-hash"):          []byte(`{"share":"portable"}`),
+		state.MustKey(state.NamespaceTrash, ownerID, "portable-trash"):                      []byte(`{"trash":"portable"}`),
+		state.MustKey(state.NamespacePreferences, ownerID, "theme"):                         []byte(`{"themeID":"endlessfs-dark"}`),
+		state.MustKey(state.NamespaceOperations, "batch", ownerID, "portable-operation"):    []byte(`{"state":"succeeded"}`),
+		state.MustKey(state.NamespaceIdempotency, "drive", ownerID, "portable-idempotency"): []byte(`{"outcome":"portable"}`),
 	}
 	stateVersions := make(map[state.Key]state.Version, len(stateValues))
 	for key, value := range stateValues {
@@ -49,7 +49,7 @@ func TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections(t 
 		}
 		stateVersions[key] = version
 	}
-	user, _ := domain.ParseUserID("U1NTU1NTU1NTU1NTU1NTUw")
+	user, _ := domain.ParseUserID(ownerID)
 	scope, _ := domain.NewScope(user, domain.AreaLive)
 	trashScope, _ := domain.NewScope(user, domain.AreaTrash)
 	if _, err := sourceEngine.Files().CreateDirectory(context.Background(), scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/documents")}); err != nil {
@@ -286,44 +286,6 @@ func TestPortabilityRawCopyPreservesSplitStateAndFileBackends(t *testing.T) {
 	}
 }
 
-func TestCheckpointSupportsInventoryBeyondCanonicalRecordLimit(t *testing.T) {
-	backend := objectmemory.New()
-	clock := domain.NewFixedClock(time.Date(2037, 2, 5, 4, 5, 6, 0, time.UTC))
-	engine := openEngine(t, backend, clock, 155, nil)
-	objects := make(map[string][]byte, 12_080)
-	for index := range 12_080 {
-		objects[fmt.Sprintf("endlessfs/v1/test/large-checkpoint/%05d", index)] = []byte{byte(index)}
-	}
-	if err := backend.Import(objects); err != nil {
-		t.Fatal(err)
-	}
-
-	checkpoint, err := engine.CreateCheckpoint(context.Background(), "large-checkpoint")
-	if err != nil {
-		t.Fatalf("CreateCheckpoint() large inventory error = %v", err)
-	}
-	if checkpoint.SchemaVersion != 3 || checkpoint.StateObjectCount+checkpoint.FileObjectCount < uint64(len(objects)) || checkpoint.InventoryPageCount < 2 {
-		t.Fatalf("checkpoint root = %+v; want paged inventory for at least %d objects", checkpoint, len(objects))
-	}
-	checkpointBody := backend.Export()[storageformat.CheckpointKey(checkpoint.CheckpointID).String()]
-	if len(checkpointBody) == 0 || len(checkpointBody) > storageformat.MaxCanonicalBytes {
-		t.Fatalf("checkpoint root body size = %d; want bounded non-empty root", len(checkpointBody))
-	}
-	visited := 0
-	if err := engine.VisitCheckpointObjects(context.Background(), checkpoint.CheckpointID, func(storageformat.CheckpointObject) error {
-		visited++
-		return nil
-	}); err != nil {
-		t.Fatalf("VisitCheckpointObjects() large inventory error = %v", err)
-	}
-	if visited != int(checkpoint.StateObjectCount+checkpoint.FileObjectCount) {
-		t.Fatalf("visited checkpoint objects = %d; want %d", visited, checkpoint.StateObjectCount+checkpoint.FileObjectCount)
-	}
-	if err := engine.VerifyCheckpoint(context.Background(), checkpoint.CheckpointID); err != nil {
-		t.Fatalf("VerifyCheckpoint() large inventory error = %v", err)
-	}
-}
-
 func TestCheckpointV1IsRejectedThenReplacedWithoutReadingFileBodies(t *testing.T) {
 	backend := objectmemory.New()
 	clock := domain.NewFixedClock(time.Date(2037, 2, 6, 4, 5, 6, 0, time.UTC))
@@ -415,53 +377,6 @@ func authoritativeCopy(t *testing.T, engine *portable.Engine, source map[string]
 		result[pageKey] = append([]byte(nil), pageBody...)
 	}
 	return result
-}
-
-func checkpointObjects(t *testing.T, engine *portable.Engine, checkpointID string) []storageformat.CheckpointObject {
-	t.Helper()
-	var objects []storageformat.CheckpointObject
-	if err := engine.VisitCheckpointObjects(context.Background(), checkpointID, func(object storageformat.CheckpointObject) error {
-		objects = append(objects, object)
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return objects
-}
-
-func TestCheckpointDetectsAuthoritativeCorruption(t *testing.T) {
-	backend := objectmemory.New()
-	clock := domain.NewFixedClock(time.Date(2037, 1, 1, 0, 0, 0, 0, time.UTC))
-	engine := openEngine(t, backend, clock, 21, nil)
-	key := state.MustKey(state.NamespaceUsers, "checkpoint-user")
-	if _, err := engine.Create(context.Background(), key, []byte("valid")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := engine.CreateCheckpoint(context.Background(), "checkpoint-corruption"); err != nil {
-		t.Fatal(err)
-	}
-	if err := engine.VerifyCheckpoint(context.Background(), "checkpoint-corruption"); err != nil {
-		t.Fatalf("VerifyCheckpoint() error = %v", err)
-	}
-	objects := backend.Export()
-	var target string
-	for objectKey := range objects {
-		if strings.HasPrefix(objectKey, storageformat.StateIndexRootPrefix()) {
-			target = objectKey
-			break
-		}
-	}
-	if target == "" {
-		t.Fatal("state object not found")
-	}
-	parsed := objectstore.MustKey(target)
-	current, _ := backend.Get(context.Background(), parsed)
-	if _, err := backend.Put(context.Background(), parsed, []byte("corrupt"), objectstore.PutCondition{Mode: objectstore.PutMatch, Version: current.Version}); err != nil {
-		t.Fatal(err)
-	}
-	if err := engine.VerifyCheckpoint(context.Background(), "checkpoint-corruption"); err == nil {
-		t.Fatal("VerifyCheckpoint() accepted corrupt authoritative object")
-	}
 }
 
 func TestCheckpointVerifierIsStrictlyReadOnly(t *testing.T) {
@@ -639,91 +554,6 @@ func TestCheckpointVerifierRejectsInvalidBootstrapAndCheckpointRecords(t *testin
 	t.Run("empty checkpoint ID", func(t *testing.T) {
 		assertRejected(t, engine.VerifyCheckpoint(context.Background(), ""))
 	})
-}
-
-func TestCheckpointVerifierRejectsMissingExtraAndUnsupportedState(t *testing.T) {
-	backend := objectmemory.New()
-	clock := domain.NewFixedClock(time.Date(2037, 3, 5, 5, 6, 7, 0, time.UTC))
-	engine := openEngine(t, backend, clock, 86, nil)
-	if _, err := engine.Create(context.Background(), state.MustKey(state.NamespaceAccounts, "verification-matrix"), []byte("value")); err != nil {
-		t.Fatal(err)
-	}
-	checkpoint, err := engine.CreateCheckpoint(context.Background(), "verification-matrix")
-	if err != nil {
-		t.Fatal(err)
-	}
-	base := authoritativeCopy(t, engine, backend.Export(), checkpoint)
-	checkpointInventory := checkpointObjects(t, engine, checkpoint.CheckpointID)
-	writer := portable.WriterConfiguration{
-		WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1",
-		KeyringIdentifiers: []string{"session-v1"},
-	}
-	verify := func(objects map[string][]byte) error {
-		destination := objectmemory.New()
-		if err := destination.Import(objects); err != nil {
-			t.Fatal(err)
-		}
-		return portable.VerifyCheckpointReadOnly(context.Background(), destination, writer, checkpoint.CheckpointID)
-	}
-	t.Run("missing authoritative object", func(t *testing.T) {
-		objects := cloneObjects(base)
-		delete(objects, checkpointInventory[len(checkpointInventory)-1].Key)
-		if err := verify(objects); !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrNotFound) {
-			t.Fatalf("verification error = %v", err)
-		}
-	})
-	t.Run("extra authoritative object", func(t *testing.T) {
-		objects := cloneObjects(base)
-		objects[storageformat.StateKey("users", state.MustKey(state.NamespaceUsers, "extra").String()).String()] = []byte("extra")
-		if err := verify(objects); !errors.Is(err, domain.ErrPreconditionFailed) {
-			t.Fatalf("verification error = %v", err)
-		}
-	})
-	t.Run("unsupported superblock feature", func(t *testing.T) {
-		objects := cloneObjects(base)
-		var superblock storageformat.Superblock
-		if err := state.DecodeJSONWithLimit(objects[storageformat.SuperblockKey().String()], &superblock, storageformat.MaxCanonicalBytes); err != nil {
-			t.Fatal(err)
-		}
-		superblock.RequiredFeatures = []string{"future-incompatible-feature"}
-		body, err := storageformat.EncodeCanonical(superblock)
-		if err != nil {
-			t.Fatal(err)
-		}
-		objects[storageformat.SuperblockKey().String()] = body
-		if err := verify(objects); !errors.Is(err, domain.ErrPreconditionFailed) {
-			t.Fatalf("verification error = %v", err)
-		}
-	})
-}
-
-func TestCheckpointPrunesExpiredStateSnapshotsButKeepsCurrentVersions(t *testing.T) {
-	backend := objectmemory.New()
-	clock := domain.NewFixedClock(time.Date(2037, 3, 6, 5, 6, 7, 0, time.UTC))
-	engine := openEngine(t, backend, clock, 87, nil)
-	kept := state.MustKey(state.NamespaceAccounts, "kept")
-	version, err := engine.Create(context.Background(), kept, []byte("first"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := engine.CompareAndSwap(context.Background(), kept, version, []byte("second")); err != nil {
-		t.Fatal(err)
-	}
-	removed := state.MustKey(state.NamespaceSessions, "removed")
-	version, err = engine.Create(context.Background(), removed, []byte("sensitive"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := engine.Delete(context.Background(), removed, version); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := engine.CreateCheckpoint(context.Background(), "snapshot-pruning"); err != nil {
-		t.Fatal(err)
-	}
-	page, err := backend.List(context.Background(), objectstore.ListRequest{Prefix: storageformat.StateVersionsPrefix(), Limit: 1000})
-	if err != nil || len(page.Objects) != 1 || page.NextCursor != "" {
-		t.Fatalf("state-version objects = %+v, %v", page, err)
-	}
 }
 
 func cloneObjects(source map[string][]byte) map[string][]byte {

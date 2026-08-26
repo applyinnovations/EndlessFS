@@ -63,6 +63,9 @@ const (
 type Event struct {
 	Role          Role
 	Kind          RequestKind
+	Operation     string
+	Subsystem     string
+	ParallelGroup string
 	Target        string
 	RequestBytes  int64
 	ResponseBytes int64
@@ -124,21 +127,31 @@ func (m Model) Provider() string { return m.provider }
 func (m Model) Profile() string  { return m.profile }
 
 type Totals struct {
-	Requests    int64
-	CostPicoUSD int64
-	P50Micros   int64
-	P95Micros   int64
-	P99Micros   int64
-	ByRole      map[Role]RoleTotals
-	ByKind      map[RequestKind]RoleTotals
+	Requests          int64
+	FailedRequests    int64
+	RequestBytes      int64
+	ResponseBytes     int64
+	CostPicoUSD       int64
+	P50Micros         int64
+	P95Micros         int64
+	P99Micros         int64
+	CriticalP50Micros int64
+	CriticalP95Micros int64
+	CriticalP99Micros int64
+	ByRole            map[Role]RoleTotals
+	ByKind            map[RequestKind]RoleTotals
+	BySubsystem       map[string]RoleTotals
 }
 
 type RoleTotals struct {
-	Requests    int64
-	CostPicoUSD int64
-	P50Micros   int64
-	P95Micros   int64
-	P99Micros   int64
+	Requests       int64
+	FailedRequests int64
+	RequestBytes   int64
+	ResponseBytes  int64
+	CostPicoUSD    int64
+	P50Micros      int64
+	P95Micros      int64
+	P99Micros      int64
 }
 
 func ParseModel(pricingBody, latencyBody []byte) (Model, error) {
@@ -206,9 +219,11 @@ func ParseModel(pricingBody, latencyBody []byte) (Model, error) {
 }
 
 func (m Model) Estimate(events []Event) (Totals, error) {
-	totals := Totals{ByRole: make(map[Role]RoleTotals), ByKind: make(map[RequestKind]RoleTotals)}
+	totals := Totals{ByRole: make(map[Role]RoleTotals), ByKind: make(map[RequestKind]RoleTotals), BySubsystem: make(map[string]RoleTotals)}
+	criticalGroups := make(map[string]RoleTotals)
+	serialSequence := 0
 	for _, event := range events {
-		if !event.Role.valid() || event.RequestBytes < 0 || event.ResponseBytes < 0 {
+		if !event.Role.valid() || event.RequestBytes < 0 || event.ResponseBytes < 0 || !validTraceLabel(event.Operation) || !validTraceLabel(event.Subsystem) || !validTraceLabel(event.ParallelGroup) {
 			return Totals{}, errors.New("provider request event is invalid")
 		}
 		price, ok := m.prices[event.Kind]
@@ -255,23 +270,60 @@ func (m Model) Estimate(events []Event) (Totals, error) {
 		if p50Err != nil || p95Err != nil || p99Err != nil {
 			return Totals{}, fmt.Errorf("provider request %q latency overflows", event.Kind)
 		}
-		addition := RoleTotals{Requests: 1, CostPicoUSD: cost, P50Micros: p50, P95Micros: p95, P99Micros: p99}
-		if err := addRoleTotals(&totals, event.Role, event.Kind, addition); err != nil {
+		failed := int64(0)
+		if event.Failed {
+			failed = 1
+		}
+		addition := RoleTotals{Requests: 1, FailedRequests: failed, RequestBytes: event.RequestBytes, ResponseBytes: event.ResponseBytes, CostPicoUSD: cost, P50Micros: p50, P95Micros: p95, P99Micros: p99}
+		subsystem := event.Subsystem
+		if subsystem == "" {
+			subsystem = "unattributed"
+		}
+		if err := addRoleTotals(&totals, event.Role, event.Kind, subsystem, addition); err != nil {
 			return Totals{}, err
+		}
+		group := event.ParallelGroup
+		if group == "" {
+			serialSequence++
+			group = fmt.Sprintf("serial-%d", serialSequence)
+		} else if event.Operation != "" {
+			group = event.Operation + "\x00" + group
+		}
+		current := criticalGroups[group]
+		current.P50Micros = max(current.P50Micros, p50)
+		current.P95Micros = max(current.P95Micros, p95)
+		current.P99Micros = max(current.P99Micros, p99)
+		criticalGroups[group] = current
+	}
+	for _, group := range criticalGroups {
+		var err error
+		if totals.CriticalP50Micros, err = checkedAdd(totals.CriticalP50Micros, group.P50Micros); err != nil {
+			return Totals{}, errors.New("provider economics critical-path totals overflow")
+		}
+		if totals.CriticalP95Micros, err = checkedAdd(totals.CriticalP95Micros, group.P95Micros); err != nil {
+			return Totals{}, errors.New("provider economics critical-path totals overflow")
+		}
+		if totals.CriticalP99Micros, err = checkedAdd(totals.CriticalP99Micros, group.P99Micros); err != nil {
+			return Totals{}, errors.New("provider economics critical-path totals overflow")
 		}
 	}
 	return totals, nil
 }
 
-func addRoleTotals(totals *Totals, role Role, kind RequestKind, addition RoleTotals) error {
+func addRoleTotals(totals *Totals, role Role, kind RequestKind, subsystem string, addition RoleTotals) error {
 	currentRole := totals.ByRole[role]
 	currentKind := totals.ByKind[kind]
-	values := []*int64{&totals.Requests, &totals.CostPicoUSD, &totals.P50Micros, &totals.P95Micros, &totals.P99Micros,
-		&currentRole.Requests, &currentRole.CostPicoUSD, &currentRole.P50Micros, &currentRole.P95Micros, &currentRole.P99Micros,
-		&currentKind.Requests, &currentKind.CostPicoUSD, &currentKind.P50Micros, &currentKind.P95Micros, &currentKind.P99Micros}
-	additions := []int64{addition.Requests, addition.CostPicoUSD, addition.P50Micros, addition.P95Micros, addition.P99Micros,
-		addition.Requests, addition.CostPicoUSD, addition.P50Micros, addition.P95Micros, addition.P99Micros,
-		addition.Requests, addition.CostPicoUSD, addition.P50Micros, addition.P95Micros, addition.P99Micros}
+	currentSubsystem := totals.BySubsystem[subsystem]
+	values := []*int64{
+		&totals.Requests, &totals.FailedRequests, &totals.RequestBytes, &totals.ResponseBytes, &totals.CostPicoUSD, &totals.P50Micros, &totals.P95Micros, &totals.P99Micros,
+		&currentRole.Requests, &currentRole.FailedRequests, &currentRole.RequestBytes, &currentRole.ResponseBytes, &currentRole.CostPicoUSD, &currentRole.P50Micros, &currentRole.P95Micros, &currentRole.P99Micros,
+		&currentKind.Requests, &currentKind.FailedRequests, &currentKind.RequestBytes, &currentKind.ResponseBytes, &currentKind.CostPicoUSD, &currentKind.P50Micros, &currentKind.P95Micros, &currentKind.P99Micros,
+		&currentSubsystem.Requests, &currentSubsystem.FailedRequests, &currentSubsystem.RequestBytes, &currentSubsystem.ResponseBytes, &currentSubsystem.CostPicoUSD, &currentSubsystem.P50Micros, &currentSubsystem.P95Micros, &currentSubsystem.P99Micros,
+	}
+	additions := make([]int64, 0, len(values))
+	for range 4 {
+		additions = append(additions, addition.Requests, addition.FailedRequests, addition.RequestBytes, addition.ResponseBytes, addition.CostPicoUSD, addition.P50Micros, addition.P95Micros, addition.P99Micros)
+	}
 	for index := range values {
 		next, err := checkedAdd(*values[index], additions[index])
 		if err != nil {
@@ -281,7 +333,12 @@ func addRoleTotals(totals *Totals, role Role, kind RequestKind, addition RoleTot
 	}
 	totals.ByRole[role] = currentRole
 	totals.ByKind[kind] = currentKind
+	totals.BySubsystem[subsystem] = currentSubsystem
 	return nil
+}
+
+func validTraceLabel(value string) bool {
+	return len(value) <= 128 && !strings.ContainsAny(value, "\r\n\x00")
 }
 
 func decodeStrict(body []byte, target any) error {

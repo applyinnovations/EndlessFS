@@ -756,11 +756,10 @@ func TestIntegrationCrossUserPrivateEndpointMatrix(t *testing.T) {
 	}
 
 	attackerTrash := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"paths":["/foreign/owned.txt"]}`, attackerCookies, driveMutationHeaders(env.csrf.Value, "cross-attack-trash-00001"))
-	var deniedBatch drive.BatchResult
-	decodeResponse(t, attackerTrash, &deniedBatch)
-	if attackerTrash.Code != http.StatusAccepted || len(deniedBatch.Items) != 1 || deniedBatch.Items[0].ErrorKind != domain.ErrorNotFound {
+	if attackerTrash.Code != http.StatusNotFound {
 		t.Fatalf("cross-user trash result = %d %s", attackerTrash.Code, attackerTrash.Body.String())
 	}
+	assertProblem(t, attackerTrash)
 	shares := performRequest(t, env.handler, http.MethodGet, "/api/v1/shares", "", "", []*http.Cookie{env.session}, nil)
 	if shares.Code != http.StatusOK || bytes.Contains(shares.Body.Bytes(), []byte(ownerShare.Share.ShareID)) {
 		t.Fatalf("attacker share listing leaked owner record: %d %s", shares.Code, shares.Body.String())

@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"math"
 
+	"github.com/applyinnovations/endlessfs/internal/auth"
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/model"
 	"github.com/applyinnovations/endlessfs/internal/secret"
@@ -61,28 +63,98 @@ func (r *Repository) Accounts(ctx context.Context) ([]model.Account, error) {
 	return listRecords[model.Account](ctx, r.store, state.MustPrefix(state.NamespaceAccounts))
 }
 
-func credentialKey(credentialID string) state.Key {
-	return state.MustKey(state.NamespaceCredentials, secret.Hash(credentialID))
+func credentialKey(userID domain.UserID, credentialID string) state.Key {
+	return state.MustKey(state.NamespaceCredentials, userID.String(), secret.Hash(credentialID))
 }
 
 func (r *Repository) CreateCredential(ctx context.Context, record model.Credential) error {
-	return createRecord(ctx, r.store, credentialKey(record.CredentialID), &record)
+	return createRecord(ctx, r.store, credentialKey(record.UserID, record.CredentialID), &record)
 }
 
-func (r *Repository) Credential(ctx context.Context, credentialID string) (model.Credential, state.Version, error) {
-	return getRecord[model.Credential](ctx, r.store, credentialKey(credentialID))
+func (r *Repository) Credential(ctx context.Context, userID domain.UserID, credentialID string) (model.Credential, state.Version, error) {
+	return getRecord[model.Credential](ctx, r.store, credentialKey(userID, credentialID))
 }
 
-func (r *Repository) CredentialByRawID(ctx context.Context, rawID []byte) (model.Credential, state.Version, error) {
-	return r.Credential(ctx, base64.RawURLEncoding.EncodeToString(rawID))
+func (r *Repository) CredentialByRawID(ctx context.Context, userID domain.UserID, rawID []byte) (model.Credential, state.Version, error) {
+	return r.Credential(ctx, userID, base64.RawURLEncoding.EncodeToString(rawID))
 }
 
 func (r *Repository) UpdateCredential(ctx context.Context, record model.Credential, version state.Version) (state.Version, error) {
-	return swapRecord(ctx, r.store, credentialKey(record.CredentialID), version, &record)
+	return swapRecord(ctx, r.store, credentialKey(record.UserID, record.CredentialID), version, &record)
 }
 
-func (r *Repository) DeleteCredential(ctx context.Context, credentialID string, version state.Version) error {
-	return r.store.Delete(ctx, credentialKey(credentialID), version)
+func (r *Repository) DeleteCredential(ctx context.Context, userID domain.UserID, credentialID string, version state.Version) error {
+	return r.store.Delete(ctx, credentialKey(userID, credentialID), version)
+}
+
+func (r *Repository) atomicStore() (state.AtomicStore, error) {
+	store, ok := r.store.(state.AtomicStore)
+	if !ok {
+		return nil, domain.NewError(domain.ErrorUnavailable, "atomic identity state is required")
+	}
+	return store, nil
+}
+
+func (r *Repository) transactionalStore() (state.TransactionalStore, error) {
+	store, ok := r.store.(state.TransactionalStore)
+	if !ok {
+		return nil, domain.NewError(domain.ErrorUnavailable, "transactional identity state is required")
+	}
+	return store, nil
+}
+
+// RemoveCredentialAtomic changes the credential index and credential record
+// through one owner-identity visibility point. A crash can therefore expose
+// neither a dangling index nor an unindexed credential.
+func (r *Repository) RemoveCredentialAtomic(ctx context.Context, userID domain.UserID, credentialID string) error {
+	store, err := r.atomicStore()
+	if err != nil {
+		return err
+	}
+	for attempts := 0; attempts < 8; attempts++ {
+		index, indexVersion, err := r.CredentialIndex(ctx, userID)
+		if err != nil {
+			return err
+		}
+		if len(index.CredentialIDs) <= 1 {
+			return domain.NewError(domain.ErrorPreconditionFailed, "the final passkey cannot be removed")
+		}
+		found := false
+		updated := make([]string, 0, len(index.CredentialIDs)-1)
+		for _, existingID := range index.CredentialIDs {
+			if existingID == credentialID {
+				found = true
+				continue
+			}
+			updated = append(updated, existingID)
+		}
+		if !found {
+			return domain.NewError(domain.ErrorNotFound, "passkey not found")
+		}
+		credential, credentialVersion, err := r.Credential(ctx, userID, credentialID)
+		if err != nil || credential.UserID != userID {
+			return domain.NewError(domain.ErrorInvalid, "credential index is inconsistent")
+		}
+		index.CredentialIDs = updated
+		indexBody, err := state.EncodeJSON(&index)
+		if err != nil {
+			return err
+		}
+		_, err = store.Mutate(ctx, state.Mutation{
+			ID: "credential-remove:" + secret.Hash(userID.String()+"\x00"+credentialID+"\x00"+string(indexVersion)+"\x00"+string(credentialVersion)),
+			Changes: []state.Change{
+				{Key: credentialIndexKey(userID), Requirement: state.RequirementPresent, ExpectedVersion: indexVersion, Data: indexBody},
+				{Key: credentialKey(userID, credentialID), Requirement: state.RequirementPresent, ExpectedVersion: credentialVersion, Delete: true},
+			},
+		})
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
+			return err
+		}
+	}
+	return domain.NewError(domain.ErrorConflict, "passkeys changed concurrently")
 }
 
 func (r *Repository) Credentials(ctx context.Context, userID domain.UserID) ([]model.Credential, error) {
@@ -92,7 +164,7 @@ func (r *Repository) Credentials(ctx context.Context, userID domain.UserID) ([]m
 	}
 	owned := make([]model.Credential, 0, len(index.CredentialIDs))
 	for _, credentialID := range index.CredentialIDs {
-		credential, _, err := r.Credential(ctx, credentialID)
+		credential, _, err := r.Credential(ctx, userID, credentialID)
 		if err != nil || credential.UserID != userID {
 			return nil, domain.NewError(domain.ErrorInternal, "credential index is inconsistent")
 		}
@@ -102,7 +174,7 @@ func (r *Repository) Credentials(ctx context.Context, userID domain.UserID) ([]m
 }
 
 func credentialIndexKey(userID domain.UserID) state.Key {
-	return state.MustKey(state.NamespaceCredentials, "user-index", userID.String())
+	return state.MustKey(state.NamespaceCredentials, userID.String(), "index")
 }
 
 func (r *Repository) CredentialIndex(ctx context.Context, userID domain.UserID) (model.CredentialIndex, state.Version, error) {
@@ -118,53 +190,125 @@ func (r *Repository) UpdateCredentialIndex(ctx context.Context, record model.Cre
 }
 
 func (r *Repository) CreateCeremony(ctx context.Context, record model.Ceremony) error {
-	return createRecord(ctx, r.store, state.MustKey(state.NamespaceCeremonies, secret.Hash(record.CeremonyID)), &record)
+	key, owner, err := ceremonyKey(record.CeremonyID)
+	if err != nil || record.UserID != nil && owner != *record.UserID || record.UserID == nil && owner.Valid() {
+		return domain.NewError(domain.ErrorInvalid, "ceremony owner binding mismatch")
+	}
+	return createRecord(ctx, r.store, key, &record)
 }
 
 func (r *Repository) Ceremony(ctx context.Context, ceremonyID string) (model.Ceremony, state.Version, error) {
-	return getRecord[model.Ceremony](ctx, r.store, state.MustKey(state.NamespaceCeremonies, secret.Hash(ceremonyID)))
+	key, _, err := ceremonyKey(ceremonyID)
+	if err != nil {
+		return model.Ceremony{}, "", err
+	}
+	return getRecord[model.Ceremony](ctx, r.store, key)
 }
 
 func (r *Repository) UpdateCeremony(ctx context.Context, record model.Ceremony, version state.Version) (state.Version, error) {
-	return swapRecord(ctx, r.store, state.MustKey(state.NamespaceCeremonies, secret.Hash(record.CeremonyID)), version, &record)
+	key, owner, err := ceremonyKey(record.CeremonyID)
+	if err != nil || record.UserID != nil && owner != *record.UserID || record.UserID == nil && owner.Valid() {
+		return "", domain.NewError(domain.ErrorInvalid, "ceremony owner binding mismatch")
+	}
+	return swapRecord(ctx, r.store, key, version, &record)
+}
+
+func ceremonyKey(ceremonyID string) (state.Key, domain.UserID, error) {
+	if owner, _, err := domain.ParseScopedOpaqueID(ceremonyID); err == nil {
+		return state.MustKey(state.NamespaceCeremonies, "owner", owner.String(), secret.Hash(ceremonyID)), owner, nil
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(ceremonyID)
+	if err != nil || len(decoded) < 16 || base64.RawURLEncoding.EncodeToString(decoded) != ceremonyID {
+		return state.Key{}, domain.UserID{}, domain.NewError(domain.ErrorInvalid, "invalid ceremony ID")
+	}
+	return state.MustKey(state.NamespaceCeremonies, "capability", secret.Hash(ceremonyID)), domain.UserID{}, nil
 }
 
 func (r *Repository) CreateSession(ctx context.Context, rawToken string, record model.Session) error {
-	return createRecord(ctx, r.store, state.MustKey(state.NamespaceSessions, secret.Hash(rawToken)), &record)
+	owner, _, err := secret.ParseScopedBearerToken(rawToken)
+	if err != nil || owner != record.UserID {
+		return domain.NewError(domain.ErrorInvalid, "session token owner mismatch")
+	}
+	return createRecord(ctx, r.store, sessionKey(owner, rawToken), &record)
 }
 
 func (r *Repository) Session(ctx context.Context, rawToken string) (model.Session, state.Version, error) {
-	return getRecord[model.Session](ctx, r.store, state.MustKey(state.NamespaceSessions, secret.Hash(rawToken)))
+	owner, _, err := secret.ParseScopedBearerToken(rawToken)
+	if err != nil {
+		return model.Session{}, "", domain.NewError(domain.ErrorNotFound, "session not found")
+	}
+	return getRecord[model.Session](ctx, r.store, sessionKey(owner, rawToken))
 }
 
 func (r *Repository) DeleteSession(ctx context.Context, rawToken string, version state.Version) error {
-	return r.store.Delete(ctx, state.MustKey(state.NamespaceSessions, secret.Hash(rawToken)), version)
+	owner, _, err := secret.ParseScopedBearerToken(rawToken)
+	if err != nil {
+		return domain.NewError(domain.ErrorNotFound, "session not found")
+	}
+	return r.store.Delete(ctx, sessionKey(owner, rawToken), version)
+}
+
+func (r *Repository) RotateSessionAtomic(ctx context.Context, oldToken string, oldVersion state.Version, newToken string, record model.Session) error {
+	oldOwner, _, oldErr := secret.ParseScopedBearerToken(oldToken)
+	newOwner, _, newErr := secret.ParseScopedBearerToken(newToken)
+	if oldErr != nil || newErr != nil || oldOwner != newOwner || newOwner != record.UserID || oldVersion == "" {
+		return domain.NewError(domain.ErrorInvalid, "session rotation owner binding mismatch")
+	}
+	body, err := state.EncodeJSON(&record)
+	if err != nil {
+		return err
+	}
+	store, err := r.atomicStore()
+	if err != nil {
+		return err
+	}
+	_, err = store.Mutate(ctx, state.Mutation{
+		ID: "session-rotate:" + secret.Hash(oldToken+"\x00"+newToken),
+		Changes: []state.Change{
+			{Key: sessionKey(oldOwner, oldToken), Requirement: state.RequirementPresent, ExpectedVersion: oldVersion, Delete: true},
+			{Key: sessionKey(newOwner, newToken), Requirement: state.RequirementAbsent, Data: body},
+		},
+	})
+	return err
 }
 
 func (r *Repository) RevokeUserSessions(ctx context.Context, userID domain.UserID) error {
-	prefix := state.MustPrefix(state.NamespaceSessions)
-	request := state.PageRequest{Limit: 200}
-	for {
-		page, err := r.store.List(ctx, prefix, request)
+	atomic, ok := r.store.(state.AtomicStore)
+	if !ok {
+		return domain.NewError(domain.ErrorUnavailable, "atomic identity state is required")
+	}
+	for attempts := 0; attempts < 8; attempts++ {
+		account, version, err := r.Account(ctx, userID)
 		if err != nil {
 			return err
 		}
-		for _, item := range page.Items {
-			var session model.Session
-			if err := state.DecodeJSON(item.Value.Data, &session); err != nil {
-				return err
-			}
-			if session.UserID == userID {
-				if err := r.store.Delete(ctx, item.Key, item.Value.Version); err != nil && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
-					return err
-				}
-			}
+		if account.AuthEpoch == math.MaxUint64 {
+			return domain.NewError(domain.ErrorInvalid, "account authentication epoch is exhausted")
 		}
-		if page.NextCursor == "" {
+		if account.AuthEpoch == 0 {
+			account.AuthEpoch = 1
+		}
+		account.AuthEpoch++
+		body, err := state.EncodeJSON(&account)
+		if err != nil {
+			return err
+		}
+		_, err = atomic.Mutate(ctx, state.Mutation{
+			ID:      "revoke-sessions-" + secret.Hash(userID.String()+"\x00"+string(version)),
+			Changes: []state.Change{{Key: state.MustKey(state.NamespaceAccounts, userID.String()), Requirement: state.RequirementPresent, ExpectedVersion: version, Data: body}},
+		})
+		if err == nil {
 			return nil
 		}
-		request.Cursor = page.NextCursor
+		if !errors.Is(err, domain.ErrPreconditionFailed) {
+			return err
+		}
 	}
+	return domain.NewError(domain.ErrorConflict, "account changed concurrently")
+}
+
+func sessionKey(owner domain.UserID, rawToken string) state.Key {
+	return state.MustKey(state.NamespaceSessions, owner.String(), secret.Hash(rawToken))
 }
 
 func (r *Repository) CreateInvite(ctx context.Context, record model.Invite) error {
@@ -192,19 +336,23 @@ func (r *Repository) InviteByID(ctx context.Context, inviteID string) (model.Inv
 }
 
 func (r *Repository) CreateRecovery(ctx context.Context, record model.Recovery) error {
-	return createRecord(ctx, r.store, state.MustKey(state.NamespaceRecoveries, record.TokenHash), &record)
+	return createRecord(ctx, r.store, state.MustKey(state.NamespaceRecoveries, record.TargetUserID.String(), record.TokenHash), &record)
 }
 
 func (r *Repository) RecoveryByToken(ctx context.Context, rawToken string) (model.Recovery, state.Version, error) {
-	return r.RecoveryByHash(ctx, secret.Hash(rawToken))
+	owner, _, err := secret.ParseScopedBearerToken(rawToken)
+	if err != nil {
+		return model.Recovery{}, "", domain.NewError(domain.ErrorNotFound, "recovery not found")
+	}
+	return r.RecoveryByHash(ctx, owner, secret.Hash(rawToken))
 }
 
-func (r *Repository) RecoveryByHash(ctx context.Context, tokenHash string) (model.Recovery, state.Version, error) {
-	return getRecord[model.Recovery](ctx, r.store, state.MustKey(state.NamespaceRecoveries, tokenHash))
+func (r *Repository) RecoveryByHash(ctx context.Context, owner domain.UserID, tokenHash string) (model.Recovery, state.Version, error) {
+	return getRecord[model.Recovery](ctx, r.store, state.MustKey(state.NamespaceRecoveries, owner.String(), tokenHash))
 }
 
 func (r *Repository) UpdateRecovery(ctx context.Context, record model.Recovery, version state.Version) (state.Version, error) {
-	return swapRecord(ctx, r.store, state.MustKey(state.NamespaceRecoveries, record.TokenHash), version, &record)
+	return swapRecord(ctx, r.store, state.MustKey(state.NamespaceRecoveries, record.TargetUserID.String(), record.TokenHash), version, &record)
 }
 
 func (r *Repository) AdminRoles(ctx context.Context) (model.AdminRoles, state.Version, error) {
@@ -240,19 +388,67 @@ func (r *Repository) CreateFirstAccountMarker(ctx context.Context, record model.
 }
 
 func (r *Repository) CreateRegistrationOperation(ctx context.Context, record model.RegistrationOperation) error {
-	return createRecord(ctx, r.store, state.MustKey(state.NamespaceOperations, "registration", record.OperationID), &record)
+	return createRecord(ctx, r.store, state.MustKey(state.NamespaceOperations, "identity", record.UserID.String(), record.OperationID), &record)
 }
 
-func (r *Repository) RegistrationOperation(ctx context.Context, operationID string) (model.RegistrationOperation, state.Version, error) {
-	return getRecord[model.RegistrationOperation](ctx, r.store, state.MustKey(state.NamespaceOperations, "registration", operationID))
+func (r *Repository) RegistrationOperation(ctx context.Context, owner domain.UserID, operationID string) (model.RegistrationOperation, state.Version, error) {
+	return getRecord[model.RegistrationOperation](ctx, r.store, state.MustKey(state.NamespaceOperations, "identity", owner.String(), operationID))
+}
+
+func authenticationOperationKey(owner domain.UserID, operationID string) state.Key {
+	return state.MustKey(state.NamespaceOperations, "identity", owner.String(), "authentication", operationID)
+}
+
+func (r *Repository) AuthenticationOperation(ctx context.Context, owner domain.UserID, operationID string) (model.AuthenticationOperation, state.Version, error) {
+	return getRecord[model.AuthenticationOperation](ctx, r.store, authenticationOperationKey(owner, operationID))
+}
+
+// CommitAuthenticationAtomic consumes the one-time ceremony and publishes the
+// credential counter, replay-safe operation outcome, and new session together.
+// The unchanged account write is a commit-time enabled/auth-epoch guard.
+func (r *Repository) CommitAuthenticationAtomic(ctx context.Context, ceremony model.Ceremony, ceremonyVersion state.Version, operation model.AuthenticationOperation, credential model.Credential, credentialVersion state.Version, account model.Account, accountVersion state.Version, issued auth.IssuedSession) error {
+	ceremonyKeyValue, _, err := ceremonyKey(ceremony.CeremonyID)
+	if err != nil || ceremony.Type != model.CeremonyAuthentication || ceremony.ConsumedAt == nil || ceremony.OperationID != operation.OperationID || ceremony.UserID == nil || *ceremony.UserID != operation.UserID || operation.UserID != credential.UserID || operation.UserID != account.UserID || issued.Record.UserID != operation.UserID || ceremonyVersion == "" || credentialVersion == "" || accountVersion == "" {
+		return domain.NewError(domain.ErrorInvalid, "authentication transition binding mismatch")
+	}
+	changes := make([]state.Change, 0, 5)
+	appendRecord := func(key state.Key, requirement state.Requirement, version state.Version, record any) error {
+		body, encodeErr := state.EncodeJSON(record)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		changes = append(changes, state.Change{Key: key, Requirement: requirement, ExpectedVersion: version, Data: body})
+		return nil
+	}
+	if err := appendRecord(ceremonyKeyValue, state.RequirementPresent, ceremonyVersion, &ceremony); err != nil {
+		return err
+	}
+	if err := appendRecord(authenticationOperationKey(operation.UserID, operation.OperationID), state.RequirementAbsent, "", &operation); err != nil {
+		return err
+	}
+	if err := appendRecord(credentialKey(operation.UserID, operation.CredentialID), state.RequirementPresent, credentialVersion, &credential); err != nil {
+		return err
+	}
+	if err := appendRecord(state.MustKey(state.NamespaceAccounts, operation.UserID.String()), state.RequirementPresent, accountVersion, &account); err != nil {
+		return err
+	}
+	if err := appendRecord(sessionKey(operation.UserID, issued.Token.Reveal()), state.RequirementAbsent, "", &issued.Record); err != nil {
+		return err
+	}
+	store, err := r.transactionalStore()
+	if err != nil {
+		return err
+	}
+	_, err = store.Transact(ctx, state.Mutation{ID: "authentication:" + operation.OperationID, Changes: changes})
+	return err
 }
 
 func (r *Repository) UpdateRegistrationOperation(ctx context.Context, record model.RegistrationOperation, version state.Version) (state.Version, error) {
-	return swapRecord(ctx, r.store, state.MustKey(state.NamespaceOperations, "registration", record.OperationID), version, &record)
+	return swapRecord(ctx, r.store, state.MustKey(state.NamespaceOperations, "identity", record.UserID.String(), record.OperationID), version, &record)
 }
 
 func idempotencyKey(owner domain.UserID, keyHash string) state.Key {
-	return state.MustKey(state.NamespaceIdempotency, owner.String(), keyHash)
+	return state.MustKey(state.NamespaceIdempotency, "identity", owner.String(), keyHash)
 }
 
 func (r *Repository) CreateIdempotency(ctx context.Context, record model.IdempotencyRecord) error {

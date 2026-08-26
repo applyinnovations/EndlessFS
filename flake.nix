@@ -224,6 +224,16 @@
         go test ./internal/theme -run '^$' -fuzz '^FuzzThemeBoundaries$' -fuzztime "$fuzztime"
         go test ./internal/preview/imagegen -run '^$' -fuzz '^FuzzGeneratorMalformed$' -fuzztime "$fuzztime"
       '';
+      raceTestCommand = ''
+        # The migration transport matrix deterministically restarts the entire
+        # schema chain at every provider boundary. Run that exhaustive test in
+        # its own package process so race instrumentation cannot make it
+        # contend with the portable package's parallel fault schedules. The
+        # second invocation runs every remaining repository test exactly once.
+        exhaustive_migration_test='^TestMigrationRecoversFromEveryObjectTransportInterruption$'
+        go test -race -timeout=30m ./internal/portable -run "$exhaustive_migration_test"
+        go test -race -timeout=30m ./... -skip "$exhaustive_migration_test"
+      '';
     in
     {
       packages = forAllSystems (
@@ -649,7 +659,7 @@
               exit 2
             fi
             export ENDLESSFS_MIGRATION_FIXTURE_PRODUCER_COMMIT="$1"
-            exec go test ./cmd/endlessfs -run '^TestGenerateSchema007MigrationFixtures$' -count=1
+            exec go test ./cmd/endlessfs -run '^TestGenerateSchema009MigrationFixtures$' -count=1
           '';
 
           fmt =
@@ -705,7 +715,7 @@
 
           test-provider-budget = goTask "endlessfs-test-provider-budget" ''
             go test ./internal/providerbudget ./internal/objectstore/budgettest ./internal/objectstore/gcs -count=1
-            go test ./internal/portable ./internal/drive ./internal/preview/... -run 'ProviderBudget' -count=1
+            go test ./internal/portable ./internal/drive ./internal/identity ./internal/theme ./internal/httpapi ./internal/preview/... -run 'ProviderBudget' -count=1
           '';
           test-migration = mkTask "endlessfs-test-migration" (goTools ++ [ pkgs.gawk ]) ''
             export CGO_ENABLED=0
@@ -797,7 +807,7 @@
             export CGO_ENABLED=1
             export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
             export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
-            go test -race -timeout=30m ./...
+            ${raceTestCommand}
           '';
 
           test-fuzz = goTask "endlessfs-test-fuzz" ''
@@ -1121,7 +1131,10 @@
                 ${pipelinePolicyCommand}
                 touch "$out"
               '';
-          raceCheck = goCheck "race" "CGO_ENABLED=1 go test -race -timeout=30m ./..." [ pkgs.stdenv.cc ];
+          raceCheck = goCheck "race" ''
+            export CGO_ENABLED=1
+            ${raceTestCommand}
+          '' [ pkgs.stdenv.cc ];
           fuzzCheck = goCheck "fuzz" ''
             fuzztime=1000x
             ${fuzzSmokeCommand}

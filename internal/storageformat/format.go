@@ -34,6 +34,10 @@ const (
 	FeatureNamespaceSnapshots   = "persistent-namespace-snapshots-v1"
 	FeatureResumableOperations  = "resumable-operation-preparation-v1"
 	FeatureUserDirectoryCatalog = "user-addressable-duplicate-directories-v1"
+	FeatureConsistencyDomains   = "consistency-domains-v1"
+	FeatureOwnerNamespaceGraph  = "owner-namespace-graph-v1"
+	FeatureDerivedProjections   = "rebuildable-derived-projections-v1"
+	FeatureTransactionalState   = "transactional-state-domains-v1"
 )
 
 type Envelope struct {
@@ -443,9 +447,10 @@ type DirectoryEntry struct {
 type UploadState string
 
 const (
-	UploadActive    UploadState = "active"
-	UploadCompleted UploadState = "completed"
-	UploadAborted   UploadState = "aborted"
+	UploadInitializing UploadState = "initializing"
+	UploadActive       UploadState = "active"
+	UploadCompleted    UploadState = "completed"
+	UploadAborted      UploadState = "aborted"
 )
 
 type UploadRecord struct {

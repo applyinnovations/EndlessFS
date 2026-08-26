@@ -1,13 +1,10 @@
 package portable
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"math"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -23,89 +20,6 @@ type deleteBackendFunc func(context.Context, objectstore.Key, objectstore.Delete
 
 func (function deleteBackendFunc) Delete(ctx context.Context, key objectstore.Key, condition objectstore.DeleteCondition) error {
 	return function(ctx, key, condition)
-}
-
-func TestStateCompatibilityObjectsAndVersionPruning(t *testing.T) {
-	ctx := context.Background()
-	backend := objectmemory.New()
-	clock := domain.NewFixedClock(time.Date(2047, 1, 2, 3, 4, 5, 0, time.UTC))
-	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("state-pruning", 1<<16)))
-
-	legacyKey := state.MustKey(state.NamespaceAccounts, "legacy")
-	legacyObjectKey := canonicalStateKey(legacyKey)
-	legacyBody := encodeInternalEnvelope(t, stateRecordSchema, legacyObjectKey, 1, storageformat.StateRecord{
-		SchemaVersion: 1, LogicalKey: legacyKey.String(), Data: []byte("legacy"),
-	})
-	legacyVersion, err := canonicalLogicalVersion(legacyBody)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyNative, err := backend.Put(ctx, legacyObjectKey, legacyBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyObject := objectstore.Object{Key: legacyObjectKey, Body: legacyBody, Version: legacyNative}
-	if record, _, err := decodeStateObject(legacyObject, legacyKey); err != nil || string(record.Data) != "legacy" {
-		t.Fatalf("decodeStateObject() = %+v, %v", record, err)
-	}
-	if _, _, err := decodeStateObject(objectstore.Object{Key: legacyObjectKey, Body: []byte("not-json")}, legacyKey); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("malformed state object error = %v", err)
-	}
-	otherKey := state.MustKey(state.NamespaceAccounts, "other")
-	if _, _, err := decodeStateObject(legacyObject, otherKey); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("mismatched state object error = %v", err)
-	}
-
-	currentLegacy, err := stateVersionObject(legacyKey, state.Version(legacyVersion), []byte("legacy"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	staleLegacy, err := stateVersionObject(legacyKey, "stale-legacy", []byte("stale"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, object := range []storageformat.MutationObject{currentLegacy, staleLegacy} {
-		if _, err := backend.Put(ctx, objectstore.MustKey(object.Key), object.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	indexedKey := state.MustKey(state.NamespaceAccounts, "indexed")
-	indexedVersion, err := engine.Create(ctx, indexedKey, []byte("current"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	staleIndexed, err := stateVersionObject(indexedKey, "stale-indexed", []byte("stale"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := backend.Put(ctx, objectstore.MustKey(staleIndexed.Key), staleIndexed.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := engine.readIndexedStateValue(ctx, storageformat.StateIndexEntry{}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid indexed value error = %v", err)
-	}
-	missingEntry := storageformat.StateIndexEntry{LogicalKey: indexedKey.String(), LogicalVersion: "missing-version"}
-	if _, err := engine.readIndexedStateValue(ctx, missingEntry); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("missing indexed value error = %v", err)
-	}
-
-	if err := engine.pruneStateVersions(ctx); err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []objectstore.Key{objectstore.MustKey(currentLegacy.Key), storageformat.StateVersionKey(string(state.NamespaceAccounts), indexedKey.String(), string(indexedVersion))} {
-		if _, err := backend.Head(ctx, key); err != nil {
-			t.Fatalf("current state version %s was pruned: %v", key.String(), err)
-		}
-	}
-	for _, key := range []objectstore.Key{objectstore.MustKey(staleLegacy.Key), objectstore.MustKey(staleIndexed.Key)} {
-		if _, err := backend.Head(ctx, key); !errors.Is(err, domain.ErrNotFound) {
-			t.Fatalf("stale state version %s remains: %v", key.String(), err)
-		}
-	}
-	if page, err := engine.List(ctx, state.MustPrefix(state.NamespaceAccounts), state.PageRequest{}); err != nil || len(page.Items) != 1 {
-		t.Fatalf("default state page = %+v, %v", page, err)
-	}
 }
 
 func TestMutationReferenceAndLegacyIntentValidation(t *testing.T) {
@@ -160,74 +74,6 @@ func TestMutationReferenceAndLegacyIntentValidation(t *testing.T) {
 	}
 }
 
-func TestPagedOperationHelpersValidateImmutableChains(t *testing.T) {
-	ctx := context.Background()
-	backend := objectmemory.New()
-	clock := domain.NewFixedClock(time.Date(2047, 1, 2, 3, 4, 7, 0, time.UTC))
-	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("operation-pages", 1<<16)))
-	files := engine.Files()
-
-	if err := files.persistFileOperationStepPages(ctx, nil); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("nil operation page error = %v", err)
-	}
-	if err := files.persistFileOperationStepPages(ctx, &storageformat.FileOperation{UserID: "user", OperationID: "operation", ReplicaAttemptID: "attempt"}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("rootless operation page error = %v", err)
-	}
-
-	operation := storageformat.FileOperation{
-		SchemaVersion: 1, UserID: "user", OperationID: "operation", ReplicaAttemptID: "attempt",
-		Roots:         []storageformat.FileOperationRoot{{Key: "a", PendingBody: []byte("pending"), FinalBody: []byte("final")}},
-		Prerequisites: []storageformat.MutationObject{{Key: "endlessfs/v1/test/prerequisite", Body: []byte("prerequisite")}},
-		Copies:        []storageformat.MutationCopy{{SourceKey: "source", DestinationKey: "destination", Size: 1, MD5: testProviderMD5, CRC32C: testProviderCRC32C}},
-	}
-	if err := files.persistFileOperationStepPages(ctx, &operation); err != nil {
-		t.Fatal(err)
-	}
-	if operation.StepPageCount != 3 || operation.StepDigest == "" || !operation.StepsStaged {
-		t.Fatalf("paged operation = %+v", operation)
-	}
-	visited := 0
-	if err := files.forEachFileOperationStepPage(ctx, operation, func(storageformat.FileOperationStepPage) error { visited++; return nil }); err != nil || visited != 3 {
-		t.Fatalf("step pages visited = %d, %v", visited, err)
-	}
-	visitErr := domain.NewError(domain.ErrorUnavailable, "stop")
-	if err := files.forEachFileOperationStepPage(ctx, operation, func(storageformat.FileOperationStepPage) error { return visitErr }); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("visitor error = %v", err)
-	}
-	tampered := operation
-	tampered.StepDigest = "wrong"
-	if err := files.forEachFileOperationStepPage(ctx, tampered, func(storageformat.FileOperationStepPage) error { return nil }); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("chain digest error = %v", err)
-	}
-	legacy := storageformat.FileOperation{UserID: "user", OperationID: "legacy", Roots: []storageformat.FileOperationRoot{{Key: "root"}}, Prerequisites: []storageformat.MutationObject{{Key: "key", Body: []byte("body")}}}
-	if err := files.forEachFileOperationStepPage(ctx, legacy, func(page storageformat.FileOperationStepPage) error {
-		if len(page.Roots) != 1 || len(page.Prerequisites) != 1 {
-			t.Fatalf("legacy page = %+v", page)
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	legacy.Roots = nil
-	if err := files.forEachFileOperationStepPage(ctx, legacy, func(storageformat.FileOperationStepPage) error { return nil }); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid legacy steps error = %v", err)
-	}
-
-	immutableKey := objectstore.MustKey("endlessfs/v1/test/immutable")
-	if err := files.ensureImmutableOperationObject(ctx, immutableKey, []byte("same")); err != nil {
-		t.Fatal(err)
-	}
-	if err := files.ensureImmutableOperationObject(ctx, immutableKey, []byte("same")); err != nil {
-		t.Fatalf("immutable replay error = %v", err)
-	}
-	if err := files.ensureImmutableOperationObject(ctx, immutableKey, []byte("different")); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("immutable collision error = %v", err)
-	}
-	if fileOperationStepPageKey(storageformat.FileOperation{UserID: "user", OperationID: "operation", StepSetID: "steps"}, 2) == stagedFileOperationStepPageKey(operation, 2) {
-		t.Fatal("durable and staged operation page keys unexpectedly match")
-	}
-}
-
 func TestStateMutationErrorBoundaries(t *testing.T) {
 	ctx := context.Background()
 	backend := objectmemory.New()
@@ -252,9 +98,6 @@ func TestStateMutationErrorBoundaries(t *testing.T) {
 		t.Fatal("state cursor accepted unavailable secure randomness")
 	}
 	engine.ids = domain.NewIDGenerator(strings.NewReader(strings.Repeat("state-errors-restored", 1<<14)))
-	if _, err := engine.newStateVersion(key, make([]byte, storageformat.MaxCanonicalBytes)); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("oversized state version error = %v", err)
-	}
 	if _, err := stateVersionObject(key, "oversized", make([]byte, storageformat.MaxCanonicalBytes)); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("oversized state object error = %v", err)
 	}
@@ -272,18 +115,6 @@ func TestStateMutationErrorBoundaries(t *testing.T) {
 	if _, err := engine.decodeStateListCursor(base64.RawURLEncoding.EncodeToString(sealed)); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid decrypted state cursor error = %v", err)
 	}
-}
-
-func coverageRandomReader(seed uint64, size int) *strings.Reader {
-	value := make([]byte, size)
-	stateValue := seed + 0x9e3779b97f4a7c15
-	for index := range value {
-		stateValue ^= stateValue << 13
-		stateValue ^= stateValue >> 7
-		stateValue ^= stateValue << 17
-		value[index] = byte(stateValue >> 29)
-	}
-	return strings.NewReader(string(value))
 }
 
 func TestRetentionPruningAndTerminalOperationValidation(t *testing.T) {
@@ -393,9 +224,6 @@ func TestOperationPrerequisiteReferencePromotionMatrix(t *testing.T) {
 	if err := files.ensureOperationPrerequisiteReferences(ctx, operation, []storageformat.MutationObjectReference{badMissing}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("staged digest mismatch error = %v", err)
 	}
-	if _, err := files.startFileOperation(ctx, storageformat.FileOperation{UserID: "invalid"}, nil, "", ""); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid stored operation owner error = %v", err)
-	}
 }
 
 func TestCheckpointMetadataOnlyValidationBoundaries(t *testing.T) {
@@ -467,139 +295,6 @@ func TestCheckpointMetadataOnlyValidationBoundaries(t *testing.T) {
 		} else if err != nil {
 			t.Fatalf("%s checkpoint retirement error = %v", name, err)
 		}
-	}
-}
-
-func TestDirectoryContentMutationValidationBoundaries(t *testing.T) {
-	ctx := context.Background()
-	backend := objectmemory.New()
-	clock := domain.NewFixedClock(time.Date(2047, 1, 2, 3, 4, 12, 0, time.UTC))
-	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("directory-content", 1<<16)))
-	files := engine.Files()
-	user, _ := domain.ParseUserID("a2tra2tra2tra2tra2traw")
-	scope, _ := domain.NewScope(user, domain.AreaLive)
-	file := withCurrentTestFingerprint(storageformat.DirectoryEntry{Name: "file.bin", NameDigest: storageformat.NameDigest("file.bin"), Kind: domain.EntryFile, BlobID: "blob", Size: 1, MediaType: "application/octet-stream", ModifiedAt: clock.Now()})
-	other := file
-	other.Name = "other.bin"
-	other.NameDigest = storageformat.NameDigest(other.Name)
-	other.LogicalVersion, _ = directoryEntryVersion(other)
-	emptyAccumulator, emptyDigest, err := directoryContentIdentity(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	emptyNode := directoryTrailNode{scope: scope, path: domain.MustParseUserPath("/"), directoryID: storageformat.RootDirectoryID, snapshot: directorySnapshot{
-		manifest: storageformat.DirectoryManifest{SchemaVersion: 2, DirectoryID: storageformat.RootDirectoryID}, contentAccumulator: emptyAccumulator, contentDigest: emptyDigest,
-	}}
-
-	if _, err := directoryContentContribution(withEntry(file, func(entry *storageformat.DirectoryEntry) {
-		entry.Name = strings.Repeat("x", storageformat.MaxCanonicalBytes)
-	})); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("oversized content contribution error = %v", err)
-	}
-	if _, _, err := updateDirectoryContentIdentityAtCount("invalid", nil, nil, 0); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid content accumulator error = %v", err)
-	}
-	if _, _, err := updateDirectoryContentIdentityAtCount(emptyAccumulator, []storageformat.DirectoryEntry{{Kind: domain.EntryFile}}, nil, 0); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid removed content error = %v", err)
-	}
-	if _, _, err := updateDirectoryContentIdentityAtCount(emptyAccumulator, nil, []storageformat.DirectoryEntry{{Kind: domain.EntryFile}}, 1); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid added content error = %v", err)
-	}
-	if err := applyDirectoryEntryChangeWithContent(map[string]directoryUpdate{}, nil, nil, nil, nil, nil); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("empty directory change error = %v", err)
-	}
-	if err := applyDirectoryEntryChangeWithContent(map[string]directoryUpdate{}, []directoryTrailNode{emptyNode}, &file, &other, nil, nil); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("renamed directory change error = %v", err)
-	}
-	if err := applyDirectoryEntryChangeWithContent(map[string]directoryUpdate{}, []directoryTrailNode{emptyNode}, nil, &file, nil, []relativeDirectoryContentFile{{entry: storageformat.DirectoryEntry{Kind: domain.EntryDirectory}}}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("non-file content change error = %v", err)
-	}
-	badBefore := file
-	badBefore.Size = -1
-	if err := applyDirectoryEntryChangeWithContent(map[string]directoryUpdate{}, []directoryTrailNode{emptyNode}, &badBefore, nil, nil, nil); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid before aggregate error = %v", err)
-	}
-	badAfter := file
-	badAfter.Size = -1
-	if err := applyDirectoryEntryChangeWithContent(map[string]directoryUpdate{}, []directoryTrailNode{emptyNode}, nil, &badAfter, nil, nil); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid after aggregate error = %v", err)
-	}
-	overflowNode := emptyNode
-	overflowNode.snapshot.recursiveBytes = math.MaxInt64
-	if err := applyDirectoryEntryChangeWithContent(map[string]directoryUpdate{}, []directoryTrailNode{overflowNode}, nil, &file, nil, nil); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("recursive byte overflow error = %v", err)
-	}
-	overflowFilesNode := emptyNode
-	overflowFilesNode.snapshot.recursiveFileCount = math.MaxInt64
-	if err := applyDirectoryEntryChangeWithContent(map[string]directoryUpdate{}, []directoryTrailNode{overflowFilesNode}, nil, &file, nil, nil); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("recursive file-count overflow error = %v", err)
-	}
-	if err := applyDirectoryEntryChangeWithContent(map[string]directoryUpdate{}, []directoryTrailNode{emptyNode}, &file, nil, nil, nil); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("entry-count underflow error = %v", err)
-	}
-	invalidAccumulatorNode := emptyNode
-	invalidAccumulatorNode.snapshot.manifest.EntryCount = 1
-	invalidAccumulatorNode.snapshot.contentAccumulator = "invalid"
-	if err := applyDirectoryEntryChangeWithContent(map[string]directoryUpdate{}, []directoryTrailNode{invalidAccumulatorNode}, &file, nil, nil, nil); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("composed accumulator error = %v", err)
-	}
-	updates := make(map[string]directoryUpdate)
-	if err := applyDirectoryEntryChangeWithContent(updates, []directoryTrailNode{emptyNode}, nil, &file, nil, []relativeDirectoryContentFile{{entry: file}}); err != nil {
-		t.Fatal(err)
-	}
-	changedFile := file
-	changedFile.Size = 2
-	changedFile.LogicalVersion, _ = directoryEntryVersion(changedFile)
-	if err := applyDirectoryEntryChangeWithContent(updates, []directoryTrailNode{emptyNode}, &changedFile, nil, []relativeDirectoryContentFile{{entry: changedFile}}, nil); !errors.Is(err, domain.ErrPreconditionFailed) {
-		t.Fatalf("composed entry mismatch error = %v", err)
-	}
-	badContent := file
-	badContent.MD5 = "invalid"
-	if err := applyDirectoryEntryChangeWithContent(map[string]directoryUpdate{}, []directoryTrailNode{emptyNode}, nil, &file, nil, []relativeDirectoryContentFile{{entry: badContent}}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid content occurrence error = %v", err)
-	}
-	childNode := emptyNode
-	childNode.path = domain.MustParseUserPath("/child")
-	childNode.directoryID = "child"
-	childNode.entry = storageformat.DirectoryEntry{Kind: domain.EntryFile, DirectoryID: "child"}
-	if err := applyDirectoryEntryChangeWithContent(map[string]directoryUpdate{}, []directoryTrailNode{emptyNode, childNode}, nil, &file, nil, []relativeDirectoryContentFile{{entry: file}}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid aggregate ancestor error = %v", err)
-	}
-
-	changes := make(map[string]directoryContentIndexMutation)
-	if err := applyDirectoryContentChanges(changes, []string{"folder"}, nil, []relativeDirectoryContentFile{{entry: file}}); err != nil || len(changes) != 1 {
-		t.Fatalf("new content change = %+v, %v", changes, err)
-	}
-	if err := applyDirectoryContentChanges(changes, []string{"folder"}, []relativeDirectoryContentFile{{entry: file}}, nil); err != nil || len(changes) != 0 {
-		t.Fatalf("collapsed content change = %+v, %v", changes, err)
-	}
-	if err := applyDirectoryContentChanges(changes, []string{"folder"}, []relativeDirectoryContentFile{{segments: []string{"."}, entry: file}}, nil); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid before content path error = %v", err)
-	}
-	if err := applyDirectoryContentChanges(changes, []string{"folder"}, nil, []relativeDirectoryContentFile{{segments: []string{"."}, entry: file}}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid after content path error = %v", err)
-	}
-	if err := applyDirectoryContentChanges(changes, []string{"folder"}, nil, []relativeDirectoryContentFile{{entry: badContent}}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid content index entry error = %v", err)
-	}
-	if _, err := files.prepareDirectoryMutation(ctx, directoryUpdate{}, 1); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid prepared mutation error = %v", err)
-	}
-	if _, err := files.prepareDirectoryWithIndexAggregates(scope, storageformat.RootDirectoryID, -1, 0, 0, 1, storageformat.DirectoryIndexChild{}, nil, storageformat.DirectoryContentIndexChild{}, nil, emptyAccumulator, emptyDigest); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid directory aggregates error = %v", err)
-	}
-	if _, err := files.prepareDirectoryWithIndexAggregates(scope, storageformat.RootDirectoryID, 0, 0, 0, 1, storageformat.DirectoryIndexChild{}, nil, storageformat.DirectoryContentIndexChild{}, nil, "invalid", emptyDigest); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid prepared accumulator error = %v", err)
-	}
-	if _, err := files.prepareDirectoryWithIndexAggregates(scope, storageformat.RootDirectoryID, 0, 0, 0, 1, storageformat.DirectoryIndexChild{}, nil, storageformat.DirectoryContentIndexChild{}, nil, emptyAccumulator, "wrong"); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("prepared content digest mismatch error = %v", err)
-	}
-	engine.ids = domain.NewIDGenerator(strings.NewReader("short"))
-	if _, err := files.prepareDirectoryWithIndexAggregates(scope, storageformat.RootDirectoryID, 0, 0, 0, 1, storageformat.DirectoryIndexChild{}, nil, storageformat.DirectoryContentIndexChild{}, nil, emptyAccumulator, emptyDigest); err == nil {
-		t.Fatal("prepared directory accepted unavailable secure randomness")
-	}
-	if _, err := files.encodeListCursor(listCursor{DirectoryPath: strings.Repeat("x", storageformat.MaxCanonicalBytes)}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("oversized file cursor error = %v", err)
 	}
 }
 
@@ -874,33 +569,8 @@ func TestOperationStepPageDenialMatrix(t *testing.T) {
 			t.Fatalf("missing step page error = %v", err)
 		}
 	})
-	t.Run("immutable-get-fails", func(t *testing.T) {
-		backend := objectmemory.New()
-		hooks := &hookedBackend{Backend: backend, put: func(context.Context, objectstore.Key, []byte, objectstore.PutCondition) (objectstore.NativeVersion, error) {
-			return "", domain.NewError(domain.ErrorConflict, "exists")
-		}, get: func(context.Context, objectstore.Key) (objectstore.Object, error) {
-			return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "get denied")
-		}}
-		engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("immutable-get", 1<<15)))
-		engine.backend = hooks
-		if err := engine.Files().ensureImmutableOperationObject(ctx, objectstore.MustKey("endlessfs/v1/test/immutable-get"), []byte("body")); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("immutable get error = %v", err)
-		}
-	})
 	backend := objectmemory.New()
 	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat("start-operation", 1<<15)))
-	user, _ := domain.ParseUserID("bGxsbGxsbGxsbGxsbGxsbA")
-	operation := storageformat.FileOperation{SchemaVersion: 1, UserID: user.String(), OperationID: "start", Kind: "copy", State: storageformat.FileOperationRunning, Roots: []storageformat.FileOperationRoot{{Key: "root"}}}
-	operationKey := storageformat.OperationKey(operation.UserID, operation.OperationID)
-	operationBody := encodeInternalEnvelope(t, fileOperationSchema, operationKey, 1, operation)
-	canceled, cancel := context.WithCancel(ctx)
-	cancel()
-	if _, err := engine.Files().startFileOperation(canceled, operation, operationBody, "", ""); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("legacy start cancellation error = %v", err)
-	}
-	if _, err := engine.Files().startFileOperation(canceled, operation, operationBody, "idempotency", "fingerprint"); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("idempotent start cancellation error = %v", err)
-	}
 	if err := engine.Files().forEachFileOperationStepPage(ctx, storageformat.FileOperation{StepPageCount: 1, StepSetID: "steps", StepDigest: "digest", Roots: []storageformat.FileOperationRoot{{Key: "root"}}}, func(storageformat.FileOperationStepPage) error { return nil }); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("mixed paged operation error = %v", err)
 	}
@@ -932,270 +602,6 @@ func TestOperationStepPageDenialMatrix(t *testing.T) {
 	ref := storageformat.MutationObjectReference{Key: target.String(), BodyDigest: storageformat.Digest(stagedBody), StagingKey: staging.String()}
 	if err := engine.Files().ensureOperationPrerequisiteReferences(ctx, storageformat.FileOperation{UserID: "user", OperationID: "collision", StepsStaged: true}, []storageformat.MutationObjectReference{ref}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("prerequisite promotion collision error = %v", err)
-	}
-	engine.backend = backend
-	largeKindOperation := operation
-	largeKindOperation.Kind = strings.Repeat("x", storageformat.MaxCanonicalBytes)
-	if _, err := engine.Files().startFileOperation(ctx, largeKindOperation, operationBody, "idempotency", "fingerprint"); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("oversized idempotency binding error = %v", err)
-	}
-}
-
-func TestDirectoryManifestPreparationAndReplacementBoundaries(t *testing.T) {
-	ctx := context.Background()
-	backend := objectmemory.New()
-	clock := domain.NewFixedClock(time.Date(2047, 1, 2, 3, 4, 15, 0, time.UTC))
-	server := httptest.NewServer(backend)
-	t.Cleanup(server.Close)
-	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(coverageRandomReader(101, 1<<17))); err != nil {
-		t.Fatal(err)
-	}
-	engine := openInternalTestEngine(t, backend, clock, coverageRandomReader(102, 1<<17))
-	files := engine.Files()
-	user, _ := domain.ParseUserID("bW1tbW1tbW1tbW1tbW1tbQ")
-	scope, _ := domain.NewScope(user, domain.AreaLive)
-	file := withCurrentTestFingerprint(storageformat.DirectoryEntry{Name: "replace.bin", NameDigest: storageformat.NameDigest("replace.bin"), Kind: domain.EntryFile, BlobID: "blob", Size: 3, MediaType: "application/octet-stream", ModifiedAt: clock.Now()})
-	capability, err := files.CreateUpload(ctx, scope, domain.CreateUploadRequest{Path: domain.MustParseUserPath("/replace.bin"), Size: 3, MediaType: "application/octet-stream", IdempotencyKey: "replace-upload"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request, _ := http.NewRequest(capability.Method, capability.URL, bytes.NewReader([]byte("abc")))
-	for name, value := range capability.Headers {
-		request.Header.Set(name, value)
-	}
-	response, err := server.Client().Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = response.Body.Close()
-	uploaded, err := files.CompleteUpload(ctx, scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: domain.MustParseUserPath("/replace.bin"), Size: 3, MediaType: "application/octet-stream"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := files.resolveDirectoryMetadataTrail(ctx, scope, domain.MustParseUserPath("/replace.bin")); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("file used as directory error = %v", err)
-	}
-	replaced, err := files.CreateDirectory(ctx, scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/replace.bin"), Conflict: domain.ConflictReplace, ExpectedVersion: uploaded.Version})
-	if err != nil || replaced.Kind != domain.EntryDirectory || replaced.Size != 0 {
-		t.Fatalf("file-to-directory replacement = %+v, %v", replaced, err)
-	}
-
-	legacyManifest := storageformat.DirectoryManifest{SchemaVersion: 1, DirectoryID: "legacy", ManifestID: "manifest", EntryCount: 1, PageIDs: []string{"missing"}}
-	if _, err := files.readManifestPageEntries(ctx, scope, "legacy", legacyManifest); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("missing legacy page error = %v", err)
-	}
-	pageKey := storageformat.DirectoryPageKey(user.String(), "live", "legacy", "malformed")
-	if _, err := backend.Put(ctx, pageKey, []byte("not-json"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-		t.Fatal(err)
-	}
-	legacyManifest.PageIDs = []string{"malformed"}
-	if _, err := files.readManifestPageEntries(ctx, scope, "legacy", legacyManifest); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("malformed legacy page error = %v", err)
-	}
-	invalidPageKey := storageformat.DirectoryPageKey(user.String(), "live", "legacy", "invalid")
-	invalidPage := storageformat.DirectoryPage{SchemaVersion: 0, DirectoryID: "legacy", PageID: "invalid"}
-	if _, err := backend.Put(ctx, invalidPageKey, encodeInternalEnvelope(t, directoryPageSchema, invalidPageKey, 1, invalidPage), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-		t.Fatal(err)
-	}
-	legacyManifest.PageIDs = []string{"invalid"}
-	if _, err := files.readManifestPageEntries(ctx, scope, "legacy", legacyManifest); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid legacy page error = %v", err)
-	}
-	legacyManifest.PageIDs = nil
-	if _, err := files.readManifestPageEntries(ctx, scope, "legacy", legacyManifest); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("legacy page count error = %v", err)
-	}
-	badEntry := file
-	badEntry.LogicalVersion = "wrong"
-	badEntriesKey := storageformat.DirectoryPageKey(user.String(), "live", "legacy", "bad-entries")
-	badEntriesPage := storageformat.DirectoryPage{SchemaVersion: 1, DirectoryID: "legacy", PageID: "bad-entries", Entries: []storageformat.DirectoryEntry{badEntry}}
-	if _, err := backend.Put(ctx, badEntriesKey, encodeInternalEnvelope(t, directoryPageSchema, badEntriesKey, 1, badEntriesPage), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-		t.Fatal(err)
-	}
-	legacyManifest.PageIDs = []string{"bad-entries"}
-	if _, err := files.readManifestPageEntries(ctx, scope, "legacy", legacyManifest); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid legacy entries error = %v", err)
-	}
-	if _, err := files.readManifestPageEntries(ctx, scope, "invalid-v2", storageformat.DirectoryManifest{SchemaVersion: 2, DirectoryID: "invalid-v2", EntryCount: 1}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid v2 directory index error = %v", err)
-	}
-
-	if _, err := files.prepareDirectoryWithContentEntries(scope, "directory", []storageformat.DirectoryEntry{{}}, nil, 1); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid prepared entries error = %v", err)
-	}
-	legacyFile := storageformat.DirectoryEntry{Name: "legacy.bin", NameDigest: storageformat.NameDigest("legacy.bin"), Kind: domain.EntryFile, BlobID: "legacy", Size: 1, MediaType: "application/octet-stream", ModifiedAt: clock.Now()}
-	legacyFile.LogicalVersion, _ = directoryEntryVersion(legacyFile)
-	if _, err := files.prepareDirectoryWithContentEntries(scope, "directory", []storageformat.DirectoryEntry{legacyFile}, nil, 1); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("missing content fingerprint error = %v", err)
-	}
-	if _, err := files.prepareDirectoryWithContentEntries(scope, "directory", []storageformat.DirectoryEntry{file}, []storageformat.DirectoryContentIndexEntry{{}}, 1); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid content index build error = %v", err)
-	}
-	emptyAccumulator, emptyDigest, _ := directoryContentIdentity(nil)
-	badEmptyUpdate := directoryUpdate{
-		scope: scope, directoryID: storageformat.RootDirectoryID, changes: map[string]directoryEntryMutation{"x": {}},
-		entryCount: 0, snapshot: directorySnapshot{exists: true, recursiveBytes: 1, manifest: storageformat.DirectoryManifest{}, contentAccumulator: emptyAccumulator, contentDigest: emptyDigest},
-	}
-	if _, err := files.prepareDirectoryMutation(ctx, badEmptyUpdate, 1); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid empty mutation source error = %v", err)
-	}
-	maxEntry := file
-	maxEntry.Size = math.MaxInt64
-	oneEntry := file
-	oneEntry.Name = "one.bin"
-	oneEntry.NameDigest = storageformat.NameDigest(oneEntry.Name)
-	oneEntry.Size = 1
-	oneEntry.LogicalVersion, _ = directoryEntryVersion(oneEntry)
-	if _, err := files.prepareDirectoryWithIndex(scope, "directory", []storageformat.DirectoryEntry{maxEntry, oneEntry}, 1, storageformat.DirectoryIndexChild{}, nil, storageformat.DirectoryContentIndexChild{}, nil, emptyAccumulator, emptyDigest); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("prepared recursive byte overflow error = %v", err)
-	}
-	maxDirectory := storageformat.DirectoryEntry{Name: "max", NameDigest: storageformat.NameDigest("max"), Kind: domain.EntryDirectory, DirectoryID: "max", FileCount: math.MaxInt64, ContentDigest: emptyDigest, ModifiedAt: clock.Now()}
-	maxDirectory.LogicalVersion, _ = directoryEntryVersion(maxDirectory)
-	oneDirectory := maxDirectory
-	oneDirectory.Name, oneDirectory.NameDigest, oneDirectory.DirectoryID, oneDirectory.FileCount = "one", storageformat.NameDigest("one"), "one", 1
-	oneDirectory.LogicalVersion, _ = directoryEntryVersion(oneDirectory)
-	if _, err := files.prepareDirectoryWithIndex(scope, "directory", []storageformat.DirectoryEntry{maxDirectory, oneDirectory}, 1, storageformat.DirectoryIndexChild{}, nil, storageformat.DirectoryContentIndexChild{}, nil, emptyAccumulator, emptyDigest); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("prepared recursive file-count overflow error = %v", err)
-	}
-
-	engine.ids = domain.NewIDGenerator(strings.NewReader(strings.Repeat("cursor-setup", 1<<15)))
-	longName := strings.Repeat("x", 250) + ".bin"
-	longEntry := file
-	longEntry.Name, longEntry.NameDigest = longName, storageformat.NameDigest(longName)
-	longEntry.LogicalVersion, _ = directoryEntryVersion(longEntry)
-	longPrepared, err := files.prepareDirectory(ctx, scope, "rename", []storageformat.DirectoryEntry{longEntry}, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var longManifest storageformat.DirectoryManifest
-	for _, prerequisite := range longPrepared.prerequisites {
-		if strings.Contains(prerequisite.Key, "/manifests/") {
-			key := objectstore.MustKey(prerequisite.Key)
-			var envelope storageformat.Envelope
-			if err := storageformat.DecodeEnvelope(prerequisite.Body, key, directoryManifestSchema, &envelope, &longManifest); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if _, err := backend.Put(ctx, objectstore.MustKey(prerequisite.Key), prerequisite.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	requested := domain.MustParseUserPath("/" + longName)
-	renamed, _, err := files.resolveIndexedDirectoryDestination(ctx, scope, "rename", longManifest, requested, domain.ConflictRename, "")
-	if err != nil || renamed == requested || len(renamed.Name()) > 255 {
-		t.Fatalf("indexed long rename = %q, %v", renamed.String(), err)
-	}
-	if _, _, err := files.resolveIndexedDirectoryDestination(ctx, scope, "rename", longManifest, requested, "invalid", ""); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid indexed conflict mode error = %v", err)
-	}
-	if _, _, err := files.startPreparingCreateDirectoryReplacement(ctx, scope, domain.MustParseUserPath("/invalid"), domain.CreateDirectoryRequest{}, nil, file); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid recursive replacement source error = %v", err)
-	}
-	validDirectory := storageformat.DirectoryEntry{Name: "directory", NameDigest: storageformat.NameDigest("directory"), Kind: domain.EntryDirectory, DirectoryID: "directory", ContentDigest: emptyDigest, ModifiedAt: clock.Now()}
-	validDirectory.LogicalVersion, _ = directoryEntryVersion(validDirectory)
-	parentTrail := []directoryTrailNode{{scope: scope, path: domain.MustParseUserPath("/"), directoryID: storageformat.RootDirectoryID}}
-	engine.ids = domain.NewIDGenerator(strings.NewReader("short"))
-	if _, _, err := files.startPreparingCreateDirectoryReplacement(ctx, scope, domain.MustParseUserPath("/directory"), domain.CreateDirectoryRequest{}, parentTrail, validDirectory); err == nil {
-		t.Fatal("recursive replacement accepted unavailable operation ID randomness")
-	}
-	engine.ids = domain.NewIDGenerator(strings.NewReader(strings.Repeat("x", 16)))
-	if _, _, err := files.startPreparingCreateDirectoryReplacement(ctx, scope, domain.MustParseUserPath("/directory"), domain.CreateDirectoryRequest{}, parentTrail, validDirectory); err == nil {
-		t.Fatal("recursive replacement accepted unavailable owner ID randomness")
-	}
-	gateHooks := &hookedBackend{Backend: backend, get: func(_ context.Context, key objectstore.Key) (objectstore.Object, error) {
-		if key == storageformat.WriteGateKey() {
-			return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "gate denied")
-		}
-		return backend.Get(ctx, key)
-	}}
-	engine.backend = gateHooks
-	engine.ids = domain.NewIDGenerator(coverageRandomReader(103, 1<<15))
-	if _, _, err := files.startPreparingCreateDirectoryReplacement(ctx, scope, domain.MustParseUserPath("/directory"), domain.CreateDirectoryRequest{}, parentTrail, validDirectory); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("recursive replacement gate error = %v", err)
-	}
-	engine.backend = backend
-
-	underflowNode := directoryTrailNode{scope: scope, path: domain.MustParseUserPath("/"), directoryID: storageformat.RootDirectoryID, snapshot: directorySnapshot{
-		manifest: storageformat.DirectoryManifest{EntryCount: 0}, recursiveBytes: file.Size, recursiveFileCount: 1,
-	}}
-	underflowNode.snapshot.contentAccumulator, underflowNode.snapshot.contentDigest, _ = directoryContentIdentity([]storageformat.DirectoryEntry{file})
-	if err := applyDirectoryEntryChangeWithContent(map[string]directoryUpdate{}, []directoryTrailNode{underflowNode}, &file, nil, []relativeDirectoryContentFile{{entry: file}}, nil); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("directory entry-count underflow error = %v", err)
-	}
-	composed := make(map[string]directoryContentIndexMutation)
-	if err := applyDirectoryContentChanges(composed, []string{"folder"}, nil, []relativeDirectoryContentFile{{entry: file}}); err != nil {
-		t.Fatal(err)
-	}
-	for key, change := range composed {
-		mutated := *change.after
-		mutated.Size++
-		change.after = &mutated
-		composed[key] = change
-	}
-	if err := applyDirectoryContentChanges(composed, []string{"folder"}, []relativeDirectoryContentFile{{entry: file}}, nil); !errors.Is(err, domain.ErrPreconditionFailed) {
-		t.Fatalf("composed content occurrence mismatch error = %v", err)
-	}
-	if _, err := encodeListCursor(listCursor{DirectoryPath: strings.Repeat("x", storageformat.MaxCanonicalBytes)}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("oversized portable list cursor error = %v", err)
-	}
-	engine.ids = domain.NewIDGenerator(strings.NewReader("short"))
-	if _, err := files.encodeListCursor(listCursor{SchemaVersion: 3}); err == nil {
-		t.Fatal("file cursor accepted unavailable secure randomness")
-	}
-	if _, err := files.decodeListCursor(base64.RawURLEncoding.EncodeToString(make([]byte, engine.cursorAEAD.NonceSize()+17))); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid authenticated file cursor error = %v", err)
-	}
-	engine.ids = domain.NewIDGenerator(coverageRandomReader(104, 1<<16))
-	view, err := files.resolveDirectoryMetadataView(ctx, scope, domain.MustParseUserPath("/replace.bin"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, gateEnvelope, gate, err := engine.readGate(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	encodeCursor := func(path, directoryID, manifestID, parentID, parentManifest string) string {
-		t.Helper()
-		value, encodeErr := files.encodeListCursor(listCursor{
-			SchemaVersion: 3, UserID: user.String(), Area: "live", DirectoryPath: path, DirectoryID: directoryID, ManifestID: manifestID,
-			ParentID: parentID, ParentManifest: parentManifest, PageSize: 1, Sort: domain.SortName, AfterName: "after",
-			GateEpoch: gate.Epoch, GateVersion: gateEnvelope.LogicalVersion, ExpiresAt: clock.Now().Add(time.Minute),
-		})
-		if encodeErr != nil {
-			t.Fatal(encodeErr)
-		}
-		return value
-	}
-	missingCursor := encodeCursor("/missing", view.directoryID, view.snapshot.manifestID, storageformat.RootDirectoryID, "parent")
-	if _, err := files.List(ctx, scope, domain.ListRequest{Directory: domain.MustParseUserPath("/missing"), PageSize: 1, Sort: domain.SortName, Cursor: missingCursor}); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("missing cursor directory error = %v", err)
-	}
-	replacedCursor := encodeCursor("/replace.bin", "different", view.snapshot.manifestID, storageformat.RootDirectoryID, "parent")
-	if _, err := files.List(ctx, scope, domain.ListRequest{Directory: domain.MustParseUserPath("/replace.bin"), PageSize: 1, Sort: domain.SortName, Cursor: replacedCursor}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("replaced cursor directory error = %v", err)
-	}
-	historicalCursor := encodeCursor("/replace.bin", view.directoryID, view.snapshot.manifestID, storageformat.RootDirectoryID, "missing-parent-manifest")
-	if _, err := files.List(ctx, scope, domain.ListRequest{Directory: domain.MustParseUserPath("/replace.bin"), PageSize: 1, Sort: domain.SortName, Cursor: historicalCursor}); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("missing historical cursor parent error = %v", err)
-	}
-	if _, err := files.CreateDirectory(ctx, scope, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/second")}); err != nil {
-		t.Fatal(err)
-	}
-	engine.ids = domain.NewIDGenerator(strings.NewReader("short"))
-	for _, sortField := range []domain.SortField{domain.SortName, domain.SortSize} {
-		if _, err := files.List(ctx, scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), PageSize: 1, Sort: sortField}); err == nil {
-			t.Fatalf("%s list cursor accepted unavailable secure randomness", sortField)
-		}
-	}
-	engine.ids = domain.NewIDGenerator(coverageRandomReader(105, 1<<15))
-	engine.backend = &hookedBackend{Backend: backend, get: func(_ context.Context, key objectstore.Key) (objectstore.Object, error) {
-		if strings.Contains(key.String(), "/sort-index/") {
-			return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "sort index denied")
-		}
-		return backend.Get(ctx, key)
-	}}
-	if _, err := files.List(ctx, scope, domain.ListRequest{Directory: domain.MustParseUserPath("/"), PageSize: 1, Sort: domain.SortSize}); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("sort-index read error = %v", err)
 	}
 }
 

@@ -308,6 +308,89 @@ func TestConcurrentReplicaUploadInitiationHasOneIdempotentOutcome(t *testing.T) 
 	}
 }
 
+func TestPortableUploadBatchResumesEveryCrashBoundary(t *testing.T) {
+	for _, step := range []string{
+		portable.StepUploadBatchAfterIntents,
+		portable.StepUploadBatchAfterSessions,
+		portable.StepUploadBatchAfterActivation,
+	} {
+		t.Run(step, func(t *testing.T) {
+			backend := objectmemory.New()
+			server := httptest.NewServer(backend)
+			t.Cleanup(server.Close)
+			clock := domain.NewFixedClock(time.Date(2039, 1, 5, 3, 4, 5, 0, time.UTC))
+			if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(96, 1<<20)))); err != nil {
+				t.Fatal(err)
+			}
+			crasher := &stepFailure{step: step}
+			first := openEngine(t, backend, clock, 97, crasher)
+			owner, _ := domain.ParseUserID("TE1NTE1NTE1NTE1NTE1NTQ")
+			scope, _ := domain.NewScope(owner, domain.AreaLive)
+			requests := []domain.CreateUploadRequest{
+				{Path: domain.MustParseUserPath("/batch-a.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "batch-crash-item-a"},
+				{Path: domain.MustParseUserPath("/batch-b.bin"), Size: 2, MediaType: "application/octet-stream", IdempotencyKey: "batch-crash-item-b"},
+				{Path: domain.MustParseUserPath("/batch-c.bin"), Size: 3, MediaType: "application/octet-stream", IdempotencyKey: "batch-crash-item-c"},
+			}
+			if _, err := first.Files().CreateUploadBatch(context.Background(), scope, requests); !errors.Is(err, domain.ErrUnavailable) {
+				t.Fatalf("crashed CreateUploadBatch() error = %v", err)
+			}
+			restarted := openEngine(t, backend, clock, 98, nil)
+			capabilities, err := restarted.Files().CreateUploadBatch(context.Background(), scope, requests)
+			if err != nil || len(capabilities) != len(requests) {
+				t.Fatalf("resumed CreateUploadBatch() = %d capabilities, %v", len(capabilities), err)
+			}
+			for index, capability := range capabilities {
+				status, statusErr := restarted.Files().UploadStatus(context.Background(), scope, capability.UploadID)
+				if statusErr != nil || status.State != domain.UploadStateActive || status.Path != requests[index].Path {
+					t.Fatalf("resumed upload %d status = %+v, %v", index, status, statusErr)
+				}
+			}
+		})
+	}
+}
+
+func TestConcurrentReplicaUploadBatchHasOneIdempotentOutcome(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2039, 1, 6, 3, 4, 5, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(99, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engines := []*portable.Engine{openEngine(t, backend, clock, 100, nil), openEngine(t, backend, clock, 101, nil)}
+	owner, _ := domain.ParseUserID("TU5PTU5PTU5PTU5PTU5PTw")
+	scope, _ := domain.NewScope(owner, domain.AreaLive)
+	requests := []domain.CreateUploadRequest{
+		{Path: domain.MustParseUserPath("/concurrent-a.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "concurrent-batch-a"},
+		{Path: domain.MustParseUserPath("/concurrent-b.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "concurrent-batch-b"},
+	}
+	start := make(chan struct{})
+	results := make([][]domain.UploadCapability, len(engines))
+	errorsFound := make([]error, len(engines))
+	var wait sync.WaitGroup
+	for index, engine := range engines {
+		index, engine := index, engine
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			results[index], errorsFound[index] = engine.Files().CreateUploadBatch(context.Background(), scope, requests)
+		}()
+	}
+	close(start)
+	wait.Wait()
+	for index := range results {
+		if errorsFound[index] != nil || len(results[index]) != len(requests) {
+			t.Fatalf("replica %d batch = %+v, %v", index, results[index], errorsFound[index])
+		}
+	}
+	for index := range requests {
+		if results[0][index].UploadID != results[1][index].UploadID || results[0][index].URL != results[1][index].URL {
+			t.Fatalf("batch item %d outcomes differ: %+v / %+v", index, results[0][index], results[1][index])
+		}
+	}
+}
+
 func TestPortableResumableUploadAbortExpiryAndLargeLogicalObject(t *testing.T) {
 	backend := objectmemory.New()
 	server := httptest.NewServer(backend)
@@ -436,14 +519,18 @@ func TestUploadCompletionLostSuccessIsIdempotentlyReconciled(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	crasher.step = portable.StepStateAfterBackend
+	crasher.step = portable.StepDomainAfterHeadCommit
 	completion := domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(content)), MediaType: "text/plain"}
-	if _, err := engine.Files().CompleteUpload(context.Background(), scope, completion); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("lost-success CompleteUpload() error = %v", err)
+	completed, err := engine.Files().CompleteUpload(context.Background(), scope, completion)
+	if err != nil {
+		t.Fatalf("lost-success was not reconciled in the original CompleteUpload() call: %v", err)
 	}
 	visible, err := engine.Files().Stat(context.Background(), scope, path)
 	if err != nil {
 		t.Fatalf("lost-success file was not visible: %v", err)
+	}
+	if completed.Version != visible.Version {
+		t.Fatalf("same-call recovery = %+v; visible=%+v", completed, visible)
 	}
 	reconciled, err := engine.Files().CompleteUpload(context.Background(), scope, completion)
 	if err != nil || reconciled.Version != visible.Version {
@@ -457,9 +544,8 @@ func TestUploadCompletionLostSuccessIsIdempotentlyReconciled(t *testing.T) {
 
 func TestUploadCompletionRecoversAtEveryAggregateCommitBoundary(t *testing.T) {
 	for index, step := range []string{
-		portable.StepUploadCompletionAfterPrepared,
-		portable.StepUploadCompletionAfterCommitted,
-		portable.StepUploadCompletionAfterFinalized,
+		portable.StepDomainBeforeHeadCommit,
+		portable.StepDomainAfterHeadCommit,
 	} {
 		t.Run(step, func(t *testing.T) {
 			backend := objectmemory.New()
@@ -469,7 +555,7 @@ func TestUploadCompletionRecoversAtEveryAggregateCommitBoundary(t *testing.T) {
 			if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(byte(170+index), 1<<20)))); err != nil {
 				t.Fatal(err)
 			}
-			crasher := &stepFailure{step: step}
+			crasher := &stepFailure{}
 			engine := openEngine(t, backend, clock, byte(180+index), crasher)
 			user, _ := domain.ParseUserID("RkdHRkdHRkdHRkdHRkdHRw")
 			scope, _ := domain.NewScope(user, domain.AreaLive)
@@ -488,22 +574,28 @@ func TestUploadCompletionRecoversAtEveryAggregateCommitBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			_ = response.Body.Close()
+			crasher.step = step
 			completion := domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(content)), MediaType: "text/plain"}
-			if _, err := engine.Files().CompleteUpload(context.Background(), scope, completion); !errors.Is(err, domain.ErrUnavailable) {
-				t.Fatalf("interrupted CompleteUpload() error = %v", err)
-			}
+			completed, completionErr := engine.Files().CompleteUpload(context.Background(), scope, completion)
 			root, err := engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			wantBeforeRetry := int64(0)
-			if step != portable.StepUploadCompletionAfterPrepared {
+			if step == portable.StepDomainBeforeHeadCommit {
+				if !errors.Is(completionErr, domain.ErrUnavailable) {
+					t.Fatalf("pre-publication interruption error = %v", completionErr)
+				}
+			} else {
 				wantBeforeRetry = int64(len(content))
+				if completionErr != nil || completed.Size != wantBeforeRetry {
+					t.Fatalf("post-publication lost response was not recovered in the same call: %+v, %v", completed, completionErr)
+				}
 			}
 			if root.Size != wantBeforeRetry {
 				t.Fatalf("interrupted root aggregate = %d; want %d", root.Size, wantBeforeRetry)
 			}
-			completed, err := engine.Files().CompleteUpload(context.Background(), scope, completion)
+			completed, err = engine.Files().CompleteUpload(context.Background(), scope, completion)
 			if err != nil || completed.Size != int64(len(content)) {
 				t.Fatalf("retried CompleteUpload() = %+v, %v", completed, err)
 			}
@@ -515,7 +607,7 @@ func TestUploadCompletionRecoversAtEveryAggregateCommitBoundary(t *testing.T) {
 	}
 }
 
-func TestUploadRecoversCommittedNamespaceTransitionBeforePublishing(t *testing.T) {
+func TestNamespaceMutationLostSuccessDoesNotLeaveARecoveryLease(t *testing.T) {
 	backend := objectmemory.New()
 	server := httptest.NewServer(backend)
 	t.Cleanup(server.Close)
@@ -529,19 +621,19 @@ func TestUploadRecoversCommittedNamespaceTransitionBeforePublishing(t *testing.T
 	scope, _ := domain.NewScope(user, domain.AreaLive)
 	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/before.txt"), []byte("before"))
 
-	crasher.step = portable.StepOperationAfterCommitted
-	if _, err := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{
+	crasher.step = portable.StepDomainAfterHeadCommit
+	moved, err := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{
 		Source: domain.MustParseUserPath("/before.txt"), Destination: domain.MustParseUserPath("/after.txt"),
-	}); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("interrupted Move() error = %v", err)
+	})
+	if err != nil || moved.State != domain.OperationSucceeded {
+		t.Fatalf("lost-success Move() = %+v, %v", moved, err)
 	}
 	if _, err := engine.Files().Stat(context.Background(), scope, domain.MustParseUserPath("/after.txt")); err != nil {
-		t.Fatalf("committed move is not visible before finalization: %v", err)
+		t.Fatalf("committed move is not visible: %v", err)
 	}
-	if _, err := engine.Files().Delete(context.Background(), scope, domain.DeleteRequest{Path: domain.MustParseUserPath("/after.txt")}); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("mutation recovered committed operation before its owner lease expired: %v", err)
+	if _, err := engine.Files().Delete(context.Background(), scope, domain.DeleteRequest{Path: domain.MustParseUserPath("/after.txt")}); err != nil {
+		t.Fatalf("a committed namespace mutation left a blocking recovery lease: %v", err)
 	}
-	clock.Advance(2 * time.Minute)
 
 	path := domain.MustParseUserPath("/photo.jpg")
 	content := []byte("photo bytes")

@@ -103,7 +103,18 @@ func (e *Engine) createCheckpointWhileClosed(ctx context.Context, checkpointID s
 	} else if !errors.Is(readErr, domain.ErrNotFound) {
 		return storageformat.Checkpoint{}, readErr
 	}
-	summary, err := e.prepareCheckpointInventoryMetadata(ctx, checkpointID, gate.Epoch)
+	schema008 := writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema008, e.writer.RequiredFeatures)
+	schema009 := writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema009, e.writer.RequiredFeatures)
+	if schema009 {
+		if err := e.validateSchema009CheckpointClosure(ctx, gate.Epoch); err != nil {
+			return storageformat.Checkpoint{}, err
+		}
+	} else if schema008 {
+		if err := e.validateSchema008CheckpointClosure(ctx, gate.Epoch); err != nil {
+			return storageformat.Checkpoint{}, err
+		}
+	}
+	summary, err := e.prepareCheckpointInventoryMetadata(ctx, checkpointID, gate.Epoch, schema008, schema009)
 	if err != nil {
 		return storageformat.Checkpoint{}, err
 	}
@@ -120,6 +131,7 @@ func (e *Engine) createCheckpointWhileClosed(ctx context.Context, checkpointID s
 	if err != nil {
 		return storageformat.Checkpoint{}, err
 	}
+	completed := checkpoint
 	if _, err := e.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
 		if !errors.Is(err, domain.ErrConflict) {
 			return storageformat.Checkpoint{}, err
@@ -131,9 +143,14 @@ func (e *Engine) createCheckpointWhileClosed(ctx context.Context, checkpointID s
 		if err := e.verifyCheckpointV2Summary(existing, gate, summary); err != nil {
 			return storageformat.Checkpoint{}, err
 		}
-		return existing, nil
+		completed = existing
 	}
-	return checkpoint, nil
+	if writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema009, e.writer.RequiredFeatures) {
+		if err := e.runCheckpointGarbageCollection(ctx, completed); err != nil {
+			return storageformat.Checkpoint{}, err
+		}
+	}
+	return completed, nil
 }
 
 // retireLegacyCheckpoint removes only non-authoritative checkpoint artifacts
@@ -252,7 +269,7 @@ type checkpointInventorySummary struct {
 // prepareCheckpointInventoryMetadata builds checkpoint-v3 directly from
 // provider metadata. It deliberately performs no object-body reads and writes
 // no object-per-item journal. Immutable pages make a restart idempotent.
-func (e *Engine) prepareCheckpointInventoryMetadata(ctx context.Context, checkpointID string, gateEpoch uint64) (checkpointInventorySummary, error) {
+func (e *Engine) prepareCheckpointInventoryMetadata(ctx context.Context, checkpointID string, gateEpoch uint64, schema008, schema009 bool) (checkpointInventorySummary, error) {
 	previousDigest := checkpointInventorySeedV3(checkpointID, gateEpoch)
 	pageIndex := uint64(0)
 	entries := make([]storageformat.CheckpointInventoryEntry, 0, checkpointInventoryPageEntries)
@@ -317,7 +334,7 @@ func (e *Engine) prepareCheckpointInventoryMetadata(ctx context.Context, checkpo
 			CompletedBytes: completedBytes[index], TotalBytes: totalBytes,
 		})
 	}
-	if err := e.walkCheckpointMetadata(ctx, func(info objectstore.ObjectInfo, fileData bool) error {
+	if err := e.walkCheckpointMetadata(ctx, schema008, schema009, func(info objectstore.ObjectInfo, fileData bool) error {
 		metadataBackend := objectstore.MetadataBackend(e.backend)
 		if fileData {
 			metadataBackend = e.fileBackend
@@ -379,7 +396,7 @@ func checkpointInventorySeedV3(checkpointID string, gateEpoch uint64) string {
 	return storageformat.Digest([]byte("endlessfs-checkpoint-inventory-v3\x00" + checkpointID + "\x00" + strconv.FormatUint(gateEpoch, 10)))
 }
 
-func (e *Engine) checkpointRoleIncludes(key string, fileData bool) (bool, error) {
+func (e *Engine) checkpointRoleIncludes(key string, fileData, schema008 bool) (bool, error) {
 	if transientOrCheckpoint(key) {
 		return false, nil
 	}
@@ -387,7 +404,44 @@ func (e *Engine) checkpointRoleIncludes(key string, fileData bool) (bool, error)
 	if e.separateFileBackend && fileData != isFileData {
 		return false, domain.NewError(domain.ErrorPreconditionFailed, "canonical object is stored in the wrong backend")
 	}
-	return fileData == isFileData, nil
+	if fileData {
+		return isFileData, nil
+	}
+	if schema008 {
+		if isFileData {
+			return false, nil
+		}
+		// Schema-007 metadata and all rebuildable projections are
+		// intentionally absent from schema-008 portability checkpoints.
+		// They are neither mutation authority nor needed to reconstruct it.
+		return isSchema008AuthorityStateKey(key), nil
+	}
+	return !isFileData, nil
+}
+
+func isSchema008AuthorityStateKey(key string) bool {
+	if key == storageformat.SuperblockKey().String() || key == storageformat.WriterSetKey().String() || key == storageformat.WriteGateKey().String() || key == storageformat.DomainCatalogHeadKey().String() {
+		return true
+	}
+	if strings.HasPrefix(key, storageformat.TransitionPrefix()+"plans/") || strings.HasPrefix(key, storageformat.TransitionPrefix()+"decisions/") {
+		return strings.HasSuffix(key, ".json")
+	}
+	segments := strings.Split(key, "/")
+	if len(segments) == 6 && segments[0] == "endlessfs" && segments[1] == "v1" && segments[2] == "domains" && segments[3] == "catalog" && segments[4] == "pages" && strings.HasSuffix(segments[5], ".json") {
+		return true
+	}
+	if len(segments) != 6 && len(segments) != 7 || segments[0] != "endlessfs" || segments[1] != "v1" || segments[2] != "domains" {
+		return false
+	}
+	switch storageformat.ConsistencyDomainKind(segments[3]) {
+	case storageformat.DomainNamespace, storageformat.DomainOwnerControl, storageformat.DomainAdmin, storageformat.DomainCapability, storageformat.DomainShare, storageformat.DomainIdentity, storageformat.DomainOwnerJobs:
+	default:
+		return false
+	}
+	if len(segments) == 6 {
+		return segments[4] != "" && segments[5] == "head.json"
+	}
+	return segments[4] != "" && segments[5] == "pages" && strings.HasSuffix(segments[6], ".json")
 }
 
 func walkObjectInfos(ctx context.Context, backend objectstore.MetadataBackend, prefix string, visit func(objectstore.ObjectInfo) error) error {
@@ -566,9 +620,35 @@ func (e *Engine) verifyCheckpointV3(ctx context.Context, checkpoint storageforma
 	if gate.Mode != storageformat.GateClosed || gate.Epoch != checkpoint.GateEpoch || gate.CheckpointID != checkpoint.CheckpointID || checkpoint.WriterSetID != e.writer.WriterSetID {
 		return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint does not match closed write gate")
 	}
-	metadata := newCheckpointMetadataStream(e)
+	schema008 := writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema008, e.writer.RequiredFeatures)
+	schema009 := writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema009, e.writer.RequiredFeatures)
+	if schema009 {
+		if err := e.validateSchema009CheckpointClosure(ctx, gate.Epoch); err != nil {
+			return err
+		}
+	} else if schema008 {
+		if err := e.validateSchema008CheckpointClosure(ctx, gate.Epoch); err != nil {
+			return err
+		}
+	}
+	metadata := newCheckpointMetadataStream(e, schema008)
+	var exact *schema008CheckpointMetadataStream
+	if schema008 {
+		var err error
+		exact, err = newConsistencyDomainCheckpointMetadataStream(ctx, e, schema009)
+		if err != nil {
+			return err
+		}
+		defer exact.Close()
+	}
+	nextMetadata := func() (objectstore.ObjectInfo, bool, bool, error) {
+		if exact != nil {
+			return exact.next(ctx)
+		}
+		return metadata.next(ctx)
+	}
 	if err := e.visitCheckpointInventory(ctx, checkpoint, func(entry storageformat.CheckpointInventoryEntry) error {
-		info, fileData, found, err := metadata.next(ctx)
+		info, fileData, found, err := nextMetadata()
 		if err != nil {
 			return err
 		}
@@ -588,7 +668,7 @@ func (e *Engine) verifyCheckpointV3(ctx context.Context, checkpoint storageforma
 	}); err != nil {
 		return err
 	}
-	if _, _, found, err := metadata.next(ctx); err != nil || found {
+	if _, _, found, err := nextMetadata(); err != nil || found {
 		if err != nil {
 			return err
 		}
@@ -610,6 +690,7 @@ type checkpointMetadataIterator struct {
 	index       int
 	done        bool
 	previousKey string
+	schema008   bool
 }
 
 type checkpointMetadataRole uint8
@@ -620,10 +701,11 @@ const (
 	checkpointMetadataFile
 )
 
-func newCheckpointMetadataIterator(engine *Engine, backend objectstore.MetadataBackend, role checkpointMetadataRole) *checkpointMetadataIterator {
+func newCheckpointMetadataIterator(engine *Engine, backend objectstore.MetadataBackend, role checkpointMetadataRole, schema008 bool) *checkpointMetadataIterator {
 	return &checkpointMetadataIterator{
 		engine: engine, backend: backend, role: role,
-		request: objectstore.ListRequest{Prefix: "endlessfs/v1/", Limit: 1000},
+		request:   objectstore.ListRequest{Prefix: "endlessfs/v1/", Limit: 1000},
+		schema008: schema008,
 	}
 }
 
@@ -639,8 +721,9 @@ func (iterator *checkpointMetadataIterator) next(ctx context.Context) (objectsto
 			iterator.previousKey = key
 			included := !transientOrCheckpoint(key)
 			var err error
-			if iterator.role != checkpointMetadataAll {
-				included, err = iterator.engine.checkpointRoleIncludes(key, iterator.role == checkpointMetadataFile)
+			if iterator.schema008 || iterator.role != checkpointMetadataAll {
+				fileData := iterator.role == checkpointMetadataFile || iterator.role == checkpointMetadataAll && isFileDataKey(key)
+				included, err = iterator.engine.checkpointRoleIncludes(key, fileData, iterator.schema008)
 			}
 			if err != nil {
 				return objectstore.ObjectInfo{}, false, err
@@ -681,14 +764,14 @@ type checkpointMetadataStream struct {
 	fileReady  bool
 }
 
-func newCheckpointMetadataStream(engine *Engine) *checkpointMetadataStream {
+func newCheckpointMetadataStream(engine *Engine, schema008 bool) *checkpointMetadataStream {
 	stream := &checkpointMetadataStream{engine: engine}
 	if !engine.separateFileBackend {
-		stream.single = newCheckpointMetadataIterator(engine, engine.backend, checkpointMetadataAll)
+		stream.single = newCheckpointMetadataIterator(engine, engine.backend, checkpointMetadataAll, schema008)
 		return stream
 	}
-	stream.state = newCheckpointMetadataIterator(engine, engine.backend, checkpointMetadataState)
-	stream.file = newCheckpointMetadataIterator(engine, engine.fileBackend, checkpointMetadataFile)
+	stream.state = newCheckpointMetadataIterator(engine, engine.backend, checkpointMetadataState, schema008)
+	stream.file = newCheckpointMetadataIterator(engine, engine.fileBackend, checkpointMetadataFile, schema008)
 	return stream
 }
 
@@ -727,8 +810,27 @@ func (stream *checkpointMetadataStream) next(ctx context.Context) (objectstore.O
 	return objectstore.ObjectInfo{}, false, false, domain.NewError(domain.ErrorPreconditionFailed, "canonical object is duplicated across backend roles")
 }
 
-func (e *Engine) walkCheckpointMetadata(ctx context.Context, visit func(objectstore.ObjectInfo, bool) error) error {
-	stream := newCheckpointMetadataStream(e)
+func (e *Engine) walkCheckpointMetadata(ctx context.Context, schema008, schema009 bool, visit func(objectstore.ObjectInfo, bool) error) error {
+	if schema008 {
+		stream, err := newConsistencyDomainCheckpointMetadataStream(ctx, e, schema009)
+		if err != nil {
+			return err
+		}
+		defer stream.Close()
+		for {
+			info, fileData, found, err := stream.next(ctx)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return nil
+			}
+			if err := visit(info, fileData); err != nil {
+				return err
+			}
+		}
+	}
+	stream := newCheckpointMetadataStream(e, schema008)
 	for {
 		info, fileData, found, err := stream.next(ctx)
 		if err != nil {

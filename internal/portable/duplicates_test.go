@@ -10,11 +10,68 @@ import (
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
+	"github.com/applyinnovations/endlessfs/internal/providerbudget"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
-func TestDuplicateSimilarityPostingsDoNotRewriteWhenContentSetIsUnchanged(t *testing.T) {
+func TestDuplicateReconciliationPublishesTheWholePlanOnce(t *testing.T) {
+	base := objectmemory.New()
+	ledger := providerbudget.NewLedger()
+	backend := budgettest.Wrap(providerbudget.RoleState, base, ledger)
+	server := httptest.NewServer(base)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2048, 1, 1, 1, 2, 3, 0, time.UTC))
+	if err := base.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(138, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := portable.Open(context.Background(), portable.Options{
+		Backend: backend, Clock: clock, IDs: domain.NewIDGenerator(bytes.NewReader(deterministic(139, 1<<20))),
+		Writer:   portable.WriterConfiguration{WriterSetID: "d3JpdGVyLXNldC0wMDAx", ConfigurationDigest: "config-v1", KeyringIdentifiers: []string{"session-v1"}},
+		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := domain.ParseUserID("YWFhYWFhYWFhYWFhYWFhYQ")
+	live, _ := domain.NewScope(owner, domain.AreaLive)
+	for _, directory := range []string{"/left", "/right"} {
+		if _, err := engine.Files().CreateDirectory(context.Background(), live, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath(directory)}); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"a.bin", "b.bin"} {
+			uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath(directory+"/"+name), []byte("identical"))
+		}
+	}
+	preview, err := engine.Files().PreviewDuplicateReconciliation(context.Background(), owner, domain.DuplicateReconciliationPreviewRequest{
+		Left: domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/left")}, Right: domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/right")}, RemoveFrom: domain.DuplicateSideRight,
+	})
+	if err != nil || len(preview.Items) != 1 || preview.PlanToken == "" {
+		t.Fatalf("PreviewDuplicateReconciliation() = %+v, %v", preview, err)
+	}
+	ledger.Reset()
+	result, err := engine.Files().ApplyDuplicateReconciliation(context.Background(), owner, preview.PlanToken, "duplicate-atomic-apply-001")
+	if err != nil || len(result.Items) != 1 || result.Operation.State != domain.OperationSucceeded {
+		t.Fatalf("ApplyDuplicateReconciliation() = %+v, %v", result, err)
+	}
+	headKey := storageformat.DomainHeadKey(storageformat.DomainNamespace, owner.String()).String()
+	headPuts := 0
+	for _, event := range ledger.Events() {
+		if event.Role != providerbudget.RoleState {
+			t.Fatalf("duplicate reconciliation contacted non-state storage: %+v", event)
+		}
+		if event.Kind == providerbudget.RequestObjectPut && event.Target == headKey && !event.Failed {
+			headPuts++
+		}
+	}
+	if headPuts != 1 {
+		t.Fatalf("duplicate reconciliation head publications = %d, want one; events=%+v", headPuts, ledger.Events())
+	}
+}
+
+func TestDuplicateProjectionIsRebuildableAndNeverWrittenByForegroundMutation(t *testing.T) {
 	backend := objectmemory.New()
 	server := httptest.NewServer(backend)
 	t.Cleanup(server.Close)
@@ -29,30 +86,54 @@ func TestDuplicateSimilarityPostingsDoNotRewriteWhenContentSetIsUnchanged(t *tes
 		t.Fatal(err)
 	}
 	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/copies/a.bin"), []byte("same bytes"))
-	before := duplicateSimilarityObjects(backend.Export())
-	if len(before) != 16 {
-		t.Fatalf("user-addressable directory similarity posting count = %d; want 16 and no area-root postings", len(before))
+	if projection := duplicateProjectionObjects(backend.Export()); len(projection) != 0 {
+		t.Fatalf("foreground namespace mutation wrote derived duplicate state: %v", projection)
+	}
+	if _, err := engine.Files().ListDuplicateGroups(context.Background(), user, domain.DuplicateGroupRequest{Limit: 20}); err != nil {
+		t.Fatal(err)
+	}
+	before := duplicateProjectionObjects(backend.Export())
+	if len(before) == 0 {
+		t.Fatal("duplicate discovery did not materialize its rebuildable projection")
 	}
 	uploadPortableFile(t, server.Client(), engine.Files(), scope, domain.MustParseUserPath("/copies/b.bin"), []byte("same bytes"))
-	after := duplicateSimilarityObjects(backend.Export())
-	if len(before) == 0 || len(after) != len(before) {
-		t.Fatalf("similarity posting count changed for duplicate multiplicity: %d -> %d", len(before), len(after))
+	stale := duplicateProjectionObjects(backend.Export())
+	if !equalObjectBodies(before, stale) {
+		t.Fatal("foreground namespace mutation eagerly rewrote the derived duplicate projection")
 	}
-	for key, body := range before {
-		if !bytes.Equal(body, after[key]) {
-			t.Fatalf("unchanged content set rewrote similarity posting %s", key)
-		}
+	page, err := engine.Files().ListDuplicateGroups(context.Background(), user, domain.DuplicateGroupRequest{Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := duplicateGroupByKind(t, page.Groups, domain.DuplicateFile)
+	if group.OccurrenceCount != 2 || group.ReclaimableBytes != int64(len("same bytes")) {
+		t.Fatalf("rebuilt duplicate projection = %+v", group)
+	}
+	if equalObjectBodies(before, duplicateProjectionObjects(backend.Export())) {
+		t.Fatal("stale duplicate projection was not replaced after discovery")
 	}
 }
 
-func duplicateSimilarityObjects(objects map[string][]byte) map[string][]byte {
+func duplicateProjectionObjects(objects map[string][]byte) map[string][]byte {
 	result := make(map[string][]byte)
 	for key, body := range objects {
-		if strings.Contains(key, "/duplicates/") && strings.Contains(key, "/similarity/") {
+		if strings.Contains(key, "/projections/") && strings.Contains(key, "/duplicates/") {
 			result[key] = body
 		}
 	}
 	return result
+}
+
+func equalObjectBodies(left, right map[string][]byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, body := range left {
+		if !bytes.Equal(body, right[key]) {
+			return false
+		}
+	}
+	return true
 }
 
 func TestDuplicateCatalogTracksFileAndExactDirectoryGroupsIncrementally(t *testing.T) {
@@ -276,8 +357,49 @@ func TestDuplicateCatalogFollowsSubtreeRootsWithoutWalkingDescendants(t *testing
 	if err != nil || !comparison.Exact || comparison.CommonFiles != 1 {
 		t.Fatalf("copied immutable subtree comparison = %+v, %v", comparison, err)
 	}
+	nestedPreference, err := engine.Files().SetDuplicateDirectoryIgnored(context.Background(), user, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left:    domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/source/nested")},
+		Right:   domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/copy/nested")},
+		Ignored: true,
+	})
+	if err != nil || !nestedPreference.Ignored || nestedPreference.Revision != 1 {
+		t.Fatalf("copied descendant pair identity = %+v, %v", nestedPreference, err)
+	}
+	if _, err := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{Source: domain.MustParseUserPath("/copy/nested"), Destination: domain.MustParseUserPath("/detached"), IdempotencyKey: "duplicate-detach-0001"}); err != nil {
+		t.Fatal(err)
+	}
+	nestedPreference, err = engine.Files().SetDuplicateDirectoryIgnored(context.Background(), user, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left:             domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/source/nested")},
+		Right:            domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/detached")},
+		Ignored:          false,
+		ExpectedRevision: nestedPreference.Revision,
+	})
+	if err != nil || nestedPreference.Ignored || nestedPreference.Revision != 2 {
+		t.Fatalf("detached copied descendant pair identity = %+v, %v", nestedPreference, err)
+	}
+	if _, err := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{Source: domain.MustParseUserPath("/detached"), Destination: domain.MustParseUserPath("/copy/nested"), IdempotencyKey: "duplicate-reattach-01"}); err != nil {
+		t.Fatal(err)
+	}
+	nestedPreference, err = engine.Files().SetDuplicateDirectoryIgnored(context.Background(), user, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left:             domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/source/nested")},
+		Right:            domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/copy/nested")},
+		Ignored:          true,
+		ExpectedRevision: nestedPreference.Revision,
+	})
+	if err != nil || !nestedPreference.Ignored || nestedPreference.Revision != 3 {
+		t.Fatalf("reattached copied descendant pair identity = %+v, %v", nestedPreference, err)
+	}
 	if _, err := engine.Files().Move(context.Background(), scope, scope, domain.MoveRequest{Source: domain.MustParseUserPath("/copy"), Destination: domain.MustParseUserPath("/moved"), IdempotencyKey: "duplicate-move-0001"}); err != nil {
 		t.Fatal(err)
+	}
+	nestedPreference, err = engine.Files().SetDuplicateDirectoryIgnored(context.Background(), user, domain.SetDuplicateDirectoryIgnoredRequest{
+		Left:             domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/source/nested")},
+		Right:            domain.DuplicateLocation{Area: domain.AreaLive, Path: domain.MustParseUserPath("/moved/nested")},
+		Ignored:          false,
+		ExpectedRevision: nestedPreference.Revision,
+	})
+	if err != nil || nestedPreference.Ignored || nestedPreference.Revision != 4 {
+		t.Fatalf("moved copied descendant pair identity = %+v, %v", nestedPreference, err)
 	}
 	directoryGroup := duplicateGroupByKind(t, groups.Groups, domain.DuplicateDirectory)
 	occurrences, err := engine.Files().ListDuplicateOccurrences(context.Background(), user, domain.DuplicateOccurrenceRequest{GroupID: directoryGroup.ID, Limit: 20})

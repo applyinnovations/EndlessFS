@@ -165,7 +165,7 @@ func (s *Service) allowPublicRegistrationAttempt(clientKey string) bool {
 }
 
 func (s *Service) StartRecovery(ctx context.Context, recoveryToken secret.Value) (CeremonyStart, error) {
-	if !secret.ValidBearerToken(recoveryToken.Reveal()) {
+	if !secret.ValidScopedBearerToken(recoveryToken.Reveal()) {
 		return CeremonyStart{}, domain.NewError(domain.ErrorUnavailable, "recovery is unavailable")
 	}
 	recovery, _, err := s.repository.RecoveryByToken(ctx, recoveryToken.Reveal())
@@ -240,6 +240,10 @@ func (s *Service) startRegistrationCeremony(ctx context.Context, flow model.Cere
 		return CeremonyStart{}, err
 	}
 	ceremonyID, binding, err := s.newCeremonySecrets()
+	if err != nil {
+		return CeremonyStart{}, err
+	}
+	ceremonyID, err = domain.ScopeOpaqueID(user.ID, ceremonyID)
 	if err != nil {
 		return CeremonyStart{}, err
 	}
@@ -332,18 +336,7 @@ func (s *Service) VerifyRegistration(ctx context.Context, ceremonyID string, bro
 		UserID: user.ID, DisplayName: user.DisplayName,
 		Credential: result.Credential, CreatedAt: now,
 	}
-	if err := s.repository.CreateRegistrationOperation(ctx, operation); err != nil {
-		return RegistrationComplete{}, err
-	}
-	ceremony.ConsumedAt = &now
-	ceremony.OperationID = operationID
-	if _, err := s.repository.UpdateCeremony(ctx, ceremony, ceremonyVersion); err != nil {
-		return RegistrationComplete{}, domain.NewError(domain.ErrorConflict, "ceremony was already consumed")
-	}
-	if err := s.claimRegistration(ctx, ceremony, operation); err != nil {
-		return RegistrationComplete{}, err
-	}
-	if err := s.materializeRegistration(ctx, operation); err != nil {
+	if err := s.commitRegistrationAtomic(ctx, ceremony, ceremonyVersion, operation); err != nil {
 		return RegistrationComplete{}, err
 	}
 	return RegistrationComplete{UserID: operation.UserID, CredentialID: operation.Credential.CredentialID, Flow: operation.Flow}, nil
@@ -354,6 +347,9 @@ func (s *Service) VerifyAuthentication(ctx context.Context, ceremonyID string, b
 	if err != nil {
 		return auth.IssuedSession{}, err
 	}
+	if ceremony.ConsumedAt != nil {
+		return s.resumeAuthentication(ctx, ceremony)
+	}
 	result, err := s.webAuthn.FinishAuthentication(ceremony.LibrarySession, response, s.resolveDiscoverable(ctx))
 	if err != nil {
 		return auth.IssuedSession{}, err
@@ -363,16 +359,11 @@ func (s *Service) VerifyAuthentication(ctx context.Context, ceremonyID string, b
 	if err != nil {
 		return auth.IssuedSession{}, err
 	}
-	ceremony.ConsumedAt = &now
-	ceremony.OperationID = operationID
-	if _, err := s.repository.UpdateCeremony(ctx, ceremony, version); err != nil {
-		return auth.IssuedSession{}, domain.NewError(domain.ErrorConflict, "ceremony was already consumed")
-	}
-	account, _, err := s.repository.Account(ctx, result.UserID)
+	account, accountVersion, err := s.repository.Account(ctx, result.UserID)
 	if err != nil || account.Status != model.AccountEnabled {
 		return auth.IssuedSession{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
 	}
-	stored, credentialVersion, err := s.repository.Credential(ctx, result.Credential.CredentialID)
+	stored, credentialVersion, err := s.repository.Credential(ctx, result.UserID, result.Credential.CredentialID)
 	if err != nil || stored.UserID != result.UserID {
 		return auth.IssuedSession{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
 	}
@@ -380,10 +371,42 @@ func (s *Service) VerifyAuthentication(ctx context.Context, ceremonyID string, b
 	stored.BackupEligible = result.Credential.BackupEligible
 	stored.BackupState = result.Credential.BackupState
 	stored.LastUsedAt = now
-	if _, err := s.repository.UpdateCredential(ctx, stored, credentialVersion); err != nil {
-		return auth.IssuedSession{}, domain.NewError(domain.ErrorConflict, "credential changed concurrently")
+	authEpoch := account.AuthEpoch
+	if authEpoch == 0 {
+		authEpoch = 1
 	}
-	return s.sessions.Issue(ctx, result.UserID, stored.CredentialID)
+	issued, err := s.sessions.PrepareForOperation(result.UserID, stored.CredentialID, operationID, now, authEpoch)
+	if err != nil {
+		return auth.IssuedSession{}, err
+	}
+	operation := model.AuthenticationOperation{
+		SchemaVersion: model.SchemaVersion, OperationID: operationID, Status: model.OperationCommitted,
+		UserID: result.UserID, CredentialID: stored.CredentialID, AuthEpoch: authEpoch, CreatedAt: now, CommittedAt: now,
+	}
+	ceremony.ConsumedAt, ceremony.OperationID, ceremony.UserID = &now, operationID, &result.UserID
+	if err := s.repository.CommitAuthenticationAtomic(ctx, ceremony, version, operation, stored, credentialVersion, account, accountVersion, issued); err != nil {
+		return auth.IssuedSession{}, err
+	}
+	return issued, nil
+}
+
+func (s *Service) resumeAuthentication(ctx context.Context, ceremony model.Ceremony) (auth.IssuedSession, error) {
+	if ceremony.UserID == nil || ceremony.OperationID == "" {
+		return auth.IssuedSession{}, domain.NewError(domain.ErrorInvalid, "committed authentication ceremony is incomplete")
+	}
+	operation, _, err := s.repository.AuthenticationOperation(ctx, *ceremony.UserID, ceremony.OperationID)
+	if err != nil || operation.UserID != *ceremony.UserID || operation.Status != model.OperationCommitted {
+		return auth.IssuedSession{}, domain.NewError(domain.ErrorInvalid, "committed authentication outcome is unavailable")
+	}
+	issued, err := s.sessions.PrepareForOperation(operation.UserID, operation.CredentialID, operation.OperationID, operation.CreatedAt, operation.AuthEpoch)
+	if err != nil {
+		return auth.IssuedSession{}, err
+	}
+	stored, _, err := s.repository.Session(ctx, issued.Token.Reveal())
+	if err != nil || stored.SessionTokenHash != issued.Record.SessionTokenHash || stored.CSRFTokenHash != issued.Record.CSRFTokenHash {
+		return auth.IssuedSession{}, domain.NewError(domain.ErrorUnauthenticated, "authentication outcome is no longer active")
+	}
+	return issued, nil
 }
 
 func (s *Service) registrationCeremony(ctx context.Context, ceremonyID string, binding secret.Value) (model.Ceremony, state.Version, error) {
@@ -399,10 +422,10 @@ func (s *Service) registrationCeremony(ctx context.Context, ceremonyID string, b
 
 func (s *Service) authenticationCeremony(ctx context.Context, ceremonyID string, binding secret.Value) (model.Ceremony, state.Version, error) {
 	ceremony, version, err := s.repository.Ceremony(ctx, ceremonyID)
-	if err != nil || ceremony.Type != model.CeremonyAuthentication || ceremony.ConsumedAt != nil || !s.sessions.MatchesProtected(binding.Reveal(), ceremony.BrowserBindingHash) {
+	if err != nil || ceremony.Type != model.CeremonyAuthentication || !s.sessions.MatchesProtected(binding.Reveal(), ceremony.BrowserBindingHash) {
 		return model.Ceremony{}, "", domain.NewError(domain.ErrorUnauthenticated, "invalid authentication ceremony")
 	}
-	if !s.clock.Now().Before(ceremony.ExpiresAt) {
+	if ceremony.ConsumedAt == nil && !s.clock.Now().Before(ceremony.ExpiresAt) {
 		return model.Ceremony{}, "", domain.NewError(domain.ErrorUnauthenticated, "invalid authentication ceremony")
 	}
 	return ceremony, version, nil
@@ -429,7 +452,7 @@ func (s *Service) resolveDiscoverable(ctx context.Context) auth.UserResolver {
 		if err != nil {
 			return auth.User{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
 		}
-		credential, _, err := s.repository.CredentialByRawID(ctx, rawCredentialID)
+		credential, _, err := s.repository.CredentialByRawID(ctx, userID, rawCredentialID)
 		if err != nil || credential.UserID != userID {
 			return auth.User{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
 		}

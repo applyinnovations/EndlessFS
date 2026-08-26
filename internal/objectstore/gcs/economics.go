@@ -20,6 +20,9 @@ var regionalStandardFlatLatency []byte
 //go:embed economics/budgets-regional-standard-flat-2026-08.json
 var regionalStandardFlatBudgets []byte
 
+//go:embed economics/budgets-schema-009-regional-standard-flat-2026-08.json
+var regionalStandardFlatSchema009Budgets []byte
+
 // RegionalStandardFlatEconomics returns the reviewed provider model used by
 // deterministic request-budget tests. It performs no network access.
 func RegionalStandardFlatEconomics() (providerbudget.Model, error) {
@@ -29,5 +32,9 @@ func RegionalStandardFlatEconomics() (providerbudget.Model, error) {
 // RegionalStandardFlatBudgetRatchet returns the append-only operation ceilings
 // for this provider profile. Later epochs may only retain or tighten them.
 func RegionalStandardFlatBudgetRatchet() (providerbudget.RatchetLedger, error) {
-	return providerbudget.ParseRatchetLedger(regionalStandardFlatBudgets)
+	ledger, err := providerbudget.ParseRatchetLedger(regionalStandardFlatBudgets)
+	if err != nil {
+		return providerbudget.RatchetLedger{}, err
+	}
+	return providerbudget.AppendRatchetDelta(ledger, regionalStandardFlatSchema009Budgets)
 }

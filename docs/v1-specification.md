@@ -31,7 +31,7 @@ The central architectural rule is:
 
 EndlessFS v1 MUST deliver the complete user-facing and control-plane behavior described in this document against deterministic local object-store implementations. It MUST also define and implement one canonical provider-independent storage-set format for all authoritative application state, file metadata, and file bytes. A storage set uses one state bucket plus an optional distinct file bucket; single-bucket mode configures the same bucket for both roles. Copying the keys and bodies of a quiescent conforming storage set to another conforming object-store backend MUST require no state conversion, reindexing, identifier rewriting, or logical-version migration.
 
-The same configured storage set MUST support multiple simultaneously active EndlessFS replicas in one compatible writer set. Correctness MUST NOT depend on process-local locks, a leader process, sticky routing, graceful shutdown, or a node releasing a lock before it disappears. Every visible mutation is admitted through the canonical state-bucket write gate and is linearized by a provider-independent conditional commit; recoverable multi-object work uses durable operation state, immutable staging, expiring ownership leases, and monotonically increasing fencing tokens.
+The same configured storage set MUST support multiple simultaneously active EndlessFS replicas in one compatible writer set. Correctness MUST NOT depend on process-local locks, a leader process, sticky routing, graceful shutdown, or a node releasing a lock before it disappears. Every same-domain mutation is linearized by one provider-independent consistency-domain head CAS. A genuine cross-domain invariant is linearized by one canonical create-only decision whose prepared participant locks are helpable by any replica. Immutable preparation, retained fingerprint-bound outcomes, durable decisions, and catalog/domain freeze provide crash recovery and checkpoint fencing.
 
 All v1 acceptance tests MUST run locally without real GCP integration. Google Cloud Storage (GCS) is the first intended production backend and informs the capability model, but a live GCS bucket, GCP credentials, and any deployment are explicitly outside the v1 completion gate.
 
@@ -58,7 +58,7 @@ Provider portability and multi-replica safety are clarifications of the original
 - Browser-direct provider-native upload and download capabilities are a core contract, not an optional optimization.
 - The authoritative storage-set format is owned by EndlessFS and MUST NOT vary by storage provider or by single-/split-bucket configuration.
 - Provider-native generations, ETags, version IDs, metadata, upload sessions, rewrite tokens, and capability values MUST NOT become authoritative or portable state.
-- Multiple replicas sharing a storage set MUST use canonical distributed admission, CAS, fencing, and recovery. Process-local mutexes and timeout-only locks cannot protect storage state.
+- Multiple replicas sharing a storage set MUST use canonical conditional publication, catalog freeze, idempotent outcomes, and recovery. Process-local mutexes, leaders, and timeout-only locks cannot protect storage state.
 - Every object-store backend implementation MUST have deterministic test doubles and MUST pass shared backend, portable-storage, provider, state, and raw-copy portability contract tests.
 - Development follows red → green → refactor. Security-sensitive behavior requires positive and negative tests.
 
@@ -84,7 +84,7 @@ EndlessFS v1 MUST provide:
 12. Reproducible development and CI entry points defined entirely by Nix.
 13. User-selectable light, dark, and operator-supplied data-only themes without allowing theme code to change application behavior.
 14. A canonical provider-independent storage-set format whose keys and bodies can be copied unchanged between conforming object stores and reopened without state migration.
-15. Stable provider-independent logical versions, identifiers, directory relationships, operation records, and state records that survive a backend change even when every native generation or ETag changes.
+15. Stable provider-independent logical versions, identifiers, directory relationships, retained mutation outcomes, and state records that survive a backend change even when every native generation or ETag changes.
 16. Horizontally scaled replicas that safely share one configured storage set, including deterministic recovery when a node disappears before, during, or after a mutation.
 
 ### 2.2 Product statement
@@ -101,7 +101,7 @@ The implementation is v1 complete only when:
 - the full required suite succeeds with outbound network access denied;
 - no real provider or deployment is needed for any required check;
 - deterministic tests prove that a complete single- or split-bucket storage set copied as keys and bodies to backends with different native versions and listing behavior opens with identical logical state and can continue mutating safely; and
-- deterministic multi-replica tests prove write admission, same-resource races, directory/tree isolation, expired-owner takeover, stale-worker denial, lost-success recovery, rolling compatibility, and checkpoint fencing; and
+- deterministic multi-replica tests prove same-domain races, directory/tree isolation, stale-head denial, lost-success recovery, rolling compatibility, migration convergence, and checkpoint freeze fencing; and
 - the limitations in this specification are documented without presenting the local mock as production storage.
 
 ---
@@ -228,15 +228,15 @@ The following are not part of v1:
 flowchart LR
     B["Browser"] -->|"Control requests; no file bodies"| E["EndlessFS Go control plane"]
     E -->|"Provider and state contracts"| F["Portable EndlessFS storage engine"]
-    F -->|"State, metadata, gate, operations"| S["Configured state backend"]
+    F -->|"Domain heads/pages, metadata, gate"| S["Configured state backend"]
     F -->|"Immutable blobs; legacy staging"| O["Configured file backend"]
     E -->|"Short-lived capability"| B
     B ==>|"File data via provider capability"| O
 ```
 
-The EndlessFS control plane authenticates users, validates virtual paths, and applies authorization. One provider-independent portable storage engine implements the file and state semantics over narrow conditional object-store backends. The state backend holds every canonical record except immutable blobs and legacy transient upload staging; the file backend holds those byte objects and supplies direct-transfer capabilities. Schema-006 uploads target a newly allocated immutable final blob key directly and publish only its canonical directory reference after provider metadata verification. Both roles MAY use the same backend/bucket. Backend adapters supply transport, native preconditions, server-side copy, and direct-transfer capabilities; they do not define the storage layout or persisted schemas. The control plane MUST NOT expose provider credentials and MUST NOT accept file bodies through its normal control API.
+The EndlessFS control plane authenticates users, validates virtual paths, and applies authorization. One provider-independent portable storage engine implements the file and state semantics over narrow conditional object-store backends. The state backend holds every canonical record except immutable blobs and legacy migration input; the file backend holds those byte objects and supplies direct-transfer capabilities. Schema-009 uploads target a newly allocated immutable final blob key directly and publish only its canonical namespace reference after provider metadata verification. Both roles MAY use the same backend/bucket. Backend adapters supply transport, native preconditions and direct-transfer capabilities; they do not define the storage layout or persisted schemas. The control plane MUST NOT expose provider credentials and MUST NOT accept file bodies through its normal control API.
 
-Every replica is an interchangeable participant in one state-bucket-scoped writer set and MUST use the same state/file backend pairing. Replicas coordinate only through canonical records and object-backend conditional operations; there is no distinguished in-process leader and no correctness dependency on routing a retry to the replica that began an operation. The state-bucket write gate controls distributed admission across both backends, resource roots control visible single-resource mutations, and durable operation records control multi-resource commit and recovery.
+Every replica is an interchangeable participant in one state-bucket-scoped writer set and MUST use the same state/file backend pairing. Replicas coordinate only through canonical records and object-backend conditional operations; there is no distinguished in-process leader and no correctness dependency on routing a retry to the replica that began an operation. A schema-009 consistency-domain head CAS is the sole visibility point for a same-domain invariant. Cross-domain plans lock every participant before one create-only canonical decision and remain helpable until all participants reflect it. The canonical domain catalog makes the complete mutable-head set freezeable for checkpoint and migration. Retained fingerprint-bound outcomes resolve retries and lost responses without a generic admission transaction around each mutation.
 
 ### 5.2 v1 local verification architecture
 
@@ -360,9 +360,9 @@ The following invariants apply in every HTTP handler, background-free use case, 
 16. **Portable logical versions:** versions exposed to application code or clients are derived from canonical record state and survive raw-copy backend changes. Native generations, ETags, and version IDs are request-local preconditions only.
 17. **Bodies over provider metadata:** correctness never depends on provider custom metadata, tags, ACL entries, storage class, native creation timestamps, listing order, or object-versioning configuration. Authoritative metadata lives in canonical object bodies.
 18. **Portable cutover:** a portability checkpoint spanning the complete configured storage set is created only after writes are quiesced and provider-native transfer/copy leases are drained or aborted. Mixed, corrupt, incomplete, misplaced, or unsupported format state fails closed at destination verification.
-19. **Distributed admission:** every user/application mutation and provider-side data mutation is associated with a durable admission for the current state-bucket write-gate epoch. Closing the gate is an atomic storage-set-wide barrier, not a process-local flag.
-20. **Fenced recovery:** an expired ownership lease only permits a conditional takeover that increases the canonical fencing token. Expiry alone never releases a resource or authorizes a commit, and a stale worker cannot publish after takeover.
-21. **Commit-defined visibility:** a public upload target is either a legacy immutable staging artifact or a newly allocated immutable final blob that remains unreachable until publication. Intermediate multi-record results are immutable staging artifacts. None becomes visible except through a canonical CAS-controlled resource root or committed operation record.
+19. **Conditional publication and freeze:** every user/application mutation has one canonical consistency-domain head CAS that totally orders with conflicting writers and domain freeze. The catalog is frozen before its registered domains, so no authority can become visible outside the checkpoint barrier.
+20. **Stale-writer denial and recovery:** expiry alone never releases or authorizes anything. A stale worker can write only unreachable immutable pages because its captured head condition cannot publish after another mutation or freeze. Lost success is reconciled from the fingerprint-bound outcome in canonical authority.
+21. **Commit-defined visibility:** a public upload target is either legacy migration input or a newly allocated immutable final blob that remains unreachable until publication. Prepared pages and provider results are not visible until one canonical domain-head CAS references them.
 22. **Replica compatibility:** all simultaneous writers use the same writer-set identity, writer protocol, canonical format/features, security-critical configuration fingerprint, and provider-independent keyring identifiers. Incompatible replicas fail readiness before serving traffic.
 
 ### 7.1 Virtual path rules
@@ -472,7 +472,9 @@ Required semantics:
 - `Copy`, `Move`, and `Delete` work for files and directory trees and are idempotent when the same idempotency key is reused.
 - Long operations MAY be asynchronous. `Operation` exposes `pending`, `running`, `succeeded`, or `failed` and a stable error, but never provider internals.
 - Conflict modes are `fail`, `replace`, and `rename`. `fail` is the default.
-- Cancellation and partial failure MUST leave a diagnosable operation record. A failed operation MUST not report success for a partially completed tree.
+- Cancellation and partial failure MUST leave a diagnosable retained outcome in
+  the affected consistency domain. A failed mutation MUST not publish or report
+  success for a partially completed tree.
 - Provider errors map to a small domain taxonomy: invalid, unauthenticated, unauthorized, not found, conflict, precondition failed, rate limited, unavailable, and internal.
 
 ### 8.3 Capability model
@@ -563,7 +565,7 @@ type ObjectBackend interface {
 - `Head` and `List` return size plus normalized canonical base64url MD5 and CRC32C values when the provider attests both, and return native versions separately. The portable engine normalizes provider encodings, listing order, page sizes, missing metadata, and error forms. ETags, multipart/composite identifiers, and provider encodings never cross this interface.
 - `Verify` accepts a provider-independent expected byte size and checksum and returns an exact native version only when provider integrity metadata for that immutable incarnation matches. Production adapters MUST NOT satisfy an ordinary control-plane assertion by reading the stored body. A provider or object class that cannot attest the required metadata is unsupported for confirmed duplicate identity and metadata-only checkpointing; it fails closed instead of falling back to a download.
 - `Copy` keeps file bytes inside the configured provider data plane. A backend that cannot provide conditionally safe server-side copy/rewrite semantics cannot satisfy the v1 backend contract.
-- Upload capabilities bind only to an operation-specific, newly allocated immutable blob key supplied by the portable engine; historical schema-001 upload records may still bind legacy staging keys and complete through provider-side copy. Download capabilities bind only to committed immutable blob keys. Capabilities cannot address state, directory, operation, idempotency, admission, checkpoint, gate, or lease objects.
+- Upload capabilities bind only to a newly allocated immutable final blob key supplied by the portable engine; historical schema-001 upload records may still bind legacy staging keys only while the adjacent migration consumes them. Download capabilities bind only to committed immutable blob keys. Capabilities cannot address state, domain, projection, checkpoint, gate, or lease objects.
 - Provider authentication, endpoints, retry hints, native checksum values, generations, ETags, version IDs, signing material, resumable session URIs, multipart IDs, block IDs, and rewrite/copy tokens remain inside the adapter or an encrypted transient lease.
 - Backend adapters may set provider metadata for transport optimization, but portable behavior MUST remain correct when all such metadata is absent or changed after a raw-copy cutover.
 
@@ -584,24 +586,42 @@ base64url(
 
 `canonicalPayloadBytes` excludes the `logicalVersion` field and is produced by the single canonical encoder defined in section 9. A create starts at revision 1. A successful mutation increments the prior revision exactly once, including when the new typed payload is otherwise equal. The version therefore changes for every successful mutation but remains identical when the object body is copied unchanged to another backend.
 
-To mutate a canonical record, the portable engine MUST read both the canonical logical version and the backend-native version, validate the caller's logical precondition, construct the next canonical envelope, conditionally write against the native version, and then discard the native version. Retries use the canonical operation/idempotency state machine rather than assuming native identifiers survive.
+To mutate schema-009 same-domain authority, the portable engine MUST read the canonical consistency-domain head together with its request-local backend-native version, validate logical preconditions against the authenticated head and referenced immutable pages, prepare changed immutable pages, and conditionally publish the next head against that native version. It then discards the native version. The committed delta or compacted outcome binds the complete normalized intent fingerprint and result. A retry reads canonical authority and returns that result; it never assumes native identifiers survive.
 
-A portable fencing token is a positive monotonically increasing integer in a canonical resource guard or operation record. It is distinct from `NativeVersion`: it survives raw-copy, identifies the currently authorized operation attempt, and is never sufficient by itself to perform a write. A visible commit MUST both present the current fencing token in the canonical transition and use the current request-local native condition on the same commit object. Takeover changes that commit object's body and native version before the new worker can publish, so an old worker's conditional commit fails.
+The domain revision and captured native head condition fence an ordinary schema-009 writer. A visible same-domain commit increments the contiguous portable domain revision and uses the current request-local native condition on the same head object. Mutation, transition preparation/finalization, or freeze changes that head before a paused writer can publish, so the paused writer's conditional commit fails. Historical portable operation fences remain decode-only migration input and do not justify a runtime lease or admission object around a schema-009 mutation.
 
 Immutable file blobs use stable random blob IDs and are never overwritten. Content-addressed or cross-user deduplication is not required. At publication the adapter normalizes the provider-attested `(size, MD5, CRC32C)` tuple into the referencing canonical entry. That tuple is the confirmed duplicate identity and copy-recovery assertion; provider generations, ETags, multipart IDs, and checksum encodings remain transient. A missing or partial tuple never forms a confirmed duplicate group. Combining 128-bit MD5 with 32-bit CRC32C and exact size makes accidental collision negligible for this operational use, but it is not a cryptographic authenticity proof against a chosen-prefix adversary. All user-visible metadata remains in canonical records.
 
 ### 8.7 Multi-replica execution contract
 
-- All replicas in one writer set are peers. Any replica may initiate, poll, resume, or reconcile an operation.
-- Other than the gate, ticket, and fenced recovery transitions that enforce this protocol, a mutation MUST complete the write-admission protocol in section 9.2 before it creates a provider capability, writes staging data, changes canonical state, or performs a provider copy/delete. Coordination transitions cannot alter user-visible logical state except by completing an already admitted operation.
-- Single-record mutations linearize at the conditional write of that record. Directory-content mutations linearize at the conditional directory-root update. Multi-resource operations linearize only at the conditional `committed` transition of their durable operation record.
-- A worker owns a recoverable operation attempt only while its canonical lease is current. Renewal, takeover, step advancement, commit, and terminal failure are CAS transitions. Wall-clock expiry makes takeover eligible but never changes ownership by itself.
-- Takeover preserves the stable operation ID, conditionally increments its attempt and fencing token, and resumes from durable steps. If several replicas attempt takeover, exactly one wins.
-- A stale worker may create only unreachable immutable staging artifacts. It cannot overwrite committed blobs, unlock resources, advance an operation, or publish directory/state changes after its fence is superseded.
-- Lost-success responses are resolved by reading the intended canonical or staged object and verifying operation ID, fence, digest, size, and step before retrying. An unconditional retry of an ambiguous mutation is prohibited.
-- Locks are canonical states on the resource root or operation, not separate best-effort mutex objects. Locks are acquired in deterministic canonical-resource order. Expiry does not delete them; a successful fenced takeover, recovery, or terminal transition releases them.
-- A crashed owner may temporarily reduce availability for the affected resources until expiry and recovery. It MUST NOT corrupt state or block unrelated resources. Maintenance waits for recovery rather than overriding a possibly active fence.
-- Correctness cannot depend on process memory, local disks, synchronized routing, replica count, graceful termination, background queues, or the failed worker returning.
+- All replicas in one writer set are peers. Any replica may initiate or retry a
+  mutation and reconcile an ambiguous result.
+- A same-domain mutation reads one exact consistency-domain head and linearizes
+  only at that head's conditional replacement. Namespace operations that must
+  be atomic belong to the same owner namespace domain.
+- A cross-domain transition persists one immutable fingerprint-bound plan,
+  conditionally prepares every participant lock, and linearizes at one
+  create-only commit/abort decision. Any replica or reader encountering a lock
+  helps every participant reach that decision before returning logical state.
+- Prepared immutable pages are unreachable before the head CAS. A stale writer
+  may leave garbage but cannot publish after another mutation, compaction, or
+  freeze changed its head condition.
+- Every mutation ID binds a canonical intent fingerprint. A retained delta or
+  compacted outcome returns the original result; reuse for different intent is
+  rejected. Lost-success handling always rereads authority and never issues an
+  unconditional duplicate side effect.
+- A domain head contains at most 32 deltas. Compaction preserves contiguous
+  revisions, retained outcomes, and structural sharing, and has the same
+  conditional head visibility rule as a mutation.
+- First use creates an inert head, registers it in the canonical catalog, and
+  then activates it. Catalog freeze and domain freeze totally order with this
+  sequence, so every mutable head is either absent/inert or included.
+- Live provider upload capabilities are the only ordinary native leases. Their
+  expiry permits an idempotent abort/drain; it never authorizes namespace
+  publication. File visibility still requires the owner namespace head CAS.
+- Correctness cannot depend on process memory, local disks, synchronized
+  routing, a leader, replica count, graceful termination, background queues,
+  or the failed worker returning.
 
 ### 8.8 Shared contract suites
 
@@ -612,7 +632,8 @@ Every implementation MUST pass reusable tests covering:
 - pagination and cursor rejection;
 - path boundary behavior;
 - conflict and version preconditions;
-- upload create/complete/abort;
+- upload create/batched-create/complete/abort, including atomic batch intent
+  creation and idempotent replay;
 - resumable offset, retry, and completion behavior;
 - capability expiry and scope;
 - direct downloads and range requests;
@@ -620,11 +641,11 @@ Every implementation MUST pass reusable tests covering:
 - idempotency;
 - injected faults and retry classification;
 - concurrency;
-- two-to-eight-replica admission, mutation, reconciliation, and takeover races;
-- stale-worker denial before and after lease expiry, including a paused worker returning after takeover;
-- node loss before a side effect, after a staged write, after provider success with a lost response, and after logical commit;
-- directory mutation during move/trash/delete and multi-resource commit visibility;
-- write-gate close/open races and checkpoint quiescence with crashed owners;
+- two-to-eight-replica head-CAS, mutation, compaction, reconciliation, catalog-registration, and freeze races;
+- stale-writer denial before and after another head publication, including a paused worker returning after freeze;
+- node loss before immutable page writes, after page writes, after provider success with a lost response, and after logical commit;
+- directory mutation during move/trash/delete and single-head atomic visibility;
+- write-gate close/open, catalog/domain freeze, active-capability drain, and checkpoint quiescence races;
 - compatible rolling replicas and fail-closed incompatible writer/configuration joins;
 - cross-scope isolation; and
 - state-store create/CAS/delete races;
@@ -649,7 +670,7 @@ v1 MUST include:
 6. **Large-object simulation** using logical sizes and resumable offsets without allocating multi-gigabyte files.
 7. **Native-divergence modes** that change native versions, provider metadata, page sizes, ordering, and error shapes without changing object keys or bodies.
 8. **Raw-copy harnesses** that transfer only keys and bodies between independently configured backends and then reopen the destination.
-9. **Replica schedulers** that deterministically pause, crash, restart, partition, and resume independent engine instances at every admission, lease, staging, provider-response, resource-root, operation-commit, and checkpoint boundary.
+9. **Replica schedulers** that deterministically pause, crash, restart, partition, and resume independent engine instances at every domain-head read/CAS, immutable-page write, compaction, catalog registration/freeze, provider response, upload lease, migration cutover, checkpoint, and unfreeze boundary.
 
 Mocks MUST enforce the same authorization, conditional-object, and capability constraints expected of a real backend. A permissive map that bypasses expiry, scope, native conditions, logical versions, resumability, or portability rules is insufficient.
 
@@ -666,33 +687,23 @@ The following layout and placement are normative for every object-store backend.
   superblock.json
   control/writer-set.json
   control/write-gate.json
-  state/<namespace>/<encoded-key>.json                         # schemas 001-003 migration input only
-  state-versions/<namespace>/<encoded-key>/<encoded-logical-version>.json
-  state-indexes/<namespace>/root.json
-  state-indexes/<namespace>/nodes/<node-id>.json
-  fs/<encoded-user-id>/<area>/dirs/<directory-id>/directory.json
-  fs/<encoded-user-id>/<area>/dirs/<directory-id>/manifests/<manifest-id>.json
-  fs/<encoded-user-id>/<area>/dirs/<directory-id>/pages/<page-id>.json  # schemas 001-003 only
-  fs/<encoded-user-id>/<area>/dirs/<directory-id>/index/<node-id>.json
-  fs/<encoded-user-id>/<area>/dirs/<directory-id>/sort-index/<order>/<node-id>.json
-  fs/<encoded-user-id>/<area>/dirs/<directory-id>/content-index/<node-id>.json
-  duplicates/<encoded-user-id>/<kind>/occurrences/<group-id>/<path-digest>.json
-  duplicates/<encoded-user-id>/<kind>/summaries/<group-id>/<shard>.json
-  duplicates/<encoded-user-id>/ignores/<group-id>.json
-  duplicates/<encoded-user-id>/similarity/<position>/<minhash>/<area>/<directory-id>.json
-  duplicates/<encoded-user-id>/directory-ignores/<pair-id>.json
-  operations/<encoded-user-id>/<operation-id>.json
-  operation-steps/<encoded-user-id>/<operation-id>/<step-set-id>/<page>.json
-  operation-staging/<encoded-user-id>/<operation-id>/<artifact-id>
-  idempotency/<encoded-user-id>/<key-digest>.json
-  admissions/<gate-epoch>/<operation-id>.json
+  domains/catalog/head.json
+  domains/catalog/pages/<page-digest>.json
+  domains/<kind>/<domain-digest>/head.json
+  domains/<kind>/<domain-digest>/pages/<page-digest>.json
+  domains/<kind>/<domain-digest>/snapshots/<snapshot-digest>.json
+  domains/state-query-snapshots/<snapshot-digest>.json
+  transitions/plans/<transition-digest>.json
+  transitions/decisions/<transition-digest>.json
+  projections/<owner-digest>/<kind>/head.json
+  projections/<owner-digest>/<kind>/heads/<projection-digest>.json
+  projections/<owner-digest>/<kind>/pages/<page-digest>.json
   checkpoints/<checkpoint-id>.json
   checkpoints/<checkpoint-id>/inventory/<page>.json
   maintenance/{gc,migration}/...
   leases/<backend-kind>/<lease-id>.json
 [file] endlessfs/v1/
   fs/<encoded-user-id>/blobs/<blob-id>
-  staging/<encoded-user-id>/<operation-id>/<artifact-id>
 ```
 
 No adapter may map these records to a different authoritative schema, key layout, or backend role. The configured bucket/container names and provider account/project are external configuration and are never embedded in canonical keys or bodies. In split mode, a checkpoint fails closed if a canonical blob is found in the state backend or a canonical state/metadata object is found in the file backend.
@@ -708,7 +719,63 @@ Canonical object keys:
 
 The state backend's `superblock.json` object identifies `endlessfs-portable-bucket-v1`, the immutable storage-set ID, canonical encoder version, key-format version, writer-protocol version, creation time, and required feature set. Startup MUST reject a missing, corrupt, mixed, newer-unsupported, or incompatible superblock before serving authenticated or public operations. The only approved compatibility paths are the ordered transformations registered by the append-only storage-schema ledger below. Startup MUST detect one exact registered epoch and complete or resume the entire remaining closed-gate migration chain before readiness. The file backend does not define another writer set, gate, or filesystem schema.
 
-Current state is a persistent copy-on-write search tree per fixed namespace. Its constant-size `state-indexes/<namespace>/root.json` visibility root names bounded immutable nodes whose leaves map logical keys to immutable `state-versions` bodies. `Get` and mutation read or rewrite O(log N) nodes; ordered listing reads O(log N + page size). Cursor capabilities are authenticated-encrypted and constant-size, expire, bind the exact prefix/limit, immutable index root, gate epoch, and logical gate version, and reveal neither state keys nor provider keys. The schema-004 migration builds and verifies these indexes before retiring legacy mutable `state/` records. Closed-gate reachability collection removes superseded nodes and version bodies; no cursor token is stored in the bucket.
+Schema 009 stores authority in consistency domains of the closed kinds
+`namespace`, `owner-control`, `administration`, `capability`, `share`,
+`owner-identity`, and `owner-jobs`. New application state routes by invariant:
+one owner's profile/account/credentials/sessions/recoveries use
+`owner-identity`; preview operations/index/idempotency use `owner-jobs`;
+bootstrap/roles/invites use `administration`; unowned ceremonies use sharded
+`capability`; and Trash/uploads/shares/drive operations remain with the owner
+`namespace`. `owner-control` and `share` remain accepted only where required by
+immutable predecessor compatibility. Every generic application value is
+wrapped in a canonical typed record whose `recordType` must match the exact
+logical key route before the opaque application payload is returned. The
+application record codecs retain their independent strict-JSON validation.
+
+Each head binds the complete domain identity and kind, positive contiguous
+revision, optional freeze epoch, a content-addressed base-tree root, retained
+outcome and outcome-expiry roots, and no more than 32 ordered deltas. Each
+delta binds one mutation ID, complete normalized intent fingerprint, revision,
+retention time, changes, logical versions, and result. A same-domain head CAS is
+its sole visibility point. Missing, noncanonical, mistyped, misbound,
+reordered, duplicated, revision-gapped, or digest-inconsistent authority fails
+closed.
+
+Immutable domain pages bind the full domain identity, kind, level, exact key
+range, entry and byte counts, and either ordered values or child descriptors.
+The SHA-256 digest of the canonical body is the page identity. Page bodies are
+bounded independently by both a 256-item maximum and the canonical-record byte
+limit. Point operations read one root-to-leaf path. Mutation and compaction
+rewrite only changed leaf/ancestor paths and structurally share unchanged
+subtrees. Independent immutable page writes use a bounded concurrency of 32;
+only the later head CAS publishes them.
+
+The canonical catalog contains every registered domain head. A new domain is
+created inert, registered by catalog CAS, and then activated, so catalog freeze
+totally orders with first publication. Prefix listings use authenticated
+immutable domain or composite query snapshots, not provider listing order.
+Derived duplicate projections are immutable and rebuildable; a projection head
+binds its exact owner and namespace revision and never authorizes namespace
+publication.
+
+The owner namespace domain contains both live and Trash roots, stable directory
+nodes, exact child-tree roots, file references, recursive byte/file aggregates,
+upload authority, retained mutation outcomes, and idempotency bindings. Move,
+rename, Trash, restore, copy-by-reference, and logical delete rewrite only the
+affected edges and ancestor paths; they do not enumerate descendants or issue
+a file-backend copy/delete. An explicit batch validates its selected roots,
+writes bounded immutable pages, and publishes the complete selection with one
+owner head CAS.
+
+### Historical schemas 001-008 (migration input only)
+
+The following state-index, per-directory manifest, admission, operation,
+staging, and synchronous duplicate-catalog descriptions define immutable
+predecessor bytes and the behavior required while migrating them. They are not
+schema-009 runtime alternatives and no ordinary request may read, write, or
+fall back to these key families.
+
+Historical schema-004 state is a persistent copy-on-write search tree per fixed namespace. Its constant-size `state-indexes/<namespace>/root.json` visibility root names bounded immutable nodes whose leaves map logical keys to immutable `state-versions` bodies. `Get` and mutation read or rewrite O(log N) nodes; ordered listing reads O(log N + page size). Cursor capabilities are authenticated-encrypted and constant-size, expire, bind the exact prefix/limit, immutable index root, gate epoch, and logical gate version, and reveal neither state keys nor provider keys. The schema-004 migration builds and verifies these indexes before retiring legacy mutable `state/` records. Closed-gate reachability collection removes superseded nodes and version bodies; no cursor token is stored in the bucket.
 
 The root directory ID is a fixed format constant. Every other directory and blob ID is a stable opaque random identifier stored in canonical records. Each mutable `directory.json` root points to one immutable manifest whose constant-size header names a persistent bounded fan-out name-search root, fixed roots for modified, size, and kind order, and a descendant-content view ordered by `(file group ID, relative path)`. Schema-006 manifests may pin an immutable predecessor view plus bounded attach/detach/file deltas; exact readers merge that lazy view, and mutation compacts a bounded delta chain into another immutable layer rather than expanding an attached subtree. Immutable leaves contain uniquely ordered entries and branches carry bounded ranges, counts, and a fixed 16-position MinHash summary over their confirmed file-group set; parent summaries are the component-wise minima of their children, so insert and delete rewrite only the search path. The name tree also carries exact byte/file/count aggregates, while the content view count equals the recursive file count. Lookup and pagination read O(log D + page size) in every supported order, and one file change structurally shares unchanged nodes while rewriting O(log D + log F) nodes in each affected ancestor. Continuations bind the exact immutable manifest and last composite key, not an offset or entry snapshot. The root contains its logical revision, non-negative persisted recursive-byte and recursive-file-count aggregates, an order-independent content accumulator and structural digest, and any operation-owned pending pre/post transition; the selected manifest repeats these values and pins the content sketch when it remains incrementally valid. Historical page-ID manifests remain migration inputs only. A stored name MUST hash to its recorded digest and match the requested name; a mismatch is a collision or corruption and fails closed.
 
@@ -724,11 +791,13 @@ The duplicate catalog is owner-scoped derived canonical state. A confirmed file 
 
 Duplicate-group, occurrence, and overlap-candidate enumeration is bounded and cursor-paginated. A selected directory probes only its 16 inverted MinHash ranges; candidates sharing multiple slots are emitted once by their first common position, and exact multiset intersection/difference is computed lazily from the two live pinned content trees. No directory-pair matrix exists. Reclaimable bytes are reported per group as `(occurrenceCount - 1) * size` with overflow checks; callers MUST NOT sum nested directory groups together with their descendant file groups as though those were disjoint bytes. Owner-scoped exact-group ignore records are keyed by stable group ID and revision. Separate revisioned directory-pair preferences are keyed by the canonical unordered pair of `(area, stable directory ID)`, survive path changes, and hide an intentionally duplicated exact or partial relationship without suppressing unrelated pairs. Selected disjoint live-directory comparisons merge the two pinned content trees and compute the exact multiset intersection and both differences with O(page-size) process memory. Reconciliation emits at most 100 pinned removal/keep pairs per plan token, omits ignored identities, and resumes from authenticated left/right content keys. Its continuation binds both selected manifests plus the exact gate epoch/version and carries the already-computed comparison totals, so later pages do not rematerialize or rescan both inventories. A changed manifest, file version, keep occurrence, ignore revision, or gate invalidates the plan; reconciliation never directly destroys a blob. After operation drain, closed-gate maintenance validates this namespace, rejects unresolved transitions, and conditionally removes nil occurrence, summary, and similarity roots while retaining explicit preferences.
 
-The append-only storage-schema ledger currently records seven complete epochs: schema 001, the pre-aggregate format written by v0.1.0–v0.1.4; schema 002, the historical byte-aggregate intermediate; schema 003, the byte-and-file-count format written by v0.1.5–v0.1.14; schema 004, the untagged indexed metadata-only intermediate; schema 005, the resumable-operation-preparation format written by v0.2.x; schema 006, the persistent namespace-snapshot and direct-final-upload format first written by v0.3.0; and schema 007, the untagged bounded-inline-operation and user-addressable duplicate-directory format. It contains only adjacent transforms `001 -> 002`, `002 -> 003`, `003 -> 004`, `004 -> 005`, `005 -> 006`, and `006 -> 007`. Startup always executes the complete remaining suffix in that exact order. An unregistered, reordered, branching, direct-jump, or ambiguous epoch fails closed. Release validity ranges and schema transformations are separate: multiple releases can write identical epoch bytes, while an untagged intermediate epoch still remains a permanent migration entry point. Schema 001 predates the gate's `writerFeatures` field, so its exact historical gate representation is unbound even when its writer set carries non-ledger application features. Schemas 002 and later require the exact feature-bound gate representation declared by their epoch; an empty gate can identify only schema 001 and never a later epoch.
+### Append-only migration ledger
+
+The append-only storage-schema ledger records nine complete epochs: schema 001, the pre-aggregate format written by v0.1.0–v0.1.4; schema 002, the historical byte-aggregate intermediate; schema 003, the byte-and-file-count format written by v0.1.5–v0.1.14; schema 004, the untagged indexed metadata-only intermediate; schema 005, the resumable-operation-preparation format written by v0.2.x; schema 006, the persistent namespace-snapshot and direct-final-upload format first written by v0.3.0; schema 007, the untagged bounded-inline-operation and user-addressable duplicate-directory format; schema 008, the untagged consistency-domain and owner-namespace-graph format; and schema 009, the typed invariant-aligned state-domain and helpable cross-domain-transition format. It contains only adjacent transforms `001 -> 002`, `002 -> 003`, `003 -> 004`, `004 -> 005`, `005 -> 006`, `006 -> 007`, `007 -> 008`, and `008 -> 009`. Startup always executes the complete remaining suffix in that exact order. An unregistered, reordered, branching, direct-jump, or ambiguous epoch fails closed. Release validity ranges and schema transformations are separate: multiple releases can write identical epoch bytes, while an untagged intermediate epoch still remains a permanent migration entry point. Schema 001 predates the gate's `writerFeatures` field, so its exact historical gate representation is unbound even when its writer set carries non-ledger application features. Schemas 002 and later require the exact feature-bound gate representation declared by their epoch; an empty gate can identify only schema 001 and never a later epoch.
 
 When the persisted gate carries predecessor writer features, an expired operation that remains in the unsealed `preparing` state MUST be conditionally changed to terminal failure during gate quiescence without publishing a visibility root; gate closure MUST NOT recompute predecessor preparation pages under current namespace semantics. That CAS denies a stale preparer. A preparation whose gate carries the current writer features MUST resume normally. Sealed running and committed operations MUST recover from their immutable step pages before the gate closes.
 
-Each adjacent transform automatically closes and drains the canonical write gate under its own stable checkpoint ID. The aggregate transforms walk every user/area graph from the fixed root, reject missing children, cycles, multiple parents, unreachable directory roots, malformed records, byte/count overflow, and contradictions in already-persisted aggregates, and compute missing totals bottom-up from authoritative file entries and stored child aggregates. Schema 004 additionally obtains every file fingerprint through provider `Head`, builds the persistent directory, secondary-sort, descendant-content, and state indexes, directory content summaries, and duplicate catalog, and never opens a stored file body. Verification walks every content-index entry and resolves its relative file through the authoritative directory indexes before feature activation. New immutable IDs are deterministic functions of the source root identity and target epoch so concurrent migrators create identical prerequisites; each mutable root advances by native CAS. Historical page manifests require at most one legacy directory's entries while deriving several differently ordered schema-004 indexes; scope discovery, subtree traversal, current-index verification, and CAS-winner reconciliation remain streamed and do not retain a namespace or subtree. The `004 -> 005`, `005 -> 006`, and `006 -> 007` edges are feature-only: schema 005 adds the durable preparing-operation representation, schema 006 freezes every selected predecessor root as an immutable snapshot source, and schema 007 changes future ordinary operation preparation and duplicate-similarity publication while treating historical area-root postings as ignored compatibility residue. Each edge closes and drains the gate, advances writer/superblock/gate feature binding, creates its own checkpoint, and deliberately performs no redundant directory graph walk or application-record rewrite.
+Each adjacent transform automatically closes and drains the canonical write gate under its own stable checkpoint ID. The aggregate transforms walk every user/area graph from the fixed root, reject missing children, cycles, multiple parents, unreachable directory roots, malformed records, byte/count overflow, and contradictions in already-persisted aggregates, and compute missing totals bottom-up from authoritative file entries and stored child aggregates. Schema 004 additionally obtains every file fingerprint through provider `Head`, builds the historical indexes and duplicate catalog, and never opens a stored file body. The `004 -> 005`, `005 -> 006`, and `006 -> 007` edges add their historical preparation, snapshot, and bounded-plan representations. The `007 -> 008` edge deterministically stages routed state, terminal operations/uploads, Trash metadata, and the owner namespace graph into consistency domains; installs content-addressed pages; freezes installed domains; creates its checkpoint; advances writer/superblock/gate feature binding; reopens; and idempotently unfreezes. The `008 -> 009` edge authenticates every predecessor domain and key, wraps each unchanged application payload in its exact typed state record, deterministically repartitions authority by invariant into namespace, owner-identity, owner-jobs, administration, and capability domains, installs and freezes the complete target catalog, checkpoints it, advances the `transactional-state-domains-v1` feature binding, reopens, and unfreezes. Both edges reference every immutable blob in place and perform no file body read or provider copy. Every edge is deterministic, resumable, multi-replica safe, and advances only to its adjacent successor.
 
 The `003 -> 004` graph discovery and verification phases use authenticated persistent directory marks under the excluded migration-maintenance namespace. A mark binds the exact checkpoint, phase, owner, area, directory, parent root/version and entry name, selected manifest/version, recursive counts, and content summary. Only the active ancestor stack is held in memory. A restart or concurrent replica revalidates a completed child mark and skips all of its descendants; stale, forged, misplaced, or contradictory marks fail closed. Transform and verification use separate marks, and all marks are removed only after successful verification. An interrupted transform may contain a reviewed safe mixture of source, target, and later already-published records; the same edge resumes without downgrading later state. After verification, startup conditionally updates the writer set and superblock, binds the target feature set into the closed gate, creates or verifies that edge's checkpoint, and reopens at a new gate epoch before continuing to the next edge.
 
@@ -740,55 +809,122 @@ Every boundary is deterministic, idempotent, and crash-resumable. Gate feature b
 
 All authoritative properties are encoded in object bodies. Correctness MUST NOT depend on provider custom metadata, tags, ACLs, storage class, object versioning, soft delete, native timestamps, checksums, listing order, folder resources, or preservation of those values by a cross-cloud copy tool. Provider-side integrity and encryption features MAY add defense in depth.
 
-The `admissions`, operation/file `staging`, `leases`, and `maintenance` namespaces are transient and are excluded from portable logical state and checkpoint inventories. Admissions, operation staging, leases, and maintenance coordination live in the state backend; decode-only legacy upload/file staging lives in the file backend. Schema-006 unpublished direct-final blobs use the ordinary immutable blob namespace but remain unreachable and non-authoritative until a committed directory manifest references them. Inventory pages under a completed checkpoint's `inventory` namespace are durable checkpoint metadata: they are excluded from the authoritative application inventory but MUST be copied and verified with the checkpoint root. Admissions contain only portable writer-gate tickets linked to durable operation records. Staging contains only immutable operation-specific data that is unreachable from committed directory manifests. Leases may contain only authenticated-encrypted, bounded backend-native resumable-session, multipart/block-upload, or rewrite/copy continuation data. Lease bodies MUST contain the backend kind and expiry and MUST NOT be required to reopen durable logical state. A checkpoint requires no admitted ticket, live staging operation, live lease, migration mark, or garbage-collection mark; cancelled/expired tickets, terminal retained operations, expired leases, completed migration marks, superseded immutable nodes, unreachable legacy staging, and unreferenced final blobs are removed only by the fenced closed-gate retention and reachability procedure.
+Schema-009 `leases`, `maintenance`, migration-stage, state-query-snapshot,
+resolved transition-plan/decision, rebuildable projection, and unreachable
+immutable-page namespaces are excluded from checkpoint inventories. Unresolved
+transition plans or participant locks prevent checkpoint closure. Leases
+contain only bounded encrypted provider-native upload continuations and are
+never required to reopen canonical state. Historical admissions, operations,
+preparation, staging, state indexes, filesystem metadata, duplicate records,
+and predecessor domains remain migration-only residue and are excluded after
+the `008 -> 009` checkpoint proves the replacement closure. Completed
+checkpoint inventory pages are durable checkpoint metadata and MUST be copied
+and verified with their root.
 
-Terminal operation results and their idempotency bindings remain replayable for 30 days; Trash retention is separate and indefinite until the owner permanently deletes it. Gate closure first resolves all non-terminal operations, prunes expired terminal operation/idempotency pairs and transient step/staging/lease artifacts, and then runs the schema-004 reachability collector. Its resumable mark and sweep session is bound to the exact checkpoint ID, closed gate epoch, and gate logical version. Roots include every live/trash filesystem root and every state-index root; traversal marks selected manifests, persistent index nodes, state-version bodies, and committed blobs. Sweep deletes only unmarked objects from the explicitly collectible immutable namespaces. A forged/stale mark, changed gate, cycle, missing child, contradictory aggregate, or ambiguous reachability fails closed. The collector replaces the legacy per-state-version lookup/prune pass so gate closure does not traverse the same logical state twice.
+Mutation outcomes and idempotency bindings remain replayable for 30 days; Trash retention is separate and indefinite until the owner permanently deletes it. Outcome expiry is itself authenticated by each domain's expiry tree. After a schema-009 checkpoint is published under the closed gate, its authenticated inventory is the immutable mark set for one checkpoint-bound garbage-collection session. The session stores only its checkpoint/gate/inventory binding, sweep index, and exclusive canonical-key cursor. It sweeps only explicitly recognized domain pages or inert heads, resolved transition records, rebuildable projections, transient leases, state-query snapshots, and unreachable immutable blobs. It never opens a file body. Every deletion is conditional on the native version returned by the immediately preceding ordered listing, and the closed gate is revalidated immediately before a destructive page. Unknown reserved objects are never deletion-eligible. Progress is durably advanced only when another provider page remains; an empty or final page can move directly to the terminal session CAS. Writes reopen only after the exact terminal session and checkpoint are reverified. Completed predecessor GC sessions and marks remain excluded durable compatibility residue while a supported predecessor sweeper could still exist; deleting them earlier can make a lagging sweeper unsafe. Forged or stale sessions, a changed gate/checkpoint binding, cycles, missing pages, contradictory aggregates, ambiguous reachability, unordered listing, or misplaced objects fail closed.
 
-### 9.2 Multi-replica write admission, fencing, and recovery
+### 9.2 Multi-replica conditional publication, freeze, and recovery
 
 `control/writer-set.json` binds the state backend and its configured file-backend role to one stable operator-configured writer-set ID, writer-protocol version, canonical feature set, security-critical configuration fingerprint, and provider-independent keyring identifiers. It contains no secret values or provider identifiers. Every replica validates it during startup and readiness. A replica with a different writer set, unsupported writer protocol/feature, origin/RP configuration, registration policy, or keyring identity MUST NOT serve any request against the storage set. A compatible rolling binary MAY join only when its declared reader and writer protocols accept the active versions; a writer-protocol or security-critical configuration change requires the closed-gate procedure.
 
-`control/write-gate.json` is a canonical state-backend CAS record containing a positive epoch, mode `open`, `closing`, or `closed`, and the sorted active writer feature set. It is the storage-set-wide mutation-admission barrier. A replica MUST reject a gate whose feature binding differs from its validated writer set and MUST NOT cache an `open` decision across mutations. Admission is:
+`control/write-gate.json` is a canonical state-backend CAS record containing a
+positive epoch, mode `open`, `closing`, or `closed`, and the sorted active
+writer feature set. A replica MUST reject a gate whose feature binding differs
+from its validated writer set. Ordinary publication is fenced by the exact
+domain head, not by a per-mutation gate ticket.
 
-1. Read the gate and require `open`; capture its epoch.
-2. Create-only a `candidate` admission ticket under that epoch containing a stable operation ID, writer-set ID, replica-attempt ID, creation/expiry times, the observed gate logical version, and enough non-secret canonical intent to locate the durable operation.
-3. Re-read the gate. Only if it is still `open` at the same logical version may the replica CAS the candidate to `admitted` and proceed. Otherwise it conditionally changes the ticket to `cancelled` and performs no side effect. Losing a race with maintenance cancellation also performs no side effect.
-4. Create or claim the durable operation/idempotency state before provider work. Keep the ticket until the operation is terminal and every capability or native continuation is expired, cancelled, or drained.
+For every schema-009 same-domain mutation:
 
-Gate transitions, admission-ticket maintenance, and fenced recovery of an operation admitted in the closing epoch are the only writes that do not acquire a new ticket. They are restricted to coordination state and to completing the already recorded intent; they cannot initiate unrelated user-visible work.
+1. Resolve the invariant's exact domain and read its authenticated head,
+   retaining the native version only for the immediate conditional write.
+2. Reject a frozen head and validate all logical preconditions against that
+   head and its content-addressed page paths.
+3. Prepare changed immutable pages. These remain unreachable and
+   non-authoritative.
+4. Conditionally replace the same head with the next contiguous revision,
+   normalized changes, intent fingerprint, retained result, and updated roots.
+5. If the provider response is missing or ambiguous, reread the head and its
+   retained outcome. Return success only when the exact fingerprint committed;
+   otherwise return the canonical conflict or transport error.
 
-Gate closure conditionally changes `open` to `closing` and then enumerates the epoch's admissions using the backend's strong listing contract. It conditionally cancels candidates and reconciles admitted tickets and their operations. A ticket that became admitted from an `open` observation before closure already existed as a candidate and is visible to that enumeration; a worker racing cancellation has one CAS winner. A candidate created after closure must observe `closing` on its second read and cannot become admitted or begin work. Because provider listings are paginated rather than transactional snapshots, closure restarts enumeration after every transition and requires a complete pass containing no admitted ticket before it advances to `closed`; cancelled or expired candidates are inert garbage. No live native lease may remain. Opening a verified destination conditionally increments the epoch and changes `closed` to `open`. The source remains closed. Process-local readiness, a load-balancer drain, or a grace period is not a substitute for this protocol.
+Every ordinary namespace mutation, including move, copy, Trash, restore,
+delete, batch publication, and upload completion, is contained in one owner
+namespace domain and has one head visibility point. Generic application state
+routes into namespace, owner-identity, owner-jobs, administration, or capability
+domains by its real invariant. The atomic state API MUST validate, normalize,
+type-bind, and resolve every requested key before its first provider mutation;
+it rejects a set that spans domains without leaving provider residue.
 
-Every recoverable operation has a stable operation ID and canonical fields for state, step, attempt, fencing token, owner attempt ID, lease expiry, intended resource set, request fingerprint, prepared artifacts, and outcomes. It contains no native provider value. Required behavior is:
+A genuine schema-009 cross-domain invariant uses this helpable decision
+protocol rather than silently splitting one invariant across independent
+heads:
 
-- acquisition and renewal are CAS transitions;
-- expiry makes a takeover eligible but does not release a lock or authorize a write;
-- takeover is one CAS winner that retains the operation ID and increments the attempt and fencing token;
-- a takeover worker reconciles ambiguous prior steps by reading canonical/staged results before issuing another provider mutation;
-- provider writes before logical commit target immutable operation-specific staging or create-only final blobs;
-- every visible resource transition uses the current fence and a native condition on the same resource root or operation commit object;
-- a superseded worker can at most leave unreachable immutable garbage, because its old conditional commit cannot succeed;
-- deterministic canonical-resource ordering prevents deadlock when several resource roots must be guarded; and
-- locks are released only by idempotent finalization after committed/terminal state, never merely because a timestamp elapsed.
+1. Create one immutable canonical plan that binds the transition ID, complete
+   normalized intent fingerprint, sorted participants and changes, local
+   preconditions, retained result, and expiry.
+2. In canonical participant order, validate each participant's local
+   preconditions and conditionally install the plan-bound lock through that
+   participant's domain head. Another transition encountering the lock helps
+   its owner before retrying.
+3. After every participant is prepared, create exactly one immutable commit
+   decision. A deterministic failed precondition instead creates exactly one
+   abort decision. This create-only decision is the global linearization point;
+   conflicting or missing decisions fail closed.
+4. Any replica or reader that encounters a participant lock reads the plan and
+   decision and conditionally finalizes every participant. Commit applies the
+   participant changes and removes its lock in one domain-head mutation; abort
+   removes only the lock. A retained fingerprint-bound outcome makes retries
+   exact after finalization or a lost provider response.
+5. Expiry grants authority only to create the one-winner abort decision for an
+   undecided locked plan. It never deletes or unlocks a participant based on
+   elapsed time. Decided transitions are finalized before their plan and
+   decision become collection-eligible.
 
-Single-record state operations and single-directory root swaps need no long-lived resource lock: their successful conditional write is the complete linearization point. Operations spanning multiple roots prepare immutable results behind operation-owned pending transitions and use the operation record's single `committed` CAS as the visibility point. A replica that receives an ambiguous provider response reads and validates the expected object or operation transition; it never converts an unknown outcome into an unconditional retry.
+Checkpoint or migration closure first CASes the write gate to `closing`, helps
+every transition plan to a durable decision and finalizes all participant
+locks, then freezes the domain catalog at that epoch, then conditionally
+freezes every registered active domain. First-use registration creates an inert
+head before catalog publication, so a new domain cannot escape this order. A
+mutation paused before its head commit loses its stale condition after freeze.
+Closure refuses to advance while a live upload capability can still change an
+unpublished blob, aborts only expired leases through their canonical terminal
+protocol, authenticates the complete reachable closure, and then changes the
+gate to `closed`.
 
-Schema-006 public uploads target a newly allocated create-only immutable final blob key. Completion verifies provider-attested size and checksums, then publishes only its canonical reference through the directory-root/operation commit protocol without a provider rewrite or copy. Expired or aborted upload capabilities can create only unreachable final blobs. Historical schema-001 records retain a decode-only staging-to-final provider-copy completion path. Maintenance cancels or waits out every capability and native lease linked to an admission before closing the gate, and the closed-gate reachability collector removes unreachable staging and final blobs.
+Opening a verified destination increments the gate epoch. Domain unfreeze is
+an idempotent suffix. If a process loses the successful reopen response,
+startup observes the gate/catalog epoch relationship and completes unfreeze
+before readiness. Process-local maintenance state, a leader, load-balancer
+drain, sticky routing, sleep, or grace period is not a substitute.
 
-If a node disappears, its admission and operation remain durable. Unrelated resources continue. The affected resource may remain temporarily unavailable until lease expiry and successful recovery. Another replica then takes over through CAS and either completes the existing intent or records a safe terminal failure. If the old node returns, its obsolete fence and native conditions prevent it from advancing, committing, unlocking, or replacing the recovered result.
+Schema-009 public uploads target a newly allocated create-only final blob key.
+Completion verifies provider-attested size and checksums, then atomically
+publishes the blob reference and terminal upload state in the owner namespace
+head without provider rewrite or copy. Expired or aborted capabilities can
+create only unreachable blobs. Historical staging/copy completion is private
+to migration compatibility and cannot be selected by ordinary runtime code.
+Creating a bounded upload batch publishes all owner-scoped upload intents in
+one namespace mutation, creates the unavoidable independent provider sessions
+in parallel, and activates all successful intents in one further namespace
+mutation; it MUST NOT run a complete authoritative state transaction per item.
+
+If a replica disappears, another replica retries from canonical authority. A
+published fingerprint-bound outcome returns the original result; unpublished
+immutable pages are garbage; a conflicting or frozen head denies the stale
+writer. Unrelated domains continue without waiting for a timeout or takeover.
 
 ### 9.3 Raw-copy portability and checkpoints
 
 Two conforming storage sets with the same canonical keys, bodies, and role placement represent the same EndlessFS logical state, regardless of provider-native versions or metadata. In single-bucket mode, both role inventories are physically co-located. In split mode, blob keys are copied file-backend to file-backend and every other authoritative key is copied state-backend to state-backend. A supported quiescent backend cutover is:
 
-1. CAS the canonical write gate from `open` to `closing`; every replica immediately stops admitting new mutations through the protocol in section 9.2.
-2. Reconcile every admission and active canonical operation to committed or safe terminal state; cancel or wait out every provider capability and drain or abort every native upload/copy lease.
-3. Verify the epoch has no admitted ticket, no live staging operation or native lease remains, all pending directory transitions resolve from terminal operation state, and then CAS the gate from `closing` to `closed`; cancelled/expired candidates are transient and cannot publish.
-4. Write a constant-size canonical checkpoint root in the state backend containing the storage-set ID, writer-set and gate epoch, format/protocol versions, logical checkpoint revision, role counts, page count, and final inventory-chain digest. Write its bounded hash-chained inventory pages containing canonical role, object key, size, normalized provider-attested MD5, and normalized provider-attested CRC32C for every authoritative object. The checkpoint includes the closed gate and writer-set record, but excludes its root/pages and the transient admission, staging, lease, and maintenance namespaces from the authoritative application inventory.
+1. CAS the canonical write gate from `open` to `closing`, freeze the canonical domain catalog at that epoch, and conditionally freeze every registered active domain through section 9.2.
+2. Refuse closure while a live provider upload capability remains; abort and remove only expired upload leases, then authenticate every frozen base, delta, retained outcome, namespace edge, aggregate, and reachable blob metadata assertion.
+3. Prove the catalog and all registered domains carry the same freeze epoch and then CAS the gate from `closing` to `closed`. A paused pre-freeze writer cannot publish because its exact domain-head condition is stale.
+4. Write a constant-size canonical checkpoint root in the state backend containing the storage-set ID, writer-set and gate epoch, format/protocol versions, logical checkpoint revision, role counts, page count, and final inventory-chain digest. Write its bounded hash-chained inventory pages containing canonical role, object key, size, normalized provider-attested MD5, and normalized provider-attested CRC32C for every authoritative object. The checkpoint includes the closed gate, writer set, frozen catalog, domain heads/pages, projections required by the declared closure, and committed blobs, but excludes its own root/pages plus leases, maintenance, migration stages, query snapshots, unreachable pages, and historical schema residue.
 5. Copy every authoritative object key and body unchanged to the corresponding destination backend role, then copy the checkpoint root and every inventory page unchanged to the destination state backend.
 6. Verify both destination role inventories and provider-attested metadata tuples against the checkpoint before enabling writes. A missing, extra-authoritative, wrongly placed, or fingerprint-mismatched object fails closed; verification never downloads the bodies through EndlessFS.
 7. Start compatible EndlessFS replicas with the destination state/file backend configuration, the same writer-set identity/configuration fingerprint/keyring identities, and the same provider-independent application secrets. No schema migration, reindex, ID rewrite, path rewrite, logical-version rewrite, or token reissue is permitted or required.
-8. Verify the destination checkpoint, conditionally increment and open the destination gate epoch, and continue mutations using newly observed destination-native preconditions while retaining the copied portable logical versions.
+8. Verify the destination checkpoint, conditionally increment and open the destination gate epoch, idempotently unfreeze every catalogued domain, and continue mutations using newly observed destination-native preconditions while retaining the copied portable logical versions.
 
 The source MAY be copied in multiple passes before maintenance mode, but the final verified checkpoint is authoritative. Online dual writes, continuous replication, and reconciling writes made outside EndlessFS remain outside v1. A copied storage set with missing, extra-authoritative, misplaced, corrupt, mixed-version, or unverified objects fails closed; an operator must repair or recopy it rather than ask EndlessFS to guess.
 
@@ -947,17 +1083,50 @@ Every pull-request gate MUST execute this complete epoch matrix and enforce at l
 
 ### 9.14 Crash-safe multi-record changes
 
-The state store deliberately offers conditional single-record operations, not database transactions. Any use case that changes multiple records MUST therefore use a durable, crash-safe state machine:
+The state API exposes two explicit atomicity scopes rather than making callers
+assemble sequences of independent single-record writes:
 
-1. A single conditional write is the linearization point that claims the bootstrap, invite, recovery, idempotency key, or administrative guard.
-2. The claimed record contains a stable operation ID and enough non-secret information to resume safely.
-3. Materialization of profile, account, credential, role, session, and related records is idempotent.
-4. The new account or privilege is not usable until the operation reaches `committed`.
-5. A retry of the same verified operation resumes it. A different replica may take over only through the expired-lease CAS/fencing protocol in sections 8.7 and 9.2; concurrent takeover attempts have one winner.
-6. Startup or request-time reconciliation can finish an interrupted committed/claimed operation without cloud-specific logic or persisted native provider tokens.
-7. Any resource guard acquired by the operation records its stable operation ID and current fence. Prepared results remain immutable and invisible until the operation's conditional commit point.
+1. `AtomicStore.Mutate` accepts a fingerprint-bound idempotent change set whose
+   keys all resolve to one consistency domain. It validates every key, record
+   type, value, precondition, and normalized intent before touching the
+   provider. It then publishes all changes and the retained result through one
+   conditional domain-head replacement. Reuse of a mutation ID with different
+   intent fails closed.
+2. `TransactionalStore.Transact` accepts the same change model when a real
+   invariant spans domains. A one-domain request delegates to `Mutate`; a
+   multi-domain request uses the immutable plan, participant-lock, create-only
+   decision, and helpable finalization protocol in section 9.2.
+3. A reader encountering a participant lock MUST help the transition to its
+   durable decision and final state before returning the affected logical
+   value. It cannot expose a participant as independently committed merely
+   because its local head was finalized first.
+4. Process loss before a same-domain head commit leaves no visible change.
+   Process loss during a cross-domain transition may leave a plan, one or more
+   locks, a decision, or a finalized subset, all of which are sufficient for
+   any replica to converge without process-local state or provider-specific
+   tokens.
+5. An ambiguous provider response is reconciled from the retained domain
+   outcome or immutable transition decision. Retry never repeats an
+   unconditional external side effect merely because the transport result was
+   lost.
+6. Immutable prepared pages remain unreachable until their head publication.
+   Transition locks and decisions are canonical portable authority; they are
+   resolved before checkpoint freeze and collected only after no participant
+   lock remains.
 
-The admin-role index is one versioned set updated by compare-and-swap. Removing or disabling an administrator first updates this guard while proving that at least one enabled administrator remains, then idempotently applies the account change. A crash may temporarily leave an enabled non-admin account, but MUST never leave zero enabled administrators or grant an unintended privilege.
+Profile, account, credential index, credential, session, recovery, identity
+operation, and owner idempotency changes use the owner-identity domain whenever
+their invariant is owner-local. Bootstrap, role, and invite authority use the
+administration domain. Registration, authentication, recovery, and
+administrator actions that genuinely touch both use `Transact`; they cannot
+publish one side through an ad hoc write sequence.
+
+The admin-role index remains one versioned set. Removing, disabling, or
+demoting an administrator includes that set, every affected account, and the
+actor authorization snapshot in one validated mutation or cross-domain
+transition. The preconditions prove that at least one enabled administrator
+remains, and the durable decision prevents a crash from leaving a partially
+applied final-admin change or granting an unintended privilege.
 
 ---
 
@@ -1090,8 +1259,13 @@ Requirements:
 - Completed bytes are committed as an immutable canonical blob before the portable file-entry record becomes visible. A completion race or failed descriptor commit leaves an unreferenced blob for bounded idempotent cleanup, never a visible corrupt entry.
 - A closed-schema client ledger persists safe transfer intent, confirmed offset, retry schedule, and terminal state in IndexedDB on the originating device, partitioned by authenticated owner to prevent exposure between accounts using one browser profile. It MUST NOT persist file bytes, capability URLs or headers, session/CSRF material, provider-native identifiers, or absolute local paths. Browser file handles MAY be persisted when supported; otherwise the user reconnects the source after reload. Closing the browser pauses transfers, and cross-device/account-synchronized queue persistence is not required in v1.
 - The owner-scoped upload-status response identifies `active`, `completed`, `aborted`, or `expired` state and returns the safe confirmed offset without returning capability or provider-native material. This bounded per-upload lookup is the reconciliation boundary; it is not an account-wide transfer-list API.
-- A completion that loses an ancestor directory-root CAS to an unrelated file mutation advances its canonical upload record to a fresh durable completion-operation attempt and retries from authoritative directory state. A true same-target create or replacement race still has exactly one version-precondition winner.
-- Upload publication and replacement update the destination directory and every changed ancestor recursive-byte and recursive-file-count aggregate at the same durable operation commit point.
+- A completion that loses the owner namespace-head CAS to an unrelated file
+  mutation rereads authoritative namespace state and retries the same mutation
+  ID and intent fingerprint. A true same-target create or replacement race
+  still has exactly one version-precondition winner.
+- Upload publication and replacement update the destination directory and every
+  changed ancestor recursive-byte and recursive-file-count aggregate at the
+  same owner namespace-head commit point.
 - Large-object tests simulate offsets above 1 TiB without allocating equivalent storage.
 
 ### 11.3 Downloads
@@ -1689,11 +1863,17 @@ Security events may contain a stable keyed pseudonymous user reference and coars
 
 ### 16.3 Runtime properties
 
-- Graceful shutdown stops new admission and attempts to release or hand off owned work, but correctness assumes abrupt process loss at every mutation boundary. Durable tickets, fenced operations, and immutable staging—not shutdown hooks—protect state.
+- Graceful shutdown stops accepting new requests, but correctness assumes
+  abrupt process loss before and after every immutable-page write and domain
+  head CAS. Immutable preparation, conditional head publication, and retained
+  outcomes—not shutdown hooks or process ownership—protect state.
 - The server sets read-header, read, write, idle, and request-body limits.
 - The control plane never buffers file payloads.
 - Resource use scales with control request concurrency and directory page size, not total stored bytes.
-- Background queues or workers requiring durable external state are prohibited. Provider operations are polled through persisted operation records when asynchronous behavior is needed.
+- Background queues requiring a separate durable service are prohibited.
+  Asynchronous work, when unavoidable, is represented by bounded canonical
+  values inside the appropriate consistency domain and reconciled by any
+  replica through an idempotent mutation.
 - The locally built OCI image contains the Go binary, required certificate/timezone data if needed, and embedded assets; it does not contain a shell, package manager, Node runtime, or cloud credential.
 - Theme manifests and media are immutable embedded resources; normal theme selection performs no archive parsing, extraction, filesystem lookup, or network installation at runtime.
 - Backend adapters hold native conditional values and transfer/copy leases only for the bounded request or encrypted lease lifetime. No provider-native identifier is required to reopen canonical durable state.
@@ -1755,10 +1935,10 @@ Security events may contain a stable keyed pseudonymous user reference and coars
 | Passkey loss | Multiple passkeys encouraged; admin recovery link | No automated recovery; loss of all passkeys plus no available admin can make an account inaccessible. |
 | Disabled account retaining access | Revoke sessions, block capability issuance, block owner shares | A previously issued provider capability remains usable until its short expiry. |
 | Concurrent metadata corruption | Conditional create/CAS/delete, immutable manifests, idempotency, race tests | A future provider lacking required atomic primitives cannot be supported safely. |
-| Replica crash, pause, or network partition while owning work | Durable admission; expiring CAS-owned attempt; monotonically increasing fence; immutable staging; one conditional visibility point; deterministic takeover tests | The affected resource may be unavailable until expiry and recovery; stale work may leave bounded unreachable garbage. |
-| Directory/tree split-brain | CAS-controlled immutable directory manifests; deterministic multi-root guards; operation-record commit as the visibility point | Large tree operations may temporarily block changes to affected directories. |
+| Replica crash, pause, or network partition during mutation | Immutable preparation; one conditional head for same-domain work; immutable plan, participant locks, and one create-only decision for cross-domain work; fingerprint-bound retained outcomes; deterministic help/lost-success/stale-CAS tests | A conflicting mutation may require bounded retry; interrupted preparation may leave unreachable immutable pages or helpable transition records. |
+| Directory/tree split-brain | One owner namespace domain; persistent immutable node trees; one namespace-head CAS as the visibility point | A large explicit selection requires bounded preparation, but descendants of a selected directory are never enumerated. |
 | Incompatible replicas sharing a storage set | Canonical writer-set/protocol/configuration record; startup/readiness denial; closed-gate configuration transition | Operators must coordinate security-critical configuration, state/file backend pairing, and writer-protocol changes. |
-| Checkpoint race with an admitted or stale writer | Strong-list two-read admission protocol; canonical gate epoch; ticket/operation recovery; capability and lease drain | A crashed operation can delay maintenance; v1 does not trade correctness for forced cutover. |
+| Checkpoint race with a paused writer or catalog registration | Closed gate; catalog freeze; CAS-frozen domain heads; capability and lease drain; startup reconciliation | A live capability can delay maintenance; v1 does not trade correctness for forced cutover. |
 | Backend lock-in or native-version leakage | One canonical key/body format; portable logical versions; adapter boundary; scans rejecting native values in durable records | Provider authentication, cost, service availability, and deployment configuration remain provider specific. |
 | Incomplete/corrupt cross-backend copy | Quiescent checkpoint, sorted key/body digest inventory, destination verification, fail-closed startup | Online zero-downtime migration and third-party mutations remain outside v1. |
 | Denial of service | Body/page/batch limits, timeouts, bounded concurrency, local rate limits | No distributed DDoS protection is provided by the application. |
@@ -1816,7 +1996,19 @@ Run the same application-facing suites against the portable engine over every in
 
 Every backend runs the same primitive suite for atomic conditional create/replace/delete, strong read-after-success and complete-prefix listing visibility, prefix pagination, native-version scoping, server-side copy, capability scope, ranges, resumability, errors, retry classification, cancellation, and ambiguous lost-success recovery. The suite deliberately varies page sizes, ordering, metadata, native versions, and error encodings.
 
-The portability suite populates a complete source bucket through several replicas, closes the canonical gate, recovers every outstanding ticket/operation, creates a quiescent checkpoint, copies only authoritative keys and bodies into an independently configured destination whose native versions and metadata differ, verifies the checkpoint, opens a new gate epoch, and continues mutations through several new replicas. It covers writer compatibility, identity, passkeys, sessions, roles, files, empty directories, long paths, immutable manifests, trash, shares, preferences, logical versions, state CAS, operations, idempotency, and reverse-direction copy. It also proves that missing, extra-authoritative, corrupt, mixed-version, collision, live-admission, pending-transition, live-lease, incompatible-writer, and unsupported-feature states fail closed.
+The portability suite populates a complete source bucket through several
+replicas, closes the canonical gate, freezes the complete registered domain
+catalog, drains or rejects live provider leases, creates a quiescent checkpoint,
+copies only authoritative keys and bodies into an independently configured
+destination whose native versions and metadata differ, verifies the checkpoint,
+opens a new gate epoch, unfreezes all domains, and continues mutations through
+several new replicas. It covers writer compatibility, identity, passkeys,
+sessions, roles, files, empty directories, long paths, immutable domain trees,
+trash, shares, preferences, logical versions, state CAS, retained outcomes,
+idempotency, and reverse-direction copy. It also proves that missing,
+extra-authoritative, corrupt, mixed-version, collision, incomplete catalog,
+unfrozen domain, live-lease, incompatible-writer, and unsupported-feature states
+fail closed.
 
 #### HTTP integration tests
 
@@ -1876,18 +2068,28 @@ Seed corpora include all known traversal and encoding cases. CI runs bounded det
 
 Run `go test -race` through Nix. Explicit tests cover concurrent bootstrap, invite/recovery consumption, credential registration, final-admin changes, upload completion/abort, same-path writes, restore conflicts, idempotency, and state CAS.
 
-The multi-replica scheduler runs two through eight separately constructed engine/server instances against one configured single- or split-backend storage set. At every admission, lease renewal, staging write, provider response, directory-root preparation, operation commit, finalization, gate transition, and checkpoint boundary it can pause, crash, partition, restart, or resume any instance. Required schedules cover:
+The multi-replica scheduler runs two through eight separately constructed
+engine/server instances against one configured single- or split-backend storage
+set. At every head read, immutable-page write, provider response, domain-head
+commit, lost-success reconciliation, catalog registration/freeze, gate
+transition, lease transition, and checkpoint boundary it can pause, crash,
+partition, restart, or resume any instance. Required schedules cover:
 
-- one winner for conditional record, directory-root, idempotency, token, and final-admin races;
-- owner loss before work, after staging, after a successful provider request whose response is lost, after prepare, after logical commit, and during finalization;
-- lease expiry with concurrent takeover attempts and an old worker resuming before and after the winner commits;
+- one winner for domain-head, idempotency, token, and final-admin races;
+- process loss before preparation, after immutable page writes, after a successful
+  head replacement whose response is lost, and after logical commit;
+- a stale writer resuming before and after the winning head commit;
 - child creation/mutation racing directory move, trash, restore, recursive copy, and recursive delete;
-- upload completion and abort racing capability expiry, takeover, and maintenance;
-- gate admission racing `open` to `closing`, a crashed admitted operation delaying `closed`, and denial of all post-close publication;
+- upload completion and abort racing capability expiry and maintenance;
+- head publication and first-use domain registration racing `open` to `closing`,
+  catalog freeze, and denial of all post-close publication;
 - compatible rolling replicas and rejection of different writer-set IDs, writer protocols, configuration fingerprints, feature sets, or keyring identifiers; and
 - restart/reconciliation with no process-local state and no wall-clock sleep.
 
-Each schedule asserts one logical outcome, no half-visible multi-resource state, no stale-fence commit, no permanent lock after recoverable owner loss, bounded unreachable staging only, and byte-for-byte deterministic canonical results where the operation order is the same.
+Each schedule asserts one logical outcome, no half-visible domain state, no stale
+head commit, no permanent lock after process loss, bounded unreachable immutable
+preparation only, and byte-for-byte deterministic canonical results where the
+mutation order is the same.
 
 ### 18.3 Determinism and isolation
 
@@ -1900,12 +2102,18 @@ Each schedule asserts one logical outcome, no half-visible multi-resource state,
 - Theme test bundles and media are generated or stored as reviewed deterministic fixtures; validation never downloads assets.
 - Mock ordering is deterministic unless a test explicitly asks for shuffled/concurrent behavior.
 - Raw-copy portability tests preserve only object keys and bodies; they intentionally replace native versions and remove/change provider metadata before reopening the destination.
-- Multi-replica schedules use logical steps and injected clocks; lease expiry, renewal, takeover, pause, restart, and return of a stale worker never depend on wall-clock sleeps.
+- Multi-replica schedules use logical steps and injected clocks; capability
+  expiry, lease drain, pause, restart, lost-success recovery, and return of a
+  stale writer never depend on wall-clock sleeps.
 
 ### 18.4 Coverage and quality gates
 
 - Repository Go statement coverage MUST be at least 85%.
-- Authentication, authorization, path, token, capability, state-CAS, scope-mapping, canonical-format/key/version/checkpoint, write-gate/admission, operation-fencing/recovery, directory-manifest, and theme validation/sanitization packages MUST each be at least 95% statement coverage.
+- Authentication, authorization, path, token, capability, state-CAS,
+  scope-mapping, canonical-format/key/version/checkpoint, gate/catalog/domain
+  freeze, domain-head publication/lost-success recovery, namespace-tree, and
+  theme validation/sanitization packages MUST each be at least 95% statement
+  coverage.
 - The production storage-migration ledger and implementation MUST have at least 98% aggregate statement coverage in the focused migration gate.
 - Every enumerated security invariant requires explicit positive and negative tests regardless of percentage.
 - Race tests, static analysis, formatting, linting, contract tests, integration tests, browser tests, and fuzz smoke tests are required gates.
@@ -1957,7 +2165,9 @@ Semantics:
 - `.#dev` launches an ephemeral local EndlessFS plus capability-aware mock with safe loopback settings.
 - `.#fmt` applies formatting; `.#fmt-check` is non-mutating.
 - `.#test` runs all required non-long-running test gates, including integration and contract suites.
-- `.#test-replica` runs the deterministic two-to-eight-engine admission, fencing, crash/takeover, manifest-visibility, compatibility, and checkpoint schedules without wall-clock sleeps.
+- `.#test-replica` runs deterministic two-to-eight-engine stale-CAS,
+  lost-success, domain-head visibility, catalog-freeze, compatibility, and
+  checkpoint schedules without wall-clock sleeps.
 - `.#test-portability` runs canonical-format, backend-divergence, checkpoint, raw-copy/reopen, and continued-mutation suites without cloud credentials or non-loopback network access.
 - `.#test-fuzz` runs the bounded CI fuzz campaign; an argument or documented app may extend duration locally.
 - `.#theme-check` validates and resolves a supplied bundle without embedding it; `.#theme-preview` serves the complete component/state fixture on loopback; and `.#test-theme` validates every embedded bundle and runs required conformance/smoke tests.
@@ -2006,9 +2216,13 @@ This order is recommended because each stage establishes contracts used by the n
 - Opaque IDs, validated paths, errors, entries, operations, capabilities.
 - Application-facing state/provider interfaces and shared contract suites.
 - Narrow object-store backend interface and conditional-operation contract suite.
-- Canonical bucket keys, superblock, writer-set/write-gate records, admission tickets, record envelopes, logical versions, directory-ID traversal, immutable directory manifests/pages, immutable blobs, operation fences, staging, checkpoints, and strict codecs.
+- Canonical bucket keys, superblock, writer-set/write-gate records, domain
+  catalog/heads, record envelopes, logical versions, immutable high-fan-out
+  pages, owner namespace graph, immutable blobs, retained outcomes, projections,
+  checkpoints, and strict codecs.
 - One portable storage engine implementing provider/state semantics over deterministic backends.
-- Multi-replica admission, fenced recovery, deterministic operation takeover, and fail-closed replica/configuration compatibility.
+- Multi-replica conditional publication, deterministic lost-success recovery,
+  catalog/domain freeze, and fail-closed replica/configuration compatibility.
 - Capability-aware local backend, fault/native-divergence injection, replica crash scheduler, and raw-copy portability harness.
 
 ### Milestone 2 — Identity and registration
@@ -2087,27 +2301,77 @@ Each criterion MUST have an automated test unless marked “inspection”.
 
 ### 21.3 Canonical storage-set format and portability
 
-**AC-023** — Golden tests prove one deterministic superblock, writer-set/write-gate format, admission layout, key grammar, canonical envelope encoding, logical-version algorithm, immutable directory-root/manifest/page mapping, staging/blob layout, operation/idempotency/fence layout, and checkpoint format.
+**AC-023** — Golden tests prove one deterministic superblock,
+writer-set/write-gate format, domain catalog/head layout, key grammar, canonical
+envelope encoding, typed state-record mapping, logical-version algorithm,
+immutable page and owner namespace mapping, transition plan/decision/lock
+layout, blob layout, retained-outcome/idempotency layout, projection layout,
+garbage-collection session, and checkpoint format.
 **AC-024** — Every valid 4096-byte virtual path, including maximum UTF-8 segments and deep nesting, resolves through bounded canonical keys no longer than 240 ASCII bytes; digest collisions and corrupt name/key pairs fail closed.
 **AC-025** — Scans and behavior tests prove that authoritative records contain no provider-native generation, ETag, version ID, bucket/container/account identifier, custom metadata dependency, upload session URL, multipart/block ID, rewrite/copy token, signed URL, or provider capability.
-**AC-026** — Copying only authoritative object keys and bodies from a closed-gate quiescent single- or split-bucket source into independent destination backend roles with different native versions, metadata, page sizes, listing order, and error encodings preserves the writer set, gate epoch, all users, credentials, sessions, roles, files, directory manifests, trash, shares, preferences, versions, operations, idempotency, and state CAS behavior.
+**AC-026** — Copying only authoritative object keys and bodies from a
+closed-gate quiescent single- or split-bucket source into independent destination
+backend roles with different native versions, metadata, page sizes, listing
+order, and error encodings preserves the writer set, gate epoch, catalog,
+domains, all users, credentials, sessions, roles, files, namespace graph, trash,
+shares, preferences, typed record bindings, versions, retained outcomes,
+idempotency, same-domain atomic mutation, and cross-domain transaction behavior.
 **AC-027** — After raw-copy reopen, pre-cutover logical versions and tokens remain valid, stale preconditions still fail, one-time/final-admin races still have one winner, and new mutations succeed using destination-native conditional values.
 **AC-028** — Checkpoint verification detects missing, extra-authoritative, wrongly placed, corrupt, truncated, mixed-format, unsupported-feature, collision, and digest-mismatched objects across both backend roles before writes are enabled.
-**AC-029** — The canonical gate's strong-list admission barrier refuses new mutations and cannot close while an admitted ticket, recoverable operation, live staging transfer, pending directory transition, or provider-native transfer/copy lease remains; cancelled/expired candidates cannot publish, and verified quiescent cutover requires no schema conversion, reindex, identifier/path rewrite, logical-version rewrite, or token reissue.
+**AC-029** — The canonical gate refuses new mutations, freezes the complete
+registered domain catalog, conditionally freezes each named head, and cannot
+close while a live upload capability or provider-native lease remains. A writer
+holding a pre-freeze native condition cannot publish, and verified quiescent
+cutover requires no schema conversion, reindex, identifier/path rewrite,
+logical-version rewrite, or token reissue.
 
 ### 21.4 Multi-replica concurrency and recovery
 
 **AC-080** — Two through eight independently constructed replicas sharing the same single- or split-backend storage set produce the same authorized results and invariants as one replica without process-local coordination, sticky routing, or a distinguished leader.
-**AC-081** — Candidate admission racing a gate transition has a total CAS outcome: it either becomes an enumerable admitted ticket and is recovered before `closed`, or is cancelled/observes the changed gate and performs no side effect. No post-close logical publication succeeds.
-**AC-082** — At every operation boundary, a crashed owner leaves durable intent; after expiry exactly one CAS takeover increments the fence and resumes to the same idempotent outcome without a permanent lock.
-**AC-083** — A paused old worker resumed before or after takeover cannot advance, commit, unlock, overwrite a committed blob, or replace the recovered result; at most it leaves bounded unreachable immutable staging data.
-**AC-084** — Concurrent child changes and recursive move/copy/trash/restore/delete operations expose either the complete pre-operation or complete post-operation directory manifests, never missing, duplicate, orphaned, or half-moved visible entries.
-**AC-085** — Schema-006 direct uploads target only a newly allocated create-only final blob key that is unreachable before commit. Completion/lost-success/abort/expiry/takeover races publish at most one verified immutable blob reference without provider copy and never expose a partial or corrupt entry; historical schema-001 staging remains decode-only compatibility.
+**AC-081** — Domain publication racing a gate transition has a total CAS
+outcome: either its head replacement commits before that domain is frozen, or
+it observes/loses to freeze and performs no logical publication. First-use
+domain registration racing catalog freeze cannot create unenumerated authority.
+No post-close logical publication succeeds.
+**AC-082** — At every same-domain mutation boundary, process loss leaves either
+no visible change or one committed head revision with a retained
+fingerprint-bound outcome. At every cross-domain boundary it leaves only a
+validated immutable plan, prepared participant locks, one create-only decision,
+or finalized participants consistent with that decision. The same or another
+replica helps and reconciles an ambiguous response without a process-local
+leader, time-only unlock, or permanent lock.
+**AC-083** — A paused stale writer resumed before or after another writer's
+commit cannot replace the newer head or alter the committed result; at most it
+leaves bounded unreachable immutable pages.
+**AC-084** — Concurrent child changes and recursive
+move/copy/trash/restore/delete operations expose either the complete
+pre-mutation or complete post-mutation owner namespace revision, never missing,
+duplicate, orphaned, or half-moved visible entries.
+**AC-085** — Schema-009 direct uploads target only a newly allocated
+create-only final blob key that is unreachable before commit.
+Completion/lost-success/abort/expiry races publish at most one verified
+immutable blob reference through the owner namespace head without provider copy
+and never expose a partial or corrupt entry. A bounded upload batch publishes
+its intents and activation with bounded owner-head mutations while initiating
+the independent provider sessions concurrently; historical staging remains
+decode-only migration compatibility.
 **AC-086** — Compatible rolling replicas can join one writer set; replicas with a different writer-set ID, writer protocol, security configuration fingerprint, canonical feature set, or keyring identity fail readiness before serving any bucket-backed request.
-**AC-087** — A crashed admitted operation delays gate closure until fenced recovery completes; checkpoint creation never forces lock deletion or sacrifices consistency for availability.
+**AC-087** — A paused pre-freeze writer loses its head CAS after catalog/domain
+freeze; checkpoint creation never forces lock deletion or sacrifices consistency
+for availability.
 **AC-088** — Every object backend proves atomic single-object mutation plus strong read-after-success and complete-prefix listing visibility; an eventually consistent backend fails the contract suite.
 **AC-089** — Opening any registered predecessor epoch automatically follows each remaining adjacent ledger transform, quiesces and migrates every affected live/trash graph and record, fences old writers, checkpoints, and reopens; crashes and two-to-eight concurrent starters converge, while corruption, overflow, undrained work, unknown epochs, or unrelated compatibility drift fail closed.
 **AC-090** — Every pull request opens, verifies, and mutates the exact immutable fixture for every storage-schema ledger epoch, including untagged intermediates; each entry point traverses the complete remaining adjacent-transform suffix in order. Release CI refuses a candidate outside the declared release validity ranges or mapped to an epoch without a fixture, and every-edge interruption, concurrent migrators, corrupt/mixed/newer state, and the complete composed path are proven locally through the pinned Nix gate.
+**AC-091** — Shared state contracts prove one-head atomic multi-record mutation,
+pre-provider rejection of cross-domain misuse, helpable multi-domain commit and
+abort, crash/lost-success recovery at every durable transition boundary,
+reader-assisted completion, exact replay, conflicting-intent denial, and
+checkpoint refusal until every participant lock is resolved.
+**AC-092** — A schema-009 checkpoint-bound collector reclaims only recognized
+objects absent from the authenticated inventory, uses conditional deletion and
+a bounded resumable cursor without reading file bodies, denies unknown or
+misbound state, converges under crashes and concurrent replicas, and reaches a
+verified terminal session before the gate reopens.
 
 ### 21.5 Isolation and files
 
@@ -2202,29 +2466,62 @@ An implementation agent should keep this checklist current and attach test names
 - [x] A narrow object-store backend interface and reusable conditional-operation/capability contract suite are implemented.
 - [x] Exactly one portable storage engine implements `StorageProvider` and `StateStore` semantics over every backend.
 - [x] Optional split-backend mode keeps state/metadata/control records in the state backend and immutable blobs/staging in the file backend; omitting the file backend preserves the one-bucket layout.
-- [x] The normative `endlessfs/v1` superblock, writer-set/write-gate records, key grammar, canonical envelopes, logical versions, immutable directory manifest/page layout, staging/blobs, fenced operation/idempotency records, state-version snapshots, and checkpoint schemas are implemented.
+- [x] The normative `endlessfs/v1` superblock, writer-set/write-gate records,
+  domain catalog/heads, key grammar, canonical envelopes, typed state records,
+  logical versions, immutable high-fan-out page layout, owner namespace graph,
+  transition plans/decisions/locks, immutable blobs, retained
+  outcome/idempotency trees, projections, state snapshots, checkpoint-bound
+  collection sessions, and checkpoint schemas are implemented.
 - [x] Canonical keys remain within the cross-provider length/alphabet/segment profile for every valid `UserPath`, and digest collisions/corruption fail closed.
 - [x] Provider-native identifiers, metadata, endpoints, capabilities, and continuation tokens are absent from authoritative records.
 - [x] Memory and the local GCS protocol backend exercise divergent native versions, metadata, pagination, ordering, and error forms under the same portable engine.
 - [x] Raw-copy key/body portability preserves complete logical state and supports continued mutation in both directions; the combined checkpoint and read-only verifier cover both backend roles.
-- [x] Checkpoint creation requires a closed canonical gate, no admitted ticket, resolved pending manifests, and no live staging operation or backend lease; cancelled/expired candidates are inert and destination verification rejects incomplete, corrupt, extra, mixed, or unsupported state.
+- [x] Checkpoint creation requires a closed canonical gate, a frozen complete
+  domain catalog, every registered domain head frozen, and no live upload
+  capability or backend lease; destination verification rejects incomplete,
+  corrupt, extra, mixed, or unsupported state.
 - [x] `test-portability` and local `provider-verify` Nix commands are implemented and included in the required gate.
 - [ ] Release evidence records the canonical format version and portability fixture/checkpoint digests.
 
 ### 22.4 Multi-replica concurrency and recovery
 
 - [x] Every backend proves atomic single-object mutations plus strong read-after-success and complete-prefix listing visibility.
-- [x] Every mutation uses candidate creation, second gate read, and candidate-to-admitted CAS before any state, staging, capability, copy, or delete side effect.
-- [x] Gate closure cancels candidates, repeatedly enumerates and recovers every admitted ticket, and cannot reach `closed` while admitted or native work remains.
-- [x] Recoverable operations use durable step state, expiring CAS ownership, monotonically increasing portable fences, and one conditional visibility point.
-- [x] Lease expiry alone never unlocks a resource; exactly one takeover wins and a resumed stale worker cannot publish or unlock.
-- [x] Directory children use immutable pages/manifests behind CAS-controlled roots; multi-root operations expose only complete pre-commit or post-commit views.
-- [x] Schema-006 browser uploads target a newly allocated create-only final blob, verify provider-attested metadata, and publish only through the directory/operation commit; historical schema-001 staging remains decode-only compatibility.
-- [ ] Two-to-eight-replica deterministic crash schedules cover every admission, lease, provider-response, prepare, commit, finalization, gate, and checkpoint boundary.
+- [x] Every ordinary same-domain mutation reads one exact consistency-domain
+  head, writes only changed immutable pages, and conditionally replaces that
+  head as its sole visibility point with a retained fingerprint-bound outcome.
+- [x] Genuine cross-domain invariants use immutable fingerprint-bound plans,
+  conditional participant locks, one create-only decision, and reader/checkpoint
+  help; expiry alone never unlocks a participant.
+- [x] Gate closure freezes the complete catalog and every registered domain,
+  and cannot reach `closed` while a live provider capability or native lease
+  remains.
+- [x] Lost-success recovery rereads the same head and returns the exact retained
+  outcome; reuse of a mutation ID with a different intent fails closed.
+- [x] Elapsed time grants no mutation authority; a resumed stale writer cannot
+  publish through a changed or frozen head condition.
+- [x] Directory children use immutable high-fan-out trees behind one owner
+  namespace head; namespace operations expose only complete pre-commit or
+  post-commit views.
+- [x] Schema-009 browser uploads target a newly allocated create-only final
+  blob, verify provider-attested metadata, and publish the reference only
+  through the owner namespace-head commit; historical staging is decode-only
+  migration compatibility.
+- [x] Bounded upload batches publish owner-scoped intents and activations in
+  batches while independent provider sessions are created concurrently; the
+  shared provider contract proves replay and failed-batch residue denial.
+- [x] Two-to-eight-replica deterministic crash schedules cover head reads,
+  immutable preparation, provider-response loss, head commits, stale writers,
+  catalog registration/freeze, gate, lease, and checkpoint boundaries.
 - [x] The required `test-replica` Nix command is implemented and included in the umbrella gate.
 - [x] Compatible rolling replicas work; mismatched writer-set, protocol, configuration, feature, and keyring identities fail readiness.
 - [x] Exact pre-aggregate buckets automatically migrate under the closed gate; concurrent starters and crash resumption converge, old writers are fenced, and corrupt or undrained buckets fail closed.
-- [x] Node loss may delay an affected resource or checkpoint but never causes a permanent lock, split-brain commit, or forced unsafe cutover.
+- [x] Node loss may require bounded retry or leave unreachable immutable pages,
+  but never causes a permanent lock, split-brain commit, or forced unsafe
+  cutover.
+- [x] Closed-gate schema-009 collection uses the checkpoint inventory as its
+  immutable mark set, sweeps only recognized key families with conditional
+  deletes and bounded cursor state, reads no file body, and must complete before
+  writes reopen.
 
 ### 22.5 Authentication and accounts
 
@@ -2368,12 +2665,20 @@ The adapter SHOULD:
 - initiate GCS resumable upload sessions server-side and pass the session capability to the browser;
 - restrict browser data-plane CORS on the file bucket to the exact EndlessFS origin and required methods/headers; the state bucket needs no browser CORS;
 - use object generations/metagenerations only as request-local `NativeVersion` preconditions;
-- use create-only generation conditions for admission tickets, immutable staging, manifests/pages, canonical records, and final blobs;
-- use generation-match conditions for writer-set, gate, resource-root, operation, state, and delete transitions so the portable engine's CAS/fencing rules have one-object linearization points;
+- use create-only generation conditions for immutable pages, canonical records,
+  catalog/domain initialization, projections, checkpoints, and final blobs;
+- use generation-match conditions for writer-set, gate, catalog, consistency-
+  domain head, and state transitions so each portable-engine mutation has one
+  object linearization point;
 - implement server-side copy/rewrite with source and destination conditions and persist any rewrite token only in an encrypted expiring GCS lease;
 - use GCS checksums for transport integrity while keeping portable integrity data in canonical entry bodies;
-- force schema-006 public upload capability targets onto newly allocated create-only final blob keys that remain unreachable until commit, restrict historical staging targets to decode-only schema-001 compatibility, and bind all public downloads to committed immutable blobs; and
-- treat flat and hierarchical bucket namespaces identically because directory semantics live in canonical roots/manifests/pages, not GCS folder resources.
+- force schema-009 public upload capability targets onto newly allocated
+  create-only final blob keys that remain unreachable until the owner namespace
+  head commit, restrict historical staging targets to decode-only migration
+  compatibility, and bind all public downloads to committed immutable blobs; and
+- treat flat and hierarchical bucket namespaces identically because directory
+  semantics live in the canonical owner namespace graph, not GCS folder
+  resources.
 
 Conceptual mapping:
 
@@ -2394,7 +2699,10 @@ The required credential-free GCS integration layer uses an in-process Go HTTP te
 Before a GCS adapter may be merged as locally qualified, it MUST pass:
 
 1. the complete object-store backend contract suite;
-2. the canonical-format, provider/state, multi-replica admission/fencing/recovery, raw-copy portability, checkpoint, continued-mutation, race, fuzz, security, integration, and browser E2E suites through the portable engine;
+2. the canonical-format, provider/state, multi-replica conditional-publication,
+   lost-success/stale-writer recovery, catalog-freeze, raw-copy portability,
+   checkpoint, continued-mutation, race, fuzz, security, integration, and
+   browser E2E suites through the portable engine;
 3. adapter unit tests using deterministic fakes at the official Go client boundary;
 4. protocol-level local integration tests for JSON/XML requests, the V4 signer boundary, CORS, direct browser transfers, generations, checksums, rewrites, resumable sessions, rate limits, malformed responses, disconnects, and lost-success responses;
 5. ADC/workload-identity construction tests that cannot reach a real metadata server or token endpoint; and
@@ -2426,7 +2734,11 @@ A change is complete only when:
 12. User-facing and implementation documentation is current.
 13. Any durable-storage change preserves the canonical key/body format, logical-version rules, and raw-copy portability or introduces an explicit reviewed format-version compatibility design with failing-before-green fixtures.
 14. No provider-native identifier, metadata dependency, capability, endpoint, or continuation token has entered authoritative canonical state.
-15. Any mutation or recovery change preserves write-gate admission, immutable-preparation visibility, fencing, stale-worker denial, deterministic takeover, and checkpoint quiescence under independently constructed replicas.
+15. Any mutation or recovery change preserves write-gate/catalog/domain freeze,
+    immutable-preparation invisibility, conditional head publication,
+    lost-success reconciliation, stale-writer denial, retained idempotent
+    outcomes, and checkpoint quiescence under independently constructed
+    replicas.
 16. No lock is process-local, released solely by elapsed time, or recoverable only by the node that acquired it.
 17. The mandatory migration matrix covers every append-only storage-schema epoch, every released durable application feature profile, and every predecessor-produced interrupted state with immutable producer fixtures; traverses every remaining adjacent edge from each entry point; exercises the real application writer builder; passes locally after the change; and maps the candidate release into a declared validity range before publication.
 

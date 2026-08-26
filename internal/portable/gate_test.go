@@ -16,10 +16,10 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
-func TestReplicaDropAfterAdmissionIsFencedRecoveredAndClosed(t *testing.T) {
+func TestReplicaDropBeforeDomainHeadPublicationLeavesNoLockAndCanRetry(t *testing.T) {
 	backend := objectmemory.New()
 	clock := domain.NewFixedClock(time.Date(2036, 2, 3, 4, 5, 6, 0, time.UTC))
-	crasher := &stepFailure{step: portable.StepStateAfterAdmitted}
+	crasher := &stepFailure{step: portable.StepDomainBeforeHeadCommit}
 	first := openEngine(t, backend, clock, 11, crasher)
 	second := openEngine(t, backend, clock, 12, nil)
 	key := state.MustKey(state.NamespaceAccounts, "crash-recovery")
@@ -29,7 +29,9 @@ func TestReplicaDropAfterAdmissionIsFencedRecoveredAndClosed(t *testing.T) {
 	if _, err := second.Get(context.Background(), key); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("mutation became visible before recovery: %v", err)
 	}
-	clock.Advance(2 * time.Minute)
+	if _, err := second.Create(context.Background(), key, []byte("intended")); err != nil {
+		t.Fatalf("retry Create() error = %v", err)
+	}
 	if _, err := second.CreateCheckpoint(context.Background(), "checkpoint-1"); err != nil {
 		t.Fatalf("CreateCheckpoint() error = %v", err)
 	}
@@ -49,15 +51,15 @@ func TestReplicaDropAfterAdmissionIsFencedRecoveredAndClosed(t *testing.T) {
 	}
 }
 
-func TestCandidateCannotAdmitAfterGateStartsClosing(t *testing.T) {
+func TestPausedDomainPublicationCannotCommitAfterCatalogFreeze(t *testing.T) {
 	backend := objectmemory.New()
 	clock := domain.NewFixedClock(time.Date(2036, 2, 3, 4, 5, 6, 0, time.UTC))
-	candidateReached := make(chan struct{})
-	releaseCandidate := make(chan struct{})
+	publicationReached := make(chan struct{})
+	releasePublication := make(chan struct{})
 	scheduler := portable.SchedulerFunc(func(_ context.Context, step string) error {
-		if step == portable.StepAdmissionAfterCandidate {
-			close(candidateReached)
-			<-releaseCandidate
+		if step == portable.StepDomainBeforeHeadCommit {
+			close(publicationReached)
+			<-releasePublication
 		}
 		return nil
 	})
@@ -69,16 +71,16 @@ func TestCandidateCannotAdmitAfterGateStartsClosing(t *testing.T) {
 		_, err := first.Create(context.Background(), key, []byte("must-not-commit"))
 		result <- err
 	}()
-	<-candidateReached
+	<-publicationReached
 	if err := second.CloseWrites(context.Background(), "checkpoint-2"); err != nil {
 		t.Fatalf("CloseWrites() error = %v", err)
 	}
-	close(releaseCandidate)
-	if err := <-result; !errors.Is(err, domain.ErrUnavailable) {
+	close(releasePublication)
+	if err := <-result; !errors.Is(err, domain.ErrPreconditionFailed) {
 		t.Fatalf("racing Create() error = %v", err)
 	}
 	if _, err := second.Get(context.Background(), key); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("cancelled candidate wrote state: %v", err)
+		t.Fatalf("paused writer published after freeze: %v", err)
 	}
 }
 
@@ -103,7 +105,7 @@ func TestReplicaCompatibilityRejectsWriterConfigurationDrift(t *testing.T) {
 	}
 }
 
-func TestAdmissionRejectsWriteGateFeatureBindingDrift(t *testing.T) {
+func TestCheckpointClosureRejectsWriteGateFeatureBindingDrift(t *testing.T) {
 	for name, features := range map[string][]string{
 		"missing":   nil,
 		"different": {"different-feature"},
@@ -130,8 +132,8 @@ func TestAdmissionRejectsWriteGateFeatureBindingDrift(t *testing.T) {
 			if _, err := backend.Put(context.Background(), key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := engine.Create(context.Background(), state.MustKey(state.NamespaceAccounts, "blocked"), []byte("value")); !errors.Is(err, domain.ErrPreconditionFailed) {
-				t.Fatalf("Create() error = %v", err)
+			if err := engine.CloseWrites(context.Background(), "feature-drift"); !errors.Is(err, domain.ErrPreconditionFailed) {
+				t.Fatalf("CloseWrites() error = %v; want precondition failed", err)
 			}
 		})
 	}

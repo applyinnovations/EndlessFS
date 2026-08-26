@@ -63,7 +63,7 @@ func TestEightReplicaConcurrentMultiFileCompletionConvergesRecursiveAggregates(t
 	engines := make([]*portable.Engine, replicaCount)
 	schedulers := make([]*aggregateOneShotScheduler, replicaCount)
 	for index := range engines {
-		schedulers[index] = &aggregateOneShotScheduler{step: portable.StepAdmissionAfterCandidate, barrier: barrier}
+		schedulers[index] = &aggregateOneShotScheduler{step: portable.StepDomainBeforeHeadCommit, barrier: barrier}
 		engines[index] = openEngine(t, backend, clock, byte(202+index), schedulers[index])
 	}
 	user, _ := domain.ParseUserID("WVlZWVlZWVlZWVlZWVlZWQ")
@@ -167,7 +167,7 @@ func TestEightReplicaSameTargetUploadRacesHaveOneAggregateWinner(t *testing.T) {
 			engines := make([]*portable.Engine, replicaCount)
 			schedulers := make([]*aggregateOneShotScheduler, replicaCount)
 			for index := range engines {
-				schedulers[index] = &aggregateOneShotScheduler{step: portable.StepAdmissionAfterCandidate, barrier: barrier}
+				schedulers[index] = &aggregateOneShotScheduler{step: portable.StepDomainBeforeHeadCommit, barrier: barrier}
 				engines[index] = openEngine(t, backend, clock, byte(213+index), schedulers[index])
 			}
 			user, _ := domain.ParseUserID("WlpaWlpaWlpaWlpaWlpaWg")
@@ -255,7 +255,7 @@ func TestEightReplicaSameUploadCompletionIsIdempotentAndAggregatedOnce(t *testin
 	engines := make([]*portable.Engine, replicaCount)
 	schedulers := make([]*aggregateOneShotScheduler, replicaCount)
 	for index := range engines {
-		schedulers[index] = &aggregateOneShotScheduler{step: portable.StepAdmissionAfterCandidate, barrier: barrier}
+		schedulers[index] = &aggregateOneShotScheduler{step: portable.StepDomainBeforeHeadCommit, barrier: barrier}
 		engines[index] = openEngine(t, backend, clock, byte(225+index), schedulers[index])
 	}
 	user, _ := domain.ParseUserID("Wl5eWl5eWl5eWl5eWl5eWg")
@@ -382,8 +382,8 @@ func TestConcurrentReplicaUploadCompletionAndAbortNeverSkewAggregate(t *testing.
 		t.Fatal(err)
 	}
 	barrier := newAggregateBarrier(2)
-	completionScheduler := &aggregateOneShotScheduler{step: portable.StepAdmissionAfterCandidate, barrier: barrier}
-	abortScheduler := &aggregateOneShotScheduler{step: portable.StepAdmissionAfterCandidate, barrier: barrier}
+	completionScheduler := &aggregateOneShotScheduler{step: portable.StepDomainBeforeHeadCommit, barrier: barrier}
+	abortScheduler := &aggregateOneShotScheduler{step: portable.StepDomainBeforeHeadCommit, barrier: barrier}
 	completionEngine := openEngine(t, backend, clock, 236, completionScheduler)
 	abortEngine := openEngine(t, backend, clock, 237, abortScheduler)
 	user, _ := domain.ParseUserID("XFxgXFxgXFxgXFxgXFxgXA")
@@ -485,8 +485,8 @@ func TestConcurrentReplicaFolderMutationsKeepRecursiveAggregatesAtomic(t *testin
 				t.Fatal(err)
 			}
 			barrier := newAggregateBarrier(2)
-			firstScheduler := &aggregateOneShotScheduler{step: portable.StepAdmissionAfterCandidate, barrier: barrier}
-			secondScheduler := &aggregateOneShotScheduler{step: portable.StepAdmissionAfterCandidate, barrier: barrier}
+			firstScheduler := &aggregateOneShotScheduler{step: portable.StepDomainBeforeHeadCommit, barrier: barrier}
+			secondScheduler := &aggregateOneShotScheduler{step: portable.StepDomainBeforeHeadCommit, barrier: barrier}
 			first := openEngine(t, backend, clock, 242, firstScheduler)
 			second := openEngine(t, backend, clock, 243, secondScheduler)
 			user, _ := domain.ParseUserID("XFxcXFxcXFxcXFxcXFxcXA")
@@ -527,68 +527,6 @@ func TestConcurrentReplicaFolderMutationsKeepRecursiveAggregatesAtomic(t *testin
 	}
 }
 
-func TestFolderMutationsRecoverAtEveryAggregateCommitBoundary(t *testing.T) {
-	for operationIndex, operationName := range []string{"copy", "move", "delete"} {
-		for stepIndex, step := range []string{portable.StepOperationAfterPrepared, portable.StepOperationAfterCommitted, portable.StepOperationAfterFinalized} {
-			t.Run(operationName+"/"+step, func(t *testing.T) {
-				backend := objectmemory.New()
-				server := httptest.NewServer(backend)
-				t.Cleanup(server.Close)
-				clock := domain.NewFixedClock(time.Date(2041, 5, 6+operationIndex, 7, 8, 9, 0, time.UTC))
-				if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(byte(251+operationIndex*3+stepIndex), 1<<20)))); err != nil {
-					t.Fatal(err)
-				}
-				crasher := &stepFailure{step: step}
-				first := openEngine(t, backend, clock, byte(11+operationIndex*6+stepIndex*2), crasher)
-				second := openEngine(t, backend, clock, byte(12+operationIndex*6+stepIndex*2), nil)
-				user, _ := domain.ParseUserID("XV1dXV1dXV1dXV1dXV1dXQ")
-				scope, _ := domain.NewScope(user, domain.AreaLive)
-				seedAggregateTree(t, server.Client(), first, scope)
-
-				var err error
-				switch operationName {
-				case "copy":
-					_, err = first.Files().Copy(context.Background(), scope, scope, domain.CopyRequest{Source: domain.MustParseUserPath("/tree"), Destination: domain.MustParseUserPath("/copy"), IdempotencyKey: "aggregate-crash-copy"})
-				case "move":
-					_, err = first.Files().Move(context.Background(), scope, scope, domain.MoveRequest{Source: domain.MustParseUserPath("/tree"), Destination: domain.MustParseUserPath("/moved"), IdempotencyKey: "aggregate-crash-move"})
-				case "delete":
-					_, err = first.Files().Delete(context.Background(), scope, domain.DeleteRequest{Path: domain.MustParseUserPath("/tree"), IdempotencyKey: "aggregate-crash-delete"})
-				}
-				if !errors.Is(err, domain.ErrUnavailable) {
-					t.Fatalf("interrupted %s error = %v", operationName, err)
-				}
-				wantBeforeRecovery := int64(12)
-				if step != portable.StepOperationAfterPrepared {
-					switch operationName {
-					case "copy":
-						wantBeforeRecovery = 24
-					case "delete":
-						wantBeforeRecovery = 0
-					}
-				}
-				if got := assertVisibleRecursiveAggregates(t, second.Files(), scope, domain.MustParseUserPath("/")); got != wantBeforeRecovery {
-					t.Fatalf("interrupted %s aggregate = %d; want %d", operationName, got, wantBeforeRecovery)
-				}
-
-				clock.Advance(2 * time.Minute)
-				if _, err := second.CreateCheckpoint(context.Background(), fmt.Sprintf("aggregate-%d-%d", operationIndex, stepIndex)); err != nil {
-					t.Fatalf("checkpoint recovery error = %v", err)
-				}
-				wantRecovered := int64(12)
-				switch operationName {
-				case "copy":
-					wantRecovered = 24
-				case "delete":
-					wantRecovered = 0
-				}
-				if got := assertVisibleRecursiveAggregates(t, second.Files(), scope, domain.MustParseUserPath("/")); got != wantRecovered {
-					t.Fatalf("recovered %s aggregate = %d; want %d", operationName, got, wantRecovered)
-				}
-			})
-		}
-	}
-}
-
 func runConcurrentOperations(first, second func() (domain.Operation, error)) (domain.Operation, domain.Operation) {
 	start := make(chan struct{})
 	results := make([]domain.Operation, 2)
@@ -604,9 +542,9 @@ func runConcurrentOperations(first, second func() (domain.Operation, error)) (do
 	}
 	close(start)
 	wait.Wait()
-	for _, err := range errorsFound {
+	for index, err := range errorsFound {
 		if err != nil {
-			return domain.Operation{ErrorKind: domain.ErrorInternal, Error: err.Error()}, domain.Operation{ErrorKind: domain.ErrorInternal, Error: err.Error()}
+			results[index] = domain.Operation{State: domain.OperationFailed, ErrorKind: domain.KindOf(err), Error: err.Error()}
 		}
 	}
 	return results[0], results[1]

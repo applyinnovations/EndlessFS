@@ -46,15 +46,16 @@ func TestProviderBudgetDurablePreviewStore(t *testing.T) {
 	}
 	check := func(name string) {
 		t.Helper()
-		budget, ok := ratchet.Latest(name)
-		if !ok {
-			t.Fatalf("provider budget %q is missing", name)
-		}
-		if report, err := budget.CheckRatchet(model, ledger.Events()); err != nil {
+		if report, err := ratchet.CheckExact(name, model, []providerbudget.Role{providerbudget.RolePreviewArtifact}, ledger.Events()); err != nil {
 			t.Errorf("%s: %v; observed=%+v; events=%+v", name, err, report.Totals, ledger.Events())
 		}
 		ledger.Reset()
 	}
+
+	if err := store.Validate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	check("preview-validate")
 
 	binding := testBinding(t)
 	artifact := testArtifact("budget-generation", binding.Variant)

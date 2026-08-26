@@ -42,6 +42,34 @@ func TestIDGeneratorRejectsShortRandomReads(t *testing.T) {
 	}
 }
 
+func TestOwnerScopedOpaqueIDRoundTrip(t *testing.T) {
+	owner, err := ParseUserID(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x41}, 16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x52}, 16))
+	scoped, err := ScopeOpaqueID(owner, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedOwner, parsedRaw, err := ParseScopedOpaqueID(scoped)
+	if err != nil || parsedOwner != owner || parsedRaw != raw {
+		t.Fatalf("parsed scoped ID = %v %q %v", parsedOwner, parsedRaw, err)
+	}
+	for _, invalid := range []string{"", raw, scoped + "x", base64.RawURLEncoding.EncodeToString([]byte{1, 0})} {
+		if _, _, err := ParseScopedOpaqueID(invalid); !errors.Is(err, ErrInvalid) {
+			t.Errorf("invalid scoped ID %q error = %v", invalid, err)
+		}
+	}
+	oversizedOwner, err := ParseUserID(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x4f}, 1<<16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ScopeOpaqueID(oversizedOwner, raw); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("oversized owner scoped ID error = %v", err)
+	}
+}
+
 func TestIDGeneratorSerializesConcurrentEntropyReads(t *testing.T) {
 	generator := NewIDGenerator(bytes.NewReader(deterministicIDBytes(64 * 16)))
 	values := make(chan string, 64)

@@ -23,6 +23,7 @@ type SessionRepository interface {
 	CreateSession(context.Context, string, model.Session) error
 	Session(context.Context, string) (model.Session, state.Version, error)
 	DeleteSession(context.Context, string, state.Version) error
+	RotateSessionAtomic(context.Context, string, state.Version, string, model.Session) error
 	RevokeUserSessions(context.Context, domain.UserID) error
 	Account(context.Context, domain.UserID) (model.Account, state.Version, error)
 }
@@ -57,10 +58,30 @@ func NewSessionManager(repository SessionRepository, ids *domain.IDGenerator, cl
 }
 
 func (m *SessionManager) Issue(ctx context.Context, userID domain.UserID, credentialID string) (IssuedSession, error) {
+	issued, err := m.prepare(ctx, userID, credentialID)
+	if err != nil {
+		return IssuedSession{}, err
+	}
+	if err := m.repository.CreateSession(ctx, issued.Token.Reveal(), issued.Record); err != nil {
+		return IssuedSession{}, err
+	}
+	return issued, nil
+}
+
+func (m *SessionManager) prepare(ctx context.Context, userID domain.UserID, credentialID string) (IssuedSession, error) {
 	if !userID.Valid() || credentialID == "" {
 		return IssuedSession{}, domain.NewError(domain.ErrorInvalid, "session owner and credential are required")
 	}
-	rawToken, err := m.ids.BearerToken()
+	account, _, err := m.repository.Account(ctx, userID)
+	if err != nil || account.Status != model.AccountEnabled {
+		return IssuedSession{}, domain.NewError(domain.ErrorUnauthenticated, "account is unavailable")
+	}
+	authEpoch := effectiveAuthEpoch(account.AuthEpoch)
+	rawSecret, err := m.ids.BearerToken()
+	if err != nil {
+		return IssuedSession{}, err
+	}
+	rawToken, err := secret.ScopeBearerToken(userID, rawSecret)
 	if err != nil {
 		return IssuedSession{}, err
 	}
@@ -73,33 +94,61 @@ func (m *SessionManager) Issue(ctx context.Context, userID domain.UserID, creden
 		SchemaVersion:         model.SchemaVersion,
 		SessionTokenHash:      secret.KeyedHash(m.protectionKey, rawToken),
 		UserID:                userID,
+		AuthEpoch:             authEpoch,
 		CSRFTokenHash:         secret.KeyedHash(m.protectionKey, csrfToken),
 		CreatedAt:             now,
 		ExpiresAt:             now.Add(m.ttl),
 		AuthnCredentialIDHash: secret.Hash(credentialID),
 	}
-	if err := m.repository.CreateSession(ctx, rawToken, record); err != nil {
+	return IssuedSession{Token: secret.Value(rawToken), CSRFToken: secret.Value(csrfToken), Record: record}, nil
+}
+
+// PrepareForOperation derives replayable session material from a committed
+// authentication operation. The operation ID is public entropy; secrecy and
+// unlinkability come from the server-held protection key. Raw secrets remain
+// ephemeral and are never written to application state.
+func (m *SessionManager) PrepareForOperation(userID domain.UserID, credentialID, operationID string, createdAt time.Time, authEpoch uint64) (IssuedSession, error) {
+	if !userID.Valid() || credentialID == "" || operationID == "" || createdAt.IsZero() || createdAt.Location() != time.UTC || authEpoch == 0 {
+		return IssuedSession{}, domain.NewError(domain.ErrorInvalid, "invalid deterministic session material")
+	}
+	rawSecret := secret.KeyedHash(m.protectionKey, "endlessfs-session-operation-v1\x00"+userID.String()+"\x00"+operationID)
+	rawToken, err := secret.ScopeBearerToken(userID, rawSecret)
+	if err != nil {
 		return IssuedSession{}, err
+	}
+	csrfToken := secret.KeyedHash(m.protectionKey, "endlessfs-csrf-operation-v1\x00"+userID.String()+"\x00"+operationID)
+	record := model.Session{
+		SchemaVersion: model.SchemaVersion, SessionTokenHash: secret.KeyedHash(m.protectionKey, rawToken),
+		UserID: userID, AuthEpoch: authEpoch, CSRFTokenHash: secret.KeyedHash(m.protectionKey, csrfToken),
+		CreatedAt: createdAt, ExpiresAt: createdAt.Add(m.ttl), AuthnCredentialIDHash: secret.Hash(credentialID),
 	}
 	return IssuedSession{Token: secret.Value(rawToken), CSRFToken: secret.Value(csrfToken), Record: record}, nil
 }
 
 func (m *SessionManager) Authenticate(ctx context.Context, rawToken string) (AuthenticatedSession, error) {
-	if !secret.ValidBearerToken(rawToken) {
+	owner, _, parseErr := secret.ParseScopedBearerToken(rawToken)
+	if parseErr != nil {
 		return AuthenticatedSession{}, domain.NewError(domain.ErrorUnauthenticated, "invalid session")
 	}
 	record, version, err := m.repository.Session(ctx, rawToken)
-	if err != nil || !secret.MatchesKeyedHash(m.protectionKey, rawToken, record.SessionTokenHash) {
+	if err != nil || record.UserID != owner || !secret.MatchesKeyedHash(m.protectionKey, rawToken, record.SessionTokenHash) {
 		return AuthenticatedSession{}, domain.NewError(domain.ErrorUnauthenticated, "invalid session")
 	}
 	if !m.clock.Now().Before(record.ExpiresAt) {
 		return AuthenticatedSession{}, domain.NewError(domain.ErrorUnauthenticated, "expired session")
 	}
 	account, _, err := m.repository.Account(ctx, record.UserID)
-	if err != nil || account.Status != model.AccountEnabled {
+	if err != nil || account.Status != model.AccountEnabled || effectiveAuthEpoch(account.AuthEpoch) != effectiveAuthEpoch(record.AuthEpoch) {
 		return AuthenticatedSession{}, domain.NewError(domain.ErrorUnauthenticated, "invalid session")
 	}
 	return AuthenticatedSession{RawToken: secret.Value(rawToken), Record: record, Version: version}, nil
+}
+
+func effectiveAuthEpoch(value uint64) uint64 {
+	if value == 0 {
+		return 1
+	}
+	return value
 }
 
 func (m *SessionManager) AuthorizeMutation(session AuthenticatedSession, csrfToken, origin string) error {
@@ -121,10 +170,14 @@ func (m *SessionManager) MatchesProtected(value, protected string) bool {
 }
 
 func (m *SessionManager) Rotate(ctx context.Context, current AuthenticatedSession, credentialID string) (IssuedSession, error) {
-	if err := m.repository.DeleteSession(ctx, current.RawToken.Reveal(), current.Version); err != nil {
+	issued, err := m.prepare(ctx, current.Record.UserID, credentialID)
+	if err != nil {
+		return IssuedSession{}, err
+	}
+	if err := m.repository.RotateSessionAtomic(ctx, current.RawToken.Reveal(), current.Version, issued.Token.Reveal(), issued.Record); err != nil {
 		return IssuedSession{}, domain.NewError(domain.ErrorUnauthenticated, "session rotation failed")
 	}
-	return m.Issue(ctx, current.Record.UserID, credentialID)
+	return issued, nil
 }
 
 func (m *SessionManager) Logout(ctx context.Context, current AuthenticatedSession) error {

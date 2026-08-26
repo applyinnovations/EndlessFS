@@ -6,9 +6,9 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
-	"sync/atomic"
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
@@ -80,28 +80,27 @@ type SchedulerFunc func(context.Context, string) error
 func (f SchedulerFunc) Step(ctx context.Context, step string) error { return f(ctx, step) }
 
 const (
-	StepAdmissionAfterCandidate = "admission:after-candidate"
-	StepStateAfterAdmitted      = "state:after-admitted"
-	StepStateAfterBackend       = "state:after-backend"
+	StepDomainBeforeHeadCommit     = "consistency-domain:before-head-commit"
+	StepDomainAfterHeadCommit      = "consistency-domain:after-head-commit"
+	StepUploadBatchAfterIntents    = "upload-batch:after-intents"
+	StepUploadBatchAfterSessions   = "upload-batch:after-sessions"
+	StepUploadBatchAfterActivation = "upload-batch:after-activation"
 )
 
 type Engine struct {
-	backend                            objectstore.Backend
-	fileBackend                        objectstore.FileControlBackend
-	separateFileBackend                bool
-	clock                              domain.Clock
-	ids                                *domain.IDGenerator
-	writer                             storageformat.WriterSet
-	leaseTTL                           time.Duration
-	uploadTTL                          time.Duration
-	downloadTTL                        time.Duration
-	cursorAEAD                         cipher.AEAD
-	cursorTTL                          time.Duration
-	scheduler                          Scheduler
-	migrationObserver                  func(MigrationProgress)
-	forceResumableOperationPreparation bool // tests exercise the large-plan recovery path deterministically
-
-	admissionSequence atomic.Uint64
+	backend             objectstore.Backend
+	fileBackend         objectstore.FileControlBackend
+	separateFileBackend bool
+	clock               domain.Clock
+	ids                 *domain.IDGenerator
+	writer              storageformat.WriterSet
+	leaseTTL            time.Duration
+	uploadTTL           time.Duration
+	downloadTTL         time.Duration
+	cursorAEAD          cipher.AEAD
+	cursorTTL           time.Duration
+	scheduler           Scheduler
+	migrationObserver   func(MigrationProgress)
 }
 
 func Open(ctx context.Context, options Options) (*Engine, error) {
@@ -244,7 +243,13 @@ func (e *Engine) initialize(ctx context.Context) error {
 		return err
 	}
 	if schema.id != currentStorageSchema().id || pendingMigration {
-		return e.migrateStorageSchemaChain(ctx)
+		if err := e.migrateStorageSchemaChain(ctx); err != nil {
+			return err
+		}
+		// A completed migration is not the end of startup validation. In
+		// particular, schema 008 opens the global gate before the idempotent
+		// consistency-domain unfreeze suffix. Every winning and lagging replica
+		// must pass through the ordinary current-schema reconciliation below.
 	}
 	if err := e.createOrVerifyEnvelope(ctx, storageformat.WriterSetKey(), writerSetSchema, e.writer); err != nil {
 		return err
@@ -255,7 +260,11 @@ func (e *Engine) initialize(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	_, _, gate, err := e.readGate(ctx)
+	gateObject, _, gate, err := e.readGate(ctx)
+	if err != nil {
+		return err
+	}
+	gate, err = e.reconcileGateDomainFreeze(ctx, gateObject, gate)
 	if err != nil {
 		return err
 	}
@@ -263,6 +272,65 @@ func (e *Engine) initialize(ctx context.Context) error {
 		return domain.NewError(domain.ErrorPreconditionFailed, "incompatible write-gate feature binding")
 	}
 	return nil
+}
+
+// reconcileGateDomainFreeze completes only the idempotent suffix already
+// authorized by a durable gate transition. It never opens a gate or guesses an
+// epoch: an open gate authorizes thawing exactly the immediately preceding
+// freeze, while a closing or closed gate preserves its matching freeze. Every
+// other combination fails closed.
+func (e *Engine) reconcileGateDomainFreeze(ctx context.Context, gateObject objectstore.Object, gate storageformat.WriteGate) (storageformat.WriteGate, error) {
+	for range 16 {
+		catalog, found, err := e.readDomainCatalogIfPresent(ctx)
+		if err != nil {
+			return storageformat.WriteGate{}, err
+		}
+		// An absent or already-thawed catalog cannot disagree with the gate and
+		// needs no second provider read. A concurrent closer is ordered by its
+		// own gate CAS and any stale migration attempt reconciles against the
+		// winner's durable completion markers.
+		if !found || catalog.head.FreezeEpoch == 0 {
+			return gate, nil
+		}
+		latestObject, _, latestGate, err := e.readGate(ctx)
+		if err != nil {
+			return storageformat.WriteGate{}, err
+		}
+		if latestObject.Version != gateObject.Version {
+			gateObject, gate = latestObject, latestGate
+			continue
+		}
+		switch {
+		case gate.Mode == storageformat.GateOpen && catalog.head.FreezeEpoch <= gate.Epoch:
+			// An open gate authorizes no domain freeze. Usually the catalog is
+			// from the immediately preceding closure, but an arbitrarily late
+			// migration helper can republish an even older epoch after multiple
+			// adjacent edges have completed. Any non-future freeze is therefore
+			// stale and safe to help; a future epoch still fails closed below.
+			if err := newDomainCatalog(e.backend, e.scheduler).unfreeze(ctx, catalog.head.FreezeEpoch); err != nil && !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) {
+				return storageformat.WriteGate{}, err
+			}
+			gateObject, gate = latestObject, latestGate
+			continue
+		case gate.Mode == storageformat.GateClosing && catalog.head.FreezeEpoch < gate.Epoch:
+			// A lagging worker from the preceding migration may publish its
+			// idempotent freeze after one or more later migrations won their
+			// closing CAS. The current closer cannot freeze at its own epoch
+			// until every older suffix is removed, so helping the old unfreeze
+			// is both safe and required for forward progress.
+			if err := newDomainCatalog(e.backend, e.scheduler).unfreeze(ctx, catalog.head.FreezeEpoch); err != nil && !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) {
+				return storageformat.WriteGate{}, err
+			}
+			gateObject, gate = latestObject, latestGate
+			continue
+		case (gate.Mode == storageformat.GateClosing || gate.Mode == storageformat.GateClosed) && gate.Epoch == catalog.head.FreezeEpoch:
+			// Checkpoint closure is intentionally durable across restarts.
+			return gate, nil
+		default:
+			return storageformat.WriteGate{}, domain.NewError(domain.ErrorPreconditionFailed, fmt.Sprintf("write gate and consistency-domain freeze disagree (gateMode=%s gateEpoch=%d catalogFreezeEpoch=%d)", gate.Mode, gate.Epoch, catalog.head.FreezeEpoch))
+		}
+	}
+	return storageformat.WriteGate{}, domain.NewError(domain.ErrorUnavailable, "write gate and consistency-domain freeze remained contended")
 }
 
 func validateCompatibleSuperblock(superblock storageformat.Superblock) error {

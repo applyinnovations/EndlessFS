@@ -173,9 +173,10 @@ func TestConsistencyDomainLostHeadCommitResponseRecoversInSameCall(t *testing.T)
 
 func TestConsistencyDomainCompactionPersistsValuesAndOutcomesWithoutClaimReads(t *testing.T) {
 	ctx := context.Background()
+	clock := domain.NewFixedClock(time.Date(2054, 2, 3, 4, 5, 6, 0, time.UTC))
 	ledger := providerbudget.NewLedger()
 	base := objectmemory.New()
-	store := newConsistencyDomainStore(budgettest.Wrap(providerbudget.RoleState, base, ledger), nil)
+	store := newConsistencyDomainStore(budgettest.Wrap(providerbudget.RoleState, base, ledger), nil, clock)
 	reference := consistencyDomainRef{Kind: storageformat.DomainOwnerControl, ID: "owner-wide"}
 	mutations := make([]consistencyDomainMutation, 300)
 	for index := range mutations {
@@ -184,6 +185,9 @@ func TestConsistencyDomainCompactionPersistsValuesAndOutcomesWithoutClaimReads(t
 		if _, err := store.mutate(ctx, reference, mutations[index]); err != nil {
 			t.Fatalf("seed %d: %v", index, err)
 		}
+		// Keep expiry keys distinct without making the exact economics fixture
+		// depend on the host wall clock's precision.
+		clock.Advance(time.Microsecond)
 	}
 	ledger.Reset()
 	if err := store.compact(ctx, reference); err != nil {

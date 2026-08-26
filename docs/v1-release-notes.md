@@ -3,23 +3,46 @@
 EndlessFS v1 provides the single-binary passkey identity system, private Drive control plane, direct capability data plane, trash, read-only public sharing, administration and recovery, accessible embedded browser application, and closed data-only theme system described in [the v1 specification](./v1-specification.md).
 
 The clarified v1 storage contract is implemented by one provider-independent
-schema-008 engine. Its canonical keys, record bodies, logical versions,
-consistency-domain catalog/heads/pages, owner namespace graph, retained
-outcomes, writer gate, and checkpoints do not depend on provider-native
-identifiers or metadata. Deterministic raw-copy tests move only
-checkpoint-authorized key/body pairs between independent backends, regenerate
-every native version, reopen at a new gate epoch, preserve all logical state,
-and continue mutations in both directions without a state migration.
+schema-009 engine. Its canonical typed records, invariant-aligned state domains,
+immutable pages, logical versions, retained outcomes, owner namespace graph,
+writer gate, and checkpoints do not depend on provider-native identifiers or
+metadata. Deterministic raw-copy tests move only checkpoint-authorized key/body
+pairs between independent backends, regenerate every native version, reopen at
+a new gate epoch, preserve all logical state, and continue mutations in both
+directions without a state migration.
 
-Multi-replica mutations write changed immutable pages and conditionally replace
-one consistency-domain head. If a replica disappears before the replacement it
-publishes nothing; if the successful response is lost, any replica reconciles
-the retained fingerprint-bound outcome. A stale returning writer cannot replace
-the changed head. Gate closure freezes the complete domain catalog and every
-registered head, then drains capabilities/leases rather than sacrificing
-consistency for availability. Schema-007 admissions, operation records, fences,
-and per-directory authority are migration-only input and are not an alternate
-runtime.
+An ordinary same-domain mutation writes changed immutable pages and
+conditionally replaces one authenticated domain head. If a replica disappears
+before that replacement it publishes nothing; if the successful response is
+lost, any replica reconciles the retained fingerprint-bound outcome. Genuine
+cross-domain invariants prepare every participant before one create-only
+decision becomes the commit or abort point, after which any replica can finish
+the transition. Gate closure resolves transitions, freezes the complete domain
+catalog and every registered head, and drains capabilities/leases rather than
+sacrificing consistency for availability. Schema-008 generic domains and every
+older admission, operation, fence, index, and per-directory authority are
+migration-only input, not alternate runtimes.
+
+The v0.4.0 state-architecture release replaces the historical generic mutation
+protocol with schema 009. Authority is partitioned by actual invariants into
+namespace, owner-identity, owner-jobs, administration, and capability domains.
+State values are bound to exact canonical record types; owner-scoped opaque
+identifiers remove global scans; sessions use scoped authentication epochs;
+registration, authentication, credential, administrator, upload, preview-job,
+and duplicate-reconciliation changes publish atomically at their correct
+boundary. External upload-provider effects are durable, replayable consequences
+of canonical intent. Checkpoint closure drives a resumable, conditional,
+checkpoint-bound garbage collector and never reads file bodies.
+
+Exact executable GCS economics ratchets cover every provider-backed production
+route. Representative state-provider request counts fall from 72 to 4 for a
+one-file move, 100 to 5 for Trash, 103 to 4 for restore, 68 to 6 for upload
+completion, and 18 to 2 for StateStore CAS. The 10,000-root Trash fixture uses
+125 state requests, one authoritative head publication, no file-provider
+request, and no stored-body read. These are deterministic modeled count, price,
+aggregate-latency, and critical-path budgets rather than live-cloud latency
+measurements; the complete table and model are in the schema-009 implementation
+and provider-economics records.
 
 The v0.3.2 upload-recovery patch repairs namespace roots left at the durable committed transition after a replica disappears before finalization. Reads continue to interpret the committed post-state without mutation. Once the recorded owner lease expires, the next upload, copy, move, Trash, delete, or directory-creation mutation performs bounded targeted recovery of that operation and replans from a fresh namespace trail. Recovery never scans the bucket or reads stored-file bodies, preserves active-owner fencing, tolerates one-winner finalization races, and fails closed on unexpected state errors. This patch writes the unchanged schema-006 format.
 
@@ -44,19 +67,22 @@ Checkpoint v3 replaces the v0.1.14 body-hashing path with a single ordered provi
 Directory metadata now carries persisted recursive-byte and recursive-file-count aggregates. File upload or replacement, move, copy, trash, restore, and permanent deletion update every affected ancestor and the live or trash area root through the same durable commit as the visible tree mutation. Directory `size` and `fileCount` are therefore cheap prefix-total lookups; an area root reports that area's total logical bytes and files. A file contributes one even when its size is zero, while directories are not counted. Overflow or inconsistent canonical aggregates fail closed. Completion attempts that lose an unrelated ancestor-root race advance through the durable upload record and retry from authoritative state; true same-target races retain one version-precondition winner. Deterministic tests force eight replicas through multi-file, same-upload, and same-target completion races, completion/abort races, contested folder rename/trash/restore/delete, and every folder-operation commit boundary. Both aggregates are covered by checkpoint/raw-copy portability and advertised as required `recursive-byte-aggregates-v1` and `recursive-file-count-aggregates-v1` storage features.
 
 Durable upgrades run through an append-only storage-schema ledger rather than
-release-specific startup branches. It records schemas 001 through 008 with only
+release-specific startup branches. It records schemas 001 through 009 with only
 adjacent transforms. Startup resolves one exact epoch and executes the complete
-remaining suffix. The `007 -> 008` edge replaces historical state/index/
-filesystem/admission/operation authority with consistency domains and the owner
-namespace graph; it is metadata-only for file blobs. Each edge quiesces the
-durable write gate, upgrades and verifies its owned records, advances writer/
-superblock/gate markers, checkpoints, and reopens before the next edge. The
-chain is crash-resumable, supports simultaneous migrators and split state/file
-buckets, and fails closed on corruption, overflow, unknown or mixed epochs,
-unrelated configuration drift, or undrained work. Immutable producer fixtures
-exist for every epoch/profile; the mandatory matrix starts from each fixture,
-traverses every remaining edge, verifies authoritative state, and performs a
-post-upgrade mutation. Arbitrary non-EndlessFS bucket objects are not imported.
+remaining suffix. The `007 -> 008` edge installs the owner namespace graph and
+consistency-domain foundation. The `008 -> 009` edge authenticates every source
+domain and state key, binds unchanged application payloads to typed records,
+and deterministically repartitions authority by invariant. Both edges reuse
+immutable file blobs in place and never read or copy their bodies. Each edge
+quiesces the durable write gate, upgrades and verifies its owned records,
+advances writer/superblock/gate markers, checkpoints, and reopens before the
+next edge. The chain is crash-resumable, supports simultaneous migrators and
+split state/file buckets, and fails closed on corruption, overflow, unknown or
+mixed epochs, unrelated configuration drift, or undrained work. Immutable
+producer fixtures exist for every epoch/profile; the mandatory matrix starts
+from each fixture, traverses every remaining edge, verifies authoritative state,
+and performs a post-upgrade mutation. Arbitrary non-EndlessFS bucket objects are
+not imported.
 
 The v0.1.10 patch introduced resumable body-inventory journals and startup migration observation. Its liveness/readiness split, structured safe progress, delayed split-bucket coverage, and upload-abort race fix remain. Schema 004 supersedes its checkpoint journal and body-read mechanism with checkpoint v3 metadata traversal and directory migration marks.
 

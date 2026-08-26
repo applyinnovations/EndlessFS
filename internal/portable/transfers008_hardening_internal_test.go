@@ -872,3 +872,83 @@ func TestSchema008TerminalUploadCleanupProviderFailureMatrix(t *testing.T) {
 		}
 	})
 }
+
+func TestSchema008RuntimeLeaseDeletionReconcilesProviderRaces(t *testing.T) {
+	ctx := context.Background()
+	for _, providerErr := range []error{
+		domain.NewError(domain.ErrorNotFound, "lease already removed"),
+		domain.NewError(domain.ErrorPreconditionFailed, "lease already replaced"),
+	} {
+		memory := objectmemory.New()
+		engine := openNamespaceTestEngine(t, memory)
+		engine.backend = &hookedBackend{Backend: memory, delete: func(context.Context, objectstore.Key, objectstore.DeleteCondition) error {
+			return providerErr
+		}}
+		object := objectstore.Object{Key: storageformat.LeaseKey(memory.BackendKind(), "conditional-delete"), Version: "stale-version"}
+		if err := engine.Files().deleteKnownRuntimeUploadLease(ctx, object); err != nil {
+			t.Fatalf("conditional lease deletion error = %v; want nil", err)
+		}
+	}
+
+	memory := objectmemory.New()
+	engine := openNamespaceTestEngine(t, memory)
+	leaseKey := storageformat.LeaseKey(memory.BackendKind(), "transfer-support-race")
+	if _, err := memory.Put(ctx, leaseKey, []byte("lease"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	engine.backend = &hookedBackend{Backend: memory, get: func(callCtx context.Context, key objectstore.Key) (objectstore.Object, error) {
+		object, err := memory.Get(callCtx, key)
+		if key == leaseKey && err == nil {
+			engine.fileBackend = metadataOnlyBackend{Backend: memory}
+		}
+		return object, err
+	}}
+	if err := engine.Files().abortAndDeleteRuntimeUploadLease(ctx, "transfer-support-race"); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("transfer support race error = %v; want precondition failed", err)
+	}
+}
+
+func TestSchema008UploadBatchBoundsHeadContentionAndPropagatesProviderErrors(t *testing.T) {
+	ctx := context.Background()
+	live := namespaceTestScope(t, domain.AreaLive)
+	request := domain.CreateUploadRequest{
+		Path: domain.MustParseUserPath("/batch-provider-boundary.bin"), Size: 1,
+		MediaType: "application/octet-stream", IdempotencyKey: "batch-provider-boundary",
+	}
+	reference := uploadDomainReference(live.UserID())
+	headKey := storageformat.DomainHeadKey(reference.Kind, reference.ID)
+
+	t.Run("unexpected-provider-error", func(t *testing.T) {
+		memory := objectmemory.New()
+		engine := openNamespaceTestEngine(t, memory)
+		failure := domain.NewError(domain.ErrorInvalid, "injected batch head failure")
+		engine.backend = &hookedBackend{Backend: memory, put: func(callCtx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+			if key == headKey && condition.Mode == objectstore.PutMatch {
+				return "", failure
+			}
+			return memory.Put(callCtx, key, body, condition)
+		}}
+		if _, err := engine.Files().createUploadBatch008(ctx, live, []domain.CreateUploadRequest{request}); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("unexpected batch provider error = %v; want invalid", err)
+		}
+	})
+
+	t.Run("persistent-head-contention", func(t *testing.T) {
+		memory := objectmemory.New()
+		engine := openNamespaceTestEngine(t, memory)
+		attempts := 0
+		engine.backend = &hookedBackend{Backend: memory, put: func(callCtx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+			if key == headKey && condition.Mode == objectstore.PutMatch {
+				attempts++
+				return "", domain.NewError(domain.ErrorConflict, "injected batch head contention")
+			}
+			return memory.Put(callCtx, key, body, condition)
+		}}
+		if _, err := engine.Files().createUploadBatch008(ctx, live, []domain.CreateUploadRequest{request}); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("persistent batch contention error = %v; want unavailable", err)
+		}
+		if attempts != 8 {
+			t.Fatalf("batch head attempts = %d; want 8", attempts)
+		}
+	})
+}

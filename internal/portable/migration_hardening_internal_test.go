@@ -26,6 +26,42 @@ type migrationMarkPutFaultBackend struct {
 	err error
 }
 
+type migrationMarkCreateConflictBackend struct {
+	objectstore.Backend
+	publishWinner bool
+	injected      int
+}
+
+func (backend *migrationMarkCreateConflictBackend) Put(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+	if condition.Mode == objectstore.PutCreateOnly && strings.HasPrefix(key.String(), storageformat.MigrationDirectoryMarkPrefix(schemaMigration003To004.checkpointID)) {
+		backend.injected++
+		if backend.publishWinner && backend.injected == 1 {
+			if _, err := backend.Backend.Put(ctx, key, body, condition); err != nil {
+				return "", err
+			}
+		}
+		return "", domain.NewError(domain.ErrorConflict, "injected migration mark creation conflict")
+	}
+	return backend.Backend.Put(ctx, key, body, condition)
+}
+
+type migrationOpenLostSuccessBackend struct {
+	objectstore.Backend
+	injected bool
+}
+
+func (backend *migrationOpenLostSuccessBackend) Put(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+	if key == storageformat.WriteGateKey() && condition.Mode == objectstore.PutMatch && strings.Contains(string(body), `"mode":"open"`) && !backend.injected {
+		version, err := backend.Backend.Put(ctx, key, body, condition)
+		if err != nil {
+			return version, err
+		}
+		backend.injected = true
+		return "", domain.NewError(domain.ErrorUnavailable, "injected lost successful gate-open response")
+	}
+	return backend.Backend.Put(ctx, key, body, condition)
+}
+
 func (backend *migrationMarkPutFaultBackend) Put(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
 	if condition.Mode == objectstore.PutMatch && strings.HasPrefix(key.String(), storageformat.MigrationDirectoryMarkPrefix(schemaMigration003To004.checkpointID)) {
 		return "", backend.err
@@ -195,6 +231,39 @@ func TestMigrationDirectoryMarksFailClosedAndCleanUp(t *testing.T) {
 	}
 	if _, err := backend.Get(ctx, key); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("migration mark after cleanup error = %v; want not found", err)
+	}
+}
+
+func TestMigrationDirectoryMarkCreationReconcilesRacesAndBoundsContention(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		publishWinner bool
+		wantErr       error
+		wantAttempts  int
+	}{
+		{name: "lost-winner-response", publishWinner: true, wantAttempts: 1},
+		{name: "persistent-contention", wantErr: domain.ErrUnavailable, wantAttempts: 8},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend, engine, scope, root, _ := emptyPhysicalMigrationRoot(t)
+			faults := &migrationMarkCreateConflictBackend{Backend: backend, publishWinner: test.publishWinner}
+			engine.backend = faults
+			walk := &migrationWalk{
+				engine: engine, group: migrationScope{scope: scope}, transition: schemaMigration003To004,
+				plan: aggregateMigrationPlan{writeProviderFingerprints: true}, phase: migrationPhaseTransform,
+			}
+			total := migrationAggregate{
+				bytes: root.recursiveBytes, files: root.recursiveFileCount, directories: 1,
+				accumulator: root.contentAccumulator, digest: root.contentDigest,
+			}
+			err := walk.writeCompletedDirectoryMark(t.Context(), storageformat.RootDirectoryID, "", "", total)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("mark creation error = %v; want %v", err, test.wantErr)
+			}
+			if faults.injected != test.wantAttempts {
+				t.Fatalf("mark creation attempts = %d; want %d", faults.injected, test.wantAttempts)
+			}
+		})
 	}
 }
 
@@ -418,6 +487,29 @@ func TestMigrationActivationAndCompletionRejectInconsistentControlRecords(t *tes
 		}
 		if err := engine.activateMigrationWriterSet(context.Background(), schemaMigration002To003); !errors.Is(err, domain.ErrPreconditionFailed) {
 			t.Fatalf("writer activation schema error = %v; want precondition failed", err)
+		}
+	})
+
+	t.Run("writer-activation-revision-overflow", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema008)
+		key := storageformat.WriterSetKey()
+		object, err := backend.Get(t.Context(), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope storageformat.Envelope
+		var writer storageformat.WriterSet
+		if err := storageformat.DecodeEnvelope(object.Body, key, writerSetSchema, &envelope, &writer); err != nil {
+			t.Fatal(err)
+		}
+		body, err := storageformat.EncodeEnvelope(writerSetSchema, key, math.MaxUint64, writer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replaceMigrationBody(t, backend, key, body)
+		if err := engine.activateMigrationWriterSet(t.Context(), schemaMigration008To009); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("writer activation revision overflow error = %v; want invalid", err)
 		}
 	})
 
@@ -1698,6 +1790,33 @@ func TestFeatureOnlyMigrationGateClosureRejectsEveryUnsafeControlState(t *testin
 	})
 }
 
+func TestFeatureOnlyMigrationReconcilesLostSuccessfulGateOpen(t *testing.T) {
+	backend, engine := currentMigrationEngine(t)
+	configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+	superblockObject, err := backend.Get(t.Context(), storageformat.SuperblockKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var superblock storageformat.Superblock
+	if err := decodeCanonicalSuperblock(superblockObject.Body, &superblock); err != nil {
+		t.Fatal(err)
+	}
+
+	faults := &migrationOpenLostSuccessBackend{Backend: backend}
+	engine.scheduler = SchedulerFunc(func(_ context.Context, step string) error {
+		if step == MigrationStepName(string(schemaMigration004To005.id), StepMigrationAfterCheckpoint) {
+			engine.backend = faults
+		}
+		return nil
+	})
+	if err := engine.runFeatureOnlyStorageMigration(t.Context(), schemaMigration004To005, superblockObject, superblock); err != nil {
+		t.Fatalf("feature-only migration with lost successful gate-open response: %v", err)
+	}
+	if !faults.injected {
+		t.Fatal("feature-only migration did not exercise the lost successful gate-open response")
+	}
+}
+
 func TestMigrationWinnerValidationRejectsEveryInconsistentResult(t *testing.T) {
 	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
 	scope, _ := domain.NewScope(user, domain.AreaLive)
@@ -2220,6 +2339,28 @@ func TestMigrationDirectoryMarkReadWriteDenialAndUpdatePaths(t *testing.T) {
 		got, found, err := fixture.walk.readCompletedDirectoryMark(t.Context(), storageformat.RootDirectoryID, "", "")
 		if err != nil || !found || got.directories != 2 {
 			t.Fatalf("updated mark = %+v, %t, %v", got, found, err)
+		}
+	})
+	t.Run("update-revision-overflow", func(t *testing.T) {
+		fixture := setup(t)
+		write(t, fixture)
+		object, err := fixture.backend.Get(t.Context(), fixture.key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope storageformat.Envelope
+		var mark storageformat.MigrationDirectoryMark
+		if err := storageformat.DecodeEnvelope(object.Body, fixture.key, migrationDirectoryMarkSchema, &envelope, &mark); err != nil {
+			t.Fatal(err)
+		}
+		body, err := storageformat.EncodeEnvelope(migrationDirectoryMarkSchema, fixture.key, math.MaxUint64, mark)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replaceMigrationBody(t, fixture.backend, fixture.key, body)
+		fixture.total.directories = 2
+		if err := fixture.walk.writeCompletedDirectoryMark(t.Context(), storageformat.RootDirectoryID, "", "", fixture.total); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("mark update revision overflow error = %v; want invalid", err)
 		}
 	})
 	t.Run("write-corrupt-existing", func(t *testing.T) {

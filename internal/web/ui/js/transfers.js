@@ -1470,7 +1470,10 @@
     const baseDirectory = "/Photography";
     let totalSize = 0;
     for (let index = 0; index < 2000; index += 1) {
-      const size = (1 + (index % 24)) * (1 << 20);
+      // Keep the four animated rows active beyond the longest instrumented E2E
+      // workflow. Small fixture files reached their ceiling before the focus-
+      // preservation assertion could observe a progress-only render.
+      const size = index < 4 ? (8 + index) * (2 ** 30) : (1 + (index % 24)) * (1 << 20);
       let transferState = "queued";
       if (index < 4) transferState = "uploading";
       else if (index < 12) transferState = "failed";

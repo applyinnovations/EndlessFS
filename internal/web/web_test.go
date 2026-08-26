@@ -221,6 +221,7 @@ func TestLocalTransferPreviewFixtureIsDefaultAndScaleOriented(t *testing.T) {
 	for _, required := range []string{
 		`state.config.localFixture`,
 		`for (let index = 0; index < 2000; index += 1)`,
+		`const size = index < 4 ? (8 + index) * (2 ** 30)`,
 		`fixture: true`,
 		"renderTransfers();\n    setTransferSheetOpen(false);",
 		`seedTransferPreviewFixture();`,

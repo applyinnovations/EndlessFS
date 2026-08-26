@@ -277,6 +277,7 @@ var storageSchemaReleaseLedger = []storageSchemaReleaseBoundary{
 	{first: "v0.1.5", schema: storageSchema003},
 	{first: "v0.2.0", schema: storageSchema005},
 	{first: "v0.3.0", schema: storageSchema006},
+	{first: "v0.4.0", schema: storageSchema009},
 }
 
 func init() {

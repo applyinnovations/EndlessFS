@@ -58,7 +58,7 @@ This document fixes the v1 JSON field casing and control-plane routes implemente
 
 Every entry returns `fileCount`. A file has `fileCount: 1`. A directory has the persisted recursive number of descendant logical files; directories themselves are not counted. File-entry `size` is the file's byte length. Directory-entry `size`, including the entry returned for `/`, is the persisted recursive sum of all descendant file bytes in that live or trash tree. Both directory aggregates are retrieved by verifying constant-size root and manifest metadata without scanning the subtree. Empty directories return `size: 0` and `fileCount: 0`; a zero-byte file returns `size: 0` and `fileCount: 1`.
 
-In schema 006, upload capabilities target their final immutable blob key and completion publishes metadata only after provider checksum verification. Same-owner file copies reuse that blob. Folder copy, move, Trash, restore, and deletion attach or detach one immutable snapshot and update only affected namespace ancestors; their synchronous control-plane cost does not grow with the number of descendants and they do not issue provider byte copy/move/delete operations.
+In schema 009, upload capabilities target their final immutable blob key and completion publishes metadata only after provider checksum verification. Same-owner file copies reuse that blob. Folder copy, move, Trash, restore, and deletion attach or detach one immutable snapshot and update only affected namespace ancestors; their synchronous control-plane cost does not grow with the number of descendants and they do not issue provider byte copy/move/delete operations.
 
 `GET /api/v1/files` returns `{ "current": Entry, "entries": [Entry...], "nextCursor": "..." }`. `current` is the directory represented by `path`; its `size`, `fileCount`, and every child row come from the same immutable manifest snapshot. Every subsequent page selected by `nextCursor` repeats that exact `current` entry even if the live directory changes between requests.
 
@@ -70,7 +70,7 @@ Each successful `GET /api/v1/trash` row preserves the prior trash-record fields 
 
 ## Duplicate reconciliation foundation
 
-These authenticated owner routes expose the duplicate catalog introduced by schema 004 and consumed by the current schema-006 backend foundation for the separate Part 2 browser workflow. They return only virtual paths, portable logical versions, counts, and opaque group/cursor/plan values. Provider keys, provider-native versions, and raw checksums are never public fields. A logical reflink is not a second physical file duplicate and therefore does not inflate reclaimable bytes.
+These authenticated owner routes expose the duplicate catalog introduced by schema 004 and served from schema 009's authoritative state domains plus rebuildable projections for the separate Part 2 browser workflow. They return only virtual paths, portable logical versions, counts, and opaque group/cursor/plan values. Provider keys, provider-native versions, and raw checksums are never public fields. A logical reflink is not a second physical file duplicate and therefore does not inflate reclaimable bytes.
 
 | Method | Route | Request or query |
 |---|---|---|

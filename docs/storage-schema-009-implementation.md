@@ -183,9 +183,9 @@ source tree also has the following local evidence:
 
 | Gate | Result |
 |---|---|
-| Strict repository coverage | 85.613% (19,714/23,027; required ≥85%) |
+| Strict repository coverage | 85.647% (19,722/23,027; required ≥85%) |
 | Security-sensitive coverage | Every named group ≥95%; token 100%, configuration 98.328% |
-| Migration coverage | 98.109% (1,764/1,798; required ≥98%) |
+| Migration coverage | 98.220% (1,766/1,798; required ≥98%) |
 | Exhaustive migration fault matrix under `-race` | Pass, 1,473.393 s under composed-gate load |
 | Every remaining repository test under `-race` | Pass, portable package 552.603 s under composed-gate load |
 | Provider economics | GCS budget catalog and all executable request/count/cost/latency ratchets pass |
@@ -213,5 +213,7 @@ reopen/next-close and multi-edge late-worker interleavings. The schema-001→009
 eight-replica matrix passes 100 consecutive focused repetitions plus the
 complete migration gate under concurrent strict-coverage load.
 
-No branch merge, migration rollout, or release claim is authorized by this
-implementation record alone.
+The implementation record is release-qualified only when the exact candidate
+tag maps to schema 009 in the append-only release ledger and passes the complete
+migration and release gates. It does not by itself claim a migration rollout or
+live deployment.

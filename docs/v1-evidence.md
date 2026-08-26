@@ -61,13 +61,13 @@ The v1 portability clarification is implemented without a second application pro
 | One portable state/provider engine over atomic object backends | `TestContractPortableStateStore`, `TestContractPortableProviderOverMemoryBackend`, `TestContractPortableProviderOverGCSProtocolFake` |
 | Optional file backend isolates immutable blobs/staging while preserving one state gate, cross-replica reads, direct transfers, combined checkpoints, and continued mutation after raw-copy cutover | `TestPortableSeparateFileBackendIsolatesBytesAndSharesOneCheckpoint`, `TestPortabilityRawCopyPreservesSplitStateAndFileBackends`, `TestParseGCSAllowsSeparateOrSharedStateBucket` |
 | Stable encrypted state pagination across replicas and concurrent CAS | `TestPortableStateCursorMovesAcrossReplicasAndKeepsImmutableSnapshot`, `TestPortableStateCASAcrossReplicas`, `TestEightReplicaConcurrentCASHasOneWinner` |
-| Conditional domain-head publication, lost-success recovery, stale-writer denial, catalog freeze, and writer compatibility | `TestConsistencyDomainLostHeadCommitResponseRecoversInSameCall`, `TestConsistencyDomainFreezeWinsAgainstPausedStaleWriter`, `TestConsistencyDomainEightReplicaConflictHasOneWinner`, `TestCheckpointFreezeClosesEveryRegisteredDomainAndRegistrationRace`, `TestReplicaCompatibilityRejectsWriterConfigurationDrift` |
+| Conditional domain-head publication, lost-success recovery, stale-writer denial, helpable cross-domain decisions, catalog freeze, and writer compatibility | `TestConsistencyDomainLostHeadCommitResponseRecoversInSameCall`, `TestConsistencyDomainFreezeWinsAgainstPausedStaleWriter`, `TestConsistencyDomainEightReplicaConflictHasOneWinner`, `TestPortableCrossDomainTransitionRecoversLostDecisionAndEightReplicaReplay`, `TestPortableCrossDomainTransitionRestartsAfterEveryDurableBoundary`, `TestCheckpointHelpsPendingTransitionBeforeFreezingDomains`, `TestCheckpointFreezeClosesEveryRegisteredDomainAndRegistrationRace`, `TestReplicaCompatibilityRejectsWriterConfigurationDrift` |
 | Every ordinary namespace mutation has one visibility point and survives crash/lost-success/concurrent replay without a generic admission or operation transaction | `TestEveryNamespaceMutationPublishesNothingBeforeHeadCommit`, `TestNamespaceMoveLostSuccessAndEightReplicaReplayConverge`, `TestSchema008RuntimeMutationsCannotReachRetiredBackendOrObjectBytes` |
-| Schema-008 owner namespace graph makes folder Trash/restore cost independent of descendants; logical copy and direct-final upload publication perform no file-provider copy | `TestNamespaceStoreMoveTrashRestoreDoesNotVisitDescendantsOrFileProvider`, `TestNamespaceFolderMoveCostDoesNotScaleWithDescendants`, `TestLogicalCopyAndUploadPublicationUseNoFileBackendCopy` |
+| Schema-009 retains the owner namespace graph so folder Trash/restore cost is independent of descendants; logical copy and direct-final upload publication perform no file-provider copy | `TestNamespaceStoreMoveTrashRestoreDoesNotVisitDescendantsOrFileProvider`, `TestNamespaceFolderMoveCostDoesNotScaleWithDescendants`, `TestLogicalCopyAndUploadPublicationUseNoFileBackendCopy` |
 | Persisted recursive-byte and recursive-file-count aggregates at every directory and area root, with constant-metadata-read lookup, upload/replacement/move/copy/trash/restore/delete maintenance, pre/post-commit visibility, overflow/corruption denial, and raw-copy continuation | `TestPortableRecursiveAggregatesTrackEveryFileMutation`, `TestPortableRecursiveAggregateStatDoesNotReadManifestPages`, `TestEightReplicaConcurrentMultiFileCompletionConvergesRecursiveAggregates`, `TestEightReplicaSameUploadCompletionIsIdempotentAndAggregatedOnce`, `TestEightReplicaSameTargetUploadRacesHaveOneAggregateWinner`, `TestFailedPartialAbortedAndReplayedUploadsDoNotSkewAggregates`, `TestConcurrentReplicaUploadCompletionAndAbortNeverSkewAggregate`, `TestConcurrentReplicaFolderMutationsKeepRecursiveAggregatesAtomic`, `TestFolderMutationsRecoverAtEveryAggregateCommitBoundary`, aggregate assertions in `TestReplicaDropAfterRootPrepareRecoversAtOneCommitPoint` and `TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections`, `TestPortableDirectoryManifestCorruptionMatrixFailsClosed`, `TestPortableDirectoryEntryValidationMatrix` |
 | Rebuildable exact duplicate and directory-overlap projections, authoritative ignore policy, revision-bound bounded reconciliation, and no synchronous projection writes on namespace mutation | `TestDuplicateProjectionIsRebuildableAndNeverWrittenByForegroundMutation`, `TestDuplicateCatalogTracksFileAndExactDirectoryGroupsIncrementally`, `TestDuplicateReconciliationPagesPersistentDirectoryContentIndexes`, `TestSchema008RuntimeMutationsCannotReachRetiredBackendOrObjectBytes` |
 | Snapshot-consistent current-directory metadata, batched trash-tree joins, schema-001 trash compatibility, and nested public current targets | `TestReplicaFileCursorKeepsCurrentAggregateSnapshotAcrossMutation`, `TestContractPortableProviderOverMemoryBackend`, `TestContractPortableProviderOverGCSProtocolFake`, `TestTrashPageReturnsExactPersistedMetadataWithoutPerRowStats`, `TestTrashPageScalesToOneThousandLegacyRecordsWithOneBatchLookup`, `TestStartupMigratesSchema001ThroughCurrent`, `TestIntegrationSharesPreviewAndRevocation`, `TestIntegrationFileHTTPDirectDataPathTrashAndShare` |
-| Eight-epoch append-only storage-schema ledger, release validity ranges, immutable fixture for every epoch/profile, complete ordered suffix through `007 -> 008`, split-backend support, every-edge crash resumption, metadata-only checkpoint inventories, concurrent starters, lagging-predecessor GC safety, and corrupt graph/page/domain denial | `TestStorageSchemaLedgerIsLinearAndAppendOnly`, `TestStorageSchemaLedgerDefinesReleaseValidity`, `TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode`, `TestEveryHistoricalReleaseMapsToRegisteredStorageSchemaFixture`, `TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary`, `TestMigrationOldestSchemaTraversesLedgerEdgesInOrder`, `TestMigrationCheckpointInventoryResumesFromBoundedPagesWithoutReadingFileBodies`, `TestMigrationDoesNotReadFileBodiesAgainImmediatelyBeforeOpeningWrites`, `TestEightReplicasConcurrentlyMigrateSchema001Fixture`, `TestGarbageCollectionTerminalMarksProtectLaggingSweeper`, `TestConsistencyDomainHeadCorruptionFailsClosed`, `TestNamespaceAndOutcomePageCorruptionFailsClosed` |
+| Nine-epoch append-only storage-schema ledger, release validity ranges through v0.4.0, immutable fixture for every epoch/profile, complete ordered suffix through `008 -> 009`, split-backend support, every-edge crash resumption, metadata-only checkpoint inventories, concurrent starters, lagging-predecessor GC safety, and corrupt graph/page/domain denial | `TestStorageSchemaLedgerIsLinearAndAppendOnly`, `TestStorageSchemaReleaseLedgerDefinesDerivedValidityRanges`, `TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode`, `TestEveryHistoricalReleaseMapsToRegisteredStorageSchemaFixture`, `TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary`, `TestMigrationOldestSchemaTraversesLedgerEdgesInOrder`, `TestMigrationCheckpointInventoryResumesFromBoundedPagesWithoutReadingFileBodies`, `TestMigrationDoesNotReadFileBodiesAgainImmediatelyBeforeOpeningWrites`, `TestEightReplicasConcurrentlyMigrateSchema001Fixture`, `TestGarbageCollectionTerminalMarksProtectLaggingSweeper`, `TestConsistencyDomainHeadCorruptionFailsClosed`, `TestNamespaceAndOutcomePageCorruptionFailsClosed` |
 | Cross-replica upload idempotency, ancestor-root contention retry, lost-success reconciliation, completion/abort convergence, capability drain, and resumability | `TestPortableUploadInitiationIsIdempotentAcrossReplicas`, `TestConcurrentReplicaUploadInitiationHasOneIdempotentOutcome`, `TestEightReplicaConcurrentMultiFileCompletionConvergesRecursiveAggregates`, `TestEightReplicaSameUploadCompletionIsIdempotentAndAggregatedOnce`, `TestUploadCompletionLostSuccessIsIdempotentlyReconciled`, `TestConcurrentReplicaUploadCompletionAndAbortNeverSkewAggregate`, `TestMutationCopyConvergesWhenConcurrentWinnerRemovesSource`, `TestCheckpointWaitsForActiveCapabilityThenDrainsItAfterExpiry` |
 | Authoritative-only raw copy, native-version replacement, read-only verification, reopen, and continued mutation both ways | `TestPortabilityRawCopyPreservesCompleteStateAndContinuesInBothDirections`, `TestCheckpointVerifierIsStrictlyReadOnly`, `TestCheckpointVerifierRejectsMissingExtraAndUnsupportedState`, `TestCheckpointPrunesExpiredStateSnapshotsButKeepsCurrentVersions` |
 | GCS generations, conditional mutation, checksums, pagination, errors, disconnect/lost-success, and full backend contract | `TestContractGCSProtocol`, `TestGenerationConditionsFenceEveryMutation`, `TestChecksumsSizesListingsAndCursorsFailClosed`, `TestLostUploadSuccessIsUnavailableAndNotRetried`, `TestProtocolErrorsMapToStableSafeKinds` |
@@ -194,25 +194,25 @@ The release coverage commands are `nix run .#test-coverage` and the migration-sp
 
 | Boundary | Statements | Result | Required |
 |---|---:|---:|---:|
-| Repository | 11,343 / 12,570 | 90.239% | 85% |
-| Authentication | 154 / 161 | 95.652% | 95% |
-| Authorization | 509 / 533 | 95.497% | 95% |
-| Canonical path | 207 / 212 | 97.642% | 95% |
-| Bearer token | 20 / 21 | 95.238% | 95% |
-| Provider capability | 992 / 1,036 | 95.753% | 95% |
-| State CAS | 420 / 438 | 95.890% | 95% |
-| Scope mapping | 2,502 / 2,623 | 95.387% | 95% |
-| Canonical format/key/version/checkpoint | 497 / 518 | 95.946% | 95% |
-| Write gate/admission | 451 / 473 | 95.349% | 95% |
-| Operation fencing/recovery | 842 / 880 | 95.682% | 95% |
-| Directory manifest | 552 / 577 | 95.667% | 95% |
-| GCS transport | 384 / 404 | 95.050% | 95% |
+| Repository | 19,722 / 23,027 | 85.647% | 85% |
+| Authentication | 179 / 188 | 95.213% | 95% |
+| Authorization | 420 / 441 | 95.238% | 95% |
+| Canonical path | 233 / 241 | 96.680% | 95% |
+| Bearer token | 45 / 45 | 100.000% | 95% |
+| Provider capability | 1,188 / 1,245 | 95.422% | 95% |
+| State CAS | 1,539 / 1,613 | 95.412% | 95% |
+| Scope mapping | 1,492 / 1,555 | 95.949% | 95% |
+| Canonical format/key/version/checkpoint | 1,804 / 1,898 | 95.047% | 95% |
+| Gate/catalog/domain freeze | 514 / 539 | 95.362% | 95% |
+| Domain publication/lost success | 942 / 987 | 95.441% | 95% |
+| Namespace tree | 1,217 / 1,280 | 95.078% | 95% |
+| GCS transport | 472 / 496 | 95.161% | 95% |
 | Theme validation/sanitization | 567 / 595 | 95.294% | 95% |
 | Configuration | 294 / 299 | 98.328% | 95% |
-| Preview core | 573 / 602 | 95.183% | 95% |
+| Preview core | 641 / 674 | 95.104% | 95% |
 | Preview image generator | 467 / 490 | 95.306% | 95% |
 | Preview store | 615 / 643 | 95.645% | 95% |
-| Migration ledger and implementation | 702 / 715 | 98.182% | 98% |
+| Migration ledger and implementation | 1,766 / 1,798 | 98.220% | 98% |
 
 ### Acceptance-criterion index
 

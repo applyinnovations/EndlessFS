@@ -671,7 +671,7 @@ func (e *Engine) schema010DomainContainsRecoveredRoot(ctx context.Context, store
 	for {
 		entry, found, err := iterator.Next()
 		if err != nil || !found {
-			return found == false, err
+			return !found, err
 		}
 		current, present, err := store.lookupAtHead(ctx, reference, head, entry.Key)
 		if err != nil {
@@ -760,7 +760,7 @@ func (e *Engine) verifySchema010Conservation(ctx context.Context, proof schema01
 				// Preserve the durable staging disposition while independently
 				// re-deriving every source and target binding.
 				receipt.Disposition = storedReceipt.Disposition
-				reference, _, expected, err := validateSchema010Receipt(receipt)
+				_, _, expected, err := validateSchema010Receipt(receipt)
 				if err != nil {
 					return err
 				}

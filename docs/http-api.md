@@ -10,6 +10,15 @@ This document fixes the v1 JSON field casing and control-plane routes implemente
 - Paths are canonical absolute virtual paths. Provider keys, buckets, owner prefixes, and caller-selected capability URLs are not request fields.
 - Capability responses contain `url`, `method`, `headers`, and `expiresAt`. The browser sends file bytes directly to that URL on the separate data-plane origin.
 
+The public configuration advertises 100 direct upload workers, matching the
+existing maximum upload-initialization batch. The browser drains one shared
+file queue with those workers, bounded by queue depth, and reduces the worker
+count to one only for explicit Data Saver intent. Browser CPU count and
+estimated download connection type/speed do not constrain the direct upload
+data plane. Retryable failures retain bounded backoff and confirmed-offset
+reconciliation. The implementation and pinned upstream evidence are recorded
+in [upload-worker-pool-upstream-evidence.md](./upload-worker-pool-upstream-evidence.md).
+
 ## Identity and administration
 
 | Method | Route | Request summary |

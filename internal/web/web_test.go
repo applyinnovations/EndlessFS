@@ -202,6 +202,30 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 	if strings.Contains(script+string(mustRead("ui/index.html")), "transfer-concurrency") {
 		t.Error("transfer concurrency remains exposed as a user-controlled input")
 	}
+	schedulerStart := strings.Index(script, "function automaticTransferConcurrency()")
+	if schedulerStart < 0 {
+		t.Fatal("automatic transfer scheduler is missing")
+	}
+	schedulerEnd := strings.Index(script[schedulerStart:], "\n  function installUploadWorkerPoolTestFixture")
+	if schedulerEnd < 0 {
+		t.Fatal("automatic transfer scheduler boundary is missing")
+	}
+	scheduler := script[schedulerStart : schedulerStart+schedulerEnd]
+	for _, forbidden := range []string{"navigator.hardwareConcurrency", "connection.downlink", "connection.effectiveType"} {
+		if strings.Contains(scheduler, forbidden) {
+			t.Errorf("upload concurrency still depends on unreliable device/network guess %q", forbidden)
+		}
+	}
+	for _, required := range []string{"maximumTransferConcurrency", "Math.min(configured, pending)", "queueUploadDirectoryRefresh", "flushUploadDirectoryRefresh"} {
+		if !strings.Contains(script, required) {
+			t.Errorf("upload concurrency is missing upstream worker-pool primitive %q", required)
+		}
+	}
+	for _, forbidden := range []string{"adaptiveTransferScheduler", "recordSuccessfulTransfer", "recordTransferFailure"} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("upload concurrency retains unproven adaptive primitive %q", forbidden)
+		}
+	}
 	for _, forbidden := range []string{"maximumRenderedTransferGroups", "maximumRenderedGroupFiles", "summarizeTransferRows", "more files"} {
 		if strings.Contains(script, forbidden) {
 			t.Errorf("transfer monitor retains manual pagination primitive %q", forbidden)

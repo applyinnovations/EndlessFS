@@ -538,37 +538,64 @@
   }
 
   function automaticTransferConcurrency() {
-    const configuredMaximum = Number(state.config && state.config.maximumTransferConcurrency);
-    const maximum = Math.max(1, Math.min(8, Number.isFinite(configuredMaximum) ? configuredMaximum : 8));
     const summary = state.transferSummary || aggregateTransferSummary(state.transfers);
     const pendingCount = summary.counts.queued + summary.counts.preparing + summary.counts.uploading;
-    if (pendingCount <= 1) return 1;
-
     const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-    let networkCeiling = maximum;
-    if (connection && connection.saveData) networkCeiling = 1;
-    else if (connection && ["slow-2g", "2g"].includes(connection.effectiveType)) networkCeiling = 1;
-    else if (connection && connection.effectiveType === "3g") networkCeiling = Math.min(networkCeiling, 2);
-    else if (connection && Number.isFinite(connection.downlink)) {
-      if (connection.downlink < 1.5) networkCeiling = Math.min(networkCeiling, 1);
-      else if (connection.downlink < 5) networkCeiling = Math.min(networkCeiling, 2);
-      else if (connection.downlink < 20) networkCeiling = Math.min(networkCeiling, 3);
-      else if (connection.downlink < 50) networkCeiling = Math.min(networkCeiling, 4);
+    const pending = Math.max(0, Math.floor(Number(pendingCount) || 0));
+    if (pending <= 1 || Boolean(connection && connection.saveData)) return Math.min(1, pending);
+    const configuredValue = Number(state.config && state.config.maximumTransferConcurrency);
+    const configured = Math.max(1, Number.isFinite(configuredValue) ? Math.floor(configuredValue) : 100);
+    return Math.min(configured, pending);
+  }
+
+  function installUploadWorkerPoolTestFixture() {
+    if (!state.config || !state.config.localFixture) return;
+    window.__endlessfsUploadWorkerPoolTest = {
+      concurrency: (pendingCount, saveData) => {
+        const pending = Math.max(0, Math.floor(Number(pendingCount) || 0));
+        if (pending <= 1 || saveData) return Math.min(1, pending);
+        const configuredValue = Number(state.config.maximumTransferConcurrency);
+        const configured = Math.max(1, Number.isFinite(configuredValue) ? Math.floor(configuredValue) : 100);
+        return Math.min(configured, pending);
+      },
+      active: () => state.activeTransfers,
+      discoveryBatchSize: () => transferDiscoveryBatchSize,
+      snapshot: () => ({
+        active: state.activeTransfers,
+        refreshDirectories: state.uploadRefreshDirectories.size,
+        refreshInFlight: state.uploadRefreshInFlight,
+        states: state.transfers.reduce((counts, transfer) => {
+          counts[transfer.state] = (counts[transfer.state] || 0) + 1;
+          return counts;
+        }, {}),
+        groups: [...state.transferGroups.values()].filter((group) => !group.fixture).map((group) => ({
+          name: group.name,
+          state: group.state,
+          files: group.transferIDs.length,
+          complete: group.transferSummary ? group.transferSummary.counts.complete : -1,
+        })),
+        renderedGroups: Array.from(document.querySelectorAll(".transfer-group-row")).map((row) => row.textContent.trim()),
+        renderedFiles: byID("file-rows").textContent.slice(0, 500),
+      }),
+    };
+  }
+
+  function queueUploadDirectoryRefresh(directory) {
+    state.uploadRefreshDirectories.add(directory);
+  }
+
+  async function flushUploadDirectoryRefresh() {
+    if (state.activeTransfers !== 0 || state.uploadRefreshInFlight || state.uploadRefreshDirectories.size === 0) return;
+    const directories = new Set(state.uploadRefreshDirectories);
+    state.uploadRefreshDirectories.clear();
+    if (!directories.has(state.currentDirectory)) return;
+    state.uploadRefreshInFlight = true;
+    try {
+      await loadDirectory(state.currentDirectory);
+    } finally {
+      state.uploadRefreshInFlight = false;
+      if (state.uploadRefreshDirectories.size > 0) flushUploadDirectoryRefresh();
     }
-
-    const hardware = Number(navigator.hardwareConcurrency);
-    const fallback = Number(state.config && state.config.defaultTransferConcurrency) || 4;
-    const hardwareCeiling = Number.isFinite(hardware) && hardware > 0 ? Math.max(2, Math.ceil(hardware / 2)) : fallback;
-    const ceiling = Math.max(1, Math.min(maximum, networkCeiling, hardwareCeiling));
-    const averageSize = summary.remainingBytes / Math.max(1, summary.active + summary.pending);
-    let desired = Math.min(ceiling, 4);
-    if (averageSize <= 256 * 1024) desired = Math.min(ceiling, pendingCount > 500 ? ceiling : 6);
-    else if (averageSize >= 256 * 1024 * 1024) desired = Math.min(ceiling, 2);
-    else if (averageSize >= 64 * 1024 * 1024) desired = Math.min(ceiling, 3);
-
-    const recentFailures = state.transferFailureTimes.filter((value) => Date.now() - value < 10000).length;
-    if (summary.active && recentFailures >= Math.ceil(summary.active / 2)) desired = Math.min(desired, Math.max(1, Math.floor(summary.active / 2)));
-    return Math.max(1, Math.min(desired, pendingCount));
   }
 
   function beginTransferMeasurement(transfer) {
@@ -638,6 +665,7 @@
         updateTransferGroup(transfer.groupID);
         scheduleTransferStructureRender();
         pumpTransfers();
+        flushUploadDirectoryRefresh();
       });
     }
   }
@@ -845,7 +873,7 @@
       transfer.nextRetryAt = 0;
       transitionTransfer(transfer, "complete");
       if (!transfer.groupID) announce(`${transfer.name} uploaded.`);
-      if (transfer.directory === state.currentDirectory) await loadDirectory(state.currentDirectory);
+      queueUploadDirectoryRefresh(transfer.directory);
     } catch (error) {
       if (error.name === "AbortError" && transfer.suspendedByLogout) {
         return;
@@ -955,8 +983,8 @@
     persistTransferGroup(group);
     if (group.state === "complete" && !group.refreshed) {
       group.refreshed = true;
-      if (state.currentDirectory === group.baseDirectory) loadDirectory(group.baseDirectory);
-      if (notify) announce(`${group.name} uploaded with ${transfers.length} files.`);
+      queueUploadDirectoryRefresh(group.baseDirectory);
+      if (notify) announce(`${group.name} uploaded with ${summary.totalCount} files.`);
     }
     if (group.state === "failed" && !group.failureAnnounced) {
       group.failureAnnounced = true;

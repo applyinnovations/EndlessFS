@@ -1265,7 +1265,19 @@ Requirements:
   transfers. Each batch item carries its stable transfer-ledger idempotency key
   so a lost batch response or browser restart can resume that exact upload
   through either initialization route without allocating another blob.
-- The UI automatically derives concurrency within the configured one-to-eight bound from connection, device, file-size, queue-depth, and recent-recovery signals. Concurrency is not a user-controlled input.
+- The UI uses the 100-worker shared file queue implemented by Google's
+  open-source `upload-cloud-storage` action. One settled task releases one
+  worker to take the next queued file; queue depth is therefore the effective
+  bound for smaller selections. The worker count matches the 100-item upload
+  initialization batch, and explicit browser Data Saver intent reduces it to
+  one. Browser-reported CPU count, effective connection type, and estimated
+  download bandwidth are not upload-capacity signals and MUST NOT cap direct
+  upload concurrency. Concurrency is not a user-controlled input. Pinned
+  upstream source, license, selection, and rejection evidence is normative in
+  `docs/upload-worker-pool-upstream-evidence.md`.
+- Completion publication MUST accumulate affected directories and refresh a
+  visible directory once after the active upload burst drains. Per-file and
+  competing group-level directory refreshes are forbidden.
 - Resumable upload state tracks the confirmed provider offset, never merely bytes attempted by the browser.
 - Retry uses bounded exponential backoff with jitter and distinguishes retryable from terminal errors.
 - Resume after an interrupted request starts at the provider-confirmed offset.

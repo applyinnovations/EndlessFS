@@ -148,7 +148,7 @@ The Milestone 5 checkpoint implements specification section 13’s core Drive wo
 | Embedded bootstrap, registration, sign-in, Drive, trash, settings, admin, and public-share workspaces with explicit loading/empty/error states | `TestApplicationShellExposesCompleteAccessibleWorkspaces`, `TestIntegrationPublicEndpoints` |
 | Real passkey bootstrap and usernameless login through a browser virtual authenticator | `TestE2EBrowserBootstrapLoginDriveShareAndTrash` |
 | Keyboard bootstrap/sign-in, visible focus, labeled controls, and focus-restoring native dialogs | `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; embedded source assertions |
-| Direct resumable upload with bounded 1–8 concurrency, provider-confirmed offsets, retry, cancellation, multi-file, folder fallback, and conflict policy | `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; `TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML`; provider contract fault suite |
+| Direct resumable upload with the pinned upstream GCS 100-worker shared queue, one 100-item admission batch, 100 simultaneous browser tasks, six saturated HTTP/1.1 fixture connections, 100 direct bodies, one coalesced listing refresh, Data Saver/short-queue bounds, provider-confirmed offsets, retry, cancellation, multi-file, folder fallback, and conflict policy | `TestE2EUpstreamGCSWorkerPoolUploadsOneHundredFilesAndCoalescesRefresh`; `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; `TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML`; `docs/upload-worker-pool-upstream-evidence.md`; provider contract fault suite |
 | Download initiation, safe preview modes, public share creation, trash and restore | `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; file/share integration suite |
 | Responsive 320 CSS-pixel layout and reduced-motion handling | Chromium viewport assertion in `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; `TestApplicationShellExposesCompleteAccessibleWorkspaces` |
 | Bounded large-directory list/grid DOM, bounded preview requests, and deterministic filter work | `TestE2EBrowserBootstrapLoginDriveShareAndTrash`; `nix run .#test-ui-benchmark` (`ui-benchmark-v1` JSON-line evidence) |
@@ -258,7 +258,7 @@ The release coverage commands are `nix run .#test-coverage` and the migration-sp
 | AC-041 | Separate mock listener and control-byte instrumentation in HTTP integration and Chromium E2E. |
 | AC-042 | Provider resumable interruption/confirmed-offset/retry/completion contract and browser workflow. |
 | AC-043 | Provider fault/checksum/size/cancel/expiry matrices plus explicit browser retry/error/cancel states. |
-| AC-044 | Browser multi-file/folder queue and public max-init/concurrency policy; service batch bounds. |
+| AC-044 | Browser multi-file/folder queue, pinned upstream 100-worker GCS policy, deterministic 100-task/one-batch/one-refresh proof, six saturated HTTP/1.1 fixture connections, and service batch bounds. |
 | AC-045 | Provider contract simulates greater-than-1-TiB logical size/offset without equivalent allocation. |
 | AC-046 | Exact-object download/preview capabilities and separate data-plane byte flow integration. |
 | AC-047 | Provider expiry/range/disposition contract and preview/download browser workflows. |

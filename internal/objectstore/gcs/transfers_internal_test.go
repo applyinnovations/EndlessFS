@@ -496,6 +496,12 @@ func TestBackendAndTransferReconciliationBranchesFailClosed(t *testing.T) {
 	if err := backend.classifyCopy(context.Background(), key, 1, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}, transportFailure); !errors.Is(err, domain.ErrInternal) {
 		t.Fatalf("classifyCopy(non-precondition) error = %v", err)
 	}
+	verificationFailureBackend, _ := newTransferBoundaryBackend(t, now, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writeBoundaryGCSProblem(writer, http.StatusTeapot)
+	}))
+	if err := verificationFailureBackend.classifyCopy(context.Background(), key, 1, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}, &googleapi.Error{Code: http.StatusPreconditionFailed}); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("classifyCopy(source verification failure) error = %v", err)
+	}
 
 	for name, test := range map[string]struct {
 		handler func(http.ResponseWriter, *http.Request, *int)

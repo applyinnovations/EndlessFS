@@ -193,8 +193,9 @@ func (store *consistencyDomainStore) mutate(ctx context.Context, reference consi
 // mutateAtHead conditionally publishes against a head the caller already
 // authenticated. Namespace mutations use it after resolving their immutable
 // path pages so the visibility commit does not pay for, or race through, a
-// redundant second head read. A conditional conflict is still returned for
-// the caller to recompute from the winning root.
+// redundant second head read. A lost head race is retried only after the
+// winning head revalidates every key precondition; changed preconditions are
+// returned for the caller to recompute from the winning state.
 func (store *consistencyDomainStore) mutateAtHead(ctx context.Context, reference consistencyDomainRef, mutation consistencyDomainMutation, initial *consistencyDomainHeadSnapshot) (consistencyDomainOutcome, error) {
 	return store.mutatePrepared(ctx, reference, mutation, initial, nil)
 }
@@ -333,6 +334,17 @@ func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, referen
 				// provider-generation failure.
 				if validationErr := store.validateMutationAtHead(ctx, reference, recovered.head, mutation.Changes); validationErr != nil {
 					return consistencyDomainOutcome{}, validationErr
+				}
+				// A different mutation may have advanced this shared domain head
+				// without touching any of this intent's keys. Canonical
+				// revalidation above proves that retrying the same mutation is
+				// safe; do so against the winning head instead of leaking a native
+				// CAS race through the application API. True same-key races fail
+				// revalidation and return their portable semantic error above.
+				advanced := recovered.exists != snapshot.exists || recovered.object.Version != snapshot.object.Version
+				if advanced && !recovered.head.Frozen && (errors.Is(putErr, domain.ErrConflict) || errors.Is(putErr, domain.ErrPreconditionFailed)) {
+					firstSnapshot = &recovered
+					continue
 				}
 			}
 			return consistencyDomainOutcome{}, putErr

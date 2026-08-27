@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,24 +17,37 @@ import (
 	"testing"
 	"time"
 
+	"github.com/applyinnovations/endlessfs/internal/auth"
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/identity"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
+	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
+	"github.com/descope/virtualwebauthn"
 )
 
 const migrationCandidateReleaseEnvironment = "ENDLESSFS_MIGRATION_CANDIDATE_RELEASE"
 
 type storageSchemaFixture struct {
-	SchemaVersion int               `json:"schemaVersion"`
-	SourceRelease string            `json:"sourceRelease"`
-	SourceCommit  string            `json:"sourceCommit"`
-	CreatedAt     time.Time         `json:"createdAt"`
-	UserID        string            `json:"userID"`
-	StateObjects  map[string][]byte `json:"stateObjects"`
-	FileObjects   map[string][]byte `json:"fileObjects"`
+	SchemaVersion  int                      `json:"schemaVersion"`
+	SourceRelease  string                   `json:"sourceRelease"`
+	SourceCommit   string                   `json:"sourceCommit"`
+	CreatedAt      time.Time                `json:"createdAt"`
+	UserID         string                   `json:"userID"`
+	StateObjects   map[string][]byte        `json:"stateObjects"`
+	FileObjects    map[string][]byte        `json:"fileObjects"`
+	SemanticOracle *migrationSemanticOracle `json:"semanticOracle,omitempty"`
+}
+
+type migrationSemanticOracle struct {
+	UserID        string                        `json:"userID"`
+	DisplayName   string                        `json:"displayName"`
+	CredentialID  string                        `json:"credentialID"`
+	Authenticator virtualwebauthn.Authenticator `json:"authenticator"`
+	RequiredKeys  []string                      `json:"requiredKeys"`
 }
 
 type storageSchemaFixtureEntry struct {
@@ -142,6 +156,13 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-006",
+		profile:  "application-complete",
+		file:     "schema-006-v0.3.2-application-complete.json", digest: "f7007f8be663cc9620ed3f97ff1e32ebc4ddf9f6c1408321ccbbdc69d45ee445",
+		producer: "v0.3.2", commit: "8d9715f22737501ae2f7485548ce7993bf804c67",
+		wantEpoch: 3, wantSize: 27, wantFiles: 1,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-006",
 		profile:  "application-preview-disabled",
 		file:     "schema-006-v0.3.0-application-disabled.json", digest: "3daf89025cdedcfb353727ec668e6c7a5b3970abf8ceda60bebcea0b72f507f0",
 		producer: "v0.3.0", commit: "2d2d49ec9f86e2a247781fd461bcc537459cfbf1",
@@ -163,6 +184,13 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-007",
+		profile:  "application-complete",
+		file:     "schema-007-application-complete.json", digest: "80660b01f183a4680626b0d63ddc591386cb19e120073b9e425e24cc6870a647",
+		producer: "schema-007", commit: "43171275e93717b1261eeff3b98ecd11b08c9e3f",
+		wantEpoch: 2, wantSize: 27, wantFiles: 1,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-007",
 		profile:  "application-preview-disabled",
 		file:     "schema-007-application-disabled.json", digest: "10e9d3d9d6f4ddeb34839f1bac21005c6d64fbd36bbbb5371a945f27c722b302",
 		producer: "schema-007", commit: "43171275e93717b1261eeff3b98ecd11b08c9e3f",
@@ -181,6 +209,13 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 		file:     "schema-008-portable-minimal.json", digest: "d2bf14ccd03e26741310f5604289ba4f90cdea7fd2b697d5e5f8f5396231584a",
 		producer: "schema-008", commit: "359ec9fbc9e8020257659c0d91e64372baece1b9",
 		wantEpoch: 1, wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-008",
+		profile:  "application-complete-recovery-residue",
+		file:     "schema-008-application-complete-residue.json", digest: "d7872913afa254d853b3a8521b46e3481e1eccbdc8f18940fcd552dac064e9ef",
+		producer: "schema-008", commit: "359ec9fbc9e8020257659c0d91e64372baece1b9",
+		wantEpoch: 1, wantSize: 27, wantFiles: 1,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-008",
@@ -217,6 +252,13 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 		producer: "schema-009", commit: "86ad9d8da0e6c45f98d85006f440937557e758dd",
 		wantEpoch: 0, wantSize: 18, wantFiles: 3,
 	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-009",
+		profile:  "application-complete-production-recovery",
+		file:     "schema-009-v0.4.0-application-complete-residue.json", digest: "a2a93ce97fececa99d8244c3d67bac266d104ca42a24f18a0f103b01e01020ea",
+		producer: "v0.4.0-production-residue", commit: "642e476ea8c49d9e4e1e9d5672eb63cdf8daff6d",
+		wantEpoch: 0, wantSize: 27, wantFiles: 1,
+	},
 }
 
 var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.2.0", "v0.2.1", "v0.3.0", "v0.3.1", "v0.3.2", "v0.4.0"}
@@ -244,6 +286,9 @@ func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *
 				}
 				t.Run(topology, func(t *testing.T) {
 					fixture := loadStorageSchemaFixture(t, family)
+					if strings.Contains(family.profile, "application-complete") {
+						assertCompleteFixtureContainsPredecessorAuthority(t, fixture)
+					}
 					stateBackend := objectmemory.New()
 					fileBackend := stateBackend
 					if split {
@@ -277,7 +322,7 @@ func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *
 						t.Fatalf("upgraded %s %s-backend root = %+v, %v; want %d bytes/%d files", family.schemaID, topology, root, err, family.wantSize, family.wantFiles)
 					}
 					gate, err := engine.GateStatus(context.Background())
-					wantEpoch := family.wantEpoch + 1
+					wantEpoch := family.wantEpoch + uint64(len(history)-9) + 1
 					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != wantEpoch {
 						t.Fatalf("upgraded %s %s-backend gate = %+v, %v; want open epoch %d", family.schemaID, topology, gate, err, wantEpoch)
 					}
@@ -287,6 +332,9 @@ func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *
 						assertAllUploadRecordsUseCurrentSchema(t, stateBackend.Export())
 					}
 					assertSchema007TerminalAuthorityMigrated(t, engine, fixture)
+					if fixture.SemanticOracle != nil {
+						assertCompleteMigrationSemanticOracle(t, engine, fixture, clock, seed+40)
+					}
 					uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath("/projects/after-upgrade.txt"), []byte("ok"))
 					after, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
 					if err != nil || after.Size != family.wantSize+2 || after.FileCount != family.wantFiles+1 {
@@ -300,6 +348,136 @@ func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *
 		if _, found := fixtureSchemas[entry.ID]; !found {
 			t.Fatalf("ledger schema %s has no immutable migration fixture", entry.ID)
 		}
+	}
+}
+
+func TestMigrationSchema009ProductionResidueRestoresRealPasskeyAuthentication(t *testing.T) {
+	var family storageSchemaFixtureEntry
+	for _, candidate := range storageSchemaFixtures {
+		if candidate.file == "schema-009-v0.4.0-application-complete-residue.json" {
+			family = candidate
+			break
+		}
+	}
+	if family.file == "" {
+		t.Fatal("schema-009 production-residue fixture is not registered")
+	}
+	fixture := loadStorageSchemaFixture(t, family)
+	assertCompleteFixtureContainsPredecessorAuthority(t, fixture)
+	stateBackend, fileBackend := objectmemory.New(), objectmemory.New()
+	if err := stateBackend.Import(fixture.StateObjects); err != nil {
+		t.Fatal(err)
+	}
+	if err := fileBackend.Import(fixture.FileObjects); err != nil {
+		t.Fatal(err)
+	}
+	clock := domain.NewFixedClock(fixture.CreatedAt.Add(4 * time.Hour))
+	options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 0xe1, nil)
+	options.Writer = currentWriterForSchemaFixture(t, fixture)
+	engine, err := portable.Open(context.Background(), options)
+	if err != nil {
+		t.Fatalf("open exact v0.4.0 production residue: %s", migrationErrorChain(err))
+	}
+	assertCompleteMigrationSemanticOracle(t, engine, fixture, clock, 0xe2)
+}
+
+func assertCompleteFixtureContainsPredecessorAuthority(t *testing.T, fixture storageSchemaFixture) {
+	t.Helper()
+	if fixture.SemanticOracle == nil || len(fixture.SemanticOracle.RequiredKeys) < 12 {
+		t.Fatal("complete application fixture is missing its semantic oracle")
+	}
+	for _, logicalKey := range fixture.SemanticOracle.RequiredKeys {
+		binding := []byte(`"logicalKey":"` + logicalKey + `"`)
+		found := false
+		for _, body := range fixture.StateObjects {
+			if bytes.Contains(body, binding) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("predecessor fixture does not contain indexed authority %q", logicalKey)
+		}
+	}
+}
+
+func assertCompleteMigrationSemanticOracle(t *testing.T, engine *portable.Engine, fixture storageSchemaFixture, clock *domain.FixedClock, seed byte) {
+	t.Helper()
+	oracle := fixture.SemanticOracle
+	if oracle == nil || oracle.UserID != fixture.UserID || oracle.DisplayName == "" || oracle.CredentialID == "" || len(oracle.RequiredKeys) < 12 || len(oracle.Authenticator.Credentials) == 0 {
+		t.Fatalf("complete application fixture has an incomplete semantic oracle: %+v", oracle)
+	}
+	ctx := context.Background()
+	userID, err := domain.ParseUserID(oracle.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := identity.NewRepository(engine)
+	profile, _, err := repository.Profile(ctx, userID)
+	if err != nil || profile.DisplayName.String() != oracle.DisplayName {
+		t.Fatalf("migrated profile = %+v, %v", profile, err)
+	}
+	account, _, err := repository.Account(ctx, userID)
+	if err != nil || account.UserID != userID {
+		t.Fatalf("migrated account = %+v, %v", account, err)
+	}
+	credentials, err := repository.Credentials(ctx, userID)
+	if err != nil || len(credentials) != 1 || credentials[0].CredentialID != oracle.CredentialID {
+		t.Fatalf("migrated credentials = %+v, %v", credentials, err)
+	}
+	for _, namespace := range []state.Namespace{
+		state.NamespaceSessions, state.NamespaceInvites, state.NamespaceRecoveries, state.NamespaceShares,
+		state.NamespaceBootstrap, state.NamespaceRoles, state.NamespacePreferences, state.NamespaceOperations,
+	} {
+		page, err := engine.List(ctx, state.MustPrefix(namespace), state.PageRequest{Limit: 1000})
+		if err != nil || len(page.Items) == 0 {
+			t.Fatalf("migrated namespace %s = %d records, %v", namespace, len(page.Items), err)
+		}
+	}
+
+	const origin = "https://drive.example.test"
+	webauthn, err := auth.NewGoWebAuthn("drive.example.test", "EndlessFS", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := domain.NewIDGenerator(bytes.NewReader(deterministic(seed, 2<<20)))
+	sessions, err := auth.NewSessionManager(repository, ids, clock, 12*time.Hour, origin, true, secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x44}, 32))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := identity.NewService(repository, webauthn, sessions, ids, clock, identity.NewMutablePolicy(identity.RegistrationPolicy{}), "", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, err := service.StartAuthentication(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options, err := virtualwebauthn.ParseAssertionOptions(string(start.Options))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator := oracle.Authenticator
+	credentialIndex := -1
+	for index := range authenticator.Credentials {
+		if base64.RawURLEncoding.EncodeToString(authenticator.Credentials[index].ID) == oracle.CredentialID {
+			credentialIndex = index
+			break
+		}
+	}
+	if credentialIndex < 0 {
+		t.Fatal("semantic oracle authenticator does not contain the persisted credential")
+	}
+	authenticator.Credentials[credentialIndex].Counter++
+	rp := virtualwebauthn.RelyingParty{Name: "EndlessFS", ID: "drive.example.test", Origin: origin}
+	assertion := virtualwebauthn.CreateAssertionResponse(rp, authenticator, authenticator.Credentials[credentialIndex], *options)
+	issued, err := service.VerifyAuthentication(ctx, start.CeremonyID, start.BrowserBinding, []byte(assertion))
+	if err != nil {
+		t.Fatalf("real post-migration passkey authentication: %v", err)
+	}
+	authenticated, err := sessions.Authenticate(ctx, issued.Token.Reveal())
+	if err != nil || authenticated.Record.UserID != userID {
+		t.Fatalf("post-migration issued session = %+v, %v", authenticated.Record, err)
 	}
 }
 

@@ -127,7 +127,7 @@ func ProductionWorkloads() []ProductionWorkload {
 		workload("maintenance/compaction", "maintenance", "maintenance-domain-compaction-300-schema-009"),
 		workload("maintenance/recovery", "maintenance", "maintenance-transition-recovery-schema-009"),
 		workload("maintenance/derived-view-rebuild", "maintenance", "maintenance-derived-view-rebuild-schema-009"),
-		workload("maintenance/migration", "maintenance", "maintenance-migration-008-to-009-minimal-fixture"),
+		workload("maintenance/migration", "maintenance", "maintenance-migration-008-to-010-minimal-fixture"),
 	}
 	return append([]ProductionWorkload(nil), workloads...)
 }

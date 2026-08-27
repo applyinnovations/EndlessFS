@@ -47,7 +47,7 @@ func TestProviderBudgetCatalogCoversApplicationContractsAndRatchets(t *testing.T
 		}
 	}
 	for _, budget := range ratchet.Epochs[len(ratchet.Epochs)-1].Budgets {
-		current := strings.HasSuffix(budget.Name, "schema-009") || strings.Contains(budget.Name, "008-to-009") || budget.Name == "preview-validate"
+		current := strings.HasSuffix(budget.Name, "schema-009") || strings.Contains(budget.Name, "008-to-010") || budget.Name == "preview-validate"
 		if current && !referencedBudgets[budget.Name] {
 			t.Errorf("current provider ratchet %q is absent from the production workload catalog", budget.Name)
 		}

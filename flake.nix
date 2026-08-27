@@ -659,7 +659,7 @@
               exit 2
             fi
             export ENDLESSFS_MIGRATION_FIXTURE_PRODUCER_COMMIT="$1"
-            exec go test ./cmd/endlessfs -run '^TestGenerateSchema009MigrationFixtures$' -count=1
+            exec go test ./cmd/endlessfs -run '^TestGenerateSchema010MigrationFixtures$' -count=1
           '';
 
           fmt =
@@ -727,8 +727,10 @@
             fi
             profile="$(mktemp "''${TMPDIR:-/tmp}/endlessfs-migration-coverage.XXXXXX")"
             trap 'rm -f "$profile"' EXIT
-            go test ./internal/portable ./cmd/endlessfs \
-              -run '(Migrat|StorageSchema|HistoricalRelease)' -count=1 \
+            # Run both owning packages in full. A name regex previously omitted
+            # migration implementations and semantic startup tests while still
+            # reporting a passing percentage over a partial production set.
+            go test ./internal/portable ./cmd/endlessfs -count=1 \
               -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
             gawk -v only_group=migration -f tools/coverage.awk "$profile"
           '';
@@ -1051,8 +1053,7 @@
           testSuite = goCheck "tests" "go test ./..." [ ];
           migrationCheck = goCheck "migration" ''
             profile="$TMPDIR/migration-coverage.out"
-            go test ./internal/portable ./cmd/endlessfs \
-              -run '(Migrat|StorageSchema|HistoricalRelease)' -count=1 \
+            go test ./internal/portable ./cmd/endlessfs -count=1 \
               -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
             gawk -v only_group=migration -f tools/coverage.awk "$profile"
           '' [ pkgs.gawk ];

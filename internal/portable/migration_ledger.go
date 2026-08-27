@@ -30,6 +30,7 @@ const (
 	storageSchema007 storageSchemaID = "endlessfs-portable-v1/schema-007"
 	storageSchema008 storageSchemaID = "endlessfs-portable-v1/schema-008"
 	storageSchema009 storageSchemaID = "endlessfs-portable-v1/schema-009"
+	storageSchema010 storageSchemaID = "endlessfs-portable-v1/schema-010"
 
 	storageMigration001To002 storageMigrationID = "schema-001-to-002"
 	storageMigration002To003 storageMigrationID = "schema-002-to-003"
@@ -39,6 +40,7 @@ const (
 	storageMigration006To007 storageMigrationID = "schema-006-to-007"
 	storageMigration007To008 storageMigrationID = "schema-007-to-008"
 	storageMigration008To009 storageMigrationID = "schema-008-to-009"
+	storageMigration009To010 storageMigrationID = "schema-009-to-010"
 )
 
 type storageSchemaReleaseBoundary struct {
@@ -74,13 +76,15 @@ type releaseVersion struct {
 }
 
 type storageMigrationRun func(*Engine, context.Context, storageMigration, objectstore.Object, storageformat.Superblock) error
+type storageMigrationAuthorityVerifier func(*Engine, context.Context, storageMigration) error
 
 type storageMigration struct {
-	id           storageMigrationID
-	from         storageSchemaID
-	to           storageSchemaID
-	checkpointID string
-	run          storageMigrationRun
+	id              storageMigrationID
+	from            storageSchemaID
+	to              storageSchemaID
+	checkpointID    string
+	run             storageMigrationRun
+	verifyAuthority storageMigrationAuthorityVerifier
 }
 
 type storageGateBinding string
@@ -135,6 +139,11 @@ var schemaMigration007To008 = storageMigration{
 var schemaMigration008To009 = storageMigration{
 	id: storageMigration008To009, from: storageSchema008, to: storageSchema009,
 	checkpointID: "automatic-storage-schema-008-to-009",
+}
+
+var schemaMigration009To010 = storageMigration{
+	id: storageMigration009To010, from: storageSchema009, to: storageSchema010,
+	checkpointID: "automatic-storage-schema-009-to-010",
 }
 
 // storageSchemaLedger is append-only. Extend it by adding one definition whose
@@ -267,6 +276,30 @@ var storageSchemaLedger = []storageSchemaDefinition{
 		gateBinding:           storageGateFeatureBound,
 		migrationFromPrevious: &schemaMigration008To009,
 	},
+	{
+		id: storageSchema010,
+		features: []string{
+			storageformat.FeatureConsistencyDomains,
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeatureOwnerNamespaceGraph,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureNamespaceSnapshots,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureDerivedProjections,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+			storageformat.FeatureResumableOperations,
+			storageformat.FeatureStateConservation,
+			storageformat.FeatureTransactionalState,
+			storageformat.FeatureUserDirectoryCatalog,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration009To010,
+	},
 }
 
 // storageSchemaReleaseLedger is also append-only. A boundary is the first
@@ -278,6 +311,7 @@ var storageSchemaReleaseLedger = []storageSchemaReleaseBoundary{
 	{first: "v0.2.0", schema: storageSchema005},
 	{first: "v0.3.0", schema: storageSchema006},
 	{first: "v0.4.0", schema: storageSchema009},
+	{first: "v0.5.0", schema: storageSchema010},
 }
 
 func init() {
@@ -293,6 +327,8 @@ func init() {
 	schemaMigration006To007.run = (*Engine).runStorageMigration006To007
 	schemaMigration007To008.run = (*Engine).runStorageMigration007To008
 	schemaMigration008To009.run = (*Engine).runStorageMigration008To009
+	schemaMigration009To010.run = (*Engine).runStorageMigration009To010
+	schemaMigration009To010.verifyAuthority = (*Engine).verifySchema010Authority
 }
 
 func currentStorageSchema() storageSchemaDefinition {
@@ -393,6 +429,7 @@ func MigrationStepName(migrationID, boundary string) string {
 }
 
 func storageMigrationPath(from storageSchemaID) ([]storageMigration, error) {
+	conservationIndex, _ := schemaIndex(storageSchema010)
 	for index, schema := range storageSchemaLedger {
 		if schema.id != from {
 			continue
@@ -405,6 +442,9 @@ func storageMigrationPath(from storageSchemaID) ([]storageMigration, error) {
 			migration := storageSchemaLedger[position].migrationFromPrevious
 			if migration == nil || migration.from != storageSchemaLedger[position-1].id || migration.to != storageSchemaLedger[position].id {
 				return nil, fmt.Errorf("invalid storage schema ledger edge into %q", storageSchemaLedger[position].id)
+			}
+			if position >= conservationIndex && migration.verifyAuthority == nil {
+				return nil, fmt.Errorf("storage schema ledger edge into %q has no pre-activation authority verifier", storageSchemaLedger[position].id)
 			}
 			path = append(path, *migration)
 		}

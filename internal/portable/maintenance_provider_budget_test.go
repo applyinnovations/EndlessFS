@@ -137,7 +137,7 @@ func TestProviderBudgetTransitionRecoveryWorkflow(t *testing.T) {
 	checkMaintenanceProviderBudget(t, "maintenance-transition-recovery-schema-009", []providerbudget.Role{providerbudget.RoleState}, ledger)
 }
 
-func TestProviderBudgetMigration008To009MinimalFixture(t *testing.T) {
+func TestProviderBudgetMigration008To010MinimalFixture(t *testing.T) {
 	ctx := context.Background()
 	var family storageSchemaFixtureEntry
 	for _, candidate := range storageSchemaFixtures {
@@ -167,5 +167,5 @@ func TestProviderBudgetMigration008To009MinimalFixture(t *testing.T) {
 	if _, err := portable.Open(ctx, options); err != nil {
 		t.Fatal(err)
 	}
-	checkMaintenanceProviderBudget(t, "maintenance-migration-008-to-009-minimal-fixture", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
+	checkMaintenanceProviderBudget(t, "maintenance-migration-008-to-010-minimal-fixture", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
 }

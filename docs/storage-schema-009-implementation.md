@@ -1,5 +1,16 @@
 # Storage schema 009 implementation record
 
+**Historical qualification correction:** the original migration claim in this
+record was incomplete. The `007 -> 008` edge listed obsolete `state/` records
+instead of the authoritative schema-007 `state-indexes`/`state-versions` graph,
+and the then-current fixtures did not contain complete identity/passkey state.
+Schema 010 repairs retained production-shaped authority and makes conservation
+a pre-activation invariant. See
+[`storage-schema-010-implementation.md`](./storage-schema-010-implementation.md).
+The schema-009 runtime/economics architecture below remains current, but this
+document is not evidence that the released predecessor migration conserved all
+application state.
+
 **Status:** phases 1–7 are implemented and locally qualified on the schema-009
 branch. Strict coverage, complete race shards, and the composed
 `nix flake check` pass. Phase 8 commits and pushes the implementation for CI.
@@ -209,11 +220,13 @@ non-future catalog freeze, and a closing gate helps every older freeze; future
 epochs and closed-gate epoch mismatches still fail closed. Head cleanup remains
 safe when the catalog already belongs to the next closing epoch, while catalog
 cleanup cannot disturb that next migration. Tests cover the exact
-reopen/next-close and multi-edge late-worker interleavings. The schema-001→009
+reopen/next-close and multi-edge late-worker interleavings. The historical schema-001→009
 eight-replica matrix passes 100 consecutive focused repetitions plus the
 complete migration gate under concurrent strict-coverage load.
 
-The implementation record is release-qualified only when the exact candidate
-tag maps to schema 009 in the append-only release ledger and passes the complete
-migration and release gates. It does not by itself claim a migration rollout or
-live deployment.
+This implementation record qualified the schema-009 runtime and economics, not
+the semantic completeness of the historical `007 -> 008` migration. Current
+release qualification requires the schema-010 complete-corpus, conservation,
+cryptographic-authentication, and activation-barrier evidence in addition to
+the unchanged schema-009 runtime evidence. It does not by itself claim a
+migration rollout or live deployment.

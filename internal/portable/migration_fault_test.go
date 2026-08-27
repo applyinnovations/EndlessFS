@@ -32,6 +32,7 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 	for _, family := range predecessors {
 		family := family
 		fixture := loadStorageSchemaFixture(t, family)
+		wantGateEpoch := expectedCurrentGateEpoch(t, portable.StorageSchemaHistory(), family.schemaID, fixture)
 		for _, target := range []string{"state", "file"} {
 			target := target
 			t.Run(family.schemaID+"/"+family.profile+"/"+target, func(t *testing.T) {
@@ -106,7 +107,7 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 						t.Fatalf("resume after %s interruption %d at %s: %v", target, failAt, faults.failureOperation, err)
 					}
 					gate, err := engine.GateStatus(context.Background())
-					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != family.wantEpoch+1 {
+					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != wantGateEpoch {
 						t.Fatalf("resume after %s interruption %d gate = %+v, %v", target, failAt, gate, err)
 					}
 				}

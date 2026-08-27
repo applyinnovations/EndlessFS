@@ -191,7 +191,7 @@ func (f *stepFailure) Step(_ context.Context, step string) error {
 	return nil
 }
 
-func openEngine(t *testing.T, backend *objectmemory.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) *portable.Engine {
+func openEngine(t *testing.T, backend objectstore.Backend, clock *domain.FixedClock, seed byte, scheduler portable.Scheduler) *portable.Engine {
 	t.Helper()
 	engine, err := portable.Open(context.Background(), portable.Options{
 		Backend: backend, Clock: clock,

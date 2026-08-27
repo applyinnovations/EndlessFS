@@ -127,6 +127,22 @@ func Schema009MigrationStageCompleteKey() objectstore.Key {
 	return fixedKey("migrations/schema-008-to-009/staging-complete.json")
 }
 
+func Schema010MigrationReceiptKey(domainIdentity, targetKey string) objectstore.Key {
+	validateDomainKeyPart(domainIdentity)
+	if targetKey == "" {
+		panic("empty schema-010 migration target key")
+	}
+	return fixedKey("migrations/schema-009-to-010/receipts/" + digestPart(domainIdentity) + "/" + digestPart(targetKey) + ".json")
+}
+
+func Schema010MigrationReceiptPrefix() string {
+	return root + "migrations/schema-009-to-010/receipts/"
+}
+
+func Schema010MigrationConservationKey() objectstore.Key {
+	return fixedKey("migrations/schema-009-to-010/conservation.json")
+}
+
 func ProjectionHeadKey(ownerID string, kind ProjectionKind) objectstore.Key {
 	validateDomainKeyPart(ownerID)
 	return fixedKey("projections/" + digestPart(ownerID) + "/" + projectionKeyKind(kind) + "/head.json")

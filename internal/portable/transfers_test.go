@@ -357,7 +357,8 @@ func TestConcurrentReplicaUploadBatchHasOneIdempotentOutcome(t *testing.T) {
 	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(99, 1<<20)))); err != nil {
 		t.Fatal(err)
 	}
-	engines := []*portable.Engine{openEngine(t, backend, clock, 100, nil), openEngine(t, backend, clock, 101, nil)}
+	barrier := &concurrentBeginBackend{Backend: backend, ready: make(chan struct{}), want: 4}
+	engines := []*portable.Engine{openEngine(t, barrier, clock, 100, nil), openEngine(t, barrier, clock, 101, nil)}
 	owner, _ := domain.ParseUserID("TU5PTU5PTU5PTU5PTU5PTw")
 	scope, _ := domain.NewScope(owner, domain.AreaLive)
 	requests := []domain.CreateUploadRequest{
@@ -388,6 +389,38 @@ func TestConcurrentReplicaUploadBatchHasOneIdempotentOutcome(t *testing.T) {
 		if results[0][index].UploadID != results[1][index].UploadID || results[0][index].URL != results[1][index].URL {
 			t.Fatalf("batch item %d outcomes differ: %+v / %+v", index, results[0][index], results[1][index])
 		}
+	}
+}
+
+// concurrentBeginBackend makes both replicas finish each provider initiation
+// before either can publish its lease. The memory provider intentionally
+// returns one idempotent native session per upload ID, reproducing the exact
+// race where a losing lease CAS must not abort the winner's identical lease.
+type concurrentBeginBackend struct {
+	*objectmemory.Backend
+	mu    sync.Mutex
+	calls int
+	want  int
+	ready chan struct{}
+}
+
+func (backend *concurrentBeginBackend) BeginUpload(ctx context.Context, request objectstore.UploadRequest) (objectstore.UploadHandle, error) {
+	handle, err := backend.Backend.BeginUpload(ctx, request)
+	if err != nil {
+		return objectstore.UploadHandle{}, err
+	}
+	backend.mu.Lock()
+	backend.calls++
+	if backend.calls == backend.want {
+		close(backend.ready)
+	}
+	ready := backend.ready
+	backend.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return objectstore.UploadHandle{}, domain.NewError(domain.ErrorUnavailable, "concurrent upload initiation canceled")
+	case <-ready:
+		return handle, nil
 	}
 }
 

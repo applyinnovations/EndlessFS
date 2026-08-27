@@ -272,7 +272,7 @@ release-tag mutation or deletion.
 - **Milestone 6 — implemented baseline:** public-share management, invite onboarding, profile/passkey settings, account administration, disable/enable behavior, recovery, and a second full Chromium journey.
 - **Milestone 7 — implemented baseline:** exhaustive cross-user and traversal matrices, fuzz/race/coverage gates, structured-log redaction, dependency/vulnerability policy, OCI inspection, threat/operations review, and release evidence.
 - **v1 portability clarification — implemented:** canonical single-/split-bucket
-  storage-set format, one schema-009 invariant-aligned state-domain engine, multi-replica
+  storage-set format, the schema-010 authority-conserving epoch over one invariant-aligned state-domain engine, multi-replica
   conditional publication/lost-success recovery, quiescent checkpoint/raw-copy
   verification, and credential-free GCS protocol qualification.
 - **v1.1 media previews — complete:** always-available virtualized grid and viewer, optional generated image WebP variants, independent preview-store lifecycle, strict startup validation, and real-browser scale proof.

@@ -1376,6 +1376,15 @@ func deterministicMigrationID(schema storageSchemaID, value string) string {
 }
 
 func (e *Engine) activateMigrationWriterSet(ctx context.Context, transition storageMigration) error {
+	conservationIndex, _ := schemaIndex(storageSchema010)
+	if targetIndex, found := schemaIndex(transition.to); found && targetIndex >= conservationIndex {
+		if transition.verifyAuthority == nil {
+			return domain.NewError(domain.ErrorPreconditionFailed, "storage migration has no pre-activation authority verifier")
+		}
+		if err := transition.verifyAuthority(e, ctx, transition); err != nil {
+			return domain.WrapError(domain.KindOf(err), "verify authoritative state before migration activation", err)
+		}
+	}
 	targetFeatures, _ := schemaFeatures(transition.to, e.writer.RequiredFeatures)
 	for range 8 {
 		object, envelope, writer, err := e.readStoredWriterSet(ctx)

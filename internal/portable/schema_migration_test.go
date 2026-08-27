@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,24 +17,37 @@ import (
 	"testing"
 	"time"
 
+	"github.com/applyinnovations/endlessfs/internal/auth"
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/identity"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
+	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
+	"github.com/descope/virtualwebauthn"
 )
 
 const migrationCandidateReleaseEnvironment = "ENDLESSFS_MIGRATION_CANDIDATE_RELEASE"
 
 type storageSchemaFixture struct {
-	SchemaVersion int               `json:"schemaVersion"`
-	SourceRelease string            `json:"sourceRelease"`
-	SourceCommit  string            `json:"sourceCommit"`
-	CreatedAt     time.Time         `json:"createdAt"`
-	UserID        string            `json:"userID"`
-	StateObjects  map[string][]byte `json:"stateObjects"`
-	FileObjects   map[string][]byte `json:"fileObjects"`
+	SchemaVersion  int                      `json:"schemaVersion"`
+	SourceRelease  string                   `json:"sourceRelease"`
+	SourceCommit   string                   `json:"sourceCommit"`
+	CreatedAt      time.Time                `json:"createdAt"`
+	UserID         string                   `json:"userID"`
+	StateObjects   map[string][]byte        `json:"stateObjects"`
+	FileObjects    map[string][]byte        `json:"fileObjects"`
+	SemanticOracle *migrationSemanticOracle `json:"semanticOracle,omitempty"`
+}
+
+type migrationSemanticOracle struct {
+	UserID        string                        `json:"userID"`
+	DisplayName   string                        `json:"displayName"`
+	CredentialID  string                        `json:"credentialID"`
+	Authenticator virtualwebauthn.Authenticator `json:"authenticator"`
+	RequiredKeys  []string                      `json:"requiredKeys"`
 }
 
 type storageSchemaFixtureEntry struct {
@@ -43,7 +57,6 @@ type storageSchemaFixtureEntry struct {
 	digest    string
 	producer  string
 	commit    string
-	wantEpoch uint64
 	wantSize  int64
 	wantFiles int64
 }
@@ -53,169 +66,197 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 		schemaID: "endlessfs-portable-v1/schema-001",
 		profile:  "portable-minimal",
 		file:     "pre-aggregate-v0.1.4.json", digest: "24111f7739207b53fad5c4e1cf0ca106982b40fce33850f045d7430150260258",
-		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86",
-		wantEpoch: 8, wantSize: 26, wantFiles: 2,
+		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86", wantSize: 26, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-002",
 		profile:  "portable-minimal",
 		file:     "schema-002-recursive-bytes.json", digest: "c7fc6a6924e62f99e9fdd99a35343385c17088d36bcac5f47b6abfe8776ee854",
-		producer: "schema-002", commit: "b70f6361497d45f20049279bb5381a4fbb1005f1",
-		wantEpoch: 7, wantSize: 10, wantFiles: 2,
+		producer: "schema-002", commit: "b70f6361497d45f20049279bb5381a4fbb1005f1", wantSize: 10, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-003",
 		profile:  "portable-minimal",
 		file:     "recursive-aggregates-v0.1.7.json", digest: "0e2ce0a0853cba6e29730346b69e3c829240f617b1f277949f394b9a54786a51",
-		producer: "v0.1.7", commit: "1548dafa30ea3fbf0340b3b32381e885a110ef5e",
-		wantEpoch: 6, wantSize: 26, wantFiles: 2,
+		producer: "v0.1.7", commit: "1548dafa30ea3fbf0340b3b32381e885a110ef5e", wantSize: 26, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-001",
 		profile:  "application-preview-disabled",
 		file:     "pre-aggregate-v0.1.4-application-disabled.json", digest: "b6932210f53e927bf0543153290674579e50f0004bdad1e1e474256fbea8e15a",
-		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86",
-		wantEpoch: 8, wantSize: 22, wantFiles: 2,
+		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86", wantSize: 22, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-001",
 		profile:  "application-preview-gcs",
 		file:     "pre-aggregate-v0.1.4-application-gcs.json", digest: "8e508619ffb77850403f2e83de9d1ce98dabfe330334ffee9c2e87f6c250cab8",
-		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86",
-		wantEpoch: 8, wantSize: 22, wantFiles: 2,
+		producer: "v0.1.4", commit: "edb67f8e345694001b9614604c5baded9bde5d86", wantSize: 22, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-001",
 		profile:  "application-preview-gcs-v0.1.7-interrupted",
 		file:     "schema-001-v0.1.7-interrupted-application-gcs.json", digest: "998cbd744dce60cdf59400903c0de950a0f96915cdb0e7f0225b5260882e28e9",
-		producer: "v0.1.7-interrupted", commit: "1548dafa30ea3fbf0340b3b32381e885a110ef5e",
-		wantEpoch: 8, wantSize: 22, wantFiles: 2,
+		producer: "v0.1.7-interrupted", commit: "1548dafa30ea3fbf0340b3b32381e885a110ef5e", wantSize: 22, wantFiles: 2,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-004",
 		profile:  "portable-minimal",
 		file:     "schema-004-portable-minimal.json", digest: "0d02e85c6c6b8a16c53f36d38564e71354e2c66a946f15fb133b2b21def65ef5",
-		producer: "schema-004", commit: "f11fe68b2d731e8fd0228352a0b85255d7574abf",
-		wantEpoch: 5, wantSize: 18, wantFiles: 3,
+		producer: "schema-004", commit: "f11fe68b2d731e8fd0228352a0b85255d7574abf", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-004",
 		profile:  "application-preview-disabled",
 		file:     "schema-004-application-disabled.json", digest: "b01cf27856b9103b1c728dc84dc9c6822fc87e8ef2518e94ef402f699c60c127",
-		producer: "schema-004", commit: "f11fe68b2d731e8fd0228352a0b85255d7574abf",
-		wantEpoch: 5, wantSize: 18, wantFiles: 3,
+		producer: "schema-004", commit: "f11fe68b2d731e8fd0228352a0b85255d7574abf", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-004",
 		profile:  "application-preview-gcs",
 		file:     "schema-004-application-gcs.json", digest: "097f081e8b41dcdc5f4de3bf8c3c76fd5187c08b5411383da5d64f1f20e279a9",
-		producer: "schema-004", commit: "f11fe68b2d731e8fd0228352a0b85255d7574abf",
-		wantEpoch: 5, wantSize: 18, wantFiles: 3,
+		producer: "schema-004", commit: "f11fe68b2d731e8fd0228352a0b85255d7574abf", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-005",
 		profile:  "portable-minimal",
 		file:     "schema-005-v0.2.0-portable-minimal.json", digest: "c342954a139466f8620dff6588f642c957c9cc4f971bcfe383d2f716b31d27d4",
-		producer: "v0.2.0", commit: "97e70a84b12de0533b8a7cf4add62ecbf575a0fd",
-		wantEpoch: 4, wantSize: 18, wantFiles: 3,
+		producer: "v0.2.0", commit: "97e70a84b12de0533b8a7cf4add62ecbf575a0fd", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-005",
 		profile:  "application-preview-disabled",
 		file:     "schema-005-v0.2.0-application-disabled.json", digest: "ec6c3c617c39fea67d21ed38fb2c05928b353cefa9f5c952f530938ce01db8a0",
-		producer: "v0.2.0", commit: "97e70a84b12de0533b8a7cf4add62ecbf575a0fd",
-		wantEpoch: 4, wantSize: 18, wantFiles: 3,
+		producer: "v0.2.0", commit: "97e70a84b12de0533b8a7cf4add62ecbf575a0fd", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-005",
 		profile:  "application-preview-gcs",
 		file:     "schema-005-v0.2.0-application-gcs.json", digest: "a72d76f0c24565393d7434cf672cb068281e122418fc5c829fa15371ad6937f9",
-		producer: "v0.2.0", commit: "97e70a84b12de0533b8a7cf4add62ecbf575a0fd",
-		wantEpoch: 4, wantSize: 18, wantFiles: 3,
+		producer: "v0.2.0", commit: "97e70a84b12de0533b8a7cf4add62ecbf575a0fd", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-006",
 		profile:  "portable-minimal",
 		file:     "schema-006-v0.3.0-portable-minimal.json", digest: "4bed9189a829a4687c310659636f22d74e8babf1a074a2f4136a42c2b934ba2c",
-		producer: "v0.3.0", commit: "2d2d49ec9f86e2a247781fd461bcc537459cfbf1",
-		wantEpoch: 3, wantSize: 18, wantFiles: 3,
+		producer: "v0.3.0", commit: "2d2d49ec9f86e2a247781fd461bcc537459cfbf1", wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-006",
+		profile:  "application-complete",
+		file:     "schema-006-v0.3.2-application-complete.json", digest: "f7007f8be663cc9620ed3f97ff1e32ebc4ddf9f6c1408321ccbbdc69d45ee445",
+		producer: "v0.3.2", commit: "8d9715f22737501ae2f7485548ce7993bf804c67", wantSize: 27, wantFiles: 1,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-006",
 		profile:  "application-preview-disabled",
 		file:     "schema-006-v0.3.0-application-disabled.json", digest: "3daf89025cdedcfb353727ec668e6c7a5b3970abf8ceda60bebcea0b72f507f0",
-		producer: "v0.3.0", commit: "2d2d49ec9f86e2a247781fd461bcc537459cfbf1",
-		wantEpoch: 3, wantSize: 18, wantFiles: 3,
+		producer: "v0.3.0", commit: "2d2d49ec9f86e2a247781fd461bcc537459cfbf1", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-006",
 		profile:  "application-preview-gcs",
 		file:     "schema-006-v0.3.0-application-gcs.json", digest: "f1bb23118a29d5edfafa1e16d7c28870607b8f92210a0cc85dc46479161beda7",
-		producer: "v0.3.0", commit: "2d2d49ec9f86e2a247781fd461bcc537459cfbf1",
-		wantEpoch: 3, wantSize: 18, wantFiles: 3,
+		producer: "v0.3.0", commit: "2d2d49ec9f86e2a247781fd461bcc537459cfbf1", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-007",
 		profile:  "portable-minimal",
 		file:     "schema-007-portable-minimal.json", digest: "1a8227ad1293adb53192d2c1079e99e2197cdd12d6df3954395666fe81579731",
-		producer: "schema-007", commit: "43171275e93717b1261eeff3b98ecd11b08c9e3f",
-		wantEpoch: 2, wantSize: 18, wantFiles: 3,
+		producer: "schema-007", commit: "43171275e93717b1261eeff3b98ecd11b08c9e3f", wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-007",
+		profile:  "application-complete",
+		file:     "schema-007-application-complete.json", digest: "80660b01f183a4680626b0d63ddc591386cb19e120073b9e425e24cc6870a647",
+		producer: "schema-007", commit: "43171275e93717b1261eeff3b98ecd11b08c9e3f", wantSize: 27, wantFiles: 1,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-007",
 		profile:  "application-preview-disabled",
 		file:     "schema-007-application-disabled.json", digest: "10e9d3d9d6f4ddeb34839f1bac21005c6d64fbd36bbbb5371a945f27c722b302",
-		producer: "schema-007", commit: "43171275e93717b1261eeff3b98ecd11b08c9e3f",
-		wantEpoch: 2, wantSize: 18, wantFiles: 3,
+		producer: "schema-007", commit: "43171275e93717b1261eeff3b98ecd11b08c9e3f", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-007",
 		profile:  "application-preview-gcs",
 		file:     "schema-007-application-gcs.json", digest: "cb7ebd3c1058347e6ee13d243c9ff6632de9a87a7e1eb7e3c69aa412de25d7bd",
-		producer: "schema-007", commit: "43171275e93717b1261eeff3b98ecd11b08c9e3f",
-		wantEpoch: 2, wantSize: 18, wantFiles: 3,
+		producer: "schema-007", commit: "43171275e93717b1261eeff3b98ecd11b08c9e3f", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-008",
 		profile:  "portable-minimal",
 		file:     "schema-008-portable-minimal.json", digest: "d2bf14ccd03e26741310f5604289ba4f90cdea7fd2b697d5e5f8f5396231584a",
-		producer: "schema-008", commit: "359ec9fbc9e8020257659c0d91e64372baece1b9",
-		wantEpoch: 1, wantSize: 18, wantFiles: 3,
+		producer: "schema-008", commit: "359ec9fbc9e8020257659c0d91e64372baece1b9", wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-008",
+		profile:  "application-complete-recovery-residue",
+		file:     "schema-008-application-complete-residue.json", digest: "d7872913afa254d853b3a8521b46e3481e1eccbdc8f18940fcd552dac064e9ef",
+		producer: "schema-008", commit: "359ec9fbc9e8020257659c0d91e64372baece1b9", wantSize: 27, wantFiles: 1,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-008",
 		profile:  "application-preview-disabled",
 		file:     "schema-008-application-disabled.json", digest: "c56c6684649dc1c5f7f36bf881877a49f4cea5fb2f98da738af22eade88b7423",
-		producer: "schema-008", commit: "359ec9fbc9e8020257659c0d91e64372baece1b9",
-		wantEpoch: 1, wantSize: 18, wantFiles: 3,
+		producer: "schema-008", commit: "359ec9fbc9e8020257659c0d91e64372baece1b9", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-008",
 		profile:  "application-preview-gcs",
 		file:     "schema-008-application-gcs.json", digest: "62b07aa949bcf325ca7af46f6835ce9986b3f67cd894a243063bb94af0750b87",
-		producer: "schema-008", commit: "359ec9fbc9e8020257659c0d91e64372baece1b9",
-		wantEpoch: 1, wantSize: 18, wantFiles: 3,
+		producer: "schema-008", commit: "359ec9fbc9e8020257659c0d91e64372baece1b9", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-009",
 		profile:  "portable-minimal",
 		file:     "schema-009-portable-minimal.json", digest: "41eaccc3880c07ee9457b1afe44d524a610702ef103b9739461a4a709affc04b",
-		producer: "schema-009", commit: "86ad9d8da0e6c45f98d85006f440937557e758dd",
-		wantEpoch: 0, wantSize: 18, wantFiles: 3,
+		producer: "schema-009", commit: "86ad9d8da0e6c45f98d85006f440937557e758dd", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-009",
 		profile:  "application-preview-disabled",
 		file:     "schema-009-application-disabled.json", digest: "3ffef665e9698baaa11156cc3eab3de37a308aa671532ca83472ed54ee03c1dc",
-		producer: "schema-009", commit: "86ad9d8da0e6c45f98d85006f440937557e758dd",
-		wantEpoch: 0, wantSize: 18, wantFiles: 3,
+		producer: "schema-009", commit: "86ad9d8da0e6c45f98d85006f440937557e758dd", wantSize: 18, wantFiles: 3,
 	},
 	{
 		schemaID: "endlessfs-portable-v1/schema-009",
 		profile:  "application-preview-gcs",
 		file:     "schema-009-application-gcs.json", digest: "c4cfe1b653f885ca3922f2a7bdf8dfc7016b89923e411eddbc9acf41902a65f9",
-		producer: "schema-009", commit: "86ad9d8da0e6c45f98d85006f440937557e758dd",
-		wantEpoch: 0, wantSize: 18, wantFiles: 3,
+		producer: "schema-009", commit: "86ad9d8da0e6c45f98d85006f440937557e758dd", wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-009",
+		profile:  "application-complete-production-recovery",
+		file:     "schema-009-v0.4.0-application-complete-residue.json", digest: "a2a93ce97fececa99d8244c3d67bac266d104ca42a24f18a0f103b01e01020ea",
+		producer: "v0.4.0-production-residue", commit: "642e476ea8c49d9e4e1e9d5672eb63cdf8daff6d", wantSize: 27, wantFiles: 1,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-010",
+		profile:  "portable-minimal",
+		file:     "schema-010-portable-minimal.json", digest: "0ae63c91e6b5baf95cee87aa5da000d9a51d2b8f7f9d2fdb7dc1edbcf54a98ff",
+		producer: "schema-010", commit: "cc5f66c1837baf928eccadaa08dfdb3d86016f44",
+		wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-010",
+		profile:  "writer-profile-preview-disabled",
+		file:     "schema-010-application-disabled.json", digest: "71d735b0d3bf59ce23d36ca99d4dd065bd075634a826f990e4cdfaf6376dc684",
+		producer: "schema-010", commit: "cc5f66c1837baf928eccadaa08dfdb3d86016f44",
+		wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-010",
+		profile:  "writer-profile-preview-gcs",
+		file:     "schema-010-application-gcs.json", digest: "108948671ae1a7c87efaf7c0746c41a263d2e1fce4eb8ca798ffe1fd247a40dd",
+		producer: "schema-010", commit: "cc5f66c1837baf928eccadaa08dfdb3d86016f44",
+		wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-010",
+		profile:  "application-complete",
+		file:     "schema-010-application-complete.json", digest: "ac83d7940b5d1f6972655a500c57a574b8103f9e50b2e20f572f1e97b16ceb26",
+		producer: "schema-010", commit: "cc5f66c1837baf928eccadaa08dfdb3d86016f44",
+		wantSize: 27, wantFiles: 1,
 	},
 }
 
@@ -244,6 +285,9 @@ func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *
 				}
 				t.Run(topology, func(t *testing.T) {
 					fixture := loadStorageSchemaFixture(t, family)
+					if strings.Contains(family.profile, "application-complete") {
+						assertCompleteFixtureContainsPredecessorAuthority(t, fixture)
+					}
 					stateBackend := objectmemory.New()
 					fileBackend := stateBackend
 					if split {
@@ -277,17 +321,20 @@ func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *
 						t.Fatalf("upgraded %s %s-backend root = %+v, %v; want %d bytes/%d files", family.schemaID, topology, root, err, family.wantSize, family.wantFiles)
 					}
 					gate, err := engine.GateStatus(context.Background())
-					wantEpoch := family.wantEpoch + 1
+					wantEpoch := expectedCurrentGateEpoch(t, history, family.schemaID, fixture)
 					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != wantEpoch {
 						t.Fatalf("upgraded %s %s-backend gate = %+v, %v; want open epoch %d", family.schemaID, topology, gate, err, wantEpoch)
 					}
-					if family.schemaID == "endlessfs-portable-v1/schema-008" || family.schemaID == "endlessfs-portable-v1/schema-009" {
-						assertNoRetiredUploadRecords(t, stateBackend.Export())
-					} else {
-						assertAllUploadRecordsUseCurrentSchema(t, stateBackend.Export())
-					}
+					assertNoLegacyUploadRecords(t, stateBackend.Export())
 					assertSchema007TerminalAuthorityMigrated(t, engine, fixture)
-					uploadPortableFile(t, server.Client(), engine.Files(), live, domain.MustParseUserPath("/projects/after-upgrade.txt"), []byte("ok"))
+					if fixture.SemanticOracle != nil {
+						assertCompleteMigrationSemanticOracle(t, engine, fixture, clock, seed+40)
+					}
+					mutationPath := domain.MustParseUserPath("/projects/after-upgrade.txt")
+					if fixture.SemanticOracle != nil {
+						mutationPath = domain.MustParseUserPath("/after-upgrade.txt")
+					}
+					uploadPortableFile(t, server.Client(), engine.Files(), live, mutationPath, []byte("ok"))
 					after, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
 					if err != nil || after.Size != family.wantSize+2 || after.FileCount != family.wantFiles+1 {
 						t.Fatalf("post-upgrade %s %s-backend mutation = %+v, %v", family.schemaID, topology, after, err)
@@ -300,6 +347,136 @@ func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *
 		if _, found := fixtureSchemas[entry.ID]; !found {
 			t.Fatalf("ledger schema %s has no immutable migration fixture", entry.ID)
 		}
+	}
+}
+
+func TestMigrationSchema009ProductionResidueRestoresRealPasskeyAuthentication(t *testing.T) {
+	var family storageSchemaFixtureEntry
+	for _, candidate := range storageSchemaFixtures {
+		if candidate.file == "schema-009-v0.4.0-application-complete-residue.json" {
+			family = candidate
+			break
+		}
+	}
+	if family.file == "" {
+		t.Fatal("schema-009 production-residue fixture is not registered")
+	}
+	fixture := loadStorageSchemaFixture(t, family)
+	assertCompleteFixtureContainsPredecessorAuthority(t, fixture)
+	stateBackend, fileBackend := objectmemory.New(), objectmemory.New()
+	if err := stateBackend.Import(fixture.StateObjects); err != nil {
+		t.Fatal(err)
+	}
+	if err := fileBackend.Import(fixture.FileObjects); err != nil {
+		t.Fatal(err)
+	}
+	clock := domain.NewFixedClock(fixture.CreatedAt.Add(4 * time.Hour))
+	options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 0xe1, nil)
+	options.Writer = currentWriterForSchemaFixture(t, fixture)
+	engine, err := portable.Open(context.Background(), options)
+	if err != nil {
+		t.Fatalf("open exact v0.4.0 production residue: %s", migrationErrorChain(err))
+	}
+	assertCompleteMigrationSemanticOracle(t, engine, fixture, clock, 0xe2)
+}
+
+func assertCompleteFixtureContainsPredecessorAuthority(t *testing.T, fixture storageSchemaFixture) {
+	t.Helper()
+	if fixture.SemanticOracle == nil || len(fixture.SemanticOracle.RequiredKeys) < 12 {
+		t.Fatal("complete application fixture is missing its semantic oracle")
+	}
+	for _, logicalKey := range fixture.SemanticOracle.RequiredKeys {
+		binding := []byte(`"logicalKey":"` + logicalKey + `"`)
+		found := false
+		for _, body := range fixture.StateObjects {
+			if bytes.Contains(body, binding) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("predecessor fixture does not contain indexed authority %q", logicalKey)
+		}
+	}
+}
+
+func assertCompleteMigrationSemanticOracle(t *testing.T, engine *portable.Engine, fixture storageSchemaFixture, clock *domain.FixedClock, seed byte) {
+	t.Helper()
+	oracle := fixture.SemanticOracle
+	if oracle == nil || oracle.UserID != fixture.UserID || oracle.DisplayName == "" || oracle.CredentialID == "" || len(oracle.RequiredKeys) < 12 || len(oracle.Authenticator.Credentials) == 0 {
+		t.Fatalf("complete application fixture has an incomplete semantic oracle: %+v", oracle)
+	}
+	ctx := context.Background()
+	userID, err := domain.ParseUserID(oracle.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := identity.NewRepository(engine)
+	profile, _, err := repository.Profile(ctx, userID)
+	if err != nil || profile.DisplayName.String() != oracle.DisplayName {
+		t.Fatalf("migrated profile = %+v, %v", profile, err)
+	}
+	account, _, err := repository.Account(ctx, userID)
+	if err != nil || account.UserID != userID {
+		t.Fatalf("migrated account = %+v, %v", account, err)
+	}
+	credentials, err := repository.Credentials(ctx, userID)
+	if err != nil || len(credentials) != 1 || credentials[0].CredentialID != oracle.CredentialID {
+		t.Fatalf("migrated credentials = %+v, %v", credentials, err)
+	}
+	for _, namespace := range []state.Namespace{
+		state.NamespaceSessions, state.NamespaceInvites, state.NamespaceRecoveries, state.NamespaceShares,
+		state.NamespaceBootstrap, state.NamespaceRoles, state.NamespacePreferences, state.NamespaceOperations,
+	} {
+		page, err := engine.List(ctx, state.MustPrefix(namespace), state.PageRequest{Limit: 1000})
+		if err != nil || len(page.Items) == 0 {
+			t.Fatalf("migrated namespace %s = %d records, %v", namespace, len(page.Items), err)
+		}
+	}
+
+	const origin = "https://drive.example.test"
+	webauthn, err := auth.NewGoWebAuthn("drive.example.test", "EndlessFS", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := domain.NewIDGenerator(bytes.NewReader(deterministic(seed, 2<<20)))
+	sessions, err := auth.NewSessionManager(repository, ids, clock, 12*time.Hour, origin, true, secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x44}, 32))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := identity.NewService(repository, webauthn, sessions, ids, clock, identity.NewMutablePolicy(identity.RegistrationPolicy{}), "", origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, err := service.StartAuthentication(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options, err := virtualwebauthn.ParseAssertionOptions(string(start.Options))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator := oracle.Authenticator
+	credentialIndex := -1
+	for index := range authenticator.Credentials {
+		if base64.RawURLEncoding.EncodeToString(authenticator.Credentials[index].ID) == oracle.CredentialID {
+			credentialIndex = index
+			break
+		}
+	}
+	if credentialIndex < 0 {
+		t.Fatal("semantic oracle authenticator does not contain the persisted credential")
+	}
+	authenticator.Credentials[credentialIndex].Counter++
+	rp := virtualwebauthn.RelyingParty{Name: "EndlessFS", ID: "drive.example.test", Origin: origin}
+	assertion := virtualwebauthn.CreateAssertionResponse(rp, authenticator, authenticator.Credentials[credentialIndex], *options)
+	issued, err := service.VerifyAuthentication(ctx, start.CeremonyID, start.BrowserBinding, []byte(assertion))
+	if err != nil {
+		t.Fatalf("real post-migration passkey authentication: %v", err)
+	}
+	authenticated, err := sessions.Authenticate(ctx, issued.Token.Reveal())
+	if err != nil || authenticated.Record.UserID != userID {
+		t.Fatalf("post-migration issued session = %+v, %v", authenticated.Record, err)
 	}
 }
 
@@ -316,6 +493,18 @@ func assertSchema007TerminalAuthorityMigrated(t *testing.T, engine *portable.Eng
 	t.Helper()
 	if !strings.Contains(fixture.SourceCommit, "43171275") && fixture.SourceRelease != "schema-007" {
 		return
+	}
+	if fixture.SemanticOracle != nil {
+		hasTrashOracle := false
+		for _, logicalKey := range fixture.SemanticOracle.RequiredKeys {
+			if strings.HasPrefix(logicalKey, string(state.NamespaceTrash)+"/") {
+				hasTrashOracle = true
+				break
+			}
+		}
+		if !hasTrashOracle {
+			return
+		}
 	}
 	ctx := context.Background()
 	for keyValue, body := range fixture.StateObjects {
@@ -389,7 +578,8 @@ func assertSchema007TerminalAuthorityMigrated(t *testing.T, engine *portable.Eng
 		}
 		return
 	}
-	t.Fatal("schema-007 fixture trash entry was not migrated")
+	trashRoot, statErr := engine.Files().Stat(ctx, trash, domain.MustParseUserPath("/"))
+	t.Fatalf("schema-007 fixture trash entry was not migrated; page=%+v root=%+v rootErr=%v", trashPage, trashRoot, statErr)
 }
 
 func TestEveryHistoricalReleaseMapsToRegisteredStorageSchemaFixture(t *testing.T) {
@@ -451,8 +641,8 @@ func TestMigrationCheckpointInventoryResumesFromBoundedPagesWithoutReadingFileBo
 	if got := interrupted.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads across interrupted migration = %d; want 0", got)
 	}
-	if got := interrupted.totalAttempts(); got != 20 {
-		t.Fatalf("file metadata list calls across interrupted schema-002-to-009 migration = %d; want measured restart ratchet 20", got)
+	if got := interrupted.totalAttempts(); got != 22 {
+		t.Fatalf("file metadata list calls across interrupted schema-002-to-010 migration = %d; want measured restart ratchet 22", got)
 	}
 	progressRecords := 0
 	inventoryPages := 0
@@ -613,8 +803,8 @@ func TestMigrationDoesNotReadFileBodiesAgainImmediatelyBeforeOpeningWrites(t *te
 	if got := counting.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads during migration = %d; want 0", got)
 	}
-	if got := counting.totalAttempts(); got != 9 {
-		t.Fatalf("file metadata listing calls across schema-002-to-009 checkpoint suffix = %d; want measured ratchet 9", got)
+	if got := counting.totalAttempts(); got != 11 {
+		t.Fatalf("file metadata listing calls across schema-002-to-010 checkpoint suffix = %d; want measured ratchet 11", got)
 	}
 }
 
@@ -778,7 +968,7 @@ func TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary(t *testing.T) 
 						t.Fatalf("resumed %s root = %+v, %v; want %d bytes/%d files", entry.MigrationID, root, err, family.wantSize, family.wantFiles)
 					}
 					gate, err := engine.GateStatus(context.Background())
-					wantEpoch := family.wantEpoch + 1
+					wantEpoch := expectedCurrentGateEpoch(t, history, family.schemaID, fixture)
 					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != wantEpoch {
 						t.Fatalf("resumed %s gate = %+v, %v; want open epoch %d", entry.MigrationID, gate, err, wantEpoch)
 					}
@@ -786,6 +976,26 @@ func TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary(t *testing.T) 
 			}
 		}
 	}
+}
+
+func expectedCurrentGateEpoch(t *testing.T, history []portable.StorageSchemaHistoryEntry, schemaID string, fixture storageSchemaFixture) uint64 {
+	t.Helper()
+	gateBody, found := fixture.StateObjects[storageformat.WriteGateKey().String()]
+	if !found {
+		t.Fatalf("schema %s fixture has no canonical write gate", schemaID)
+	}
+	var envelope storageformat.Envelope
+	var gate storageformat.WriteGate
+	if err := storageformat.DecodeEnvelope(gateBody, storageformat.WriteGateKey(), "write-gate-v1", &envelope, &gate); err != nil {
+		t.Fatalf("decode schema %s fixture write gate: %v", schemaID, err)
+	}
+	for index, entry := range history {
+		if entry.ID == schemaID {
+			return gate.Epoch + uint64(len(history)-index-1)
+		}
+	}
+	t.Fatalf("schema %s is absent from the storage ledger", schemaID)
+	return 0
 }
 
 func storageSchemaFixturesFor(schemaID string) []storageSchemaFixtureEntry {
@@ -1261,19 +1471,19 @@ func corruptHistoricalUploadRecord(t *testing.T, objects map[string][]byte) {
 	t.Fatal("historical fixture has no upload record")
 }
 
+func assertNoLegacyUploadRecords(t *testing.T, objects map[string][]byte) {
+	t.Helper()
+	_, schema001 := countUploadRecordSchemas(t, objects)
+	if schema001 != 0 {
+		t.Fatalf("schema migration fixture retains %d schema-001 upload records; want none", schema001)
+	}
+}
+
 func assertAllUploadRecordsUseCurrentSchema(t *testing.T, objects map[string][]byte) {
 	t.Helper()
 	current, schema001 := countUploadRecordSchemas(t, objects)
 	if current < 2 || schema001 != 0 {
 		t.Fatalf("schema migration fixture exposed %d current/%d schema-001 upload records; want at least 2/0", current, schema001)
-	}
-}
-
-func assertNoRetiredUploadRecords(t *testing.T, objects map[string][]byte) {
-	t.Helper()
-	current, schema001 := countUploadRecordSchemas(t, objects)
-	if current != 0 || schema001 != 0 {
-		t.Fatalf("schema-008 fixture contains %d schema-007/%d schema-001 upload records; want none", current, schema001)
 	}
 }
 

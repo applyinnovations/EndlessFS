@@ -1,6 +1,7 @@
 package portable
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -329,13 +330,21 @@ func (s *FileStore) ensurePortableUploadLease(ctx context.Context, intent storag
 			leaseObject = objectstore.Object{Key: leaseKey, Body: append([]byte(nil), handle.Lease...), Version: version, Size: int64(len(handle.Lease))}
 			capability = handle.Capability
 		} else {
-			_ = transfers.AbortUpload(ctx, handle.Lease)
 			if !errors.Is(putErr, domain.ErrConflict) && !errors.Is(putErr, domain.ErrPreconditionFailed) {
+				_ = transfers.AbortUpload(ctx, handle.Lease)
 				return objectstore.UploadCapability{}, objectstore.Object{}, putErr
 			}
 			leaseObject, leaseErr = s.engine.backend.Get(ctx, leaseKey)
 			if leaseErr != nil {
+				_ = transfers.AbortUpload(ctx, handle.Lease)
 				return objectstore.UploadCapability{}, objectstore.Object{}, leaseErr
+			}
+			// Providers may make BeginUpload idempotent for the canonical upload
+			// ID. In that case both contenders receive the same native session;
+			// aborting the losing create attempt would revoke the durable winner.
+			// Only a genuinely distinct, uncommitted lease is disposable.
+			if !bytes.Equal(handle.Lease, leaseObject.Body) {
+				_ = transfers.AbortUpload(ctx, handle.Lease)
 			}
 		}
 	} else if leaseErr != nil {

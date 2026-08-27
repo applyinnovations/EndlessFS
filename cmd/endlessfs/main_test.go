@@ -380,7 +380,7 @@ func TestApplicationWriterProfilesOpenSchema010Fixtures(t *testing.T) {
 	}
 	for _, profile := range profiles {
 		t.Run(profile.name, func(t *testing.T) {
-			testApplicationWriterProfileMigration(t, profile.fixture, "schema-010", "38e288a229c827d242224c28727412c80528befe", 18, profile.configure)
+			testApplicationWriterProfileMigration(t, profile.fixture, "schema-010", "c9f0561564bd7cc0f4e260d17585c628b245654c", 18, profile.configure)
 		})
 	}
 }

@@ -279,7 +279,6 @@ var storageSchemaLedger = []storageSchemaDefinition{
 	{
 		id: storageSchema010,
 		features: []string{
-			storageformat.FeatureStateConservation,
 			storageformat.FeatureConsistencyDomains,
 			storageformat.FeatureDirectoryDigests,
 			storageformat.FeatureDuplicateCatalog,
@@ -294,6 +293,7 @@ var storageSchemaLedger = []storageSchemaDefinition{
 			storageformat.FeatureRecursiveBytes,
 			storageformat.FeatureRecursiveFileCounts,
 			storageformat.FeatureResumableOperations,
+			storageformat.FeatureStateConservation,
 			storageformat.FeatureTransactionalState,
 			storageformat.FeatureUserDirectoryCatalog,
 		},

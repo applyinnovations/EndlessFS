@@ -31,11 +31,13 @@ immutable pages and unrelated domains continue immediately.
 
 Startup detects one exact epoch in the append-only storage-schema ledger and
 executes every remaining adjacent transformation in order. The current ledger
-contains schemas 001 through 009. Schema 009 is the typed transactional-state
-and owner-namespace-graph format and is the only ordinary runtime. A schema-001
-bucket therefore runs `001 -> 002 -> 003 -> 004 -> 005 -> 006 -> 007 -> 008 -> 009`;
-schema 003 runs the suffix beginning `003 -> 004`; schema 008 runs only
-`008 -> 009`; current schema-009 state performs no migration. No operator
+contains schemas 001 through 010. Schema 010 adds a verified authority-
+conservation boundary to the schema-009 typed transactional-state and owner-
+namespace-graph runtime. A schema-001 bucket therefore runs
+`001 -> 002 -> 003 -> 004 -> 005 -> 006 -> 007 -> 008 -> 009 -> 010`;
+schema 003 runs the suffix beginning `003 -> 004`; schema 008 runs
+`008 -> 009 -> 010`; schema 009 runs `009 -> 010`; and current schema-010 state
+performs no migration. No operator
 migration command or bucket edit is required. Unknown or contradictory epoch
 markers fail closed.
 
@@ -59,6 +61,17 @@ checkpoints it, advances the `transactional-state-domains-v1` feature binding,
 reopens, and unfreezes. It neither reads nor copies file bodies and is
 restartable/convergent at the same durable migration boundaries.
 
+The `009 -> 010` recovery edge addresses schema-007 indexed application state
+that the released `007 -> 008` edge could omit. While the gate and every target
+domain are frozen, it walks the actual retained `state-indexes` roots and their
+referenced `state-versions`, writes source-to-target conservation receipts,
+installs only missing typed values, and independently re-walks every source,
+receipt, target, and catalog binding. Any missing source, corruption, or unequal
+current value fails closed before schema activation. This reads state metadata
+bodies only; it never reads or copies file bodies. The writer-set activation
+path itself requires the registered authority verifier, so an edge cannot make
+schema 010 or a later epoch current merely by updating feature markers.
+
 The `003 -> 004` graph walk persists authenticated transform and verification marks for each completed directory. Every mark is tied to the exact migration checkpoint, parent/root/manifest logical versions, parent entry, aggregates, and content summary. The process holds only the active ancestor stack; after restart, a valid completed mark skips that entire subtree. Several replicas may advance the same deterministic walk through CAS. Stale, forged, misplaced, corrupt, or contradictory marks fail closed and marks are removed only after the independent verification phase succeeds. Provider-ordered scope discovery retains one owner/area at a time. Transforming a historical page manifest retains at most that one legacy directory while deriving its differently ordered persistent indexes; current-index verification and CAS-winner reconciliation are page-bounded.
 
 Every edge is safe to retry after process loss and safe for several new replicas
@@ -67,9 +80,20 @@ An interrupted chain resumes its checkpointed edge and accepts only the
 explicitly reviewed mixture of source, target, and later already-published
 records without downgrading them. Until an edge commits, predecessor records
 remain authoritative and the gate stays closed once migration has begun.
-Immutable schema-004 through schema-009 fixtures cover portable-minimal,
+Immutable schema-004 through schema-010 fixtures cover portable-minimal,
 application-disabled, and application-GCS writer profiles and are pinned to
-their producer revision and fixture digest.
+their producer revision and fixture digest. Predecessor-produced complete
+application corpora from v0.3.2 through v0.4.0 additionally contain real
+profile/account/passkey/session/role/invite/recovery/share/preference authority.
+Their semantic oracle must complete a newly signed passkey assertion after the
+full migration suffix; opening the engine or listing files is not sufficient.
+
+During a v0.4.x rollout, expect liveness to remain available while readiness is
+false until the closed-gate recovery finishes. Do not recreate credentials or
+edit bucket objects. A conflict, missing legacy state-version, or corrupt proof
+is intentionally a fail-closed startup error. Preserve the source objects and
+inspect the migration error. Exact fixture provenance and the incident analysis
+are in `docs/storage-schema-010-implementation.md`.
 
 A live upload capability can temporarily prevent checkpoint closure; allow it
 to finish or expire and retry. Missing roots, cycles, multiple parents,

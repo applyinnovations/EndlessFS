@@ -1,9 +1,13 @@
 package portable
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
+
+	"github.com/applyinnovations/endlessfs/internal/domain"
 )
 
 func TestStorageSchemaLedgerIsLinearAndAppendOnly(t *testing.T) {
@@ -24,6 +28,7 @@ func TestStorageSchemaLedgerIsLinearAndAppendOnly(t *testing.T) {
 	}
 	checkpoints := make(map[string]struct{})
 	featureSignatures := make(map[string]struct{})
+	conservationIndex, _ := schemaIndex(storageSchema010)
 	for index, schema := range storageSchemaLedger {
 		if schema.id != wantIDs[index] {
 			t.Fatalf("storage schema ledger[%d] = %q; want %q", index, schema.id, wantIDs[index])
@@ -61,10 +66,21 @@ func TestStorageSchemaLedgerIsLinearAndAppendOnly(t *testing.T) {
 		if migration.id == "" || migration.checkpointID == "" || migration.run == nil {
 			t.Fatalf("schema %q migration is incomplete: %+v", schema.id, migration)
 		}
+		if index >= conservationIndex && migration.verifyAuthority == nil {
+			t.Fatalf("schema %q migration has no pre-activation authority verifier", schema.id)
+		}
 		if _, duplicate := checkpoints[migration.checkpointID]; duplicate {
 			t.Fatalf("migration checkpoint %q is reused", migration.checkpointID)
 		}
 		checkpoints[migration.checkpointID] = struct{}{}
+	}
+}
+
+func TestConservationEraMigrationCannotActivateWithoutAuthorityVerifier(t *testing.T) {
+	transition := schemaMigration009To010
+	transition.verifyAuthority = nil
+	if err := (&Engine{}).activateMigrationWriterSet(context.Background(), transition); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("activation without authority verifier error = %v; want precondition failed", err)
 	}
 }
 

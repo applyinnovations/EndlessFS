@@ -76,13 +76,15 @@ type releaseVersion struct {
 }
 
 type storageMigrationRun func(*Engine, context.Context, storageMigration, objectstore.Object, storageformat.Superblock) error
+type storageMigrationAuthorityVerifier func(*Engine, context.Context, storageMigration) error
 
 type storageMigration struct {
-	id           storageMigrationID
-	from         storageSchemaID
-	to           storageSchemaID
-	checkpointID string
-	run          storageMigrationRun
+	id              storageMigrationID
+	from            storageSchemaID
+	to              storageSchemaID
+	checkpointID    string
+	run             storageMigrationRun
+	verifyAuthority storageMigrationAuthorityVerifier
 }
 
 type storageGateBinding string
@@ -326,6 +328,7 @@ func init() {
 	schemaMigration007To008.run = (*Engine).runStorageMigration007To008
 	schemaMigration008To009.run = (*Engine).runStorageMigration008To009
 	schemaMigration009To010.run = (*Engine).runStorageMigration009To010
+	schemaMigration009To010.verifyAuthority = (*Engine).verifySchema010Authority
 }
 
 func currentStorageSchema() storageSchemaDefinition {
@@ -426,6 +429,7 @@ func MigrationStepName(migrationID, boundary string) string {
 }
 
 func storageMigrationPath(from storageSchemaID) ([]storageMigration, error) {
+	conservationIndex, _ := schemaIndex(storageSchema010)
 	for index, schema := range storageSchemaLedger {
 		if schema.id != from {
 			continue
@@ -438,6 +442,9 @@ func storageMigrationPath(from storageSchemaID) ([]storageMigration, error) {
 			migration := storageSchemaLedger[position].migrationFromPrevious
 			if migration == nil || migration.from != storageSchemaLedger[position-1].id || migration.to != storageSchemaLedger[position].id {
 				return nil, fmt.Errorf("invalid storage schema ledger edge into %q", storageSchemaLedger[position].id)
+			}
+			if position >= conservationIndex && migration.verifyAuthority == nil {
+				return nil, fmt.Errorf("storage schema ledger edge into %q has no pre-activation authority verifier", storageSchemaLedger[position].id)
 			}
 			path = append(path, *migration)
 		}

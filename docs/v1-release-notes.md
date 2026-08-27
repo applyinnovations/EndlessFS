@@ -3,13 +3,31 @@
 EndlessFS v1 provides the single-binary passkey identity system, private Drive control plane, direct capability data plane, trash, read-only public sharing, administration and recovery, accessible embedded browser application, and closed data-only theme system described in [the v1 specification](./v1-specification.md).
 
 The clarified v1 storage contract is implemented by one provider-independent
-schema-009 engine. Its canonical typed records, invariant-aligned state domains,
+schema-010 authority-conserving epoch over the invariant-aligned state-domain engine. Its canonical typed records,
 immutable pages, logical versions, retained outcomes, owner namespace graph,
 writer gate, and checkpoints do not depend on provider-native identifiers or
 metadata. Deterministic raw-copy tests move only checkpoint-authorized key/body
 pairs between independent backends, regenerate every native version, reopen at
 a new gate epoch, preserve all logical state, and continue mutations in both
 directions without a state migration.
+
+The v0.5.0 recovery release appends schema 010. The released `007 -> 008`
+migration enumerated an obsolete `state/` namespace while real schema-007
+profile, passkey, session, administrator, invite, recovery, share, preference,
+operation, and ceremony authority lived behind persistent `state-indexes` and
+`state-versions`. Schema 010 recovers that retained authority under the closed
+gate, writes exact source-to-target conservation receipts, fails closed on any
+missing source or unequal target, and independently verifies the complete
+relation before the shared activation path permits the new writer feature.
+Recovery reads state metadata only and never reads or copies file bodies.
+
+Migration qualification now includes predecessor-produced complete application
+corpora, not only writer-profile fixtures. The full suffix must preserve every
+required logical key and complete a real signed passkey assertion and session
+lookup. The migration gate runs both owning packages in full, and the 98%
+coverage group includes every numbered migration implementation plus the
+ledger. Exact provenance, denial cases, and rollout behavior are recorded in
+the schema-010 implementation record.
 
 An ordinary same-domain mutation writes changed immutable pages and
 conditionally replaces one authenticated domain head. If a replica disappears
@@ -67,12 +85,14 @@ Checkpoint v3 replaces the v0.1.14 body-hashing path with a single ordered provi
 Directory metadata now carries persisted recursive-byte and recursive-file-count aggregates. File upload or replacement, move, copy, trash, restore, and permanent deletion update every affected ancestor and the live or trash area root through the same durable commit as the visible tree mutation. Directory `size` and `fileCount` are therefore cheap prefix-total lookups; an area root reports that area's total logical bytes and files. A file contributes one even when its size is zero, while directories are not counted. Overflow or inconsistent canonical aggregates fail closed. Completion attempts that lose an unrelated ancestor-root race advance through the durable upload record and retry from authoritative state; true same-target races retain one version-precondition winner. Deterministic tests force eight replicas through multi-file, same-upload, and same-target completion races, completion/abort races, contested folder rename/trash/restore/delete, and every folder-operation commit boundary. Both aggregates are covered by checkpoint/raw-copy portability and advertised as required `recursive-byte-aggregates-v1` and `recursive-file-count-aggregates-v1` storage features.
 
 Durable upgrades run through an append-only storage-schema ledger rather than
-release-specific startup branches. It records schemas 001 through 009 with only
+release-specific startup branches. It records schemas 001 through 010 with only
 adjacent transforms. Startup resolves one exact epoch and executes the complete
 remaining suffix. The `007 -> 008` edge installs the owner namespace graph and
 consistency-domain foundation. The `008 -> 009` edge authenticates every source
 domain and state key, binds unchanged application payloads to typed records,
-and deterministically repartitions authority by invariant. Both edges reuse
+and deterministically repartitions authority by invariant. The `009 -> 010`
+edge proves and restores retained indexed application authority before the
+central activation barrier permits the new epoch. All edges reuse
 immutable file blobs in place and never read or copy their bodies. Each edge
 quiesces the durable write gate, upgrades and verifies its owned records,
 advances writer/superblock/gate markers, checkpoints, and reopens before the

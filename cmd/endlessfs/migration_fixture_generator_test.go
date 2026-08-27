@@ -25,10 +25,10 @@ import (
 
 const migrationFixtureProducerCommitEnvironment = "ENDLESSFS_MIGRATION_FIXTURE_PRODUCER_COMMIT"
 
-// TestGenerateSchema009MigrationFixtures is invoked only through the Nix
+// TestGenerateSchema010MigrationFixtures is invoked only through the Nix
 // fixture-generation app after the epoch writer has been committed. Ordinary
 // tests skip it and never mutate the checkout.
-func TestGenerateSchema009MigrationFixtures(t *testing.T) {
+func TestGenerateSchema010MigrationFixtures(t *testing.T) {
 	commit := os.Getenv(migrationFixtureProducerCommitEnvironment)
 	if commit == "" {
 		t.Skip("schema fixture generation was not requested")
@@ -62,16 +62,77 @@ func TestGenerateSchema009MigrationFixtures(t *testing.T) {
 	}
 	for index, profile := range profiles {
 		t.Run(profile.name, func(t *testing.T) {
-			fixture := buildSchema009MigrationFixture(t, commit, byte(0x91+index*17), profile.writer(t))
+			fixture := buildSchema010MigrationFixture(t, commit, byte(0x91+index*17), profile.writer(t))
 			body, err := json.Marshal(fixture)
 			if err != nil {
 				t.Fatal(err)
 			}
-			path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-009-"+profile.name+".json")
+			path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-010-"+profile.name+".json")
 			if err := os.WriteFile(path, body, 0o600); err != nil {
 				t.Fatal(err)
 			}
 		})
+	}
+	generateSchema010CompleteMigrationFixture(t, commit)
+}
+
+// generateSchema010CompleteMigrationFixture migrates the immutable
+// predecessor-produced production residue through the real current writer. It
+// deliberately preserves the independent semantic oracle instead of
+// reconstructing application records with current code.
+func generateSchema010CompleteMigrationFixture(t *testing.T, commit string) {
+	t.Helper()
+	path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-009-v0.4.0-application-complete-residue.json")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var predecessor applicationMigrationFixture
+	if err := decoder.Decode(&predecessor); err != nil {
+		t.Fatal(err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		t.Fatalf("complete predecessor fixture trailing JSON: %v", err)
+	}
+	if len(predecessor.SemanticOracle) == 0 {
+		t.Fatal("complete predecessor fixture has no independent semantic oracle")
+	}
+
+	stateBackend, fileBackend := objectmemory.New(), objectmemory.New()
+	if err := stateBackend.Import(predecessor.StateObjects); err != nil {
+		t.Fatal(err)
+	}
+	if err := fileBackend.Import(predecessor.FileObjects); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := buildWriterConfiguration(runtimeTestConfig(t), "session-keyring-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := portable.Open(context.Background(), portable.Options{
+		Backend: stateBackend, FileBackend: fileBackend,
+		Clock: domain.NewFixedClock(predecessor.CreatedAt.Add(time.Hour)),
+		IDs:   domain.NewIDGenerator(bytes.NewReader(applicationMigrationBytes(0xd1, 8<<20))), Writer: writer,
+		LeaseTTL: time.Minute, UploadTTL: 5 * time.Minute, DownloadTTL: time.Minute,
+		CursorKey: bytes.Repeat([]byte{0x63}, 32),
+	}); err != nil {
+		t.Fatalf("migrate complete schema-009 residue: %v", err)
+	}
+	fixture := applicationMigrationFixture{
+		SchemaVersion: 1, SourceRelease: "schema-010", SourceCommit: commit,
+		CreatedAt: predecessor.CreatedAt, UserID: predecessor.UserID,
+		StateObjects: stateBackend.Export(), FileObjects: fileBackend.Export(),
+		SemanticOracle: predecessor.SemanticOracle,
+	}
+	body, err = json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path = filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-010-application-complete.json")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -83,7 +144,7 @@ func configureSchema005PreviewProfile(cfg *config.Config) {
 	cfg.PreviewKeySecret = secret.Value(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("p", 32))))
 }
 
-func buildSchema009MigrationFixture(t *testing.T, commit string, seed byte, writer portable.WriterConfiguration) applicationMigrationFixture {
+func buildSchema010MigrationFixture(t *testing.T, commit string, seed byte, writer portable.WriterConfiguration) applicationMigrationFixture {
 	t.Helper()
 	ctx := context.Background()
 	createdAt := time.Date(2046, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -144,7 +205,7 @@ func buildSchema009MigrationFixture(t *testing.T, commit string, seed byte, writ
 		t.Fatal(err)
 	}
 	return applicationMigrationFixture{
-		SchemaVersion: 1, SourceRelease: "schema-009", SourceCommit: commit, CreatedAt: createdAt,
+		SchemaVersion: 1, SourceRelease: "schema-010", SourceCommit: commit, CreatedAt: createdAt,
 		UserID: user.String(), StateObjects: stateBackend.Export(), FileObjects: fileBackend.Export(),
 	}
 }

@@ -29,7 +29,7 @@ function belongs(file, group) {
   if (group == "preview-core") return index(file, "/internal/preview/") > 0 && index(file, "/internal/preview/imagegen/") == 0 && index(file, "/internal/preview/memory/") == 0 && index(file, "/internal/preview/durable/") == 0 && index(file, "/internal/preview/storecontract/") == 0
   if (group == "preview-image-generator") return index(file, "/internal/preview/imagegen/") > 0
   if (group == "preview-store") return index(file, "/internal/preview/memory/") > 0 || index(file, "/internal/preview/durable/") > 0
-  if (group == "migration") return file ~ /\/internal\/portable\/migration(008|_ledger)?\.go$/
+  if (group == "migration") return file ~ /\/internal\/portable\/migration([0-9][0-9][0-9]|_ledger)?\.go$/
   return 0
 }
 

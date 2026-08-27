@@ -238,13 +238,14 @@ func TestWriterCompatibilityIncludesDurablePreviewConfiguration(t *testing.T) {
 }
 
 type applicationMigrationFixture struct {
-	SchemaVersion int               `json:"schemaVersion"`
-	SourceRelease string            `json:"sourceRelease"`
-	SourceCommit  string            `json:"sourceCommit"`
-	CreatedAt     time.Time         `json:"createdAt"`
-	UserID        string            `json:"userID"`
-	StateObjects  map[string][]byte `json:"stateObjects"`
-	FileObjects   map[string][]byte `json:"fileObjects"`
+	SchemaVersion  int               `json:"schemaVersion"`
+	SourceRelease  string            `json:"sourceRelease"`
+	SourceCommit   string            `json:"sourceCommit"`
+	CreatedAt      time.Time         `json:"createdAt"`
+	UserID         string            `json:"userID"`
+	StateObjects   map[string][]byte `json:"stateObjects"`
+	FileObjects    map[string][]byte `json:"fileObjects"`
+	SemanticOracle json.RawMessage   `json:"semanticOracle,omitempty"`
 }
 
 func TestApplicationWriterProfilesMigrateV014FixturesBeforeStartup(t *testing.T) {
@@ -352,6 +353,38 @@ func TestApplicationWriterProfilesOpenSchema008Fixtures(t *testing.T) {
 	}
 }
 
+func TestApplicationWriterProfilesOpenSchema009Fixtures(t *testing.T) {
+	profiles := []struct {
+		name      string
+		fixture   string
+		configure func(*config.Config)
+	}{
+		{name: "preview-disabled", fixture: "schema-009-application-disabled.json", configure: func(*config.Config) {}},
+		{name: "preview-gcs", fixture: "schema-009-application-gcs.json", configure: configureSchema005PreviewProfile},
+	}
+	for _, profile := range profiles {
+		t.Run(profile.name, func(t *testing.T) {
+			testApplicationWriterProfileMigration(t, profile.fixture, "schema-009", "86ad9d8da0e6c45f98d85006f440937557e758dd", 18, profile.configure)
+		})
+	}
+}
+
+func TestApplicationWriterProfilesOpenSchema010Fixtures(t *testing.T) {
+	profiles := []struct {
+		name      string
+		fixture   string
+		configure func(*config.Config)
+	}{
+		{name: "preview-disabled", fixture: "schema-010-application-disabled.json", configure: func(*config.Config) {}},
+		{name: "preview-gcs", fixture: "schema-010-application-gcs.json", configure: configureSchema005PreviewProfile},
+	}
+	for _, profile := range profiles {
+		t.Run(profile.name, func(t *testing.T) {
+			testApplicationWriterProfileMigration(t, profile.fixture, "schema-010", "38e288a229c827d242224c28727412c80528befe", 18, profile.configure)
+		})
+	}
+}
+
 func testApplicationWriterProfileMigration(t *testing.T, fixtureName, sourceRelease, sourceCommit string, wantSize int64, configure func(*config.Config)) {
 	t.Helper()
 	body, err := os.ReadFile("../../internal/portable/testdata/migrations/" + fixtureName)
@@ -400,7 +433,7 @@ func testApplicationWriterProfileMigration(t *testing.T, fixtureName, sourceRele
 	live, _ := domain.NewScope(user, domain.AreaLive)
 	root, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
 	wantFiles := int64(2)
-	if sourceRelease == "schema-004" || sourceRelease == "v0.2.0" || sourceRelease == "v0.3.0" || sourceRelease == "schema-007" || sourceRelease == "schema-008" {
+	if sourceRelease == "schema-004" || sourceRelease == "v0.2.0" || sourceRelease == "v0.3.0" || sourceRelease == "schema-007" || sourceRelease == "schema-008" || sourceRelease == "schema-009" || sourceRelease == "schema-010" {
 		wantFiles = 3
 	}
 	if err != nil || root.Size != wantSize || root.FileCount != wantFiles {

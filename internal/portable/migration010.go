@@ -224,6 +224,24 @@ func (e *Engine) readSchema010Conservation(ctx context.Context) (schema010Conser
 	return value, true, nil
 }
 
+// verifySchema010Authority is the ledger-enforced activation barrier. The
+// writer set cannot advertise schema 010 until the durable source inventory,
+// every source-to-target receipt, and every installed typed target have been
+// independently re-read and verified under the closed gate.
+func (e *Engine) verifySchema010Authority(ctx context.Context, transition storageMigration) error {
+	if transition.id != storageMigration009To010 || transition.from != storageSchema009 || transition.to != storageSchema010 {
+		return domain.NewError(domain.ErrorInvalid, "schema-010 authority verifier received another migration")
+	}
+	proof, found, err := e.readSchema010Conservation(ctx)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return domain.NewError(domain.ErrorPreconditionFailed, "schema-010 conservation proof is missing")
+	}
+	return e.verifySchema010Conservation(ctx, proof)
+}
+
 func (e *Engine) stageSchema009IndexedState010(ctx context.Context, freezeEpoch uint64) (schema010Conservation, error) {
 	if existing, found, err := e.readSchema010Conservation(ctx); err != nil || found {
 		if found && existing.FreezeEpoch != freezeEpoch {
@@ -704,7 +722,10 @@ func (e *Engine) verifySchema010Conservation(ctx context.Context, proof schema01
 			return err
 		}
 		object, err := e.backend.Get(ctx, key)
-		if err != nil || storageformat.Digest(object.Body) != rootProof.RootDigest {
+		if err != nil {
+			return err
+		}
+		if storageformat.Digest(object.Body) != rootProof.RootDigest {
 			return domain.NewError(domain.ErrorPreconditionFailed, "schema-010 recovery source changed before activation")
 		}
 		var envelope storageformat.Envelope
@@ -729,7 +750,7 @@ func (e *Engine) verifySchema010Conservation(ctx context.Context, proof schema01
 				receiptKey := storageformat.Schema010MigrationReceiptKey(schema008DomainIdentity(reference), receipt.TargetKey)
 				stored, err := e.backend.Get(ctx, receiptKey)
 				if err != nil {
-					return domain.NewError(domain.ErrorPreconditionFailed, "schema-010 conservation receipt is missing")
+					return err
 				}
 				var storedReceipt schema010ConservationReceipt
 				if decodeCanonicalValue(stored.Body, &storedReceipt) != nil {
@@ -768,7 +789,10 @@ func (e *Engine) verifySchema010Conservation(ctx context.Context, proof schema01
 func (e *Engine) verifySchema010ReceiptTargets(ctx context.Context, proof schema010Conservation) error {
 	catalog := newDomainCatalog(e.backend, e.scheduler)
 	snapshot, err := catalog.load(ctx)
-	if err != nil || snapshot.head.FreezeEpoch != proof.FreezeEpoch {
+	if err != nil {
+		return err
+	}
+	if snapshot.head.FreezeEpoch != proof.FreezeEpoch {
 		return domain.NewError(domain.ErrorPreconditionFailed, "schema-010 target catalog is not frozen")
 	}
 	request := objectstore.ListRequest{Prefix: storageformat.Schema010MigrationReceiptPrefix(), Limit: 1000}
@@ -791,15 +815,23 @@ func (e *Engine) verifySchema010ReceiptTargets(ctx context.Context, proof schema
 			if err != nil || !bytes.Equal(body, object.Body) || storageformat.Schema010MigrationReceiptKey(schema008DomainIdentity(reference), receipt.TargetKey) != info.Key {
 				return domain.NewError(domain.ErrorInvalid, "misbound schema-010 conservation receipt during verification")
 			}
-			if _, found, err := catalog.entryAt(ctx, snapshot.head, reference); err != nil || !found {
+			if _, found, err := catalog.entryAt(ctx, snapshot.head, reference); err != nil {
+				return err
+			} else if !found {
 				return domain.NewError(domain.ErrorPreconditionFailed, "schema-010 target domain is absent from catalog")
 			}
 			head, err := e.stateDomainStore().loadHead(ctx, reference)
-			if err != nil || !head.exists || !head.head.Registered || !head.head.Frozen || head.head.FreezeEpoch != proof.FreezeEpoch {
+			if err != nil {
+				return err
+			}
+			if !head.exists || !head.head.Registered || !head.head.Frozen || head.head.FreezeEpoch != proof.FreezeEpoch {
 				return domain.NewError(domain.ErrorPreconditionFailed, "schema-010 target domain is not frozen")
 			}
 			value, found, err := e.stateDomainStore().lookupAtHead(ctx, reference, head.head, receipt.TargetKey)
-			if err != nil || !found || value.LogicalVersion != receipt.SourceLogicalVersion || !bytes.Equal(value.Data, receipt.TargetValue) {
+			if err != nil {
+				return err
+			}
+			if !found || value.LogicalVersion != receipt.SourceLogicalVersion || !bytes.Equal(value.Data, receipt.TargetValue) {
 				return domain.NewError(domain.ErrorPreconditionFailed, "schema-010 recovered target does not match source")
 			}
 			count++

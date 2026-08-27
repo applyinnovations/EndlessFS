@@ -2,6 +2,17 @@
 
 EndlessFS v1 provides the single-binary passkey identity system, private Drive control plane, direct capability data plane, trash, read-only public sharing, administration and recovery, accessible embedded browser application, and closed data-only theme system described in [the v1 specification](./v1-specification.md).
 
+The v0.5.1 upload-concurrency patch coalesces browser multi-file initialization
+into the existing bounded 100-item batch route before running direct provider
+transfers concurrently. Stable per-item idempotency lets a lost batch response
+or reload resume the same provider upload through either initialization route.
+The consistency-domain engine now rereads and retries a lost head CAS only
+after canonical revalidation proves the winning mutation touched unrelated
+keys; genuine same-key conflicts retain exactly one winner. Deterministic
+two- and eight-replica tests cover both outcomes, and the Chromium workflow
+proves a two-file folder uses one batch admission and no single-item admission.
+This patch writes the unchanged schema-010 format.
+
 The clarified v1 storage contract is implemented by one provider-independent
 schema-010 authority-conserving epoch over the invariant-aligned state-domain engine. Its canonical typed records,
 immutable pages, logical versions, retained outcomes, owner namespace graph,

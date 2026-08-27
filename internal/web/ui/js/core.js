@@ -16,6 +16,7 @@
     transferGroups: new Map(),
     directoryPromises: new Map(),
     activeTransfers: 0,
+    uploadBatchActive: false,
     transferFilter: "current",
     transferSearch: "",
     transferRenderFrame: 0,

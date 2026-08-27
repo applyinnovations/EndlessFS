@@ -443,6 +443,9 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		t.Fatalf("wait for restored file to leave trash: %v (%s)", err, browserStatus(ctx))
 	}
 
+	mu.Lock()
+	folderRequestStart := len(requestedURLs)
+	mu.Unlock()
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(harness.origin+"/"),
 		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
@@ -485,6 +488,15 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 	if err := waitFor(ctx, `document.querySelector("#file-rows").textContent.includes("Dropped Folder")`, 10*time.Second); err != nil {
 		t.Fatalf("wait for dropped folder listing: %v (%s)", err, browserStatus(ctx))
+	}
+	mu.Lock()
+	folderRequests := append([]string(nil), requestedURLs[folderRequestStart:]...)
+	mu.Unlock()
+	if got := countExactRequest(folderRequests, "POST "+harness.origin+"/api/v1/uploads/batch"); got != 1 {
+		t.Fatalf("folder upload batch admissions = %d, want 1; requests=%v", got, folderRequests)
+	}
+	if got := countExactRequest(folderRequests, "POST "+harness.origin+"/api/v1/uploads"); got != 0 {
+		t.Fatalf("folder upload used %d single-item admissions; requests=%v", got, folderRequests)
 	}
 	if err := closeTransferSheet(ctx); err != nil {
 		t.Fatalf("close folder transfer sheet: %v (%s)", err, browserStatus(ctx))
@@ -2152,6 +2164,16 @@ func countRequestPath(requests []string, path string) int {
 	count := 0
 	for _, request := range requests {
 		if strings.Contains(request, path) {
+			count++
+		}
+	}
+	return count
+}
+
+func countExactRequest(requests []string, request string) int {
+	count := 0
+	for _, candidate := range requests {
+		if candidate == request {
 			count++
 		}
 	}

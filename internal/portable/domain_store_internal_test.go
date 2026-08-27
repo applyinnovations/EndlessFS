@@ -149,6 +149,108 @@ func TestConsistencyDomainSameMutationConcurrentCallersObserveOneOutcome(t *test
 	}
 }
 
+func TestConsistencyDomainDistinctConcurrentMutationsRetryUnrelatedHeadRace(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	reference := consistencyDomainRef{Kind: storageformat.DomainNamespace, ID: "owner-distinct-retry"}
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var schedulerMu sync.Mutex
+	blockedCommits := 0
+	scheduler := SchedulerFunc(func(_ context.Context, step string) error {
+		if step != StepDomainBeforeHeadCommit {
+			return nil
+		}
+		schedulerMu.Lock()
+		blockedCommits++
+		shouldBlock := blockedCommits <= 2
+		schedulerMu.Unlock()
+		if shouldBlock {
+			ready <- struct{}{}
+			<-release
+		}
+		return nil
+	})
+	mutations := []consistencyDomainMutation{
+		{ID: "create-left", Changes: []consistencyDomainChange{{Key: "left", Require: domainValueAbsent, Value: []byte("left-value")}}},
+		{ID: "create-right", Changes: []consistencyDomainChange{{Key: "right", Require: domainValueAbsent, Value: []byte("right-value")}}},
+	}
+	errorsFound := make(chan error, len(mutations))
+	for _, mutation := range mutations {
+		mutation := mutation
+		go func() {
+			_, err := newConsistencyDomainStore(backend, scheduler).mutate(ctx, reference, mutation)
+			errorsFound <- err
+		}()
+	}
+	<-ready
+	<-ready
+	close(release)
+	for range mutations {
+		if err := <-errorsFound; err != nil {
+			t.Fatalf("distinct concurrent mutation failed: %v", err)
+		}
+	}
+	store := newConsistencyDomainStore(backend, nil)
+	for key, want := range map[string]string{"left": "left-value", "right": "right-value"} {
+		value, err := store.get(ctx, reference, key)
+		if err != nil || string(value.Data) != want {
+			t.Fatalf("%s = %+v, %v; want %q", key, value, err, want)
+		}
+	}
+}
+
+func TestConsistencyDomainConflictingConcurrentMutationsKeepOneWinner(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	reference := consistencyDomainRef{Kind: storageformat.DomainNamespace, ID: "owner-same-key-race"}
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var schedulerMu sync.Mutex
+	blockedCommits := 0
+	scheduler := SchedulerFunc(func(_ context.Context, step string) error {
+		if step != StepDomainBeforeHeadCommit {
+			return nil
+		}
+		schedulerMu.Lock()
+		blockedCommits++
+		shouldBlock := blockedCommits <= 2
+		schedulerMu.Unlock()
+		if shouldBlock {
+			ready <- struct{}{}
+			<-release
+		}
+		return nil
+	})
+	errorsFound := make(chan error, 2)
+	for _, value := range []string{"left-value", "right-value"} {
+		value := value
+		go func() {
+			_, err := newConsistencyDomainStore(backend, scheduler).mutate(ctx, reference, consistencyDomainMutation{
+				ID: "create-" + value, Changes: []consistencyDomainChange{{Key: "shared", Require: domainValueAbsent, Value: []byte(value)}},
+			})
+			errorsFound <- err
+		}()
+	}
+	<-ready
+	<-ready
+	close(release)
+	successes, conflicts := 0, 0
+	for range 2 {
+		switch err := <-errorsFound; {
+		case err == nil:
+			successes++
+		case errors.Is(err, domain.ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("same-key concurrent mutation returned %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("same-key race = %d successes, %d conflicts; want 1, 1", successes, conflicts)
+	}
+}
+
 func TestConsistencyDomainLostHeadCommitResponseRecoversInSameCall(t *testing.T) {
 	ctx := context.Background()
 	base := objectmemory.New()
@@ -417,6 +519,24 @@ func TestConsistencyDomainFreezeRetriesConditionalConflict(t *testing.T) {
 	snapshot, err := store.loadHead(ctx, reference)
 	if err != nil || !snapshot.head.Frozen || snapshot.head.FreezeEpoch != 11 {
 		t.Fatalf("frozen head = %+v, %v", snapshot.head, err)
+	}
+}
+
+func TestConsistencyDomainMutationDoesNotRetryWithoutAWinningHead(t *testing.T) {
+	ctx := context.Background()
+	base := objectmemory.New()
+	reference := consistencyDomainRef{Kind: storageformat.DomainNamespace, ID: "owner-unadvanced-conflict"}
+	store := newConsistencyDomainStore(base, nil)
+	if _, err := store.mutate(ctx, reference, consistencyDomainMutation{ID: "seed", Changes: []consistencyDomainChange{{Key: "seed", Require: domainValueAbsent, Value: []byte("seed")}}}); err != nil {
+		t.Fatal(err)
+	}
+	backend := &rejectHeadPutOnceBackend{Backend: base, target: storageformat.DomainHeadKey(reference.Kind, reference.ID), armed: true}
+	_, err := newConsistencyDomainStore(backend, nil).mutate(ctx, reference, consistencyDomainMutation{ID: "rejected", Changes: []consistencyDomainChange{{Key: "other", Require: domainValueAbsent, Value: []byte("other")}}})
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("unadvanced provider conflict = %v", err)
+	}
+	if _, err := store.get(ctx, reference, "other"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("rejected mutation became visible: %v", err)
 	}
 }
 

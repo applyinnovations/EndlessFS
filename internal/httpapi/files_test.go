@@ -554,6 +554,35 @@ func TestIntegrationBatchUploadEmptyTrashAndPublicDownloadRoutes(t *testing.T) {
 	}
 }
 
+func TestIntegrationBatchUploadItemIdempotencySurvivesEnvelopeRetry(t *testing.T) {
+	env := newDriveHTTPEnvironment(t)
+	const origin = "https://drive.example.test"
+	cookies := []*http.Cookie{env.session, env.csrf}
+	body := `{"uploads":[{"path":"/stable.txt","size":3,"mediaType":"text/plain","idempotencyKey":"stable-browser-transfer-item"}]}`
+
+	first := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/batch", origin, body, cookies, driveMutationHeaders(env.csrf.Value, "batch-envelope-attempt-0001"))
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first batch = %d %s", first.Code, first.Body.String())
+	}
+	second := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/batch", origin, body, cookies, driveMutationHeaders(env.csrf.Value, "batch-envelope-attempt-0002"))
+	if second.Code != http.StatusCreated {
+		t.Fatalf("retried batch = %d %s", second.Code, second.Body.String())
+	}
+	var firstResult, secondResult struct {
+		Uploads []struct {
+			Capability *domain.UploadCapability `json:"capability"`
+		} `json:"uploads"`
+	}
+	decodeResponse(t, first, &firstResult)
+	decodeResponse(t, second, &secondResult)
+	if len(firstResult.Uploads) != 1 || len(secondResult.Uploads) != 1 || firstResult.Uploads[0].Capability == nil || secondResult.Uploads[0].Capability == nil {
+		t.Fatalf("batch results = %+v / %+v", firstResult, secondResult)
+	}
+	if firstResult.Uploads[0].Capability.UploadID != secondResult.Uploads[0].Capability.UploadID {
+		t.Fatalf("batch retry allocated a second upload: %q / %q", firstResult.Uploads[0].Capability.UploadID, secondResult.Uploads[0].Capability.UploadID)
+	}
+}
+
 func TestIntegrationBatchCopyMoveAndUploadLifecycleRoutes(t *testing.T) {
 	env := newDriveHTTPEnvironment(t)
 	const origin = "https://drive.example.test"

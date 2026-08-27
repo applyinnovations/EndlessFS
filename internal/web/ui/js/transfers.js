@@ -617,6 +617,17 @@
 
   function pumpTransfers() {
     if (!navigator.onLine) return;
+    if (!state.uploadBatchActive) {
+      const batch = nextUploadAdmissionBatch();
+      if (batch.length > 1) {
+        state.uploadBatchActive = true;
+        admitUploadBatch(batch).finally(() => {
+          state.uploadBatchActive = false;
+          scheduleTransferStructureRender();
+          pumpTransfers();
+        });
+      }
+    }
     const concurrency = automaticTransferConcurrency();
     while (state.activeTransfers < concurrency) {
       const transfer = nextQueuedTransfer();
@@ -637,9 +648,86 @@
       const index = state.transferQueueCursor % count;
       state.transferQueueCursor = (index + 1) % count;
       const transfer = state.transfers[index];
-      if (transfer.state === "queued" && transfer.file instanceof File && (!transfer.groupID || state.transferGroups.get(transfer.groupID)?.state !== "preparing")) return transfer;
+      const admitted = Boolean(transfer.pendingCapability || transfer.uploadID);
+      if (transfer.state === "queued" && transfer.file instanceof File && (admitted || !state.uploadBatchActive) && (!transfer.groupID || state.transferGroups.get(transfer.groupID)?.state !== "preparing")) return transfer;
     }
     return null;
+  }
+
+  function nextUploadAdmissionBatch() {
+    const batch = [];
+    for (const transfer of state.transfers) {
+      if (batch.length >= 100) break;
+      if (transfer.state !== "queued" || !(transfer.file instanceof File) || transfer.uploadID || transfer.pendingCapability) continue;
+      if (transfer.groupID && state.transferGroups.get(transfer.groupID)?.state === "preparing") continue;
+      batch.push(transfer);
+    }
+    return batch;
+  }
+
+  function uploadInitializationRequest(transfer, includeItemKey = false) {
+    const request = {
+      path: transfer.directory,
+      name: transfer.name,
+      size: transferFileSize(transfer),
+      mediaType: transferMediaType(transfer),
+      conflict: "rename",
+      resumable: true,
+    };
+    if (includeItemKey) request.idempotencyKey = transfer.id;
+    return request;
+  }
+
+  function uploadBatchItemError(kind) {
+    const error = new Error("Upload initialization failed.");
+    error.batchErrorKind = kind || "internal";
+    return error;
+  }
+
+  function failUploadPreparation(transfer, error) {
+    if (!["preparing", "queued"].includes(transfer.state) || transfer.cancelRequested) return;
+    if (transferFailureIsRetryable(error)) {
+      scheduleTransferRetry(transfer, error);
+      return;
+    }
+    transitionTransfer(transfer, "failed", friendlyError(error, "Upload could not be initialized."), error instanceof APIError ? error.code : error.batchErrorKind || "terminal");
+    if (!transfer.groupID) announce(`${transfer.name} failed to upload.`, true);
+  }
+
+  async function admitUploadBatch(transfers) {
+    for (const transfer of transfers) {
+      transfer.cancelRequested = false;
+      transitionTransfer(transfer, "preparing");
+    }
+    scheduleTransferStructureRender();
+    try {
+      await Promise.all(transfers.map((transfer) => ensureDirectories(transfer.baseDirectory, transfer.relativeDirectory)));
+      const pending = transfers.filter((transfer) => transfer.state === "preparing" && !transfer.cancelRequested);
+      if (!pending.length) return;
+      const response = await api("/api/v1/uploads/batch", {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey() },
+        body: { uploads: pending.map((transfer) => uploadInitializationRequest(transfer, true)) },
+      });
+      const results = response && Array.isArray(response.uploads) ? response.uploads : [];
+      if (results.length !== pending.length) throw uploadBatchItemError("internal");
+      for (const [offset, transfer] of pending.entries()) {
+        const result = results[offset];
+        if (!result || result.index !== offset || !result.capability) {
+          failUploadPreparation(transfer, uploadBatchItemError(result && result.errorKind));
+          continue;
+        }
+        transfer.uploadID = result.capability.uploadID;
+        if (transfer.cancelRequested || transfer.state === "cancelled") {
+          api(`/api/v1/uploads/${encodeURIComponent(transfer.uploadID)}`, { method: "DELETE", body: {} }).catch(() => {});
+          continue;
+        }
+        transfer.pendingCapability = result.capability;
+        transitionTransfer(transfer, "queued");
+      }
+    } catch (error) {
+      for (const transfer of transfers) failUploadPreparation(transfer, error);
+    }
   }
 
   function uploadMediaType(file, name) {
@@ -668,6 +756,7 @@
   function transferFailureIsRetryable(error) {
     if (!navigator.onLine) return true;
     if (error instanceof APIError) return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+    if (error && ["rate_limited", "unavailable", "internal"].includes(error.batchErrorKind)) return true;
     return error instanceof TypeError || (error && error.name === "NetworkError");
   }
 
@@ -736,10 +825,14 @@
     updateTransferGroup(transfer.groupID, false);
     scheduleTransferStructureRender();
     try {
-      await ensureDirectories(transfer.baseDirectory, transfer.relativeDirectory);
+      let capability = transfer.pendingCapability || null;
+      transfer.pendingCapability = null;
       const mediaType = transferMediaType(transfer);
       const size = transferFileSize(transfer);
-      const capability = await api("/api/v1/uploads", { method: "POST", headers: { "Idempotency-Key": transfer.id }, body: { path: transfer.directory, name: transfer.name, size, mediaType, conflict: "rename", resumable: true }, signal: transfer.controller.signal });
+      if (!capability) {
+        await ensureDirectories(transfer.baseDirectory, transfer.relativeDirectory);
+        capability = await api("/api/v1/uploads", { method: "POST", headers: { "Idempotency-Key": transfer.id }, body: uploadInitializationRequest(transfer), signal: transfer.controller.signal });
+      }
       transfer.uploadID = capability.uploadID;
       transitionTransfer(transfer, "uploading");
       beginTransferMeasurement(transfer);

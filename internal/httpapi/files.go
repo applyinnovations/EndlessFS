@@ -450,6 +450,7 @@ type uploadRequest struct {
 	Conflict        domain.ConflictMode `json:"conflict,omitempty"`
 	ExpectedVersion domain.Version      `json:"expectedVersion,omitempty"`
 	Resumable       bool                `json:"resumable,omitempty"`
+	IdempotencyKey  string              `json:"idempotencyKey,omitempty"`
 }
 
 func uploadPath(request uploadRequest) (domain.UserPath, error) {
@@ -470,6 +471,10 @@ func (api *identityAPI) createUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	var request uploadRequest
 	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if request.IdempotencyKey != "" {
+		writeProblem(w, r, domain.NewError(domain.ErrorInvalid, "single upload idempotency belongs in the request header"))
 		return
 	}
 	path, err := uploadPath(request)
@@ -514,7 +519,15 @@ func (api *identityAPI) createUploadBatch(w http.ResponseWriter, r *http.Request
 			results[index] = result{Index: index, ErrorKind: domain.KindOf(err)}
 			continue
 		}
-		valid = append(valid, domain.CreateUploadRequest{Path: path, Size: item.Size, MediaType: item.MediaType, Conflict: item.Conflict, ExpectedVersion: item.ExpectedVersion, Resumable: item.Resumable, IdempotencyKey: "upload-batch:" + secret.Hash(key+"\x00"+strconv.Itoa(index))})
+		itemKey := item.IdempotencyKey
+		if itemKey == "" {
+			// Preserve the original envelope-derived contract for existing
+			// clients. Browser transfer-ledger clients provide a stable item key
+			// so a lost batch response can later resume an item through either
+			// the batch or single-upload endpoint without allocating a new blob.
+			itemKey = "upload-batch:" + secret.Hash(key+"\x00"+strconv.Itoa(index))
+		}
+		valid = append(valid, domain.CreateUploadRequest{Path: path, Size: item.Size, MediaType: item.MediaType, Conflict: item.Conflict, ExpectedVersion: item.ExpectedVersion, Resumable: item.Resumable, IdempotencyKey: itemKey})
 		validIndexes = append(validIndexes, index)
 	}
 	if len(valid) != 0 {

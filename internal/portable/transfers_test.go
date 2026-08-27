@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -305,6 +306,65 @@ func TestConcurrentReplicaUploadInitiationHasOneIdempotentOutcome(t *testing.T) 
 	}
 	if results[0].UploadID != results[1].UploadID || results[0].URL != results[1].URL || results[0].Method != results[1].Method {
 		t.Fatalf("concurrent outcomes differ: %+v and %+v", results[0], results[1])
+	}
+}
+
+func TestEightReplicaDistinctUploadInitiationsSurviveSharedHeadContention(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2039, 1, 4, 4, 5, 6, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(96, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	const replicaCount = 8
+	barrier := newAggregateBarrier(replicaCount)
+	engines := make([]*portable.Engine, replicaCount)
+	schedulers := make([]*aggregateOneShotScheduler, replicaCount)
+	for index := range engines {
+		schedulers[index] = &aggregateOneShotScheduler{step: portable.StepDomainBeforeHeadCommit, barrier: barrier}
+		engines[index] = openEngine(t, backend, clock, byte(97+index), schedulers[index])
+	}
+	owner, _ := domain.ParseUserID("UFBQUFBQUFBQUFBQUFBQUA")
+	scope, _ := domain.NewScope(owner, domain.AreaLive)
+	// Register the upload domain before forcing every replica to race the same
+	// established head, matching concurrent browser admission in production.
+	if _, err := engines[0].Files().CreateUpload(context.Background(), scope, domain.CreateUploadRequest{
+		Path: domain.MustParseUserPath("/seed.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "distinct-upload-seed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, scheduler := range schedulers {
+		scheduler.Enable()
+	}
+
+	results := make([]domain.UploadCapability, replicaCount)
+	errorsFound := make([]error, replicaCount)
+	var wait sync.WaitGroup
+	for index, engine := range engines {
+		index, engine := index, engine
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			results[index], errorsFound[index] = engine.Files().CreateUpload(context.Background(), scope, domain.CreateUploadRequest{
+				Path: domain.MustParseUserPath(fmt.Sprintf("/concurrent-%d.bin", index)), Size: int64(index + 1), MediaType: "application/octet-stream", IdempotencyKey: fmt.Sprintf("distinct-concurrent-upload-%d", index),
+			})
+		}()
+	}
+	wait.Wait()
+	seen := make(map[domain.UploadID]struct{}, replicaCount)
+	for index, err := range errorsFound {
+		if err != nil {
+			t.Fatalf("replica %d CreateUpload() error = %v", index, err)
+		}
+		if _, duplicate := seen[results[index].UploadID]; duplicate {
+			t.Fatalf("replica %d reused upload ID %q", index, results[index].UploadID)
+		}
+		seen[results[index].UploadID] = struct{}{}
+		status, statusErr := engines[(index+1)%replicaCount].Files().UploadStatus(context.Background(), scope, results[index].UploadID)
+		if statusErr != nil || status.State != domain.UploadStateActive {
+			t.Fatalf("replica %d status = %+v, %v", index, status, statusErr)
+		}
 	}
 }
 

@@ -741,6 +741,12 @@ its sole visibility point. Missing, noncanonical, mistyped, misbound,
 reordered, duplicated, revision-gapped, or digest-inconsistent authority fails
 closed.
 
+When a conditional head publication loses to another mutation, the engine
+rereads the authenticated winning head and revalidates every key precondition.
+If the winning mutation changed none of the intent's keys, the engine retries
+the same mutation ID and fingerprint against that head. If any precondition
+changed, it returns the portable conflict, not a provider-generation error.
+
 Immutable domain pages bind the full domain identity, kind, level, exact key
 range, entry and byte counts, and either ordered values or child descriptors.
 The SHA-256 digest of the canonical body is the page identity. Page bodies are
@@ -1254,6 +1260,11 @@ Requirements:
 
 - The control API MUST reject file bodies and request bodies over its documented limit.
 - A single upload and a batch of up to 100 upload initializations are supported.
+- The browser coalesces concurrently queued upload initialization into batches
+  of at most 100 before starting their independently concurrent direct data
+  transfers. Each batch item carries its stable transfer-ledger idempotency key
+  so a lost batch response or browser restart can resume that exact upload
+  through either initialization route without allocating another blob.
 - The UI automatically derives concurrency within the configured one-to-eight bound from connection, device, file-size, queue-depth, and recent-recovery signals. Concurrency is not a user-controlled input.
 - Resumable upload state tracks the confirmed provider offset, never merely bytes attempted by the browser.
 - Retry uses bounded exponential backoff with jitter and distinguishes retryable from terminal errors.
@@ -2577,6 +2588,7 @@ An implementation agent should keep this checklist current and attach test names
 ### 22.8 Direct uploads and downloads
 
 - [x] Single and batch upload initialization return destination-bound capabilities.
+- [x] Concurrent browser selections use bounded batch initialization with stable per-item replay across lost responses and reloads.
 - [x] Control API rejects file bodies and enforces request-body limits.
 - [x] Browser bytes bypass control handlers in E2E instrumentation.
 - [x] Concurrent multi-file and folder upload preserve validated paths; dropped directory trees recurse and report aggregate plus per-file progress.

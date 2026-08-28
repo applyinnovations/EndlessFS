@@ -301,7 +301,10 @@
 
   async function start() {
     consumePathTokens(); wireIconControls(); wireActionTooltips(); wireEvents();
-    try { state.config = await api("/api/v1/config"); }
+    try {
+      state.config = await api("/api/v1/config");
+      installUploadWorkerPoolTestFixture();
+    }
     catch (error) { showState("drive-state", friendlyError(error, "EndlessFS configuration is unavailable."), "error"); }
     if (state.publicToken) {
       syncFileBrowserAccess("public");

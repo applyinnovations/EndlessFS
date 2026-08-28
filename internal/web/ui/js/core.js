@@ -30,6 +30,8 @@
     transferRetryTimers: new Map(),
     transferFailureTimes: [],
     transferCircuitOpenUntil: 0,
+    uploadRefreshDirectories: new Set(),
+    uploadRefreshInFlight: false,
     transferLedger: null,
     transferLedgerOwner: "",
     transferLedgerWarningShown: false,
@@ -107,7 +109,7 @@
   const transferVirtualWindowSize = 72;
   const transferVirtualWindowStep = 32;
   const transferVirtualRowHeight = 60;
-  const transferDiscoveryBatchSize = 64;
+  const transferDiscoveryBatchSize = 100;
   const transferRetryBaseDelay = 1000;
   const transferRetryMaximumDelay = 60000;
   const transferRetryLimit = 7;

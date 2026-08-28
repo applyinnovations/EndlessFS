@@ -2,6 +2,18 @@
 
 EndlessFS v1 provides the single-binary passkey identity system, private Drive control plane, direct capability data plane, trash, read-only public sharing, administration and recovery, accessible embedded browser application, and closed data-only theme system described in [the v1 specification](./v1-specification.md).
 
+The browser upload scheduler now ports the 100-worker shared-queue model from
+Google's open-source `upload-cloud-storage` action instead of embedding an
+unexplained eight-transfer maximum or guessing from CPU count and estimated
+download speed. One 100-file selection uses one batch admission, starts 100
+browser tasks, saturates all six HTTP/1.1 fixture connections, sends exactly
+100 direct data bodies and completion requests, and refreshes the directory
+once after the burst drains. Data Saver reduces the worker count to one;
+confirmed-offset recovery, cancellation, bounded retry/backoff, and the rule
+that object bytes never enter the Go service remain unchanged. Pinned upstream
+sources and licenses are recorded in
+`docs/upload-worker-pool-upstream-evidence.md`.
+
 The v0.5.1 upload-concurrency patch coalesces browser multi-file initialization
 into the existing bounded 100-item batch route before running direct provider
 transfers concurrently. Stable per-item idempotency lets a lost batch response

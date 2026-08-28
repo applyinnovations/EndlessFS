@@ -55,6 +55,112 @@ func TestVirtualAuthenticatorUsesPlatformTransport(t *testing.T) {
 	}
 }
 
+func TestE2EUpstreamGCSWorkerPoolUploadsOneHundredFilesAndCoalescesRefresh(t *testing.T) {
+	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
+		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
+	}
+	uploadGate := newUploadConcurrencyGate()
+	harness := newHarnessWithDataPlaneWrapper(t, false, uploadGate.wrap)
+	t.Cleanup(uploadGate.releaseAll)
+	client := newTestBrowser(t)
+	if err := chromedp.Run(client.ctx, chromedp.Navigate(harness.origin+"/")); err != nil {
+		t.Fatalf("open browser shell: %v", err)
+	}
+	if err := waitFor(client.ctx, `typeof window.__endlessfsUploadWorkerPoolTest === "object"`, 5*time.Second); err != nil {
+		t.Fatalf("wait for local upload worker-pool fixture: %v (%s)", err, browserStatus(client.ctx))
+	}
+
+	var proof struct {
+		FullQueue          int `json:"fullQueue"`
+		ShortQueue         int `json:"shortQueue"`
+		SaveData           int `json:"saveData"`
+		DiscoveryBatchSize int `json:"discoveryBatchSize"`
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`(() => {
+		const fixture = window.__endlessfsUploadWorkerPoolTest;
+		return {
+			fullQueue: fixture.concurrency(100, false),
+			shortQueue: fixture.concurrency(2, false),
+			saveData: fixture.concurrency(100, true),
+			discoveryBatchSize: fixture.discoveryBatchSize(),
+		};
+	})()`, &proof)); err != nil {
+		t.Fatalf("exercise upload worker pool: %v", err)
+	}
+	if proof.FullQueue != 100 {
+		t.Errorf("full-queue concurrency = %d, want upstream GCS default 100", proof.FullQueue)
+	}
+	if proof.ShortQueue != 2 {
+		t.Errorf("short-queue concurrency = %d, want 2", proof.ShortQueue)
+	}
+	if proof.SaveData != 1 {
+		t.Errorf("data-saver concurrency = %d, want 1", proof.SaveData)
+	}
+	if proof.DiscoveryBatchSize != 100 {
+		t.Errorf("discovery batch size = %d, want 100", proof.DiscoveryBatchSize)
+	}
+	bootstrapBrowser(t, client, harness)
+	requestStart := len(client.requestSnapshot())
+	uploadDirectory := t.TempDir()
+	uploadPaths := make([]string, 100)
+	for index := range uploadPaths {
+		uploadPaths[index] = filepath.Join(uploadDirectory, fmt.Sprintf("upstream-%03d.bin", index))
+		if err := os.WriteFile(uploadPaths[index], bytes.Repeat([]byte{byte(index + 1)}, 1024), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", uploadPaths, chromedp.ByQuery)); err != nil {
+		t.Fatalf("queue worker-pool uploads: %v", err)
+	}
+	if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.active() === 100`, 15*time.Second); err != nil {
+		t.Fatalf("worker pool did not start 100 upload tasks: %v (%s)", err, browserStatus(client.ctx))
+	}
+	arrivalContext, cancelArrivals := context.WithTimeout(client.ctx, 10*time.Second)
+	defer cancelArrivals()
+	if err := uploadGate.waitForMaximum(arrivalContext, 6); err != nil {
+		t.Fatalf("browser data plane did not fill its HTTP/1.1 connections: %v (maximum=%d, %s requests=%v)", err, uploadGate.maximum.Load(), browserStatus(client.ctx), client.requestSnapshot())
+	}
+	uploadGate.releaseAll()
+	if err := chromedp.Run(client.ctx, chromedp.Click(`[role="tab"][data-tab-value="complete"]`, chromedp.ByQuery)); err != nil {
+		t.Fatalf("show completed worker-pool uploads: %v", err)
+	}
+	if err := waitFor(client.ctx, `Array.from(document.querySelectorAll(".transfer-group-row.complete")).some((row) => row.textContent.includes("100 of 100 files")) && document.querySelector("#file-rows").textContent.includes("upstream-099.bin")`, 30*time.Second); err != nil {
+		var diagnostic string
+		_ = chromedp.Run(client.ctx, chromedp.Evaluate(`JSON.stringify(window.__endlessfsUploadWorkerPoolTest.snapshot())`, &diagnostic))
+		t.Fatalf("wait for worker-pool uploads and coalesced listing refresh: %v (%s scheduler=%s requests=%v)", err, browserStatus(client.ctx), diagnostic, client.requestSnapshot()[requestStart:])
+	}
+	requests := client.requestSnapshot()[requestStart:]
+	if got := countExactRequest(requests, "POST /api/v1/uploads/batch"); got != 1 {
+		t.Errorf("worker-pool upload batch admissions = %d, want 1; requests=%v", got, requests)
+	}
+	if got := countExactRequest(requests, "POST /api/v1/uploads"); got != 0 {
+		t.Errorf("worker-pool upload used %d single-item admissions; requests=%v", got, requests)
+	}
+	dataRequests := 0
+	preflightRequests := 0
+	for _, request := range requests {
+		if strings.HasPrefix(request, http.MethodPut+" /cap/upload/") || strings.HasPrefix(request, http.MethodPatch+" /cap/upload/") {
+			dataRequests += 1
+		}
+		if strings.HasPrefix(request, http.MethodOptions+" /cap/upload/") {
+			preflightRequests += 1
+		}
+	}
+	if dataRequests != len(uploadPaths) {
+		t.Errorf("direct upload requests = %d, want %d; requests=%v", dataRequests, len(uploadPaths), requests)
+	}
+	if preflightRequests != len(uploadPaths) {
+		t.Errorf("direct upload preflight requests = %d, want %d; requests=%v", preflightRequests, len(uploadPaths), requests)
+	}
+	if got := countRequestPath(requests, "/api/v1/uploads/") - countExactRequest(requests, "POST /api/v1/uploads/batch"); got != len(uploadPaths) {
+		t.Errorf("upload completion requests = %d, want %d; requests=%v", got, len(uploadPaths), requests)
+	}
+	if got := countExactRequest(requests, "GET /api/v1/files"); got != 1 {
+		t.Errorf("directory refresh requests = %d, want one coalesced refresh; requests=%v", got, requests)
+	}
+	client.assertNoExternalRequests(t, harness)
+}
+
 func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
@@ -2001,6 +2107,10 @@ func newHarness(t *testing.T) harness {
 }
 
 func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
+	return newHarnessWithDataPlaneWrapper(t, withPreviews, nil)
+}
+
+func newHarnessWithDataPlaneWrapper(t *testing.T, withPreviews bool, wrap func(http.Handler) http.Handler) harness {
 	t.Helper()
 	controlListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -2085,7 +2195,11 @@ func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
 		controlHandler = httpapi.NewCompleteApplicationWithPreview(cfg, "e2e", identityService, sessions, driveService, previewService, themeManager)
 	}
 	controlServer := &http.Server{Handler: controlHandler}
-	dataServer := &http.Server{Handler: storage}
+	var dataHandler http.Handler = storage
+	if wrap != nil {
+		dataHandler = wrap(dataHandler)
+	}
+	dataServer := &http.Server{Handler: dataHandler}
 	previewServer := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		response := httptest.NewRecorder()
 		previewStore.ServeHTTP(response, request)
@@ -2121,6 +2235,56 @@ func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
 		origin: origin, dataOrigin: dataOrigin, previewOrigin: previewOrigin, bootstrapToken: bootstrapToken,
 		repository: repository, storage: storage, previewStore: previewStore, corruptPreview: corruptPreview, clock: clock,
 	}
+}
+
+type uploadConcurrencyGate struct {
+	active  atomic.Int64
+	maximum atomic.Int64
+	arrived chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newUploadConcurrencyGate() *uploadConcurrencyGate {
+	return &uploadConcurrencyGate{arrived: make(chan struct{}, 32), release: make(chan struct{})}
+}
+
+func (gate *uploadConcurrencyGate) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if (request.Method != http.MethodPut && request.Method != http.MethodPatch) || !strings.HasPrefix(request.URL.Path, "/cap/upload/") {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		active := gate.active.Add(1)
+		defer gate.active.Add(-1)
+		for {
+			maximum := gate.maximum.Load()
+			if active <= maximum || gate.maximum.CompareAndSwap(maximum, active) {
+				break
+			}
+		}
+		select {
+		case gate.arrived <- struct{}{}:
+		default:
+		}
+		<-gate.release
+		next.ServeHTTP(writer, request)
+	})
+}
+
+func (gate *uploadConcurrencyGate) waitForMaximum(ctx context.Context, want int64) error {
+	for gate.maximum.Load() < want {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-gate.arrived:
+		}
+	}
+	return nil
+}
+
+func (gate *uploadConcurrencyGate) releaseAll() {
+	gate.once.Do(func() { close(gate.release) })
 }
 
 func seedVirtualFiles(t *testing.T, harness harness, count int) {

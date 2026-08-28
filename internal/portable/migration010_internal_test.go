@@ -48,6 +48,23 @@ func validSchema010ConservationForTest() schema010Conservation {
 	}
 }
 
+func TestSchema010ConservationInventoryMatchesIdenticalCanonicalRoots(t *testing.T) {
+	proof := validSchema010ConservationForTest()
+	proof.Roots = []schema010ConservationRoot{{
+		Namespace:         string(state.NamespacePreferences),
+		RootKey:           storageformat.StateIndexRootKey(string(state.NamespacePreferences)).String(),
+		RootDigest:        storageformat.Digest([]byte("root")),
+		EntryCount:        1,
+		ReceiptCommitment: storageformat.Digest([]byte("receipts")),
+	}}
+	proof.SourceEntryCount = 1
+	proof.RecoveredCount = 1
+
+	if !sameSchema010ConservationInventory(proof, proof) {
+		t.Fatal("identical conservation inventories did not match")
+	}
+}
+
 func TestSchema010ConservationRecordsFailClosedForEveryBindingClass(t *testing.T) {
 	valid := validSchema010ReceiptForTest(t)
 	if _, _, body, err := validateSchema010Receipt(valid); err != nil || len(body) == 0 {

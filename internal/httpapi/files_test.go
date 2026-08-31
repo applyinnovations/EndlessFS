@@ -320,6 +320,32 @@ func TestIntegrationFileHTTPDirectDataPathTrashAndShare(t *testing.T) {
 	}
 }
 
+func TestIntegrationUploadPlanningRoutesAreStrictOwnerScopedMetadataQueries(t *testing.T) {
+	env := newDriveHTTPEnvironment(t)
+	origin := "https://drive.example.test"
+	cookies := []*http.Cookie{env.session, env.csrf}
+	headers := driveMutationHeaders(env.csrf.Value, "")
+	missingSession := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/plan/sizes", origin, `{"items":[{"id":"item-1","path":"/photo.jpg","size":12}]}`, nil, headers)
+	if missingSession.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous upload plan = %d %s", missingSession.Code, missingSession.Body.String())
+	}
+	unknown := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/plan/sizes", origin, `{"items":[{"id":"item-1","path":"/photo.jpg","size":12,"providerKey":"forbidden"}]}`, cookies, headers)
+	if unknown.Code != http.StatusBadRequest {
+		t.Fatalf("upload plan unknown field = %d %s", unknown.Code, unknown.Body.String())
+	}
+	valid := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/plan/sizes", origin, `{"items":[{"id":"item-1","path":"/photo.jpg","size":12}]}`, cookies, headers)
+	if valid.Code != http.StatusServiceUnavailable || strings.Contains(valid.Body.String(), "providerKey") {
+		t.Fatalf("upload plan optional-provider boundary = %d %s", valid.Code, valid.Body.String())
+	}
+	invalidFingerprint := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/plan/fingerprints", origin, `{"token":"opaque","items":[{"id":"item-1","path":"/photo.jpg","size":12,"md5":"bad","crc32c":"bad"}]}`, cookies, headers)
+	if invalidFingerprint.Code != http.StatusServiceUnavailable {
+		// The HTTP layer is transport-only; the portable implementation owns
+		// fingerprint validation. A minimal provider deliberately reports the
+		// optional planning feature as unavailable without echoing the body.
+		t.Fatalf("upload fingerprint optional-provider boundary = %d %s", invalidFingerprint.Code, invalidFingerprint.Body.String())
+	}
+}
+
 func TestIntegrationStorageMapHierarchyIsAuthenticatedAndOwnerScoped(t *testing.T) {
 	env := newDriveHTTPEnvironment(t)
 	ctx := context.Background()

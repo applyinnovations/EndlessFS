@@ -21,6 +21,7 @@ var applicationScriptSources = []string{
 	"ui/js/files.js",
 	"ui/js/storage-map.js",
 	"ui/js/transfers.js",
+	"ui/js/upload-planner.js",
 	"ui/js/previews.js",
 	"ui/js/operations.js",
 	"ui/js/account-admin.js",
@@ -52,6 +53,7 @@ func Handler(themeCSSResolvers ...func(*http.Request) string) http.Handler {
 	}{
 		"/assets/ui.css":                     {data: applicationStylesheet, contentType: "text/css; charset=utf-8", cache: "public, max-age=3600"},
 		"/assets/ui.js":                      {data: applicationScript, contentType: "text/javascript; charset=utf-8", cache: "public, max-age=3600"},
+		"/assets/upload-hash-worker.js":      {data: mustRead("ui/js/upload-hash-worker.js"), contentType: "text/javascript; charset=utf-8", cache: "public, max-age=3600"},
 		"/assets/brand/endlessfs-mark.svg":   {data: mustRead("ui/brand/endlessfs-mark.svg"), contentType: "image/svg+xml", cache: "public, max-age=31536000, immutable", isolated: true},
 		"/assets/fonts/inter-regular.woff2":  {data: mustRead("ui/fonts/inter-regular.woff2"), contentType: "font/woff2", cache: "public, max-age=31536000, immutable"},
 		"/assets/fonts/inter-medium.woff2":   {data: mustRead("ui/fonts/inter-medium.woff2"), contentType: "font/woff2", cache: "public, max-age=31536000, immutable"},

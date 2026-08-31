@@ -91,6 +91,31 @@ type reconciliationStorage struct {
 	applyCalls int
 }
 
+type uploadPlanningStorage struct {
+	provider.NamespaceStorage
+	sizeOwner        domain.UserID
+	sizeRequest      domain.UploadSizePlanRequest
+	fingerprintOwner domain.UserID
+	fingerprintReq   domain.UploadFingerprintPlanRequest
+}
+
+func (s *uploadPlanningStorage) PlanUploadSizes(_ context.Context, owner domain.UserID, request domain.UploadSizePlanRequest) (domain.UploadSizePlan, error) {
+	s.sizeOwner = owner
+	s.sizeRequest = request
+	return domain.UploadSizePlan{
+		Token: "size-plan-token",
+		Items: []domain.UploadSizePlanDecision{{ID: request.Items[0].ID, FingerprintRequired: true}},
+	}, nil
+}
+
+func (s *uploadPlanningStorage) PlanUploadFingerprints(_ context.Context, owner domain.UserID, request domain.UploadFingerprintPlanRequest) (domain.UploadFingerprintPlan, error) {
+	s.fingerprintOwner = owner
+	s.fingerprintReq = request
+	return domain.UploadFingerprintPlan{
+		Items: []domain.UploadFingerprintPlanDecision{{ID: request.Items[0].ID, Action: domain.UploadPlanSkip}},
+	}, nil
+}
+
 func (s *reconciliationStorage) ListDuplicateGroups(context.Context, domain.UserID, domain.DuplicateGroupRequest) (domain.DuplicateGroupPage, error) {
 	return domain.DuplicateGroupPage{}, nil
 }
@@ -362,6 +387,51 @@ func TestDuplicateCatalogMethodsForwardAndFailClosedWhenUnsupported(t *testing.T
 		if err := check(); !errors.Is(err, domain.ErrUnavailable) {
 			t.Fatalf("unsupported duplicate method %d error = %v", index, err)
 		}
+	}
+}
+
+func TestUploadPlanningMethodsForwardAuthenticatedOwnerAndFailClosedWhenUnsupported(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	ids := domain.NewIDGenerator(&hashReader{})
+	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, 32)))
+	wrapper := &uploadPlanningStorage{NamespaceStorage: env.storage}
+	service, err := drive.NewService(wrapper, env.store, env.repo, ids, env.clock, key, "http://127.0.0.1:8080", "http://127.0.0.1:8081", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sizeRequest := domain.UploadSizePlanRequest{Items: []domain.UploadSizePlanItem{{
+		ID: "photo-1", Path: domain.MustParseUserPath("/photo.jpg"), Size: 12,
+	}}}
+	sizePlan, err := service.PlanUploadSizes(ctx, env.owner, sizeRequest)
+	if err != nil || sizePlan.Token != "size-plan-token" || len(sizePlan.Items) != 1 || !sizePlan.Items[0].FingerprintRequired {
+		t.Fatalf("PlanUploadSizes() = %+v, %v", sizePlan, err)
+	}
+	if wrapper.sizeOwner != env.owner || len(wrapper.sizeRequest.Items) != 1 || wrapper.sizeRequest.Items[0].Path != sizeRequest.Items[0].Path {
+		t.Fatalf("size planning delegation = owner %q request %+v", wrapper.sizeOwner, wrapper.sizeRequest)
+	}
+
+	fingerprintRequest := domain.UploadFingerprintPlanRequest{
+		Token: "size-plan-token",
+		Items: []domain.UploadFingerprintPlanItem{{
+			ID: "photo-1", Path: domain.MustParseUserPath("/photo.jpg"), Size: 12,
+			MD5: "kAFQmDzST7DWlj99KOF/cg==", CRC32C: "9ONpcA==",
+		}},
+	}
+	fingerprintPlan, err := service.PlanUploadFingerprints(ctx, env.owner, fingerprintRequest)
+	if err != nil || len(fingerprintPlan.Items) != 1 || fingerprintPlan.Items[0].Action != domain.UploadPlanSkip {
+		t.Fatalf("PlanUploadFingerprints() = %+v, %v", fingerprintPlan, err)
+	}
+	if wrapper.fingerprintOwner != env.owner || wrapper.fingerprintReq.Token != fingerprintRequest.Token {
+		t.Fatalf("fingerprint planning delegation = owner %q request %+v", wrapper.fingerprintOwner, wrapper.fingerprintReq)
+	}
+
+	if _, err := env.service.PlanUploadSizes(ctx, env.owner, sizeRequest); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unsupported PlanUploadSizes() error = %v", err)
+	}
+	if _, err := env.service.PlanUploadFingerprints(ctx, env.owner, fingerprintRequest); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unsupported PlanUploadFingerprints() error = %v", err)
 	}
 }
 

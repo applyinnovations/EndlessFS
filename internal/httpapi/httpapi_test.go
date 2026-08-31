@@ -179,6 +179,9 @@ func assertSecurityHeaders(t *testing.T, header http.Header) {
 	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "img-src 'self' blob:") {
 		t.Errorf("Content-Security-Policy does not allow validated in-memory preview images: %q", csp)
 	}
+	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "worker-src 'self'") {
+		t.Errorf("Content-Security-Policy does not constrain upload hash workers: %q", csp)
+	}
 	if csp := header.Get("Content-Security-Policy"); strings.Contains(csp, "'unsafe-inline'") {
 		t.Errorf("Content-Security-Policy permits inline styles or scripts: %q", csp)
 	}

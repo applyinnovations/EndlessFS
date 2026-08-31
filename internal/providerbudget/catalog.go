@@ -51,6 +51,8 @@ func ProductionWorkloads() []ProductionWorkload {
 
 		workload("transfer/create-upload", "transfer", "file-create-upload-cold-schema-009", "file-create-upload-warm-schema-009"),
 		workload("transfer/create-upload-batch", "transfer", "file-create-upload-batch-100-schema-009"),
+		workload("transfer/plan-upload-sizes", "derived-read", "upload-plan-index-cold-256-schema-010", "upload-plan-index-incremental-one-schema-010", "upload-plan-sizes-1000-schema-010"),
+		workload("transfer/plan-upload-fingerprints", "derived-read", "upload-plan-fingerprints-1000-schema-010"),
 		workload("transfer/upload-status", "transfer", "file-upload-status-active-schema-009"),
 		workload("transfer/complete-upload", "transfer", "file-complete-upload-schema-009"),
 		workload("transfer/abort-upload", "transfer", "file-abort-upload-schema-009"),
@@ -181,6 +183,8 @@ func ProductionProviderRoutes() []ProductionRoute {
 		protected("POST /api/v1/directories", "namespace/create-directory"),
 		protected("POST /api/v1/uploads", "transfer/create-upload"),
 		route("POST /api/v1/uploads/batch", "one to 100 upload capabilities", "session/authenticate", "transfer/create-upload-batch"),
+		route("POST /api/v1/uploads/plan/sizes", "one to 1000 local metadata items", "session/authenticate", "transfer/plan-upload-sizes"),
+		route("POST /api/v1/uploads/plan/fingerprints", "one to 1000 local fingerprints", "session/authenticate", "transfer/plan-upload-fingerprints"),
 		protected("GET /api/v1/uploads/{uploadID}", "transfer/upload-status"),
 		protected("POST /api/v1/uploads/{uploadID}/complete", "transfer/complete-upload"),
 		protected("DELETE /api/v1/uploads/{uploadID}", "transfer/abort-upload"),

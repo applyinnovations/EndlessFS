@@ -51,6 +51,8 @@ in [upload-worker-pool-upstream-evidence.md](./upload-worker-pool-upstream-evide
 | `POST` | `/api/v1/directories` | `path`, optional `conflict`, `expectedVersion` |
 | `POST` | `/api/v1/uploads` | `path` or directory `path` plus `name`, `size`, `mediaType`, `resumable`, optional conflict/version |
 | `POST` | `/api/v1/uploads/batch` | `uploads` with 1–100 upload initialization objects; each may carry a stable `idempotencyKey` for item-level replay independent of the batch request key |
+| `POST` | `/api/v1/uploads/plan/sizes` | `items` with 1–1000 client transfer `id`, virtual destination `path`, and local `size`; returns per-item target metadata, `fingerprintRequired`, and an opaque exact-phase token |
+| `POST` | `/api/v1/uploads/plan/fingerprints` | Opaque size-phase `token` and 1–1000 ambiguous items with `id`, `path`, `size`, canonical `md5`, and `crc32c`; returns `upload`, `skip`, or same-owner metadata-only `reuse` decisions |
 | `GET` | `/api/v1/uploads/{uploadID}` | Owner-scoped `active`, `completed`, `aborted`, or `expired` state with the safe provider-confirmed offset; no capability or provider-native material |
 | `POST` | `/api/v1/uploads/{uploadID}/complete` | `path`, `size`, `mediaType`; stored-object fingerprints come from provider metadata |
 | `DELETE` | `/api/v1/uploads/{uploadID}` | Abort and invalidate the upload capability |
@@ -68,6 +70,19 @@ in [upload-worker-pool-upstream-evidence.md](./upload-worker-pool-upstream-evide
 Every entry returns `fileCount`. A file has `fileCount: 1`. A directory has the persisted recursive number of descendant logical files; directories themselves are not counted. File-entry `size` is the file's byte length. Directory-entry `size`, including the entry returned for `/`, is the persisted recursive sum of all descendant file bytes in that live or trash tree. Both directory aggregates are retrieved by verifying constant-size root and manifest metadata without scanning the subtree. Empty directories return `size: 0` and `fileCount: 0`; a zero-byte file returns `size: 0` and `fileCount: 1`.
 
 In schema 009, upload capabilities target their final immutable blob key and completion publishes metadata only after provider checksum verification. Same-owner file copies reuse that blob. Folder copy, move, Trash, restore, and deletion attach or detach one immutable snapshot and update only affected namespace ancestors; their synchronous control-plane cost does not grow with the number of descendants and they do not issue provider byte copy/move/delete operations.
+
+Upload planning is a metadata-only control-plane optimization over schema-010
+namespace state. The size route may build or incrementally refresh a separate
+rebuildable projection using state-backend GET/PUT operations; the warm size
+and fingerprint routes issue only state-backend GETs. Neither route calls the
+file backend, reads an object body, accepts a provider key, or returns a raw
+checksum. The token binds the exact owner, projection root, namespace root, and
+expiry. A namespace change between phases returns conflict rather than using a
+stale source. Reuse is executed by the existing batch-copy API with the
+returned virtual source path and logical version, so its authorization,
+idempotency, atomic publication, and conflict rules remain unchanged. Detailed
+request economics and browser recovery evidence are in
+[smart-upload-planning-evidence.md](./smart-upload-planning-evidence.md).
 
 `GET /api/v1/files` returns `{ "current": Entry, "entries": [Entry...], "nextCursor": "..." }`. `current` is the directory represented by `path`; its `size`, `fileCount`, and every child row come from the same immutable manifest snapshot. Every subsequent page selected by `nextCursor` repeats that exact `current` entry even if the live directory changes between requests.
 

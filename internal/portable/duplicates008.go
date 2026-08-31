@@ -107,6 +107,18 @@ func duplicateProjectionLocationKey008(area, path string) string {
 	return "location/" + area + "/" + base64.RawURLEncoding.EncodeToString([]byte(path))
 }
 
+func duplicateProjectionSizePrefix008(size int64) string {
+	return fmt.Sprintf("size/%020d/", size)
+}
+
+func duplicateProjectionSizeKey008(value storageformat.DuplicateProjectionOccurrence) string {
+	return duplicateProjectionSizePrefix008(value.Occurrence.Size) + strings.TrimPrefix(duplicateProjectionOccurrenceKey008(value), "occurrence/file/")
+}
+
+func duplicateProjectionLiveSourceKey008(value storageformat.DuplicateProjectionOccurrence) string {
+	return "source/" + value.Occurrence.GroupID + "/" + strings.TrimPrefix(duplicateProjectionOccurrenceKey008(value), "occurrence/file/"+value.Occurrence.GroupID+"/")
+}
+
 func (s *FileStore) duplicateProjection008(ctx context.Context, owner domain.UserID) (duplicateProjectionSnapshot008, error) {
 	if !owner.Valid() {
 		return duplicateProjectionSnapshot008{}, domain.NewError(domain.ErrorInvalid, "invalid duplicate projection owner")

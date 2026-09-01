@@ -1288,6 +1288,50 @@ Requirements:
 - Durable upload intent, scope, destination, size, integrity expectations, and logical progress use canonical records. Provider-native resumable session URLs, multipart IDs, block IDs, and confirmed-native offsets are encrypted transient leases and cannot be required after a portability checkpoint.
 - Completed bytes are committed as an immutable canonical blob before the portable file-entry record becomes visible. A completion race or failed descriptor commit leaves an unreferenced blob for bounded idempotent cleanup, never a visible corrupt entry.
 - A closed-schema client ledger persists safe transfer intent, confirmed offset, retry schedule, and terminal state in IndexedDB on the originating device, partitioned by authenticated owner to prevent exposure between accounts using one browser profile. It MUST NOT persist file bytes, capability URLs or headers, session/CSRF material, provider-native identifiers, or absolute local paths. Browser file handles MAY be persisted when supported; otherwise the user reconnects the source after reload. Closing the browser pauses transfers, and cross-device/account-synchronized queue persistence is not required in v1.
+- Before a selected file or completed folder discovery begins, the browser asks
+  for one duplicate strategy: smart merge, replace changed files, only add new
+  names, or keep both. Keep-both follows the direct-upload path without content
+  planning. The other strategies submit at most 1000 `(transfer ID, virtual
+  destination, size)` records to the authenticated control plane. Files whose
+  sizes cannot match existing live files are released to the ordinary upload
+  queue immediately; planning for ambiguous files continues independently.
+- The browser computes canonical MD5 and CRC32C together, in one bounded-chunk
+  pass, only for ambiguous local files. At most two dedicated Web Workers hash
+  concurrently so hashing neither blocks the application thread nor retains a
+  whole file in memory. Local file bytes go only to those browser workers and
+  then directly to an upload capability when needed; they never enter the Go
+  service. The exact planning request carries the size and both hashes as
+  lookup hints and the response never echoes a raw checksum.
+- Exact content already at the destination is skipped. Exact content elsewhere
+  in the same owner's live namespace is reused through the existing logical
+  copy operation, which references the immutable blob and performs no
+  file-provider copy, download, upload, or delete. Changed-name handling follows
+  the selected conflict strategy and retains the existing logical-version
+  preconditions. Cross-owner reuse is forbidden.
+- Upload planning uses a separate rebuildable owner projection containing only
+  size and confirmed `(size, MD5, CRC32C)` lookup postings over live namespace
+  metadata. A cold projection streams bounded metadata pages. Later refreshes
+  compare immutable namespace roots and skip equal subtrees, so work is
+  proportional to changed branches rather than total inventory. The projection
+  is non-authoritative, never part of a portability checkpoint, and introduces
+  no storage-schema epoch. Concurrent builders publish it with native CAS and
+  never move its source revision backward.
+- The size response carries an encrypted, owner-bound, expiring token that pins
+  both the derived projection and its exact immutable namespace root. The exact
+  phase fails with a conflict if the namespace changed, causing a safe replan;
+  a pinned derived page collected by checkpoint maintenance causes the same
+  safe replan. Corrupt, expired, cross-owner, or inconsistent tokens fail closed. Stored
+  entries remain authoritative and contain only provider-attested fingerprints.
+- Duplicate strategy, planning phase, completed local fingerprints, target
+  preconditions, and outcome are part of the owner-partitioned IndexedDB
+  transfer ledger. They contain no file bytes or provider capability material.
+  Connection loss retains completed fingerprints while the same in-memory
+  `File` remains bound. Reload restarts the cheap size phase and, after any
+  source reacquisition, recomputes ambiguous fingerprints because matching
+  name, size, and modification time do not prove byte identity. Source
+  reconnection is required only when the browser no longer holds a safe file
+  handle. Cancellation terminates an active hash worker and cannot leave an
+  unresolved planning task.
 - The owner-scoped upload-status response identifies `active`, `completed`, `aborted`, or `expired` state and returns the safe confirmed offset without returning capability or provider-native material. This bounded per-upload lookup is the reconciliation boundary; it is not an account-wide transfer-list API.
 - A completion that loses the owner namespace-head CAS to an unrelated file
   mutation rereads authoritative namespace state and retries the same mutation

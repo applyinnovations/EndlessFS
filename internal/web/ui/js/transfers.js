@@ -69,6 +69,10 @@
       state: transfer.state, confirmed: Math.max(0, transfer.confirmed || 0), uploadID: transfer.uploadID || "",
       retryCount: Math.max(0, transfer.retryCount || 0), nextRetryAt: Math.max(0, transfer.nextRetryAt || 0),
       errorCode: String(transfer.errorCode || "").slice(0, 80), error: String(transfer.error || "").slice(0, 240),
+      strategy: transfer.strategy || "keep-both", planPhase: transfer.planPhase || "done",
+      md5: transfer.md5 || "", crc32c: transfer.crc32c || "", planOutcome: transfer.planOutcome || "",
+      targetExists: Boolean(transfer.targetExists), targetKind: transfer.targetKind || "",
+      targetVersion: transfer.targetVersion || "", uploadConflict: transfer.uploadConflict || "rename",
       createdAt: transfer.createdAt || Date.now(), updatedAt: Date.now(),
     };
   }
@@ -80,6 +84,7 @@
       baseDirectory: group.baseDirectory, directories: [...(group.directories || [])], transferIDs: [...group.transferIDs],
       totalSize: group.totalSize || 0, state: group.state, error: String(group.error || "").slice(0, 240),
       cancelled: Boolean(group.cancelled), discoveryDone: group.discoveryDone !== false,
+      strategy: group.strategy || "keep-both",
       createdAt: group.createdAt || Date.now(), updatedAt: Date.now(),
     };
   }
@@ -154,10 +159,26 @@
       const file = await source.handle.getFile();
       if (file.size !== transferFileSize(transfer) || (transfer.lastModified && file.lastModified !== transfer.lastModified)) return false;
       transfer.file = file;
+      resetUploadPlanForReconnectedSource(transfer);
       return true;
     } catch {
       return false;
     }
+  }
+
+  function resetUploadPlanForReconnectedSource(transfer) {
+    if (transfer.strategy === "keep-both" || transfer.uploadID || ["complete", "cancelled"].includes(transfer.state)) return;
+    // A newly acquired File object is not cryptographically identical merely
+    // because its name, size, and modification time match. Never apply a
+    // fingerprint persisted for a prior local source instance.
+    transfer.planPhase = "size-pending";
+    transfer.planOutcome = "";
+    transfer.md5 = "";
+    transfer.crc32c = "";
+    transfer.targetExists = false;
+    transfer.targetKind = "";
+    transfer.targetVersion = "";
+    transfer.uploadConflict = "rename";
   }
 
   async function reconcileRestoredTransfer(transfer) {
@@ -190,6 +211,9 @@
       transfer.state = "needs-source";
       transfer.errorCode = "source_required";
       transfer.error = "Reconnect the source to continue.";
+    } else if (transfer.planPhase && transfer.planPhase !== "done") {
+      transfer.state = navigator.onLine ? "preparing" : "paused";
+      transfer.error = navigator.onLine ? "Resuming duplicate check." : "Waiting for a network connection.";
     } else if (transfer.state === "retry-wait" && transfer.nextRetryAt > Date.now()) {
       state.transferRetryTimers.set(transfer.id, window.setTimeout(() => {
         state.transferRetryTimers.delete(transfer.id);
@@ -240,6 +264,7 @@
       if (state.transfers.length) {
         renderTransfers();
         setTransferSheetOpen(false);
+        resumeUploadPlans();
         pumpTransfers();
       }
     } catch {
@@ -290,13 +315,14 @@
     const inputs = Array.from(files).map((value) => value instanceof File ? { file: value, relativePath: value.webkitRelativePath || value.name } : value)
       .filter((value) => value && value.file instanceof File && typeof value.relativePath === "string");
     const groupID = options.groupID || (options.groupName || inputs.length > 1 ? idempotencyKey() : "");
+    const strategy = options.strategy || "keep-both";
     const queued = [];
     let group = groupID ? state.transferGroups.get(groupID) : null;
     if (groupID && !group) {
       group = {
         id: groupID, name: options.groupName || `${inputs.length} files`, baseDirectory, directories: [], transferIDs: [],
         totalSize: 0, state: "queued", error: "", refreshed: false, cancelled: false, failureAnnounced: false,
-        discoveryDone: options.discoveryDone !== false, createdAt: Date.now(),
+        discoveryDone: options.discoveryDone !== false, strategy, createdAt: Date.now(),
       };
       state.transferGroups.set(groupID, group);
     }
@@ -313,8 +339,10 @@
       const directory = relativeDirectory ? joinPath(baseDirectory, relativeDirectory) : baseDirectory;
       queued.push({
         id: idempotencyKey(), file: input.file, name, directory, baseDirectory, relativeDirectory,
-        relativePath: input.relativePath, groupID, state: "queued", confirmed: 0, error: "", controller: null, uploadID: "",
+        relativePath: input.relativePath, groupID, state: strategy === "keep-both" ? "queued" : "preparing", confirmed: 0, error: "", controller: null, uploadID: "",
         size: input.file.size, mediaType: uploadMediaType(input.file, name), lastModified: input.file.lastModified,
+        strategy, planPhase: strategy === "keep-both" ? "done" : "size-pending", md5: "", crc32c: "", planOutcome: "",
+        targetExists: false, targetKind: "", targetVersion: "", uploadConflict: "rename",
         sourceHandle: input.sourceHandle || null, speedBps: 0, lastProgressAt: 0, lastProgressBytes: 0,
         recoveryFailures: 0, retryCount: 0, nextRetryAt: 0, errorCode: "", createdAt: Date.now(),
       });
@@ -339,18 +367,20 @@
     state.transferFilter = "current";
     if (group) {
       group.discoveryDone = options.discoveryDone !== false;
-      group.state = group.transferIDs.length ? "queued" : "preparing";
+      group.strategy = strategy;
+      group.state = group.transferIDs.length ? (strategy === "keep-both" ? "queued" : "preparing") : "preparing";
       await persistTransferGroup(group);
       if (!group.transferIDs.length && group.discoveryDone) prepareTransferGroup(group);
     }
     setTransferSheetOpen(true);
     rebuildTransferProjection();
     renderTransfers();
+    if (strategy !== "keep-both" && options.discoveryDone !== false) planUploadTransfers(queued, group);
     pumpTransfers();
     return groupID;
   }
 
-  async function queueFolderFiles(files) {
+  async function queueFolderFiles(files, strategy = "keep-both") {
     const groups = new Map();
     const looseFiles = [];
     for (const file of Array.from(files).filter((value) => value instanceof File)) {
@@ -369,8 +399,8 @@
       group.files.push({ file, relativePath });
       for (let length = 1; length < components.length; length += 1) group.directories.add(components.slice(0, length).join("/"));
     }
-    for (const [groupName, group] of groups) await queueFiles(group.files, { groupName, directories: [...group.directories] });
-    if (looseFiles.length) await queueFiles(looseFiles);
+    for (const [groupName, group] of groups) await queueFiles(group.files, { groupName, directories: [...group.directories], strategy });
+    if (looseFiles.length) await queueFiles(looseFiles, { strategy });
   }
 
   function readLegacyFile(entry) {
@@ -408,7 +438,7 @@
     for await (const child of handle.values()) await discoverFileSystemHandle(child, relativePath, onFile, onDirectory);
   }
 
-  async function discoverTransferGroup(name, discover) {
+  async function discoverTransferGroup(name, discover, strategy = "keep-both") {
     const groupID = idempotencyKey();
     const files = [];
     const directories = [];
@@ -416,7 +446,7 @@
       if (!files.length && !directories.length) return;
       const pendingFiles = files.splice(0, files.length);
       const pendingDirectories = directories.splice(0, directories.length);
-      await queueFiles(pendingFiles, { groupID, groupName: name, directories: pendingDirectories, discoveryDone: false });
+      await queueFiles(pendingFiles, { groupID, groupName: name, directories: pendingDirectories, discoveryDone: false, strategy });
     };
     await discover(async (input) => {
       files.push(input);
@@ -430,7 +460,8 @@
     if (group) {
       group.discoveryDone = true;
       if (!group.transferIDs.length) await prepareTransferGroup(group);
-      else updateTransferGroup(groupID, false);
+      else if (strategy === "keep-both") updateTransferGroup(groupID, false);
+      else planUploadTransfers(group.transferIDs.map((id) => state.transferByID.get(id)).filter(Boolean), group);
       await persistTransferGroup(group);
       rebuildTransferProjection();
       renderTransfers();
@@ -438,10 +469,10 @@
     }
   }
 
-  async function queueDroppedItems(dataTransfer) {
+  async function queueDroppedItems(dataTransfer, strategy = "keep-both") {
     const items = Array.from(dataTransfer.items || []).filter((item) => item.kind === "file");
     if (!items.length) {
-      queueFiles(dataTransfer.files || []);
+      queueFiles(dataTransfer.files || [], { strategy });
       return;
     }
     const looseFiles = [];
@@ -452,7 +483,7 @@
       if (handle) {
         usedEntryAPI = true;
         if (handle.kind === "directory") {
-          await discoverTransferGroup(handle.name, (onFile, onDirectory) => discoverFileSystemHandle(handle, "", onFile, onDirectory));
+          await discoverTransferGroup(handle.name, (onFile, onDirectory) => discoverFileSystemHandle(handle, "", onFile, onDirectory), strategy);
         } else {
           await discoverFileSystemHandle(handle, "", async (input) => { looseFiles.push(input); }, async () => {});
         }
@@ -463,7 +494,7 @@
       if (legacyEntry) {
         usedEntryAPI = true;
         if (legacyEntry.isDirectory) {
-          await discoverTransferGroup(legacyEntry.name, (onFile, onDirectory) => discoverLegacyEntry(legacyEntry, "", onFile, onDirectory));
+          await discoverTransferGroup(legacyEntry.name, (onFile, onDirectory) => discoverLegacyEntry(legacyEntry, "", onFile, onDirectory), strategy);
         } else {
           await discoverLegacyEntry(legacyEntry, "", async (input) => { looseFiles.push(input); }, async () => {});
         }
@@ -472,8 +503,8 @@
       const file = typeof item.getAsFile === "function" ? item.getAsFile() : null;
       if (file) looseFiles.push({ file, relativePath: file.name });
     }
-    if (looseFiles.length) await queueFiles(looseFiles);
-    if (!usedEntryAPI && !looseFiles.length) await queueFiles(dataTransfer.files || []);
+    if (looseFiles.length) await queueFiles(looseFiles, { strategy });
+    if (!usedEntryAPI && !looseFiles.length) await queueFiles(dataTransfer.files || [], { strategy });
   }
 
   async function ensureDirectory(path) {
@@ -522,6 +553,7 @@
       }
       if (group.cancelled) return;
       group.state = group.transferIDs.length ? "queued" : "complete";
+      if (group.transferIDs.length) updateTransferGroup(group.id, false);
       if (!group.transferIDs.length && state.currentDirectory === group.baseDirectory) loadDirectory(group.baseDirectory);
       pumpTransfers();
     } catch (error) {
@@ -699,9 +731,10 @@
       name: transfer.name,
       size: transferFileSize(transfer),
       mediaType: transferMediaType(transfer),
-      conflict: "rename",
+      conflict: transfer.uploadConflict || "rename",
       resumable: true,
     };
+    if (request.conflict === "replace" && transfer.targetVersion) request.expectedVersion = transfer.targetVersion;
     if (includeItemKey) request.idempotencyKey = transfer.id;
     return request;
   }
@@ -831,9 +864,11 @@
     let resumed = 0;
     for (const transfer of state.transfers) {
       if (!['paused', 'retry-wait'].includes(transfer.state) || !(transfer.file instanceof File)) continue;
+      if (transfer.planPhase && transfer.planPhase !== "done") continue;
       transitionTransfer(transfer, "queued");
       resumed += 1;
     }
+    resumeUploadPlans();
     if (resumed) {
       rebuildTransferProjection();
       renderTransfers();
@@ -957,6 +992,10 @@
 
   async function cancelTransfer(transfer) {
     transfer.cancelRequested = true;
+    cancelUploadFingerprint(transfer);
+    if (!transfer.groupID) state.transferPlanControllers.get(transfer.id)?.abort();
+    if (!transfer.groupID) window.clearTimeout(state.uploadPlanRetryTimers.get(transfer.id));
+    if (!transfer.groupID) state.uploadPlanRetryTimers.delete(transfer.id);
     if (transfer.controller) transfer.controller.abort();
     if (transfer.uploadID) {
       try { await api(`/api/v1/uploads/${encodeURIComponent(transfer.uploadID)}`, { method: "DELETE", body: {} }); } catch { /* already expired or complete */ }
@@ -971,7 +1010,8 @@
     if (!groupID) return;
     const group = state.transferGroups.get(groupID);
     if (!group || group.state === "preparing") return;
-    const summary = group.transferSummary || aggregateTransferSummary(group.transferIDs.map((id) => state.transferByID.get(id)).filter(Boolean));
+    const groupTransfers = group.transferIDs.map((id) => state.transferByID.get(id)).filter(Boolean);
+    const summary = group.transferSummary || aggregateTransferSummary(groupTransfers);
     group.transferSummary = summary;
     if (group.cancelled) group.state = "cancelled";
     else if (group.discoveryDone !== false && summary.totalCount > 0 && summary.counts.complete === summary.totalCount) group.state = "complete";
@@ -988,17 +1028,21 @@
     }
     if (group.state === "failed" && !group.failureAnnounced) {
       group.failureAnnounced = true;
-      if (notify) announce(`${group.name} has ${transfers.filter((transfer) => transfer.state === "failed").length} failed uploads.`, true);
+      if (notify) announce(`${group.name} has ${groupTransfers.filter((transfer) => transfer.state === "failed").length} failed uploads.`, true);
     }
   }
 
   async function cancelTransferGroup(group) {
     group.cancelled = true;
     group.state = "cancelled";
+    state.transferPlanControllers.get(group.id)?.abort();
+    window.clearTimeout(state.uploadPlanRetryTimers.get(group.id));
+    state.uploadPlanRetryTimers.delete(group.id);
     const cancelled = state.transfers.filter((item) => item.groupID === group.id && ["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(item.state));
     const uploadIDs = [];
     for (const transfer of cancelled) {
       transfer.cancelRequested = true;
+      cancelUploadFingerprint(transfer);
       if (transfer.controller) transfer.controller.abort();
       if (transfer.uploadID) uploadIDs.push(transfer.uploadID);
       window.clearTimeout(state.transferRetryTimers.get(transfer.id));
@@ -1039,7 +1083,8 @@
         transfer.confirmed = 0;
         transfer.uploadID = "";
       }
-      transfer.state = "queued";
+      transfer.cancelRequested = false;
+      transfer.state = transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued";
       transfer.error = "";
       transfer.speedBps = 0;
       transfer.lastProgressAt = 0;
@@ -1061,10 +1106,11 @@
       renderTransfers();
       return;
     }
-    group.state = "queued";
+    group.state = state.transfers.some((item) => item.groupID === group.id && item.planPhase && item.planPhase !== "done") ? "preparing" : "queued";
     persistTransferGroup(group);
     rebuildTransferProjection();
     renderTransfers();
+    resumeUploadPlans();
     pumpTransfers();
   }
 
@@ -1074,7 +1120,8 @@
       transfer.confirmed = 0;
       transfer.uploadID = "";
     }
-    transfer.state = transfer.fixture ? "uploading" : "queued";
+    transfer.cancelRequested = false;
+    transfer.state = transfer.fixture ? "uploading" : transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued";
     transfer.error = "";
     transfer.speedBps = transfer.fixture ? 4 * (1 << 20) : 0;
     transfer.lastProgressAt = 0;
@@ -1083,7 +1130,10 @@
     transfer.retryCount = 0;
     transfer.nextRetryAt = 0;
     queueTransferPersistence(transfer);
-    if (!transfer.fixture) pumpTransfers();
+    if (!transfer.fixture) {
+      resumeUploadPlans();
+      pumpTransfers();
+    }
     rebuildTransferProjection();
     renderTransfers();
   }
@@ -1099,19 +1149,21 @@
       }
       transfer.retryCount = 0;
       transfer.nextRetryAt = 0;
-      transitionTransfer(transfer, transfer.fixture ? "uploading" : "queued");
+      transfer.cancelRequested = false;
+      transitionTransfer(transfer, transfer.fixture ? "uploading" : transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued");
       if (transfer.fixture) transfer.speedBps = 4 * (1 << 20);
     }
     for (const group of state.transferGroups.values()) {
       if (failedGroupIDs.has(group.id)) {
         group.cancelled = false;
         group.failureAnnounced = false;
-        group.state = "queued";
+        group.state = failed.some((transfer) => transfer.groupID === group.id && transfer.planPhase && transfer.planPhase !== "done") ? "preparing" : "queued";
         persistTransferGroup(group);
       }
     }
     rebuildTransferProjection();
     renderTransfers();
+    resumeUploadPlans();
     pumpTransfers();
     showToast(failed.length ? `${failed.length} failed transfers returned to the queue.` : "No failed transfers can be retried without reconnecting their source.", failed.length ? "success" : "info");
   }
@@ -1126,11 +1178,13 @@
       const file = supplied.get(transfer.relativePath) || supplied.get(transfer.name);
       if (!file || file.size !== transferFileSize(transfer) || (transfer.lastModified && file.lastModified !== transfer.lastModified)) continue;
       transfer.file = file;
-      transitionTransfer(transfer, "queued");
+      resetUploadPlanForReconnectedSource(transfer);
+      transitionTransfer(transfer, transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued");
       connected += 1;
     }
     rebuildTransferProjection();
     renderTransfers();
+    resumeUploadPlans();
     pumpTransfers();
     showToast(`${connected} of ${candidates.length} transfer sources reconnected.`, connected === candidates.length ? "success" : "warning");
   }
@@ -1146,7 +1200,8 @@
         const file = await handle.getFile();
         if (file.size !== transferFileSize(transfer) || (transfer.lastModified && file.lastModified !== transfer.lastModified)) continue;
         transfer.file = file;
-        transitionTransfer(transfer, "queued");
+        resetUploadPlanForReconnectedSource(transfer);
+        transitionTransfer(transfer, transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued");
         connected += 1;
       } catch {
         // Explicit file selection below remains available when a stored handle
@@ -1156,6 +1211,7 @@
     const remaining = candidates.filter((transfer) => transfer.state === "needs-source");
     if (connected) {
       renderTransfers();
+      resumeUploadPlans();
       pumpTransfers();
     }
     if (!remaining.length) {
@@ -1252,7 +1308,7 @@
     const percent = transferPercent(transfer);
     let eta = "Waiting";
     if (transfer.state === "uploading") eta = transfer.speedBps > 0 ? formatDuration((total - confirmed) / transfer.speedBps) : "Calculating ETA";
-    else if (transfer.state === "preparing") eta = "Preparing";
+    else if (transfer.state === "preparing") eta = transfer.planPhase && transfer.planPhase !== "done" ? "Checking duplicates" : "Preparing";
     else if (transfer.state === "retry-wait") eta = transfer.nextRetryAt > Date.now() ? `Retry in ${formatDuration((transfer.nextRetryAt - Date.now()) / 1000)}` : "Retrying";
     else if (transfer.state === "paused") eta = "Offline";
     else if (transfer.state === "needs-source") eta = "Source needed";
@@ -1325,7 +1381,7 @@
     const tail = document.createElement("div");
     tail.className = "transfer-row-tail";
     if (transfers.some((transfer) => transfer.state === "needs-source")) tail.append(iconButton("folder-up", `Reconnect upload source for ${group.name}`, () => openTransferReconnect(group.id), "transfer-row-actions", "Reconnect source"));
-    if (["preparing", "queued", "uploading"].includes(group.state)) tail.append(iconButton("x", `Cancel folder upload ${group.name}`, () => cancelTransferGroup(group), "transfer-row-actions", "Cancel folder upload"));
+    if (["preparing", "queued", "uploading", "retry-wait", "paused"].includes(group.state)) tail.append(iconButton("x", `Cancel folder upload ${group.name}`, () => cancelTransferGroup(group), "transfer-row-actions", "Cancel folder upload"));
     if (["failed", "cancelled"].includes(group.state)) tail.append(iconButton("refresh", `Retry folder upload ${group.name}`, () => retryTransferGroup(group), "transfer-row-actions", "Retry folder upload"));
     const expanded = state.expandedTransferGroups.has(group.id);
     const disclosure = iconButton(expanded ? "chevron-up" : "chevron-down", `${expanded ? "Collapse" : "Expand"} upload group ${group.name}`, () => {
@@ -1341,7 +1397,10 @@
     header.append(text("strong", group.name, "transfer-row-main"), tail);
     const metrics = document.createElement("div");
     metrics.className = "transfer-row-metrics";
-    const metricText = group.state === "preparing" && !transfers.some((transfer) => transfer.state !== "queued")
+    const duplicatePlanning = transfers.some((transfer) => transfer.planPhase && transfer.planPhase !== "done" && !["cancelled", "failed"].includes(transfer.state));
+    const metricText = duplicatePlanning
+      ? `${summary.percent}% · Checking duplicates · ${formatRate(summary.speedBps)}`
+      : group.state === "preparing" && !transfers.some((transfer) => transfer.state !== "queued")
       ? `${summary.percent}% · Preparing · ${formatRate(summary.speedBps)}`
       : `${summary.percent}% · ${summary.eta} · ${formatRate(summary.speedBps)}`;
     metrics.append(

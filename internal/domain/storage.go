@@ -192,6 +192,68 @@ type CompleteUploadRequest struct {
 	MediaType string
 }
 
+// UploadSizePlanItem is safe local-file metadata used to decide whether the
+// browser needs to calculate a content fingerprint. It never carries bytes or
+// a provider object identifier.
+type UploadSizePlanItem struct {
+	ID   string   `json:"id"`
+	Path UserPath `json:"path"`
+	Size int64    `json:"size"`
+}
+
+type UploadSizePlanRequest struct {
+	Items []UploadSizePlanItem `json:"items"`
+}
+
+type UploadSizePlanDecision struct {
+	ID                  string    `json:"id"`
+	FingerprintRequired bool      `json:"fingerprintRequired"`
+	TargetExists        bool      `json:"targetExists"`
+	TargetKind          EntryKind `json:"targetKind,omitempty"`
+	TargetSize          int64     `json:"targetSize,omitempty"`
+	TargetVersion       Version   `json:"targetVersion,omitempty"`
+}
+
+type UploadSizePlan struct {
+	Token string                   `json:"token"`
+	Items []UploadSizePlanDecision `json:"items"`
+}
+
+type UploadFingerprintPlanItem struct {
+	ID     string   `json:"id"`
+	Path   UserPath `json:"path"`
+	Size   int64    `json:"size"`
+	MD5    string   `json:"md5"`
+	CRC32C string   `json:"crc32c"`
+}
+
+type UploadFingerprintPlanRequest struct {
+	Token string                      `json:"token"`
+	Items []UploadFingerprintPlanItem `json:"items"`
+}
+
+type UploadPlanAction string
+
+const (
+	UploadPlanUpload UploadPlanAction = "upload"
+	UploadPlanSkip   UploadPlanAction = "skip"
+	UploadPlanReuse  UploadPlanAction = "reuse"
+)
+
+type UploadFingerprintPlanDecision struct {
+	ID            string           `json:"id"`
+	Action        UploadPlanAction `json:"action"`
+	SourcePath    *UserPath        `json:"sourcePath,omitempty"`
+	SourceVersion Version          `json:"sourceVersion,omitempty"`
+	TargetExists  bool             `json:"targetExists"`
+	TargetKind    EntryKind        `json:"targetKind,omitempty"`
+	TargetVersion Version          `json:"targetVersion,omitempty"`
+}
+
+type UploadFingerprintPlan struct {
+	Items []UploadFingerprintPlanDecision `json:"items"`
+}
+
 type CreateDownloadRequest struct {
 	Path        UserPath
 	Version     Version

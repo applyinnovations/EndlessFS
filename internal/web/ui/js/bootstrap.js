@@ -99,12 +99,18 @@
     byID("new-folder-button").addEventListener("click", createFolder);
     byID("upload-input").addEventListener("change", async (event) => {
       if (state.transferReconnectGroup !== null) await reconnectTransferSources(event.target.files);
-      else await queueFiles(event.target.files);
+      else {
+        const strategy = await chooseUploadStrategy(event.target.files.length === 1 ? event.target.files[0].name : `${event.target.files.length} files`);
+        if (strategy) await queueFiles(event.target.files, { strategy });
+      }
       event.target.value = "";
     });
     byID("folder-input").addEventListener("change", async (event) => {
       if (state.transferReconnectGroup !== null) await reconnectTransferSources(event.target.files);
-      else await queueFolderFiles(event.target.files);
+      else {
+        const strategy = await chooseUploadStrategy("this folder");
+        if (strategy) await queueFolderFiles(event.target.files, strategy);
+      }
       event.target.value = "";
     });
     const drop = byID("drop-target");
@@ -114,7 +120,9 @@
       if (state.browserAccess !== "owner") return;
       event.preventDefault();
       drop.classList.remove("dragging");
-      try { await queueDroppedItems(event.dataTransfer); }
+      const strategy = await chooseUploadStrategy("the dropped items");
+      if (!strategy) return;
+      try { await queueDroppedItems(event.dataTransfer, strategy); }
       catch (error) { announce(friendlyError(error, "Dropped files could not be read."), true); }
     });
     drop.addEventListener("keydown", (event) => { if (state.browserAccess === "owner" && event.target === drop && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); byID("upload-input").click(); } });
@@ -258,7 +266,7 @@
         }
       }
     });
-    window.addEventListener("online", resumePausedTransfers);
+    window.addEventListener("online", () => { resumeUploadPlans(); resumePausedTransfers(); });
     window.addEventListener("offline", () => {
       for (const transfer of state.transfers.filter((item) => item.state === "retry-wait")) transitionTransfer(transfer, "paused", "Waiting for a network connection.", "offline");
       renderTransfers();
@@ -304,6 +312,7 @@
     try {
       state.config = await api("/api/v1/config");
       installUploadWorkerPoolTestFixture();
+      installUploadPlannerTestFixture();
     }
     catch (error) { showState("drive-state", friendlyError(error, "EndlessFS configuration is unavailable."), "error"); }
     if (state.publicToken) {

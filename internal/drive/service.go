@@ -197,6 +197,22 @@ func (s *Service) CreateUploadBatch(ctx context.Context, userID domain.UserID, r
 	return s.uploadBatch.CreateUploadBatch(ctx, scope, requests)
 }
 
+func (s *Service) PlanUploadSizes(ctx context.Context, userID domain.UserID, request domain.UploadSizePlanRequest) (domain.UploadSizePlan, error) {
+	planner, ok := s.storage.(provider.UploadPlanningStorage)
+	if !ok {
+		return domain.UploadSizePlan{}, domain.NewError(domain.ErrorUnavailable, "upload planning is not available")
+	}
+	return planner.PlanUploadSizes(ctx, userID, request)
+}
+
+func (s *Service) PlanUploadFingerprints(ctx context.Context, userID domain.UserID, request domain.UploadFingerprintPlanRequest) (domain.UploadFingerprintPlan, error) {
+	planner, ok := s.storage.(provider.UploadPlanningStorage)
+	if !ok {
+		return domain.UploadFingerprintPlan{}, domain.NewError(domain.ErrorUnavailable, "upload planning is not available")
+	}
+	return planner.PlanUploadFingerprints(ctx, userID, request)
+}
+
 func (s *Service) UploadStatus(ctx context.Context, userID domain.UserID, uploadID domain.UploadID) (domain.UploadStatus, error) {
 	scope, err := liveScope(userID)
 	if err != nil {

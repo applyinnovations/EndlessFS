@@ -54,6 +54,13 @@ type UploadBatchStorage interface {
 	CreateUploadBatch(context.Context, domain.Scope, []domain.CreateUploadRequest) ([]domain.UploadCapability, error)
 }
 
+// UploadPlanningStorage exposes metadata-only duplicate lookup. Local file
+// bytes stay in the browser and stored object bytes stay on the data plane.
+type UploadPlanningStorage interface {
+	PlanUploadSizes(context.Context, domain.UserID, domain.UploadSizePlanRequest) (domain.UploadSizePlan, error)
+	PlanUploadFingerprints(context.Context, domain.UserID, domain.UploadFingerprintPlanRequest) (domain.UploadFingerprintPlan, error)
+}
+
 // NamespaceStorage is the complete file-control contract required by the
 // application runtime. Trash placement and bounded batches are mandatory
 // atomic namespace mutations, never optional fallbacks to per-item state

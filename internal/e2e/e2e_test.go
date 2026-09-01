@@ -30,6 +30,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/httpapi"
 	"github.com/applyinnovations/endlessfs/internal/identity"
+	"github.com/applyinnovations/endlessfs/internal/integrity"
 	"github.com/applyinnovations/endlessfs/internal/preview"
 	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
 	previewmemory "github.com/applyinnovations/endlessfs/internal/preview/memory"
@@ -53,6 +54,49 @@ func TestVirtualAuthenticatorUsesPlatformTransport(t *testing.T) {
 	if options.Transport != cdpwebauthn.AuthenticatorTransportInternal {
 		t.Fatalf("virtual authenticator transport = %q, want internal", options.Transport)
 	}
+}
+
+func TestE2EUploadPlannerHashesMD5AndCRC32CInOneWorkerPass(t *testing.T) {
+	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
+		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
+	}
+	harness := newHarness(t)
+	client := newTestBrowser(t)
+	if err := chromedp.Run(client.ctx, chromedp.Navigate(harness.origin+"/")); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitFor(client.ctx, `typeof window.__endlessfsUploadPlannerTest === "object"`, 5*time.Second); err != nil {
+		t.Fatalf("wait for upload planner fixture: %v (%s)", err, browserStatus(client.ctx))
+	}
+	var result struct {
+		MD5         string `json:"md5"`
+		CRC32C      string `json:"crc32c"`
+		WorkerLimit int    `json:"workerLimit"`
+		BatchSize   int    `json:"batchSize"`
+		LargeMD5    string `json:"largeMD5"`
+		LargeCRC32C string `json:"largeCRC32C"`
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`(async () => {
+		const fixture = window.__endlessfsUploadPlannerTest;
+		const small = await fixture.fingerprint("123456789");
+		const large = await fixture.fingerprintRepeated("a", (4 << 20) + 17);
+		return {...small, largeMD5: large.md5, largeCRC32C: large.crc32c, workerLimit: fixture.workerLimit, batchSize: fixture.batchSize};
+	})()`, &result, func(parameters *runtime.EvaluateParams) *runtime.EvaluateParams {
+		return parameters.WithAwaitPromise(true)
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if result.MD5 != "JfnnlDI7RTiF9RgfG2JNCw" || result.CRC32C != "4waSgw" {
+		t.Fatalf("browser fingerprint = %+v", result)
+	}
+	large := bytes.Repeat([]byte("a"), (4<<20)+17)
+	if result.LargeMD5 != integrity.MD5(large) || result.LargeCRC32C != integrity.CRC32C(large) {
+		t.Fatalf("multi-chunk browser fingerprint = %+v", result)
+	}
+	if result.WorkerLimit != 2 || result.BatchSize != 1000 {
+		t.Fatalf("upload planner bounds = %+v", result)
+	}
+	client.assertNoExternalRequests(t, harness)
 }
 
 func TestE2EUpstreamGCSWorkerPoolUploadsOneHundredFilesAndCoalescesRefresh(t *testing.T) {

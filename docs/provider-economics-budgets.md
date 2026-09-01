@@ -122,3 +122,29 @@ while its explicitly parallel critical p95 is 479.804 ms. A 128-object
 checkpoint garbage sweep performs 163 requests, costs $0.0001014, reads no file
 body, and has a modeled 2.860128 s critical p95. The full exact table is the
 versioned GCS schema-009 fixture under `internal/objectstore/gcs/economics`.
+
+## Smart-upload planning
+
+The schema-010 smart-upload fixture ratchets four observed paths. These are
+measurements of the implemented architecture, not design targets chosen in
+advance. All four have exactly zero file-backend requests and therefore zero
+stored-object reads, rewrites, downloads, uploads, or deletes. Warm request
+counts are identical for one item and 1000 items because one request evaluates
+a batch against cached immutable projection pages.
+
+| Workload | Items/change | Requests | Modeled cost (USD) | p50 | p95 | p99 | File requests |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Cold projection build | 256 live files | 15 | $0.0000336 | 360.430 ms | 1.077430 s | 2.652430 s | 0 |
+| Incremental projection refresh | 1 added file in 256 | 14 | $0.0000240 | 325.627 ms | 975.627 ms | 2.405627 s | 0 |
+| Warm size plan | 1000 candidates | 6 | $0.0000024 | 134.998 ms | 392.998 ms | 962.998 ms | 0 |
+| Warm exact-fingerprint plan | 1000 candidates | 4 | $0.0000016 | 90.930 ms | 262.930 ms | 642.930 ms | 0 |
+
+The projection build cost is paid lazily once per owner/projection loss. Normal
+updates Merkle-diff the prior and current immutable live roots, skip shared
+subtrees, and write only changed postings. The fixture separately asserts that
+cold and incremental paths use only state GET/PUT, warm paths use only state
+GET, and all request count, price, aggregate latency, critical latency, and
+role totals match the append-only GCS ratchet. Exact content reuse then composes
+with the existing metadata-only batch-copy workload; it does not invent a
+file-provider transfer path. See
+[smart-upload-planning-evidence.md](./smart-upload-planning-evidence.md).

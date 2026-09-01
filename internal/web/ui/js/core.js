@@ -40,6 +40,11 @@
     transferReconnectGroup: null,
     transferSheetOpener: null,
     transferFixtureTimer: 0,
+    transferPlanControllers: new Map(),
+    uploadPlanRetryTimers: new Map(),
+    uploadHashWorkers: [],
+    uploadHashQueue: [],
+    uploadHashPending: new Map(),
     themes: [],
     passkeys: [],
     shares: [],
@@ -105,7 +110,7 @@
   const maximumViewerPreviewCacheEntries = 8;
   const maximumViewerPreviewCacheBytes = 64 << 20;
   const transferLedgerDatabaseName = "endlessfs-transfer-ledger-v1";
-  const transferLedgerVersion = 1;
+  const transferLedgerVersion = 2;
   const transferVirtualWindowSize = 72;
   const transferVirtualWindowStep = 32;
   const transferVirtualRowHeight = 60;
@@ -606,11 +611,16 @@
     const suspendedTransfers = state.transfers.filter((transfer) => !["complete", "cancelled"].includes(transfer.state));
     for (const transfer of suspendedTransfers) {
       transfer.suspendedByLogout = true;
+      cancelUploadFingerprint(transfer);
       if (transfer.controller) transfer.controller.abort();
       window.clearTimeout(state.transferRetryTimers.get(transfer.id));
       state.transferRetryTimers.delete(transfer.id);
       transitionTransfer(transfer, "paused", "Paused on this device.", "signed_out");
     }
+    for (const controller of state.transferPlanControllers.values()) controller.abort();
+    state.transferPlanControllers.clear();
+    for (const timer of state.uploadPlanRetryTimers.values()) window.clearTimeout(timer);
+    state.uploadPlanRetryTimers.clear();
     await Promise.all([
       ...suspendedTransfers.map(persistTransferItem),
       ...[...state.transferGroups.values()].map(persistTransferGroup),

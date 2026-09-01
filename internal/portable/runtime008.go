@@ -124,6 +124,14 @@ func (s *FileStore) ListDuplicateGroups(ctx context.Context, userID domain.UserI
 	return s.listDuplicateGroups008(ctx, userID, request)
 }
 
+func (s *FileStore) PlanUploadSizes(ctx context.Context, userID domain.UserID, request domain.UploadSizePlanRequest) (domain.UploadSizePlan, error) {
+	return s.planUploadSizes008(ctx, userID, request)
+}
+
+func (s *FileStore) PlanUploadFingerprints(ctx context.Context, userID domain.UserID, request domain.UploadFingerprintPlanRequest) (domain.UploadFingerprintPlan, error) {
+	return s.planUploadFingerprints008(ctx, userID, request)
+}
+
 func (s *FileStore) ListDuplicateOccurrences(ctx context.Context, userID domain.UserID, request domain.DuplicateOccurrenceRequest) (domain.DuplicateOccurrencePage, error) {
 	return s.listDuplicateOccurrences008(ctx, userID, request)
 }

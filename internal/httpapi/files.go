@@ -27,6 +27,8 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/directories", api.createDirectory)
 	mux.HandleFunc("POST /api/v1/uploads", api.createUpload)
 	mux.HandleFunc("POST /api/v1/uploads/batch", api.createUploadBatch)
+	mux.HandleFunc("POST /api/v1/uploads/plan/sizes", api.planUploadSizes)
+	mux.HandleFunc("POST /api/v1/uploads/plan/fingerprints", api.planUploadFingerprints)
 	mux.HandleFunc("GET /api/v1/uploads/{uploadID}", api.uploadStatus)
 	mux.HandleFunc("POST /api/v1/uploads/{uploadID}/complete", api.completeUpload)
 	mux.HandleFunc("DELETE /api/v1/uploads/{uploadID}", api.abortUpload)
@@ -46,6 +48,40 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/public/shares/{token}/stat", api.publicShareStat)
 	mux.HandleFunc("POST /api/v1/public/shares/{token}/downloads", api.publicShareDownload)
 	mux.HandleFunc("GET /s/{token}", api.publicShareShell)
+}
+
+func (api *identityAPI) planUploadSizes(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.mutation(w, r)
+	if !ok {
+		return
+	}
+	var request domain.UploadSizePlanRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	result, err := api.drive.PlanUploadSizes(r.Context(), current.Record.UserID, request)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (api *identityAPI) planUploadFingerprints(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.mutation(w, r)
+	if !ok {
+		return
+	}
+	var request domain.UploadFingerprintPlanRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	result, err := api.drive.PlanUploadFingerprints(r.Context(), current.Record.UserID, request)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (api *identityAPI) duplicateGroups(w http.ResponseWriter, r *http.Request) {

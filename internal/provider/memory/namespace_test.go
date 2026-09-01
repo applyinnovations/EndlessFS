@@ -134,6 +134,18 @@ func TestNamespaceExtensionDenialMatrix(t *testing.T) {
 		func() error { _, err := provider.DeleteFromTrash(ctx, owner, "nested/id", "key"); return err },
 		func() error { _, err := provider.BatchCopyMove(ctx, owner, nil, false, "key"); return err },
 		func() error { _, err := provider.BatchMoveToTrash(ctx, owner, nil, "key"); return err },
+		func() error {
+			_, err := provider.BatchRestoreFromTrash(ctx, owner, nil, domain.ConflictFail, "key")
+			return err
+		},
+		func() error {
+			_, err := provider.BatchRestoreFromTrash(ctx, owner, []string{"nested/id"}, domain.ConflictFail, "key")
+			return err
+		},
+		func() error {
+			_, err := provider.BatchRestoreFromTrash(ctx, owner, []string{"same", "same"}, domain.ConflictFail, "key")
+			return err
+		},
 		func() error { _, err := provider.BatchDeleteFromTrash(ctx, owner, nil, "key"); return err },
 		func() error {
 			_, err := provider.BatchDeleteFromTrash(ctx, owner, []string{"nested/id"}, "key")
@@ -152,6 +164,9 @@ func TestNamespaceExtensionDenialMatrix(t *testing.T) {
 	cancel()
 	if _, err := provider.RestoreFromTrash(canceled, owner, "missing", domain.ConflictFail, "key"); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("canceled restore = %v", err)
+	}
+	if _, err := provider.BatchRestoreFromTrash(canceled, owner, []string{"missing"}, domain.ConflictFail, "key"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled batch restore = %v", err)
 	}
 	if _, err := provider.DeleteFromTrash(canceled, owner, "missing", "key"); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("canceled delete = %v", err)

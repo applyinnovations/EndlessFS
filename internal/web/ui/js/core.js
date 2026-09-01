@@ -120,6 +120,7 @@
   const transferRetryLimit = 7;
   const transferProgressSampleWeight = 0.35;
   let toastTimer = 0;
+  const browserPageSize = 1000;
 
   class APIError extends Error {
     constructor(response, problem) {
@@ -418,14 +419,12 @@
     const undo = button("Undo", async () => {
       undo.disabled = true;
       try {
-        for (const item of recoverable) {
-          const operation = await api(`/api/v1/trash/${encodeURIComponent(item.trashID)}/restore`, {
-            method: "POST",
-            headers: { "Idempotency-Key": idempotencyKey() },
-            body: { conflict: "rename" },
-          });
-          await watchOperation(operation.operationID || operation.id);
-        }
+        const operation = await api("/api/v1/trash/restore", {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey() },
+          body: { trashIDs: recoverable.map((item) => item.trashID), conflict: "rename" },
+        });
+        await awaitOperation(operation);
         clearToast();
         announce(`${recoverable.length} item${recoverable.length === 1 ? "" : "s"} restored.`);
         await loadDirectory(state.currentDirectory);

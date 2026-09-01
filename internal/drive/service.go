@@ -426,11 +426,39 @@ func (s *Service) Restore(ctx context.Context, userID domain.UserID, trashID str
 	return s.trash.RestoreFromTrash(ctx, userID, trashID, conflict, idempotencyKey)
 }
 
+func (s *Service) RestoreBatch(ctx context.Context, userID domain.UserID, trashIDs []string, conflict domain.ConflictMode, idempotencyKey string) (BatchResult, error) {
+	if err := validateIdempotencyKey(idempotencyKey); err != nil {
+		return BatchResult{}, err
+	}
+	if len(trashIDs) < 1 || len(trashIDs) > MaxBatchItems {
+		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "restore batch must contain 1 to 10000 items")
+	}
+	result, err := s.batch.BatchRestoreFromTrash(ctx, userID, trashIDs, conflict, idempotencyKey)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	return driveBatchResult(result), nil
+}
+
 func (s *Service) PermanentDelete(ctx context.Context, userID domain.UserID, trashID, idempotencyKey string) (domain.Operation, error) {
 	if err := validateIdempotencyKey(idempotencyKey); err != nil {
 		return domain.Operation{}, err
 	}
 	return s.trash.DeleteFromTrash(ctx, userID, trashID, idempotencyKey)
+}
+
+func (s *Service) PermanentDeleteBatch(ctx context.Context, userID domain.UserID, trashIDs []string, idempotencyKey string) (BatchResult, error) {
+	if err := validateIdempotencyKey(idempotencyKey); err != nil {
+		return BatchResult{}, err
+	}
+	if len(trashIDs) < 1 || len(trashIDs) > MaxBatchItems {
+		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "permanent-delete batch must contain 1 to 10000 items")
+	}
+	result, err := s.batch.BatchDeleteFromTrash(ctx, userID, trashIDs, idempotencyKey)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	return driveBatchResult(result), nil
 }
 
 func (s *Service) EmptyTrash(ctx context.Context, userID domain.UserID, confirmed bool, idempotencyKey string) (BatchResult, error) {

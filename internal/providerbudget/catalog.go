@@ -19,6 +19,61 @@ type ProductionRoute struct {
 	Workloads   []string
 }
 
+// BudgetExecution composes an exact provider ratchet into a production-scale
+// workflow. Executions captures logical repetition; Parallelism records the
+// actual bounded worker pool used for critical-path estimates without changing
+// aggregate request count or marginal cost.
+type BudgetExecution struct {
+	Budget      string
+	Executions  int64
+	Parallelism int64
+}
+
+// ProductionScaleScenario is the cardinality audit for workflows where a UI
+// state or one user intent can represent many logical items. The component
+// budgets remain the append-only ceilings; this catalog prevents client/API
+// composition from silently multiplying a cheap primitive per rendered item.
+type ProductionScaleScenario struct {
+	ID              string
+	Category        string
+	LogicalItems    int64
+	BrowserRequests int64
+	RequestBasis    string
+	Executions      []BudgetExecution
+}
+
+func execution(budget string, executions, parallelism int64) BudgetExecution {
+	return BudgetExecution{Budget: budget, Executions: executions, Parallelism: parallelism}
+}
+
+// ProductionScaleScenarios records the largest deterministic workloads in the
+// production surface. A zero-execution scenario is intentional proof that
+// dormant client state does not contact the provider.
+func ProductionScaleScenarios() []ProductionScaleScenario {
+	return []ProductionScaleScenario{
+		{ID: "restored-transfer-ledger-needs-source", Category: "startup", LogicalItems: 10_000, BrowserRequests: 0, RequestBasis: "Dormant history is local IndexedDB state; provider reconciliation is deferred until a source file is reacquired."},
+		{ID: "browse-live-directory", Category: "namespace-read", LogicalItems: 10_000, BrowserRequests: 10, RequestBasis: "Ten sequential 1,000-entry pages.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 10, 1), execution("namespace-list-page-1000-schema-010", 10, 1)}},
+		{ID: "browse-trash", Category: "namespace-read", LogicalItems: 10_000, BrowserRequests: 10, RequestBasis: "Ten sequential 1,000-entry pages.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 10, 1), execution("namespace-list-page-1000-schema-010", 10, 1)}},
+		{ID: "copy-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("batch-copy-10000-schema-009", 1, 1)}},
+		{ID: "move-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("batch-move-10000-schema-009", 1, 1)}},
+		{ID: "trash-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("trash-batch-10000-schema-009", 1, 1)}},
+		{ID: "restore-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("restore-batch-10000-schema-010", 1, 1)}},
+		{ID: "permanent-delete-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("empty-trash-10000-schema-009", 1, 1)}},
+		{ID: "trash-selection-replay", Category: "recovery", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "Retry reads the durable paged outcome and performs no publication.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("trash-batch-10000-replay-schema-010", 1, 1)}},
+		{ID: "restore-selection-replay", Category: "recovery", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "Retry reads the durable paged outcome and performs no publication.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("restore-batch-10000-replay-schema-010", 1, 1)}},
+		{ID: "permanent-delete-selection-replay", Category: "recovery", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "Retry reads the durable paged outcome and performs no publication.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("empty-trash-10000-replay-schema-010", 1, 1)}},
+		{ID: "trash-selection-denied", Category: "denial", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "A stale final item validates the closed snapshot and writes nothing.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("trash-batch-10000-denied-schema-010", 1, 1)}},
+		{ID: "smart-upload-size-planning", Category: "transfer-planning", LogicalItems: 10_000, BrowserRequests: 10, RequestBasis: "Ten metadata-only requests of 1,000 local sizes.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 10, 1), execution("upload-plan-sizes-1000-schema-010", 10, 1)}},
+		{ID: "smart-upload-all-size-candidates", Category: "transfer-planning", LogicalItems: 10_000, BrowserRequests: 20, RequestBasis: "Size planning followed by fingerprints only for every size candidate.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 20, 1), execution("upload-plan-sizes-1000-schema-010", 10, 1), execution("upload-plan-fingerprints-1000-schema-010", 10, 1)}},
+		{ID: "upload-admission", Category: "transfer-active", LogicalItems: 10_000, BrowserRequests: 100, RequestBasis: "One hundred batches of 100; each item necessarily creates one provider upload session.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 100, 1), execution("file-create-upload-batch-100-schema-009", 100, 1)}},
+		{ID: "upload-completion", Category: "transfer-active", LogicalItems: 10_000, BrowserRequests: 10_000, RequestBasis: "Only transfers whose object data completed call completion; the configured worker pool bounds concurrency.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 10_000, 100), execution("file-complete-upload-schema-009", 10_000, 100)}},
+		{ID: "upload-cancellation", Category: "transfer-active", LogicalItems: 10_000, BrowserRequests: 10_000, RequestBasis: "Only live provider sessions are aborted; the configured control worker pool prevents an unbounded request surge.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 10_000, 100), execution("file-abort-upload-schema-009", 10_000, 100)}},
+		{ID: "visible-grid-preview-resolution", Category: "preview", LogicalItems: 10_000, BrowserRequests: 32, RequestBasis: "The logical directory is virtualized; only the bounded visible/overscan window resolves previews.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 32, 2), execution("namespace-stat-schema-009", 32, 2), execution("preview-latest", 32, 2), execution("preview-create-download", 32, 2)}},
+		{ID: "checkpoint-garbage-collection", Category: "maintenance", LogicalItems: 128, BrowserRequests: 0, RequestBasis: "One quiescent maintenance run over the calibrated garbage set.", Executions: []BudgetExecution{execution("maintenance-checkpoint-garbage-128-schema-009", 1, 1)}},
+		{ID: "domain-compaction", Category: "maintenance", LogicalItems: 300, BrowserRequests: 0, RequestBasis: "One bounded compaction run over the calibrated domain history.", Executions: []BudgetExecution{execution("maintenance-domain-compaction-300-schema-009", 1, 1)}},
+	}
+}
+
 func workload(id, category string, budgets ...string) ProductionWorkload {
 	return ProductionWorkload{ID: id, Category: category, Budgets: append([]string(nil), budgets...)}
 }
@@ -36,17 +91,17 @@ func ProductionWorkloads() []ProductionWorkload {
 		workload("state/mutate", "control", "state-mutate-two-records-schema-009"),
 		workload("state/transact", "control", "state-transact-two-domains-schema-009"),
 
-		workload("namespace/list", "namespace-read", "namespace-list-page-schema-009"),
+		workload("namespace/list", "namespace-read", "namespace-list-page-schema-009", "namespace-list-page-1000-schema-010"),
 		workload("namespace/lookup-children", "namespace-read", "namespace-lookup-children-schema-009"),
 		workload("namespace/stat", "namespace-read", "namespace-stat-schema-009"),
 		workload("namespace/create-directory", "namespace-mutation", "file-create-directory-schema-009"),
 		workload("namespace/copy", "namespace-mutation", "direct-copy-one-file-schema-009", "batch-copy-10000-schema-009"),
 		workload("namespace/move", "namespace-mutation", "direct-move-one-file-schema-009", "batch-move-10000-schema-009"),
 		workload("namespace/batch-copy-move", "namespace-mutation", "batch-copy-10000-schema-009", "batch-move-10000-schema-009"),
-		workload("namespace/trash", "namespace-mutation", "trash-one-file-schema-009", "trash-batch-10000-schema-009"),
-		workload("namespace/restore", "namespace-mutation", "restore-one-file-schema-009"),
+		workload("namespace/trash", "namespace-mutation", "trash-one-file-schema-009", "trash-batch-10000-schema-009", "trash-batch-10000-replay-schema-010", "trash-batch-10000-denied-schema-010"),
+		workload("namespace/restore", "namespace-mutation", "restore-one-file-schema-009", "restore-batch-10000-schema-010", "restore-batch-10000-replay-schema-010"),
 		workload("namespace/delete", "namespace-mutation", "direct-delete-one-file-schema-009"),
-		workload("namespace/delete-trash", "namespace-mutation", "permanent-delete-one-file-schema-009", "empty-trash-10000-schema-009"),
+		workload("namespace/delete-trash", "namespace-mutation", "permanent-delete-one-file-schema-009", "empty-trash-10000-schema-009", "empty-trash-10000-replay-schema-010"),
 		workload("namespace/get-operation", "namespace-read", "namespace-get-operation-schema-009"),
 
 		workload("transfer/create-upload", "transfer", "file-create-upload-cold-schema-009", "file-create-upload-warm-schema-009"),
@@ -194,6 +249,8 @@ func ProductionProviderRoutes() []ProductionRoute {
 		route("POST /api/v1/files/trash", "one to 10000 selected roots", "session/authenticate", "namespace/trash"),
 		protected("GET /api/v1/operations/{operationID}", "namespace/get-operation"),
 		route("GET /api/v1/trash", "one metadata page", "session/authenticate", "namespace/list"),
+		route("POST /api/v1/trash/restore", "one to 10000 trash roots", "session/authenticate", "namespace/restore"),
+		route("POST /api/v1/trash/delete", "one to 10000 trash roots", "session/authenticate", "namespace/delete-trash"),
 		route("POST /api/v1/trash/{trashID}/restore", "one trash root", "session/authenticate", "namespace/restore"),
 		route("DELETE /api/v1/trash/{trashID}", "one trash root", "session/authenticate", "namespace/delete-trash"),
 		route("POST /api/v1/trash/empty", "up to 10000 trash roots", "session/authenticate", "namespace/delete-trash"),

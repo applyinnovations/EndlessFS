@@ -580,6 +580,51 @@ func TestIntegrationBatchUploadEmptyTrashAndPublicDownloadRoutes(t *testing.T) {
 	}
 }
 
+func TestIntegrationSelectedTrashRestoreAndDeleteUseAtomicBatchRoutes(t *testing.T) {
+	env := newDriveHTTPEnvironment(t)
+	const origin = "https://drive.example.test"
+	cookies := []*http.Cookie{env.session, env.csrf}
+	createHTTPFile(t, env, env.session, env.csrf, "/batch-one.txt", "one", "batch-route-upload-0001")
+	createHTTPFile(t, env, env.session, env.csrf, "/batch-two.txt", "two", "batch-route-upload-0002")
+
+	trash := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"paths":["/batch-one.txt","/batch-two.txt"]}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-route-trash-0001"))
+	if trash.Code != http.StatusAccepted {
+		t.Fatalf("trash = %d %s", trash.Code, trash.Body.String())
+	}
+	var trashed drive.BatchResult
+	decodeResponse(t, trash, &trashed)
+	if len(trashed.Items) != 2 {
+		t.Fatalf("trash result = %+v", trashed)
+	}
+	restoreBody, _ := json.Marshal(map[string]any{"trashIDs": []string{trashed.Items[0].TrashID, trashed.Items[1].TrashID}, "conflict": "fail"})
+	restored := performRequest(t, env.handler, http.MethodPost, "/api/v1/trash/restore", origin, string(restoreBody), cookies, driveMutationHeaders(env.csrf.Value, "batch-route-restore-0001"))
+	if restored.Code != http.StatusAccepted || !bytes.Contains(restored.Body.Bytes(), []byte(`"state":"succeeded"`)) {
+		t.Fatalf("restore = %d %s", restored.Code, restored.Body.String())
+	}
+
+	trash = performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"paths":["/batch-one.txt","/batch-two.txt"]}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-route-trash-0002"))
+	if trash.Code != http.StatusAccepted {
+		t.Fatalf("retrash = %d %s", trash.Code, trash.Body.String())
+	}
+	decodeResponse(t, trash, &trashed)
+	deleteBody, _ := json.Marshal(map[string]any{"trashIDs": []string{trashed.Items[0].TrashID, trashed.Items[1].TrashID}})
+	deleted := performRequest(t, env.handler, http.MethodPost, "/api/v1/trash/delete", origin, string(deleteBody), cookies, driveMutationHeaders(env.csrf.Value, "batch-route-delete-0001"))
+	if deleted.Code != http.StatusAccepted || !bytes.Contains(deleted.Body.Bytes(), []byte(`"state":"succeeded"`)) {
+		t.Fatalf("delete = %d %s", deleted.Code, deleted.Body.String())
+	}
+	listing := performRequest(t, env.handler, http.MethodGet, "/api/v1/trash", "", "", []*http.Cookie{env.session}, nil)
+	if listing.Code != http.StatusOK || !bytes.Contains(listing.Body.Bytes(), []byte(`"items":[]`)) {
+		t.Fatalf("trash after delete = %d %s", listing.Code, listing.Body.String())
+	}
+
+	for _, target := range []string{"/api/v1/trash/restore", "/api/v1/trash/delete"} {
+		invalid := performRequest(t, env.handler, http.MethodPost, target, origin, `{"trashIDs":[]}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-route-invalid-0001"))
+		if invalid.Code != http.StatusBadRequest {
+			t.Fatalf("invalid %s = %d %s", target, invalid.Code, invalid.Body.String())
+		}
+	}
+}
+
 func TestIntegrationBatchUploadItemIdempotencySurvivesEnvelopeRetry(t *testing.T) {
 	env := newDriveHTTPEnvironment(t)
 	const origin = "https://drive.example.test"
@@ -790,7 +835,9 @@ func TestIntegrationCrossUserPrivateEndpointMatrix(t *testing.T) {
 		{name: "move", method: http.MethodPost, target: "/api/v1/files/move", body: `{"source":"/foreign/owned.txt","destination":"/stolen.txt","expectedSource":"` + string(ownerEntry.Version) + `"}`, want: http.StatusNotFound, key: "cross-attack-move-00001"},
 		{name: "operation", method: http.MethodGet, target: "/api/v1/operations/" + string(ownerOperation.ID), want: http.StatusNotFound},
 		{name: "restore", method: http.MethodPost, target: "/api/v1/trash/" + ownerTrash.Items[0].TrashID + "/restore", body: `{}`, want: http.StatusNotFound, key: "cross-attack-restore-001"},
+		{name: "batch restore", method: http.MethodPost, target: "/api/v1/trash/restore", body: `{"trashIDs":["` + ownerTrash.Items[0].TrashID + `"],"conflict":"fail"}`, want: http.StatusNotFound, key: "cross-attack-batch-restore-1"},
 		{name: "permanent delete", method: http.MethodDelete, target: "/api/v1/trash/" + ownerTrash.Items[0].TrashID, body: `{}`, want: http.StatusNotFound, key: "cross-attack-delete-0001"},
+		{name: "batch permanent delete", method: http.MethodPost, target: "/api/v1/trash/delete", body: `{"trashIDs":["` + ownerTrash.Items[0].TrashID + `"]}`, want: http.StatusNotFound, key: "cross-attack-batch-delete-01"},
 		{name: "create share", method: http.MethodPost, target: "/api/v1/shares", body: `{"path":"/foreign/owned.txt"}`, want: http.StatusNotFound, key: "cross-attack-share-00001"},
 		{name: "revoke share", method: http.MethodDelete, target: "/api/v1/shares/" + ownerShare.Share.ShareID, body: `{}`, want: http.StatusNotFound},
 	}

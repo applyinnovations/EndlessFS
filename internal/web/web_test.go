@@ -183,7 +183,7 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 		"transferVirtualWindowSize", "renderTransferWindow", "retryFailedTransfers",
 		"discoverLegacyEntry", "discoverFileSystemHandle",
 		"requestPermission", "reconnectStoredTransferSources",
-		"automaticTransferConcurrency", "aggregateTransferSummary", "recordTransferProgress", "scheduleTransferRender",
+		"automaticTransferConcurrency", "configuredTransferConcurrency", "runTransferControlPool", "aggregateTransferSummary", "recordTransferProgress", "scheduleTransferRender",
 		"transferByID", "nextQueuedTransfer", "updateRenderedTransferProgress", "scheduleTransferStructureRender",
 		"dataset.appearance", `state.themeAssets["brand.mark"]`, `state.themeAssets["brand.favicon"]`,
 	} {
@@ -225,6 +225,9 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 		if strings.Contains(script, forbidden) {
 			t.Errorf("upload concurrency retains unproven adaptive primitive %q", forbidden)
 		}
+	}
+	if strings.Contains(script, "Promise.all(uploadIDs.map") {
+		t.Error("group cancellation can issue one simultaneous provider request per transfer")
 	}
 	for _, forbidden := range []string{"maximumRenderedTransferGroups", "maximumRenderedGroupFiles", "summarizeTransferRows", "more files"} {
 		if strings.Contains(script, forbidden) {
@@ -1003,7 +1006,9 @@ func TestSelectionActionsFloatWithoutReplacingDriveControls(t *testing.T) {
 		`if (accessChanged) { state.selected.clear(); updateSelection(); }`,
 		`async function restoreSelectedTrash()`,
 		`async function deleteSelectedTrash()`,
-		`for (const entry of entries) {`,
+		`api("/api/v1/trash/restore"`,
+		`api("/api/v1/trash/delete"`,
+		`async function awaitOperation(result)`,
 		`selectionBar.setAttribute("aria-busy", "true");`,
 		`byID("restore-selected").addEventListener("click", restoreSelectedTrash);`,
 		`byID("delete-selected-permanently").addEventListener("click", deleteSelectedTrash);`,
@@ -1641,8 +1646,9 @@ func TestRoutineTrashIsImmediateAndRecoverable(t *testing.T) {
 	}
 	script := string(applicationScript)
 	for _, required := range []string{
-		"showTrashUndo", `/api/v1/trash/${encodeURIComponent(item.trashID)}/restore`,
-		`body: { conflict: "rename" }`,
+		"showTrashUndo", `api("/api/v1/trash/restore"`,
+		`trashIDs: recoverable.map((item) => item.trashID)`,
+		`conflict: "rename"`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("routine trash flow is missing %q", required)

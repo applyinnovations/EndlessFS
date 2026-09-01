@@ -201,7 +201,7 @@
     }
     const activeReuse = reuse.filter(({ transfer }) => !transfer.cancelRequested);
     if (activeReuse.length) {
-      await Promise.all(activeReuse.map(({ transfer }) => ensureDirectories(transfer.baseDirectory, transfer.relativeDirectory)));
+      await Promise.all(activeReuse.map(({ transfer }) => ensureTransferDirectories(transfer)));
       // The first stable transfer ID makes each 1000-item planning batch
       // independently replayable even when one folder spans several batches.
       const reuseKey = `${activeReuse[0].transfer.id}-content-reuse`;

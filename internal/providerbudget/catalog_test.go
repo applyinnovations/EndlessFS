@@ -75,7 +75,7 @@ func TestProviderBudgetCatalogCoversApplicationContractsAndRatchets(t *testing.T
 			"MoveToTrash": "namespace/trash", "ListTrash": "namespace/list", "RestoreFromTrash": "namespace/restore", "DeleteFromTrash": "namespace/delete-trash",
 		}},
 		{name: "provider.BatchStorage", typeOf: reflect.TypeOf((*provider.BatchStorage)(nil)).Elem(), methods: map[string]string{
-			"BatchCopyMove": "namespace/batch-copy-move", "BatchMoveToTrash": "namespace/trash", "BatchDeleteFromTrash": "namespace/delete-trash", "GetBatchOperation": "namespace/get-operation",
+			"BatchCopyMove": "namespace/batch-copy-move", "BatchMoveToTrash": "namespace/trash", "BatchRestoreFromTrash": "namespace/restore", "BatchDeleteFromTrash": "namespace/delete-trash", "GetBatchOperation": "namespace/get-operation",
 		}},
 		{name: "provider.UploadBatchStorage", typeOf: reflect.TypeOf((*provider.UploadBatchStorage)(nil)).Elem(), methods: map[string]string{
 			"CreateUploadBatch": "transfer/create-upload-batch",

@@ -352,6 +352,54 @@ func (p *Provider) BatchMoveToTrash(ctx context.Context, owner domain.UserID, re
 	return result, err
 }
 
+func (p *Provider) BatchRestoreFromTrash(ctx context.Context, owner domain.UserID, trashIDs []string, conflict domain.ConflictMode, idempotencyKey string) (domain.NamespaceBatchResult, error) {
+	if !owner.Valid() || len(trashIDs) < 1 || len(trashIDs) > 10_000 || validateIdempotencyKey(idempotencyKey) != nil {
+		return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid restore-trash batch")
+	}
+	normalized, err := domain.NormalizeConflictMode(conflict)
+	if err != nil {
+		return domain.NamespaceBatchResult{}, err
+	}
+	parts := make([]string, 0, len(trashIDs)+1)
+	parts = append(parts, string(normalized))
+	parts = append(parts, trashIDs...)
+	fingerprint := operationFingerprint(parts...)
+	if prior, found, replayErr := p.replayMemoryBatch(owner, "batch-restore-trash", idempotencyKey, fingerprint); found || replayErr != nil {
+		return prior, replayErr
+	}
+	seen := make(map[string]struct{}, len(trashIDs))
+	for _, trashID := range trashIDs {
+		if validateMemoryTrashID(trashID) != nil {
+			return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid trash ID")
+		}
+		if _, duplicate := seen[trashID]; duplicate {
+			return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "duplicate trash ID")
+		}
+		seen[trashID] = struct{}{}
+	}
+	snapshot := p.namespaceSnapshot()
+	items := make([]domain.NamespaceBatchItemResult, 0, len(trashIDs))
+	for index, trashID := range trashIDs {
+		p.mu.Lock()
+		record := p.trashEntries[memoryTrashKey(owner, trashID)]
+		p.mu.Unlock()
+		operation, restoreErr := p.RestoreFromTrash(ctx, owner, trashID, normalized, idempotencyKey+":"+strconv.Itoa(index))
+		if restoreErr != nil || operation.State != domain.OperationSucceeded {
+			p.restoreNamespaceSnapshot(snapshot)
+			if restoreErr == nil {
+				restoreErr = domain.NewError(domain.ErrorUnavailable, "mock batch item failed")
+			}
+			return domain.NamespaceBatchResult{}, restoreErr
+		}
+		items = append(items, domain.NamespaceBatchItemResult{Source: domain.MustParseUserPath("/" + trashID), Destination: record.OriginalPath, TrashID: trashID})
+	}
+	result, finishErr := p.finishMemoryBatch(owner, "batch-restore-trash", idempotencyKey, fingerprint, items)
+	if finishErr != nil {
+		p.restoreNamespaceSnapshot(snapshot)
+	}
+	return result, finishErr
+}
+
 func (p *Provider) BatchDeleteFromTrash(ctx context.Context, owner domain.UserID, trashIDs []string, idempotencyKey string) (domain.NamespaceBatchResult, error) {
 	if !owner.Valid() || len(trashIDs) < 1 || len(trashIDs) > 10_000 || validateIdempotencyKey(idempotencyKey) != nil {
 		return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid delete-trash batch")

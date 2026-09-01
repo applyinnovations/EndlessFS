@@ -42,6 +42,7 @@ type TrashStorage interface {
 type BatchStorage interface {
 	BatchCopyMove(context.Context, domain.UserID, []domain.CopyRequest, bool, string) (domain.NamespaceBatchResult, error)
 	BatchMoveToTrash(context.Context, domain.UserID, []domain.TrashRequest, string) (domain.NamespaceBatchResult, error)
+	BatchRestoreFromTrash(context.Context, domain.UserID, []string, domain.ConflictMode, string) (domain.NamespaceBatchResult, error)
 	BatchDeleteFromTrash(context.Context, domain.UserID, []string, string) (domain.NamespaceBatchResult, error)
 	GetBatchOperation(context.Context, domain.UserID, domain.OperationID) (domain.Operation, error)
 }

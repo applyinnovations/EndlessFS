@@ -38,6 +38,8 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/files/trash", api.trashFiles)
 	mux.HandleFunc("GET /api/v1/operations/{operationID}", api.operation)
 	mux.HandleFunc("GET /api/v1/trash", api.listTrash)
+	mux.HandleFunc("POST /api/v1/trash/restore", api.restoreTrashBatch)
+	mux.HandleFunc("POST /api/v1/trash/delete", api.deleteTrashBatch)
 	mux.HandleFunc("POST /api/v1/trash/{trashID}/restore", api.restoreTrash)
 	mux.HandleFunc("DELETE /api/v1/trash/{trashID}", api.deleteTrash)
 	mux.HandleFunc("POST /api/v1/trash/empty", api.emptyTrash)
@@ -815,6 +817,27 @@ func (api *identityAPI) restoreTrash(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusAccepted, operation)
 }
+
+func (api *identityAPI) restoreTrashBatch(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.idempotentMutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		TrashIDs []string            `json:"trashIDs"`
+		Conflict domain.ConflictMode `json:"conflict,omitempty"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	result, err := api.drive.RestoreBatch(r.Context(), current.Record.UserID, request.TrashIDs, request.Conflict, r.Header.Get("Idempotency-Key"))
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
 func (api *identityAPI) deleteTrash(w http.ResponseWriter, r *http.Request) {
 	current, ok := api.idempotentMutation(w, r)
 	if !ok {
@@ -830,6 +853,26 @@ func (api *identityAPI) deleteTrash(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusAccepted, operation)
 }
+
+func (api *identityAPI) deleteTrashBatch(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.idempotentMutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		TrashIDs []string `json:"trashIDs"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	result, err := api.drive.PermanentDeleteBatch(r.Context(), current.Record.UserID, request.TrashIDs, r.Header.Get("Idempotency-Key"))
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
 func (api *identityAPI) emptyTrash(w http.ResponseWriter, r *http.Request) {
 	current, ok := api.idempotentMutation(w, r)
 	if !ok {

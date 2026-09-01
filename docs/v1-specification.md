@@ -1332,7 +1332,7 @@ Requirements:
   reconnection is required only when the browser no longer holds a safe file
   handle. Cancellation terminates an active hash worker and cannot leave an
   unresolved planning task.
-- The owner-scoped upload-status response identifies `active`, `completed`, `aborted`, or `expired` state and returns the safe confirmed offset without returning capability or provider-native material. This bounded per-upload lookup is the reconciliation boundary; it is not an account-wide transfer-list API.
+- The owner-scoped upload-status response identifies `active`, `completed`, `aborted`, or `expired` state and returns the safe confirmed offset without returning capability or provider-native material. It is a bounded exceptional-recovery lookup, not an account-wide transfer-list API. Application startup reconstructs device-local transfer intent without issuing one status request per ledger item and never blocks the file workspace on transfer recovery. A restored transfer with no reacquired source becomes locally `needs-source` without contacting the control plane. A restored transfer with a source resumes through its stable idempotency key and the ordinary bounded upload queue; the browser consults upload status only after an ambiguous direct-provider response or an idempotent admission conflict where terminal outcome must be distinguished.
 - A completion that loses the owner namespace-head CAS to an unrelated file
   mutation rereads authoritative namespace state and retries the same mutation
   ID and intent fingerprint. A true same-target create or replacement race
@@ -1498,11 +1498,19 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 | POST | `/api/v1/files/trash` | Move one or more items to trash. |
 | GET | `/api/v1/operations/{operationID}` | Poll a user-scoped operation. |
 | GET | `/api/v1/trash` | List trash records with exact file/directory size, recursive file count, and file media type through one bounded tree lookup per page. |
+| POST | `/api/v1/trash/restore` | Atomically restore 1–10,000 selected trash roots with one conflict policy and one owner-namespace publication. |
+| POST | `/api/v1/trash/delete` | Atomically permanently delete 1–10,000 selected trash roots through one owner-namespace publication. |
 | POST | `/api/v1/trash/{trashID}/restore` | Restore with explicit conflict policy. |
 | DELETE | `/api/v1/trash/{trashID}` | Permanently delete one item. |
 | POST | `/api/v1/trash/empty` | Confirmed empty-trash operation. |
 
 The browser sends virtual paths only. Any JSON field resembling a provider key, bucket, owner prefix, or arbitrary capability URL is rejected.
+
+The browser uses the maximum 1,000-entry page for virtualized live, Trash, and
+public-share browsing. A terminal operation or batch result is authoritative and
+MUST NOT trigger a redundant operation-status request. Selected Trash restore,
+selected permanent deletion, and Trash Undo use the bounded batch routes; client
+code MUST NOT decompose them into one mutation or one poll per selected item.
 
 ### 12.6 Share APIs
 

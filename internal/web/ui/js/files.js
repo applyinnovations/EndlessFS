@@ -258,7 +258,7 @@
     try {
       const endpoint = storageView
         ? `/api/v1/files/storage-map?path=${encodeURIComponent(directory)}`
-        : `/api/v1/files?path=${encodeURIComponent(directory)}&limit=100&sort=${sort}&order=${order}${cursor}`;
+        : `/api/v1/files?path=${encodeURIComponent(directory)}&limit=${browserPageSize}&sort=${sort}&order=${order}${cursor}`;
       const page = await api(endpoint);
       if (request !== state.directoryRequest) return;
       state.currentEntry = page.current;

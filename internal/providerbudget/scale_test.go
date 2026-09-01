@@ -2,10 +2,15 @@ package providerbudget_test
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	"github.com/applyinnovations/endlessfs/internal/providerbudget"
+	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
 type scaleEvidence struct {
@@ -20,11 +25,18 @@ type scaleEvidence struct {
 	RequestBasis       string `json:"requestBasis"`
 }
 
-func TestProviderBudgetProductionScaleScenarios(t *testing.T) {
-	ratchet, err := gcs.RegionalStandardFlatBudgetRatchet()
-	if err != nil {
-		t.Fatal(err)
-	}
+type targetEvidence struct {
+	ID                       string `json:"id"`
+	BaselineProviderRequests int64  `json:"baselineProviderRequests,omitempty"`
+	TargetBrowserRequests    int64  `json:"targetBrowserRequests"`
+	TargetProviderRequests   int64  `json:"targetProviderRequests"`
+	TargetCostPicoUSD        int64  `json:"targetCostPicoUSD"`
+	TargetCriticalP95Micros  int64  `json:"targetCriticalP95Micros"`
+	FeasibilityBasis         string `json:"feasibilityBasis"`
+}
+
+func productionScaleEvidence(t *testing.T, ratchet providerbudget.RatchetLedger) []scaleEvidence {
+	t.Helper()
 	seen := make(map[string]bool)
 	evidence := make([]scaleEvidence, 0, len(providerbudget.ProductionScaleScenarios()))
 	for _, scenario := range providerbudget.ProductionScaleScenarios() {
@@ -56,6 +68,15 @@ func TestProviderBudgetProductionScaleScenarios(t *testing.T) {
 		}
 		evidence = append(evidence, item)
 	}
+	return evidence
+}
+
+func TestProviderBudgetProductionScaleScenarios(t *testing.T) {
+	ratchet, err := gcs.RegionalStandardFlatBudgetRatchet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence := productionScaleEvidence(t, ratchet)
 	if len(evidence) < 18 {
 		t.Fatalf("production scale audit has only %d scenarios", len(evidence))
 	}
@@ -64,4 +85,132 @@ func TestProviderBudgetProductionScaleScenarios(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("provider-scale-v1 %s", body)
+}
+
+func TestProviderBudgetProductionScaleTargetsAreStrictlyBetterAndFeasible(t *testing.T) {
+	model, err := gcs.RegionalStandardFlatEconomics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ratchet, err := gcs.RegionalStandardFlatBudgetRatchet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselines := make(map[string]scaleEvidence)
+	for _, item := range productionScaleEvidence(t, ratchet) {
+		baselines[item.ID] = item
+	}
+	seenTargets := make(map[string]bool)
+	coveredBaselines := make(map[string]bool)
+	evidence := make([]targetEvidence, 0, len(providerbudget.ProductionScaleTargets()))
+	for _, target := range providerbudget.ProductionScaleTargets() {
+		if target.ID == "" || target.Category == "" || target.LogicalItems < 1 || target.MaximumBrowserRequests < 0 || target.FeasibilityBasis == "" || seenTargets[target.ID] {
+			t.Fatalf("invalid production scale target: %+v", target)
+		}
+		seenTargets[target.ID] = true
+		events := make([]providerbudget.Event, 0)
+		for waveIndex, wave := range target.RequestWaves {
+			if wave.Count < 1 || wave.Parallelism < 1 || wave.Parallelism > wave.Count || wave.RequestBytesEach < 0 || wave.ResponseBytesEach < 0 {
+				t.Fatalf("invalid request wave in %q: %+v", target.ID, wave)
+			}
+			for requestIndex := int64(0); requestIndex < wave.Count; requestIndex++ {
+				group := ""
+				if wave.Parallelism > 1 {
+					group = fmt.Sprintf("wave-%d-batch-%d", waveIndex, requestIndex/wave.Parallelism)
+				}
+				events = append(events, providerbudget.Event{
+					Role: wave.Role, Kind: wave.Kind, Operation: target.ID, Subsystem: "efficiency-target", ParallelGroup: group,
+					RequestBytes: wave.RequestBytesEach, ResponseBytes: wave.ResponseBytesEach,
+				})
+			}
+		}
+		totals, err := model.Estimate(events)
+		if err != nil {
+			t.Fatalf("estimate target %q: %v", target.ID, err)
+		}
+		item := targetEvidence{
+			ID: target.ID, TargetBrowserRequests: target.MaximumBrowserRequests, TargetProviderRequests: totals.Requests,
+			TargetCostPicoUSD: totals.CostPicoUSD, TargetCriticalP95Micros: totals.CriticalP95Micros, FeasibilityBasis: target.FeasibilityBasis,
+		}
+		if target.BaselineScenario != "" {
+			baseline, ok := baselines[target.BaselineScenario]
+			if !ok || coveredBaselines[target.BaselineScenario] {
+				t.Fatalf("target %q has invalid baseline %q", target.ID, target.BaselineScenario)
+			}
+			coveredBaselines[target.BaselineScenario] = true
+			item.BaselineProviderRequests = baseline.ProviderRequests
+			if target.ID == "restored-transfer-ledger-needs-source" {
+				if totals.Requests != 0 || baseline.ProviderRequests != 0 {
+					t.Fatalf("dormant transfer target = %d, baseline = %d; want zero", totals.Requests, baseline.ProviderRequests)
+				}
+			} else if totals.Requests >= baseline.ProviderRequests || totals.CostPicoUSD >= baseline.CostPicoUSD || totals.CriticalP95Micros >= baseline.CriticalP95Micros {
+				t.Fatalf("target %q does not improve every provider dimension: target=%+v baseline=%+v", target.ID, totals, baseline)
+			}
+			if target.MaximumBrowserRequests > baseline.BrowserRequests {
+				t.Fatalf("target %q increases browser requests from %d to %d", target.ID, baseline.BrowserRequests, target.MaximumBrowserRequests)
+			}
+		}
+		evidence = append(evidence, item)
+	}
+	if len(coveredBaselines) != len(baselines) {
+		t.Fatalf("production scale targets cover %d of %d baselines", len(coveredBaselines), len(baselines))
+	}
+	body, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("provider-target-v1 %s", body)
+}
+
+func TestProviderBudgetTargetPayloadEnvelopesAreMeasured(t *testing.T) {
+	const (
+		controlBodyLimit = 1 << 20
+		segmentLimit     = 4 << 20
+		projectionLimit  = 2 * segmentLimit
+	)
+	digest := strings.Repeat("d", 64)
+	padding := strings.Repeat("x", controlBodyLimit-128)
+	intent, err := json.Marshal(struct {
+		Padding string `json:"padding"`
+	}{Padding: padding})
+	if err != nil || len(intent) > controlBodyLimit {
+		t.Fatalf("construct maximum accepted control intent: bytes=%d err=%v", len(intent), err)
+	}
+	transaction, err := json.Marshal(struct {
+		SchemaVersion int             `json:"schemaVersion"`
+		BaseRevision  string          `json:"baseRevision"`
+		RequestDigest string          `json:"requestDigest"`
+		Intent        json.RawMessage `json:"intent"`
+	}{SchemaVersion: 1, BaseRevision: digest, RequestDigest: digest, Intent: intent})
+	if err != nil || len(transaction) > segmentLimit {
+		t.Fatalf("compact transaction envelope: bytes=%d maximum=%d err=%v", len(transaction), segmentLimit, err)
+	}
+
+	entries := make([]storageformat.DirectoryEntry, 10_000)
+	for index := range entries {
+		entries[index] = storageformat.DirectoryEntry{
+			Name: strings.Repeat("n", 249) + fmt.Sprintf("%06d", index), NameDigest: digest,
+			Kind: domain.EntryFile, BlobID: fmt.Sprintf("blob-%06d", index), Size: 1,
+			MediaType: "application/octet-stream", MD5: "MDEyMzQ1Njc4OWFiY2RlZg==", CRC32C: "AAAAAA==",
+			ModifiedAt: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), LogicalVersion: digest,
+		}
+	}
+	projection, err := json.Marshal(entries)
+	if err != nil || len(projection) > projectionLimit {
+		t.Fatalf("10,000-entry verbose projection: bytes=%d maximum=%d err=%v", len(projection), projectionLimit, err)
+	}
+
+	type progressItem struct {
+		UploadID string `json:"uploadID"`
+		Lease    string `json:"sealedLease"`
+	}
+	progress := make([]progressItem, 1_000)
+	for index := range progress {
+		progress[index] = progressItem{UploadID: fmt.Sprintf("upload-%06d", index), Lease: strings.Repeat("l", 2<<10)}
+	}
+	progressBody, err := json.Marshal(progress)
+	if err != nil || len(progressBody) > segmentLimit {
+		t.Fatalf("1,000-item transfer progress segment: bytes=%d maximum=%d err=%v", len(progressBody), segmentLimit, err)
+	}
+	t.Logf("provider-target-payload-v1 transactionBytes=%d projectionBytes=%d transferProgressBytes=%d", len(transaction), len(projection), len(progressBody))
 }

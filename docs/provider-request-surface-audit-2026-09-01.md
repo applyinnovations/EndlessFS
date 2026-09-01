@@ -3,14 +3,21 @@
 ## Outcome
 
 This audit closes the browser request-amplification incident and records the
-complete production provider boundary. Provider-backed work is acceptable only
-when its cardinality follows the data that must actually change:
+complete production provider boundary. It does **not** accept the surviving
+schema-010 request counts as efficient. The measured values below are failure
+baselines: their append-only ratchets prevent regression while the replacement
+architecture is built, but passing a current-baseline ratchet is not evidence
+that a pathway meets its efficiency target.
+
+Provider-backed work is acceptable only when its cardinality follows the data
+that must actually change:
 
 - dormant device-local UI state performs zero provider work;
-- metadata-only operations over many selected roots use one HTTP mutation and
-  one atomic namespace publication, with immutable page work proportional to
-  the touched tree pages rather than one transaction per item;
-- directory reads paginate at the provider's maximum application page size;
+- metadata-only operations over a bounded selection persist one compact intent
+  and one atomic namespace publication, without rewriting a page tree or
+  retaining one success record per item;
+- a 10,000-row directory or Trash projection is read from at most two packed
+  4 MiB segments and progressively decoded through one browser request;
 - previews are bounded by the virtualized visible/overscan window rather than
   logical directory size; and
 - linear transfer work is permitted only for distinct active provider upload,
@@ -18,9 +25,11 @@ when its cardinality follows the data that must actually change:
   operations. Its concurrency remains bounded by the server-advertised worker
   pool.
 
-These are structural rules, not guessed numerical targets. The exact observed
-request, price, and latency values are then frozen by append-only ratchets so a
-future implementation can tighten them but cannot silently spend more.
+The numerical targets are derived from those request shapes, measured encoded
+payload envelopes, and the reviewed GCS price/latency fixtures. They are not
+percentage reductions selected from the current implementation. The current
+ratchets and the lower target catalog are intentionally separate so an
+inefficient measurement can never be mistaken for an acceptable ceiling.
 
 ## Incident and corrections
 
@@ -75,7 +84,7 @@ checkpointing, compaction, recovery, derived-view rebuild, and migration. Every
 catalogued GCS budget must both exist in the append-only ledger and be referenced
 by an executable test.
 
-## Massive-workload evidence
+## Measured current baselines — not acceptance
 
 Costs use the reviewed GCS Regional Standard Storage flat-namespace marginal
 pricing fixture, excluding free tier and negotiated discounts. Latency is a
@@ -83,7 +92,7 @@ conservative engineering model, not a Google Cloud SLA. “Critical p95” accou
 for the explicitly proven immutable-page or worker-pool parallel groups;
 “aggregate p95” remains available in the emitted `provider-scale-v1` evidence.
 
-| Production state / intent | Logical items | Browser requests | Provider requests | Modeled marginal cost (USD) | Critical p95 | Scaling basis |
+| Production state / intent | Logical items | Browser requests | Provider requests | Modeled marginal cost (USD) | Critical p95 | Current scaling basis |
 |---|---:|---:|---:|---:|---:|---|
 | Restored transfer history without sources | 10,000 | 0 | 0 | $0 | 0 s | Device-local only |
 | Browse live directory | 10,000 | 10 | 80 | $0.0000320 | 5.265 s | Ten 1,000-entry pages |
@@ -113,7 +122,105 @@ Their per-operation exact budgets remain visible separately by state/file/data
 role, so future batching can tighten state overhead without hiding the distinct
 provider object work.
 
-## Atomic restore design
+## Required production-efficiency targets
+
+The following are maximums for the replacement architecture. Schema 010 does
+not meet them. A replacement is not complete until the real executable workload
+events—not a fabricated target trace—meet or beat every count, modeled cost, and
+critical-p95 value and append a tighter observed ratchet.
+
+| Production state / intent | Current → target provider requests | Target browser requests | Target marginal cost (USD) | Target critical p95 |
+|---|---:|---:|---:|---:|
+| Restored transfer history without sources | 0 → 0 | 0 | $0 | 0 s |
+| Browse live directory | 80 → 5 | 1 | $0.0000020 | 0.302 s |
+| Browse Trash | 80 → 5 | 1 | $0.0000020 | 0.302 s |
+| Copy selected roots | 128 → 5 | 1 | $0.0000112 | 0.398 s |
+| Move selected roots | 129 → 5 | 1 | $0.0000112 | 0.398 s |
+| Move selected roots to Trash | 127 → 5 | 1 | $0.0000112 | 0.398 s |
+| Restore selected Trash roots | 167 → 5 | 1 | $0.0000112 | 0.398 s |
+| Permanently delete selected Trash roots | 86 → 5 | 1 | $0.0000112 | 0.398 s |
+| Retry Trash after lost response | 44 → 4 | 1 | $0.0000016 | 0.263 s |
+| Retry restore after lost response | 44 → 4 | 1 | $0.0000016 | 0.263 s |
+| Retry permanent delete after lost response | 44 → 4 | 1 | $0.0000016 | 0.263 s |
+| Denied Trash with stale final item | 44 → 3 | 1 | $0.0000012 | 0.197 s |
+| Smart-upload size phase | 80 → 5 | 1 | $0.0000020 | 0.302 s |
+| Smart upload when every size is a candidate | 140 → 10 | 2 | $0.0000040 | 0.604 s |
+| Admit actual uploads | 20,700 → 10,014 | 1 | $0.0500562 | 13.478 s background |
+| Complete actual uploaded objects | 100,000 → 10,014 | 1 | $0.0040562 | 7.478 s background |
+| Cancel active provider sessions | 90,000 → 10,014 | 1 | $0.0000562 | 7.478 s background |
+| Resolve previews in a 10,000-item grid | 352 → 36 | 1 | $0.0000144 | 0.712 s background |
+| Checkpoint garbage collection | 163 → 131 | 0 | $0.0000058 | 0.332 s |
+| Domain compaction | 15 → 5 | 0 | $0.0000112 | 0.398 s |
+| Move one directory with 1,000,000 descendants | unmeasured → 4 | 1 | $0.0000062 | 0.278 s |
+
+These ceilings come from executable request-wave plans in
+`providerbudget.ProductionScaleTargets`, evaluated by the same GCS model as the
+observed ratchets. `TestProviderBudgetProductionScaleTargetsAreStrictlyBetterAndFeasible`
+requires a target for every measured massive workload, requires every nonzero
+target to improve count, cost, and critical latency, and emits
+`provider-target-v1`. `TestProviderBudgetTargetPayloadEnvelopesAreMeasured`
+records the byte evidence:
+
+- a maximum accepted 1 MiB control intent plus transaction binding encodes to
+  1,048,656 bytes, below one 4 MiB immutable transaction segment;
+- 10,000 deliberately verbose file projection rows, including 255-byte names,
+  encode to 6,050,001 bytes, below two 4 MiB projection segments; and
+- 1,000 transfer progress rows with a conservative 2 KiB sealed lease each
+  encode to 2,094,001 bytes, below one 4 MiB progress segment.
+
+The target request formula is therefore based on encoded bytes, not item count:
+
+```text
+packed read     = 3 fixed authority/head reads
+                  + ceil(encoded projection bytes / 4 MiB) parallel reads
+
+metadata write  = 3 fixed authority/proof reads
+                  + ceil(encoded compact intent bytes / 4 MiB) immutable writes
+                  + 1 conditional visibility-head write
+
+active transfer = one unavoidable provider object operation per active object
+                  + 3 fixed reads
+                  + max(ceil(progress bytes / 4 MiB), ceil(items / 1,000)) progress writes
+                  + 1 terminal visibility-head write
+```
+
+For transfer workflows, the 1,000-item progress boundary limits the amount of
+provider work that can become an unexposed orphan after a pod crash. A progress
+segment is durable before its capabilities/results are streamed to the browser;
+retry reads completed segments and continues from the first absent segment.
+The ten progress writes are modeled serially, so the latency target does not
+pretend they all complete in one wave. Sealed provider leases remain transient,
+encrypted, bounded, and excluded from authoritative portability checkpoints.
+The replacement adapter must reject or split a transient sealed lease that
+exceeds the measured 2 KiB-per-item envelope; an oversized provider response
+cannot silently invalidate the segment bound.
+
+The remaining 10,000 active-transfer calls are an actual provider lower bound:
+GCS requires a resumable-session initiation for each object, and completion or
+revocation must verify or abort each corresponding object/session. GCS JSON API
+batching can reduce HTTP connection overhead but each subrequest is still
+counted and billed, and uploads/downloads are not supported by that batch API.
+No target hides those calls as one synthetic request.
+
+Metadata mutations use a compact immutable intent bound to the authenticated
+base revision. Uniform success is reconstructed from the intent; only a compact
+exception representation is retained. One conditional head replacement is the
+visibility point. This removes the current immutable B-tree rewrite and paged
+outcome amplification while preserving atomicity, idempotent replay,
+lost-success recovery, and replica CAS convergence. Moving a directory retains
+its child-root reference, so descendants contribute neither records nor
+provider calls. Larger selections scale by encoded segment count and affected
+namespace roots, never by one state transaction per logical item.
+
+The target performs one write to a namespace visibility head for the complete
+bulk mutation. It does not assume that many writes to the same GCS object can
+run concurrently: GCS documents an approximately one-write-per-second limit for
+replacing one object. Independent prepared intents can be coalesced behind one
+head publication, while genuine conflicts still converge through the native
+generation-match CAS. No provider batch request is counted as an atomic
+multi-object transaction.
+
+## Current schema-010 atomic restore design
 
 Batch restore derives every original destination from trash metadata inside the
 same closed owner-namespace snapshot used for publication. It validates all
@@ -132,6 +239,13 @@ same single-publication batch discipline.
 
 - Pricing source: <https://cloud.google.com/storage/pricing>, effective
   2026-08-24 in the fixture.
+- GCS batch behavior and billing: <https://cloud.google.com/storage/docs/batch>.
+- GCS request-rate guidance, including the same-object replacement limit:
+  <https://cloud.google.com/storage/quotas>.
+- Generation-match atomic preconditions:
+  <https://cloud.google.com/storage/docs/request-preconditions>.
+- Per-object resumable-session initiation:
+  <https://cloud.google.com/storage/docs/resumable-uploads>.
 - Latency sources and methodology are embedded in
   `internal/objectstore/gcs/economics/latency-regional-standard-flat-2026-08.json`.
 - The price model excludes storage-at-rest, retrieval, replication, and egress;

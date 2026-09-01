@@ -2092,6 +2092,41 @@ extra-authoritative, corrupt, mixed-version, collision, incomplete catalog,
 unfrozen domain, live-lease, incompatible-writer, and unsupported-feature states
 fail closed.
 
+#### Provider-economics qualification
+
+Every production pathway that can cross an object-store boundary MUST have both
+an executable observed ratchet and an independently derived production-scale
+target for request count, modeled marginal request cost, and modeled critical
+p95 latency. An observed ratchet records what a released schema currently
+spends and prevents regression; matching an inefficient observed value is not
+acceptance evidence. The target is derived from the minimum safe request waves,
+encoded byte envelopes, necessary provider-object operations, bounded
+concurrency, and the provider's reviewed pricing/latency fixtures. It MUST NOT be
+selected as a percentage reduction from the current implementation.
+
+The required GCS production-scale targets and their payload measurements are
+recorded in `docs/provider-request-surface-audit-2026-09-01.md` and emitted by
+`TestProviderBudgetProductionScaleTargetsAreStrictlyBetterAndFeasible` and
+`TestProviderBudgetTargetPayloadEnvelopesAreMeasured`. The current schema-010
+figures in that record are explicit nonconforming baselines. A replacement
+storage architecture is not provider-economics qualified until its real traced
+workloads meet or improve every corresponding target and append those lower
+observations to the ratchet ledger. A target may tighten when an implementation
+proves a cheaper safe request shape. It may be relaxed only with new primary
+provider evidence or a demonstrated invariant that the former request shape
+could not satisfy; preserving the current implementation is not a reason.
+
+Metadata-work targets scale with encoded segment bytes and distinct affected
+authority roots, not with one state transaction, outcome row, or tree rewrite
+per selected logical item. A selected directory retains its immutable child
+root, so moving, trashing, or restoring it performs no provider work for its
+descendants. Bulk active-transfer targets separately expose the unavoidable one
+provider operation per real object/session and the bounded state-orchestration
+overhead; batching cannot relabel individually billed GCS subrequests as one
+request. Target latency may assume concurrency only when the request trace names
+and tests that parallel wave, and it MUST respect documented same-object update
+limits.
+
 #### HTTP integration tests
 
 Run the real router/middleware/use cases with the portable engine over deterministic object-store backends. Cover success and malformed requests, authentication, authorization, CSRF/origin, body limits, cache controls, headers, idempotency, and problem responses.

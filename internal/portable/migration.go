@@ -299,7 +299,10 @@ func (e *Engine) runFeatureOnlyStorageMigration(ctx context.Context, transition 
 }
 
 func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition storageMigration) (bool, error) {
-	for range 16 {
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, domain.WrapError(domain.ErrorUnavailable, fmt.Sprintf("feature-only storage migration gate contention cancelled for %s", transition.id), err)
+		}
 		object, envelope, gate, err := e.readGate(ctx)
 		if err != nil {
 			return false, err
@@ -380,7 +383,6 @@ func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition s
 			return true, nil
 		}
 	}
-	return false, domain.NewError(domain.ErrorUnavailable, fmt.Sprintf("feature-only storage migration gate remained contended for %s", transition.id))
 }
 
 func (e *Engine) runAggregateSchemaMigration(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock, plan aggregateMigrationPlan) error {
@@ -615,7 +617,10 @@ func (e *Engine) readStoredWriterSet(ctx context.Context) (objectstore.Object, s
 }
 
 func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition storageMigration, plan aggregateMigrationPlan) (bool, error) {
-	for range 16 {
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, domain.WrapError(domain.ErrorUnavailable, fmt.Sprintf("storage-schema migration gate contention cancelled for %s", transition.id), err)
+		}
 		object, envelope, gate, err := e.readGate(ctx)
 		if err != nil {
 			return false, err
@@ -682,12 +687,6 @@ func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition stora
 			return true, nil
 		}
 	}
-	_, _, gate, gateErr := e.readGate(ctx)
-	catalog, catalogFound, catalogErr := e.readDomainCatalogIfPresent(ctx)
-	if gateErr == nil && catalogErr == nil {
-		return false, domain.NewError(domain.ErrorUnavailable, fmt.Sprintf("storage-schema migration gate remained contended for %s (mode=%s epoch=%d catalogFound=%t catalogFreezeEpoch=%d)", transition.id, gate.Mode, gate.Epoch, catalogFound, catalog.head.FreezeEpoch))
-	}
-	return false, domain.NewError(domain.ErrorUnavailable, fmt.Sprintf("storage-schema migration gate remained contended for %s", transition.id))
 }
 
 // readClosedStorageMigrationGate binds migration work to the exact closed gate

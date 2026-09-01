@@ -719,11 +719,18 @@ func (backend *closingGateContentionBackend) Put(ctx context.Context, key object
 
 type migrationGatePutFailureBackend struct {
 	objectstore.Backend
-	err error
+	err         error
+	cancel      context.CancelFunc
+	cancelAfter int
+	attempts    int
 }
 
 func (backend *migrationGatePutFailureBackend) Put(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
 	if key == storageformat.WriteGateKey() {
+		backend.attempts++
+		if backend.cancel != nil && backend.attempts == backend.cancelAfter {
+			backend.cancel()
+		}
 		return "", backend.err
 	}
 	return backend.Backend.Put(ctx, key, body, condition)
@@ -1179,7 +1186,7 @@ func TestStorageMigration007To008PropagatesCompletionReadFailure(t *testing.T) {
 	}
 }
 
-func TestStorageMigrationContentionDiagnosticSurvivesFinalReadFailure(t *testing.T) {
+func TestStorageMigrationContentionPropagatesGateReadFailure(t *testing.T) {
 	backend, engine := currentMigrationEngine(t)
 	configureMigrationSourceSchema(t, backend, engine, storageSchema008)
 	gateReads := 0
@@ -1201,7 +1208,7 @@ func TestStorageMigrationContentionDiagnosticSurvivesFinalReadFailure(t *testing
 	}
 	engine.backend = hooks
 	if _, err := engine.closeStorageMigrationGate(context.Background(), schemaMigration008To009, aggregateMigrationPlan{}); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("migration contention error = %v; want unavailable", err)
+		t.Fatalf("migration gate read error = %v; want unavailable", err)
 	}
 }
 
@@ -1780,12 +1787,20 @@ func TestFeatureOnlyMigrationGateClosureRejectsEveryUnsafeControlState(t *testin
 		}
 	})
 
-	t.Run("gate-contention-exhaustion", func(t *testing.T) {
+	t.Run("gate-contention-cancellation", func(t *testing.T) {
 		backend, engine := currentMigrationEngine(t)
 		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
-		engine.backend = &migrationGatePutFailureBackend{Backend: backend, err: domain.NewError(domain.ErrorConflict, "injected gate contention")}
-		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("gate contention error = %v; want unavailable", err)
+		ctx, cancel := context.WithCancel(t.Context())
+		contended := &migrationGatePutFailureBackend{
+			Backend: backend, err: domain.NewError(domain.ErrorConflict, "injected gate contention"),
+			cancel: cancel, cancelAfter: 64,
+		}
+		engine.backend = contended
+		if _, err := engine.closeFeatureOnlyMigrationGate(ctx, schemaMigration004To005); !errors.Is(err, context.Canceled) {
+			t.Fatalf("gate contention error = %v; want context cancellation", err)
+		}
+		if contended.attempts != 64 {
+			t.Fatalf("feature-only gate contention attempts = %d; want 64", contended.attempts)
 		}
 	})
 }

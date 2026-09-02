@@ -267,15 +267,13 @@ func (e *Engine) validateCheckpointGarbagePlan(ctx context.Context, checkpoint s
 		if err != nil {
 			return err
 		}
-		expected := checkpointGarbagePlanPageEntries
-		remaining := plan.EntryCount - count
-		if remaining < uint64(expected) {
-			expected = int(remaining)
-		}
-		if len(entries) != expected {
+		if pageIndex+1 < plan.PageCount && len(entries) != checkpointGarbagePlanPageEntries {
 			return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint garbage plan page cardinality mismatch")
 		}
 		for _, entry := range entries {
+			if count >= plan.EntryCount {
+				return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint garbage plan page cardinality mismatch")
+			}
 			if err := validateCheckpointGarbageEntry(entry); err != nil {
 				return err
 			}

@@ -11,6 +11,7 @@ import (
 const (
 	DomainLeafKeyFilterBytes  = 512
 	domainLeafKeyFilterHashes = 8
+	domainLeafKeyFilterBits   = uint32(DomainLeafKeyFilterBytes * 8)
 )
 
 // DomainLeafKeyFilter constructs a bounded authenticated membership hint for
@@ -22,7 +23,7 @@ func DomainLeafKeyFilter(keys []string) string {
 	for _, key := range keys {
 		digest := sha256.Sum256([]byte("endlessfs-domain-leaf-key-filter-v1\x00" + key))
 		for index := 0; index < domainLeafKeyFilterHashes; index++ {
-			position := binary.BigEndian.Uint32(digest[index*4:(index+1)*4]) % uint32(len(bits)*8)
+			position := binary.BigEndian.Uint32(digest[index*4:(index+1)*4]) % domainLeafKeyFilterBits
 			bits[position/8] |= byte(1 << (position % 8))
 		}
 	}
@@ -44,7 +45,7 @@ func DomainLeafKeyFilterMayContain(value, key string) (bool, error) {
 	bits, _ := base64.RawURLEncoding.DecodeString(value)
 	digest := sha256.Sum256([]byte("endlessfs-domain-leaf-key-filter-v1\x00" + key))
 	for index := 0; index < domainLeafKeyFilterHashes; index++ {
-		position := binary.BigEndian.Uint32(digest[index*4:(index+1)*4]) % uint32(len(bits)*8)
+		position := binary.BigEndian.Uint32(digest[index*4:(index+1)*4]) % domainLeafKeyFilterBits
 		if bits[position/8]&(byte(1<<(position%8))) == 0 {
 			return false, nil
 		}

@@ -33,9 +33,9 @@ Google's open-source `upload-cloud-storage` action instead of embedding an
 unexplained eight-transfer maximum or guessing from CPU count and estimated
 download speed. One 100-file selection uses one batch admission, starts 100
 browser tasks, saturates all six HTTP/1.1 fixture connections, sends exactly
-100 direct data bodies and completion requests, and refreshes the directory
-once after the burst drains. Data Saver reduces the worker count to one;
-confirmed-offset recovery, cancellation, bounded retry/backoff, and the rule
+100 direct data bodies and one atomic batch-completion request, and refreshes
+the directory once after the burst drains. Data Saver reduces the worker count
+to one; confirmed-offset recovery, cancellation, bounded retry/backoff, and the rule
 that object bytes never enter the Go service remain unchanged. Pinned upstream
 sources and licenses are recorded in
 `docs/upload-worker-pool-upstream-evidence.md`.

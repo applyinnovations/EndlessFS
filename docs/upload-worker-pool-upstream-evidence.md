@@ -59,8 +59,8 @@ per file.
 - the scheduler has 100 live upload tasks simultaneously;
 - the HTTP/1.1 fixture data plane has all six available wire connections busy;
 - one 100-item batch admission and no single-item admission are issued;
-- exactly 100 direct data-plane body requests and 100 completion requests are
-  issued;
+- exactly 100 direct data-plane body requests and one atomic batch-completion
+  request are issued;
 - all 100 transfers reach the complete UI state; and
 - one coalesced directory listing makes the uploaded files visible.
 

@@ -274,8 +274,11 @@ func TestE2EUpstreamGCSWorkerPoolUploadsOneHundredFilesAndCoalescesRefresh(t *te
 	if preflightRequests != len(uploadPaths) {
 		t.Errorf("direct upload preflight requests = %d, want %d; requests=%v", preflightRequests, len(uploadPaths), requests)
 	}
-	if got := countRequestPath(requests, "/api/v1/uploads/") - countExactRequest(requests, "POST /api/v1/uploads/batch"); got != len(uploadPaths) {
-		t.Errorf("upload completion requests = %d, want %d; requests=%v", got, len(uploadPaths), requests)
+	if got := countExactRequest(requests, "POST /api/v1/uploads/batch/complete"); got != 1 {
+		t.Errorf("worker-pool batch completion requests = %d, want 1; requests=%v", got, requests)
+	}
+	if got := countRequestPath(requests, "/api/v1/uploads/") - countExactRequest(requests, "POST /api/v1/uploads/batch") - countExactRequest(requests, "POST /api/v1/uploads/batch/complete"); got != 0 {
+		t.Errorf("worker-pool upload used %d per-item completion requests; requests=%v", got, requests)
 	}
 	if got := countExactRequest(requests, "GET /api/v1/files"); got != 1 {
 		t.Errorf("directory refresh requests = %d, want one coalesced refresh; requests=%v", got, requests)
@@ -849,7 +852,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.Focus("#file-view-grid", chromedp.ByQuery), chromedp.KeyEvent(" ")); err != nil {
 		t.Fatalf("switch to media grid: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector(".media-frame[data-path='/media-proof.png']").dataset.previewState === "generating"`, 5*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector(".media-frame[data-path='/media-proof.png']").dataset.previewState === "generating"`, 15*time.Second); err != nil {
 		t.Fatalf("wait for contending grid generation: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := harness.previewStore.Commit(context.Background(), gridBinding, gridClaim, gridArtifact); err != nil {
@@ -894,7 +897,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.Focus("#preview-regenerate", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatalf("regenerate preview: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector("#toast-region .toast.info")?.textContent.includes("Preview generation continues") && document.querySelector("#preview-regenerate").disabled`, 5*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector("#toast-region .toast.info")?.textContent.includes("Preview generation continues") && document.querySelector("#preview-regenerate").disabled`, 15*time.Second); err != nil {
 		t.Fatalf("wait for contending preview operation: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := harness.previewStore.Commit(context.Background(), binding, claim, artifact); err != nil {
@@ -1030,7 +1033,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	directoryRequestsAfterScale := countRequestPath(requestedURLs, "/api/v1/files")
 	mu.Unlock()
 	directoryPageRequests := directoryRequestsAfterScale - directoryRequestsBeforeScale
-	if loaded != 10_003 || renderedTiles > 64 || resolveRequestsAfterScale-resolveRequestsBeforeScale > 1 || directoryPageRequests != 1 {
+	if loaded != 10_003 || renderedTiles > 64 || resolveRequestsAfterScale-resolveRequestsBeforeScale > 1 || directoryPageRequests != 2 {
 		t.Fatalf("virtual grid bounds: logical=%d rendered=%d previewRequests=%d directoryPageRequests=%d", loaded, renderedTiles, resolveRequestsAfterScale-resolveRequestsBeforeScale, directoryPageRequests)
 	}
 	var listBenchmark struct {

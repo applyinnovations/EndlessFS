@@ -25,27 +25,201 @@ import (
 const domainPageMaximumItems = 256
 
 type domainPageRef struct {
-	root     storageformat.DomainTreeRoot
-	firstKey string
-	lastKey  string
+	root          storageformat.DomainTreeRoot
+	firstKey      string
+	lastKey       string
+	leafKeyFilter string
 }
 
 type consistencyDomainTreeSession struct {
-	store     *consistencyDomainStore
-	reference consistencyDomainRef
-	mu        sync.RWMutex
-	pages     map[string]storageformat.DomainPage
-	known     map[string]storageformat.DomainTreeRoot
-	pageKey   func(string) objectstore.Key
+	store        *consistencyDomainStore
+	reference    consistencyDomainRef
+	mu           sync.RWMutex
+	pages        map[string]storageformat.DomainPage
+	pagePacks    map[string]string
+	packs        map[string]map[string]storageformat.DomainPage
+	packLoads    map[string]*consistencyDomainPackLoad
+	known        map[string]storageformat.DomainTreeRoot
+	pageKey      func(string) objectstore.Key
+	packKey      func(string) objectstore.Key
+	packID       string
+	packSeed     string
+	mutationSeed string
+	packedWrites bool
+	pendingPack  map[string]storageformat.DomainPage
+	packFlushed  bool
+	forcePack    bool
+}
+
+type consistencyDomainPackLoad struct {
+	done  chan struct{}
+	pages map[string]storageformat.DomainPage
+	err   error
 }
 
 func newConsistencyDomainTreeSession(store *consistencyDomainStore, reference consistencyDomainRef) *consistencyDomainTreeSession {
 	return &consistencyDomainTreeSession{
-		store: store, reference: reference, pages: make(map[string]storageformat.DomainPage), known: make(map[string]storageformat.DomainTreeRoot),
+		store: store, reference: reference, pages: make(map[string]storageformat.DomainPage), pagePacks: make(map[string]string),
+		packs: make(map[string]map[string]storageformat.DomainPage), packLoads: make(map[string]*consistencyDomainPackLoad), known: make(map[string]storageformat.DomainTreeRoot),
 		pageKey: func(digest string) objectstore.Key {
 			return storageformat.DomainPageKey(reference.Kind, reference.ID, digest)
 		},
+		packKey: func(packID string) objectstore.Key {
+			return storageformat.DomainPagePackKey(reference.Kind, reference.ID, packID)
+		},
 	}
+}
+
+// loadPack coalesces concurrent reads of the same immutable pack. Tree
+// rewrites validate unchanged branches in parallel; without request-scoped
+// single-flight coordination, those workers can all issue the same billed GET
+// before the first response reaches the cache.
+func (session *consistencyDomainTreeSession) loadPack(ctx context.Context, packID string) (map[string]storageformat.DomainPage, error) {
+	session.mu.Lock()
+	if pack, found := session.packs[packID]; found {
+		session.mu.Unlock()
+		return pack, nil
+	}
+	if load, found := session.packLoads[packID]; found {
+		session.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, domain.WrapError(domain.ErrorUnavailable, "consistency-domain pack read canceled", ctx.Err())
+		case <-load.done:
+			return load.pages, load.err
+		}
+	}
+	load := &consistencyDomainPackLoad{done: make(chan struct{})}
+	session.packLoads[packID] = load
+	session.mu.Unlock()
+
+	key := session.packKey(packID)
+	object, err := session.store.backend.Get(ctx, key)
+	var pack map[string]storageformat.DomainPage
+	if err == nil {
+		var decoded storageformat.DomainPagePack
+		decoded, err = storageformat.DecodeDomainPagePack(object.Body, session.reference.ID, session.reference.Kind, packID)
+		if err == nil {
+			pack = make(map[string]storageformat.DomainPage, len(decoded.Pages))
+			for _, packed := range decoded.Pages {
+				pack[packed.Digest] = packed.Page
+			}
+		}
+	}
+	session.mu.Lock()
+	if err == nil {
+		session.packs[packID] = pack
+	}
+	load.pages, load.err = pack, err
+	delete(session.packLoads, packID)
+	close(load.done)
+	session.mu.Unlock()
+	return pack, err
+}
+
+// enablePackedWrites coalesces every new immutable page prepared by this
+// session into one create-only provider object. The factory is lazy so a
+// read-only namespace view consumes no ID and creates no garbage.
+func (session *consistencyDomainTreeSession) enablePackedWrites(seed string) {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	session.packedWrites = true
+	session.packSeed = seed
+}
+
+// bindPackedMutation makes the physical pack identity depend on the complete
+// logical operation, not whichever changed page happens to be written first.
+// Two edits from one snapshot can share an initial page rewrite and diverge in
+// a later page; their immutable pack keys must still be distinct.
+func (session *consistencyDomainTreeSession) bindPackedMutation(seed string) error {
+	if seed == "" {
+		return domain.NewError(domain.ErrorInvalid, "empty consistency-domain packed mutation binding")
+	}
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.mutationSeed != "" {
+		if session.mutationSeed == seed {
+			return nil
+		}
+		return domain.NewError(domain.ErrorInvalid, "consistency-domain session is bound to another mutation")
+	}
+	if session.packID != "" || len(session.pendingPack) != 0 || session.packFlushed {
+		return domain.NewError(domain.ErrorInvalid, "consistency-domain packed mutation was bound after writing")
+	}
+	session.mutationSeed = seed
+	session.packSeed = storageformat.Digest([]byte("endlessfs-domain-page-pack-mutation-v1\x00" + session.packSeed + "\x00" + seed))
+	return nil
+}
+
+func (session *consistencyDomainTreeSession) ensurePackID(firstWriteDigest string) (string, error) {
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.packID != "" {
+		return session.packID, nil
+	}
+	if !session.packedWrites {
+		return "", nil
+	}
+	if firstWriteDigest == "" {
+		return "", domain.NewError(domain.ErrorInvalid, "empty consistency-domain page pack seed")
+	}
+	// Pack identities are derived from the authenticated source snapshot and
+	// the first deterministic page-write set. This deliberately consumes no
+	// shared randomness: introducing the physical grouping must not perturb
+	// application IDs, and a retry of the same logical edit must address the
+	// same immutable object. Different edits from the same source snapshot have
+	// different leaf digests and therefore cannot alias silently.
+	session.packID = storageformat.Digest([]byte("endlessfs-domain-page-pack-v1\x00" + string(session.reference.Kind) + "\x00" + session.reference.ID + "\x00" + session.packSeed + "\x00" + firstWriteDigest))
+	session.pendingPack = make(map[string]storageformat.DomainPage)
+	return session.packID, nil
+}
+
+// flushPack prepares the immutable pack before the later conditional head
+// publication. A create conflict is accepted only when exact bytes already
+// exist, which makes lost responses idempotent and collisions fail closed.
+func (session *consistencyDomainTreeSession) flushPack(ctx context.Context) error {
+	session.mu.RLock()
+	packID := session.packID
+	flushed := session.packFlushed
+	pages := make([]storageformat.DomainPackedPage, 0, len(session.pendingPack))
+	for digest, page := range session.pendingPack {
+		pages = append(pages, storageformat.DomainPackedPage{Digest: digest, Page: page})
+	}
+	session.mu.RUnlock()
+	if packID == "" || len(pages) == 0 || flushed {
+		return nil
+	}
+	pack := storageformat.DomainPagePack{SchemaVersion: 1, DomainID: session.reference.ID, Kind: session.reference.Kind, PackID: packID, Pages: pages}
+	body, err := storageformat.EncodeDomainPagePack(pack)
+	if err != nil {
+		return err
+	}
+	key := session.packKey(packID)
+	if _, err := session.store.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		if !errors.Is(err, domain.ErrConflict) {
+			return err
+		}
+		existing, getErr := session.store.backend.Get(ctx, key)
+		if getErr != nil {
+			return getErr
+		}
+		if !bytes.Equal(existing.Body, body) {
+			return domain.NewError(domain.ErrorInvalid, "consistency-domain page pack identity collision")
+		}
+	}
+	decoded, err := storageformat.DecodeDomainPagePack(body, session.reference.ID, session.reference.Kind, packID)
+	if err != nil {
+		return err
+	}
+	indexed := make(map[string]storageformat.DomainPage, len(decoded.Pages))
+	for _, packed := range decoded.Pages {
+		indexed[packed.Digest] = packed.Page
+	}
+	session.mu.Lock()
+	session.packs[packID] = indexed
+	session.packFlushed = true
+	session.mu.Unlock()
+	return nil
 }
 
 func (session *consistencyDomainTreeSession) markKnown(root storageformat.DomainTreeRoot) {
@@ -75,6 +249,9 @@ func (session *consistencyDomainTreeSession) readPage(ctx context.Context, expec
 	}
 	session.mu.RLock()
 	cachedPage, found := session.pages[expected.root.Digest]
+	if !found && expected.root.PackID != "" && expected.root.PackID == session.packID {
+		cachedPage, found = session.pendingPack[expected.root.Digest]
+	}
 	session.mu.RUnlock()
 	if found {
 		if err := verifyConsistencyDomainPageRef(cachedPage, expected); err != nil {
@@ -82,14 +259,26 @@ func (session *consistencyDomainTreeSession) readPage(ctx context.Context, expec
 		}
 		return cachedPage, nil
 	}
-	key := session.pageKey(expected.root.Digest)
-	object, err := session.store.backend.Get(ctx, key)
-	if err != nil {
-		return storageformat.DomainPage{}, err
-	}
 	var page storageformat.DomainPage
-	if err := decodeCanonicalValue(object.Body, &page); err != nil {
-		return storageformat.DomainPage{}, err
+	if expected.root.PackID != "" {
+		pack, err := session.loadPack(ctx, expected.root.PackID)
+		if err != nil {
+			return storageformat.DomainPage{}, err
+		}
+		var present bool
+		page, present = pack[expected.root.Digest]
+		if !present {
+			return storageformat.DomainPage{}, domain.NewError(domain.ErrorInvalid, "consistency-domain page is missing from its pack")
+		}
+	} else {
+		key := session.pageKey(expected.root.Digest)
+		object, err := session.store.backend.Get(ctx, key)
+		if err != nil {
+			return storageformat.DomainPage{}, err
+		}
+		if err := decodeCanonicalValue(object.Body, &page); err != nil {
+			return storageformat.DomainPage{}, err
+		}
 	}
 	if page.DomainID != session.reference.ID || page.Kind != session.reference.Kind {
 		return storageformat.DomainPage{}, domain.NewError(domain.ErrorInvalid, "consistency-domain page key binding mismatch")
@@ -102,23 +291,28 @@ func (session *consistencyDomainTreeSession) readPage(ctx context.Context, expec
 	}
 	session.mu.Lock()
 	session.pages[expected.root.Digest] = page
+	session.pagePacks[expected.root.Digest] = expected.root.PackID
 	session.mu.Unlock()
 	return page, nil
 }
 
 func verifyConsistencyDomainPageRef(page storageformat.DomainPage, expected domainPageRef) error {
-	actual, err := consistencyDomainPageDescriptor(page, expected.root.Digest)
+	actual, err := consistencyDomainPageDescriptor(page, expected.root.Digest, expected.root.PackID)
 	if err != nil {
 		return err
 	}
-	if actual.root != expected.root || expected.firstKey != "" && actual.firstKey != expected.firstKey || expected.lastKey != "" && actual.lastKey != expected.lastKey {
+	if actual.root != expected.root || expected.firstKey != "" && actual.firstKey != expected.firstKey || expected.lastKey != "" && actual.lastKey != expected.lastKey || expected.leafKeyFilter != "" && actual.leafKeyFilter != expected.leafKeyFilter {
 		return domain.NewError(domain.ErrorInvalid, "consistency-domain child descriptor mismatch")
 	}
 	return nil
 }
 
-func consistencyDomainPageDescriptor(page storageformat.DomainPage, digest string) (domainPageRef, error) {
-	reference := domainPageRef{root: storageformat.DomainTreeRoot{Digest: digest, Level: page.Level}}
+func consistencyDomainPageDescriptor(page storageformat.DomainPage, digest string, packIDs ...string) (domainPageRef, error) {
+	packID := ""
+	if len(packIDs) > 0 {
+		packID = packIDs[0]
+	}
+	reference := domainPageRef{root: storageformat.DomainTreeRoot{Digest: digest, PackID: packID, Level: page.Level}}
 	if page.Level == 0 {
 		reference.root.EntryCount = uint64(len(page.Entries))
 		if len(page.Entries) > 0 {
@@ -131,6 +325,11 @@ func consistencyDomainPageDescriptor(page storageformat.DomainPage, digest strin
 			}
 			reference.root.ByteCount += uint64(len(entry.Value))
 		}
+		keys := make([]string, len(page.Entries))
+		for index, entry := range page.Entries {
+			keys[index] = entry.Key
+		}
+		reference.leafKeyFilter = storageformat.DomainLeafKeyFilter(keys)
 		return reference, nil
 	}
 	if len(page.Children) == 0 {
@@ -171,7 +370,16 @@ func (session *consistencyDomainTreeSession) lookup(ctx context.Context, root st
 			return consistencyDomainValue{}, false, nil
 		}
 		child := page.Children[index]
-		reference = domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}
+		if child.Level == 0 && child.LeafKeyFilter != "" {
+			mayContain, err := storageformat.DomainLeafKeyFilterMayContain(child.LeafKeyFilter, key)
+			if err != nil {
+				return consistencyDomainValue{}, false, err
+			}
+			if !mayContain {
+				return consistencyDomainValue{}, false, nil
+			}
+		}
+		reference = domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, PackID: child.PackID, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey, leafKeyFilter: child.LeafKeyFilter}
 	}
 }
 
@@ -217,7 +425,7 @@ func (session *consistencyDomainTreeSession) collect(ctx context.Context, root s
 			if prefix != "" && child.FirstKey > prefix && !strings.HasPrefix(child.FirstKey, prefix) {
 				break
 			}
-			if err := visit(domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}); err != nil {
+			if err := visit(domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, PackID: child.PackID, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}); err != nil {
 				return err
 			}
 		}
@@ -264,7 +472,7 @@ func (session *consistencyDomainTreeSession) collectOrdered(ctx context.Context,
 			if bound != "" && child.FirstKey >= bound {
 				continue
 			}
-			if err := visit(domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}); err != nil {
+			if err := visit(domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, PackID: child.PackID, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}); err != nil {
 				return err
 			}
 			if len(result) == limit {
@@ -343,6 +551,49 @@ func (session *consistencyDomainTreeSession) buildTree(ctx context.Context, entr
 	return pages[0].root, nil
 }
 
+// rebuild materializes a bounded tree wholly into the current mutation pack.
+// This prevents later mutations from chasing historical packs when a large
+// edit already had to read the complete bounded tree. Larger trees retain
+// persistent path-copy behavior and scale by changed branches.
+func (session *consistencyDomainTreeSession) rebuild(ctx context.Context, root storageformat.DomainTreeRoot, changes []storageformat.DomainChange) (storageformat.DomainTreeRoot, error) {
+	if root.EntryCount > uint64(math.MaxInt-1) {
+		return storageformat.DomainTreeRoot{}, domain.NewError(domain.ErrorInvalid, "consistency-domain rebuild cardinality overflows")
+	}
+	entries, err := session.collect(ctx, root, "", "", int(root.EntryCount)+1)
+	if err != nil {
+		return storageformat.DomainTreeRoot{}, err
+	}
+	values := make(map[string]storageformat.DomainEntry, len(entries)+len(changes))
+	for _, entry := range entries {
+		values[entry.Key] = entry
+	}
+	for _, change := range changes {
+		if change.Delete {
+			delete(values, change.Key)
+			continue
+		}
+		values[change.Key] = storageformat.DomainEntry{Key: change.Key, Value: append([]byte(nil), change.Value...), LogicalVersion: change.LogicalVersion}
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	materialized := make([]storageformat.DomainEntry, len(keys))
+	for index, key := range keys {
+		materialized[index] = values[key]
+	}
+	session.mu.Lock()
+	session.forcePack = true
+	session.mu.Unlock()
+	defer func() {
+		session.mu.Lock()
+		session.forcePack = false
+		session.mu.Unlock()
+	}()
+	return session.buildTree(ctx, materialized)
+}
+
 func (session *consistencyDomainTreeSession) rewrite(ctx context.Context, page storageformat.DomainPage, changes []storageformat.DomainChange) ([]domainPageRef, error) {
 	if page.Level == 0 {
 		entries := append([]storageformat.DomainEntry(nil), page.Entries...)
@@ -381,7 +632,7 @@ func (session *consistencyDomainTreeSession) rewrite(ctx context.Context, page s
 	sort.Ints(indices)
 	children := make([]domainPageRef, len(page.Children))
 	for index, child := range page.Children {
-		children[index] = domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}
+		children[index] = domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, PackID: child.PackID, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey, leafKeyFilter: child.LeafKeyFilter}
 	}
 	offset := 0
 	for _, originalIndex := range indices {
@@ -451,7 +702,7 @@ func (session *consistencyDomainTreeSession) writeBranchGroups(ctx context.Conte
 	for groupIndex, group := range groups {
 		pageChildren := make([]storageformat.DomainPageChild, len(group))
 		for index, child := range group {
-			pageChildren[index] = storageformat.DomainPageChild{FirstKey: child.firstKey, LastKey: child.lastKey, Digest: child.root.Digest, Level: child.root.Level, EntryCount: child.root.EntryCount, ByteCount: child.root.ByteCount}
+			pageChildren[index] = storageformat.DomainPageChild{FirstKey: child.firstKey, LastKey: child.lastKey, Digest: child.root.Digest, PackID: child.root.PackID, LeafKeyFilter: child.leafKeyFilter, Level: child.root.Level, EntryCount: child.root.EntryCount, ByteCount: child.root.ByteCount}
 		}
 		pages[groupIndex] = storageformat.DomainPage{SchemaVersion: 1, DomainID: session.reference.ID, Kind: session.reference.Kind, Level: level, Children: pageChildren}
 	}
@@ -470,6 +721,20 @@ func (session *consistencyDomainTreeSession) writePages(ctx context.Context, pag
 	if len(pages) == 1 {
 		reference, err := session.writePage(ctx, pages[0])
 		return []domainPageRef{reference}, err
+	}
+	// Preselect the pack identity before concurrent writers run. The sorted
+	// digest set is deterministic across scheduling, replicas, and retries.
+	digests := make([]string, len(pages))
+	for index, page := range pages {
+		body, err := storageformat.EncodeCanonical(page)
+		if err != nil {
+			return nil, err
+		}
+		digests[index] = storageformat.Digest(body)
+	}
+	sort.Strings(digests)
+	if _, err := session.ensurePackID(strings.Join(digests, "\x00")); err != nil {
+		return nil, err
 	}
 	workerCount := min(len(pages), domainPageWriteParallelism)
 	parallel := providerbudget.TraceFromContext(ctx)
@@ -517,7 +782,7 @@ func (session *consistencyDomainTreeSession) branchGroups(level int, children []
 		for end < len(children) && end-offset < domainPageMaximumItems {
 			pageChildren := make([]storageformat.DomainPageChild, end-offset+1)
 			for index, child := range children[offset : end+1] {
-				pageChildren[index] = storageformat.DomainPageChild{FirstKey: child.firstKey, LastKey: child.lastKey, Digest: child.root.Digest, Level: child.root.Level, EntryCount: child.root.EntryCount, ByteCount: child.root.ByteCount}
+				pageChildren[index] = storageformat.DomainPageChild{FirstKey: child.firstKey, LastKey: child.lastKey, Digest: child.root.Digest, PackID: child.root.PackID, LeafKeyFilter: child.leafKeyFilter, Level: child.root.Level, EntryCount: child.root.EntryCount, ByteCount: child.root.ByteCount}
 			}
 			candidate := storageformat.DomainPage{SchemaVersion: 1, DomainID: session.reference.ID, Kind: session.reference.Kind, Level: level, Children: pageChildren}
 			if _, err := storageformat.EncodeCanonical(candidate); err != nil {
@@ -545,31 +810,48 @@ func (session *consistencyDomainTreeSession) writePage(ctx context.Context, page
 	}
 	session.mu.RLock()
 	cached, cachedFound := session.pages[digest]
+	cachedPack := session.pagePacks[digest]
 	known, knownFound := session.known[digest]
+	forcePack := session.forcePack
+	activePackID := session.packID
 	session.mu.RUnlock()
-	if cachedFound {
+	if cachedFound && (!forcePack || cachedPack == activePackID && activePackID != "") {
 		cachedBody, encodeErr := storageformat.EncodeCanonical(cached)
 		if encodeErr != nil || !bytes.Equal(cachedBody, body) {
 			return domainPageRef{}, domain.NewError(domain.ErrorInvalid, "consistency-domain page digest collision")
 		}
-		return consistencyDomainPageDescriptor(page, digest)
+		return consistencyDomainPageDescriptor(page, digest, cachedPack)
 	}
 	reference, err := consistencyDomainPageDescriptor(page, digest)
 	if err != nil {
 		return domainPageRef{}, err
 	}
-	if knownFound {
+	if knownFound && !forcePack {
+		reference.root.PackID = known.PackID
 		if known != reference.root {
 			return domainPageRef{}, domain.NewError(domain.ErrorInvalid, "consistency-domain known page descriptor mismatch")
 		}
-		validated, readErr := session.readPage(ctx, reference)
-		if readErr != nil {
-			return domainPageRef{}, readErr
+		// known is reachable from the authenticated source head and therefore
+		// names an immutable object whose create-only publication already won.
+		// The locally reconstructed canonical body and digest above prove exact
+		// equality without downloading that object again.
+		return reference, nil
+	}
+	packID, err := session.ensurePackID(digest)
+	if err != nil {
+		return domainPageRef{}, err
+	}
+	if packID != "" {
+		reference.root.PackID = packID
+		session.mu.Lock()
+		if session.packFlushed {
+			session.mu.Unlock()
+			return domainPageRef{}, domain.NewError(domain.ErrorInvalid, "consistency-domain page pack was already flushed")
 		}
-		validatedBody, encodeErr := storageformat.EncodeCanonical(validated)
-		if encodeErr != nil || !bytes.Equal(validatedBody, body) {
-			return domainPageRef{}, domain.NewError(domain.ErrorInvalid, "consistency-domain page digest collision")
-		}
+		session.pendingPack[digest] = page
+		session.pages[digest] = page
+		session.pagePacks[digest] = packID
+		session.mu.Unlock()
 		return reference, nil
 	}
 	key := session.pageKey(digest)
@@ -587,6 +869,7 @@ func (session *consistencyDomainTreeSession) writePage(ctx context.Context, page
 	}
 	session.mu.Lock()
 	session.pages[digest] = page
+	session.pagePacks[digest] = ""
 	session.mu.Unlock()
 	return reference, nil
 }

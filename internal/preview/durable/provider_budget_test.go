@@ -3,6 +3,8 @@ package durable_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
+	"github.com/applyinnovations/endlessfs/internal/preview"
 	"github.com/applyinnovations/endlessfs/internal/preview/durable"
 	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/secret"
@@ -28,8 +31,9 @@ func TestProviderBudgetDurablePreviewStore(t *testing.T) {
 	}
 	ledger := providerbudget.NewLedger()
 	backend := budgettest.Wrap(providerbudget.RolePreviewArtifact, base, ledger)
+	indexBackend := budgettest.Wrap(providerbudget.RolePreviewState, base, ledger)
 	store, err := durable.New(durable.Options{
-		Backend: backend, Transfers: backend, Clock: clock, IDs: ids,
+		Backend: backend, IndexBackend: indexBackend, Transfers: backend, Clock: clock, IDs: ids,
 		Key: secret.Value(testBearer(0x41)), CapabilityTTL: time.Minute,
 		DataOrigin: server.URL, HTTPClient: server.Client(),
 	})
@@ -44,9 +48,12 @@ func TestProviderBudgetDurablePreviewStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check := func(name string) {
+	check := func(name string, roles ...providerbudget.Role) {
 		t.Helper()
-		if report, err := ratchet.CheckExact(name, model, []providerbudget.Role{providerbudget.RolePreviewArtifact}, ledger.Events()); err != nil {
+		if len(roles) == 0 {
+			roles = []providerbudget.Role{providerbudget.RolePreviewArtifact}
+		}
+		if report, err := ratchet.CheckExact(name, model, roles, ledger.Events()); err != nil {
 			t.Errorf("%s: %v; observed=%+v; events=%+v", name, err, report.Totals, ledger.Events())
 		}
 		ledger.Reset()
@@ -90,6 +97,24 @@ func TestProviderBudgetDurablePreviewStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("preview-create-download")
+
+	readyScope := sha256.Sum256([]byte("provider-budget"))
+	selection := preview.ReadySelection{CacheScope: base64.RawURLEncoding.EncodeToString(readyScope[:]), Binding: binding}
+	if err := store.RecordReady(ctx, selection, artifact.Metadata()); err != nil {
+		t.Fatal(err)
+	}
+	check("preview-record-ready", providerbudget.RolePreviewState)
+
+	resolved, err := store.ResolveReady(ctx, []preview.ReadySelection{selection})
+	if err != nil || len(resolved) != 1 || resolved[0] == nil {
+		t.Fatalf("ResolveReady() = %+v, %v", resolved, err)
+	}
+	check("preview-resolve-ready", providerbudget.RolePreviewState)
+
+	if _, err := store.CreateKnownDownload(ctx, binding, *resolved[0]); err != nil {
+		t.Fatal(err)
+	}
+	check("preview-create-known-download")
 
 	nextClaim, err := store.Claim(ctx, binding, "budget-release", clock.Now().Add(time.Minute))
 	if err != nil {

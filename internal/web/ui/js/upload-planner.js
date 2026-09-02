@@ -1,4 +1,4 @@
-  const uploadPlanningBatchSize = 1000;
+  const uploadPlanningBatchSize = 10000;
   const uploadHashWorkerLimit = 2;
 
   async function chooseUploadStrategy(label = "these items") {

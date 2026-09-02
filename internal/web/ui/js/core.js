@@ -17,6 +17,8 @@
     directoryPromises: new Map(),
     activeTransfers: 0,
     uploadBatchActive: false,
+    uploadCompletionActive: false,
+    uploadCompletionTimer: 0,
     transferFilter: "current",
     transferSearch: "",
     transferRenderFrame: 0,
@@ -77,6 +79,7 @@
     previewQueue: [],
     previewQueued: new Set(),
     previewActive: 0,
+    previewPumpScheduled: false,
     previewControllers: new Map(),
     previewObjectURLs: new Map(),
     previewRetryAttempts: new Map(),
@@ -110,7 +113,7 @@
   const maximumViewerPreviewCacheEntries = 8;
   const maximumViewerPreviewCacheBytes = 64 << 20;
   const transferLedgerDatabaseName = "endlessfs-transfer-ledger-v1";
-  const transferLedgerVersion = 2;
+  const transferLedgerVersion = 3;
   const transferVirtualWindowSize = 72;
   const transferVirtualWindowStep = 32;
   const transferVirtualRowHeight = 60;
@@ -120,7 +123,10 @@
   const transferRetryLimit = 7;
   const transferProgressSampleWeight = 0.35;
   let toastTimer = 0;
-  const browserPageSize = 1000;
+  // One bounded response covers the product-scale 10,000-row projection.
+  // Rendering remains virtualized; a large directory therefore does not
+  // multiply control-plane authentication or provider reads per viewport.
+  const browserPageSize = 10000;
 
   class APIError extends Error {
     constructor(response, problem) {

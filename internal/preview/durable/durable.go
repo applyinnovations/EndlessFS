@@ -17,6 +17,7 @@ import (
 	"math"
 	"mime"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,16 +31,19 @@ import (
 )
 
 const (
-	schemaVersion           = 1
-	previewPrefix           = "preview/v1/"
-	defaultMaxGenerations   = 4
-	defaultMaxArtifactBytes = int64(32 << 20)
-	maximumRecordBytes      = int64(64 << 10)
-	maximumRetries          = 32
+	schemaVersion            = 1
+	previewPrefix            = "preview/v1/"
+	defaultMaxGenerations    = 4
+	defaultMaxArtifactBytes  = int64(32 << 20)
+	maximumRecordBytes       = int64(64 << 10)
+	maximumReadyCatalogBytes = int64(4 << 20)
+	maximumReadyCatalogItems = 10_000
+	maximumRetries           = 32
 )
 
 type Options struct {
 	Backend          objectstore.Backend
+	IndexBackend     objectstore.Backend
 	Transfers        objectstore.DirectTransferBackend
 	Clock            domain.Clock
 	IDs              *domain.IDGenerator
@@ -54,6 +58,7 @@ type Options struct {
 
 type Store struct {
 	backend          objectstore.Backend
+	indexBackend     objectstore.Backend
 	transfers        objectstore.DirectTransferBackend
 	clock            domain.Clock
 	ids              *domain.IDGenerator
@@ -84,6 +89,19 @@ type manifestRecord struct {
 	Artifact      preview.ArtifactMetadata `json:"artifact"`
 }
 
+type readyCatalogRecord struct {
+	SchemaVersion int                 `json:"schemaVersion"`
+	ScopeDigest   string              `json:"scopeDigest"`
+	Revision      uint64              `json:"revision"`
+	Entries       []readyCatalogEntry `json:"entries"`
+}
+
+type readyCatalogEntry struct {
+	BindingDigest string                   `json:"bindingDigest"`
+	RecordedAt    time.Time                `json:"recordedAt"`
+	Artifact      preview.ArtifactMetadata `json:"artifact"`
+}
+
 func New(options Options) (*Store, error) {
 	if options.Clock == nil {
 		options.Clock = domain.SystemClock{}
@@ -103,15 +121,18 @@ func New(options Options) (*Store, error) {
 	if options.MaxArtifactBytes == 0 {
 		options.MaxArtifactBytes = defaultMaxArtifactBytes
 	}
+	if options.IndexBackend == nil {
+		options.IndexBackend = options.Backend
+	}
 	key, err := base64.RawURLEncoding.DecodeString(options.Key.Reveal())
-	if options.Backend == nil || options.Transfers == nil || err != nil || len(key) < 32 ||
+	if options.Backend == nil || options.IndexBackend == nil || options.Transfers == nil || err != nil || len(key) < 32 ||
 		options.CapabilityTTL <= 0 || options.CapabilityTTL > 10*time.Minute ||
 		options.DataOrigin == "" || options.MaxGenerations < 1 || options.MaxGenerations > 32 ||
 		options.MaxArtifactBytes < int64(len(preview.OnePixelWebP())) || options.MaxArtifactBytes > 128<<20 {
 		return nil, domain.NewError(domain.ErrorInvalid, "invalid durable preview store configuration")
 	}
 	return &Store{
-		backend: options.Backend, transfers: options.Transfers, clock: options.Clock, ids: options.IDs,
+		backend: options.Backend, indexBackend: options.IndexBackend, transfers: options.Transfers, clock: options.Clock, ids: options.IDs,
 		key: key, capabilityTTL: options.CapabilityTTL, dataOrigin: strings.TrimRight(options.DataOrigin, "/"),
 		allowedOrigin: options.AllowedOrigin, httpClient: options.HTTPClient,
 		maxGenerations: options.MaxGenerations, maxArtifactBytes: options.MaxArtifactBytes,
@@ -385,6 +406,112 @@ func (s *Store) Latest(ctx context.Context, binding preview.Binding) (preview.Ar
 	return metadata, nil
 }
 
+func (s *Store) ResolveReady(ctx context.Context, selections []preview.ReadySelection) ([]*preview.ArtifactMetadata, error) {
+	if err := objectstore.ContextError(ctx); err != nil {
+		return nil, domain.WrapError(domain.ErrorUnavailable, "preview store request canceled", err)
+	}
+	if len(selections) < 1 || len(selections) > 64 {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid preview ready batch")
+	}
+	results := make([]*preview.ArtifactMetadata, len(selections))
+	groups := make(map[string][]int)
+	for index, selection := range selections {
+		if !selection.Valid() {
+			return nil, domain.NewError(domain.ErrorInvalid, "invalid preview ready selection")
+		}
+		groups[selection.CacheScope] = append(groups[selection.CacheScope], index)
+	}
+	for cacheScope, indices := range groups {
+		scopeDigest := s.readyScopeDigest(cacheScope)
+		object, err := s.indexBackend.Get(ctx, readyCatalogKey(scopeDigest))
+		if errors.Is(err, domain.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			s.setReady(false)
+			return nil, err
+		}
+		record, err := decodeReadyCatalog(object.Body, scopeDigest)
+		if err != nil {
+			s.setReady(false)
+			return nil, domain.NewError(domain.ErrorUnavailable, "preview ready catalog is corrupt")
+		}
+		for _, resultIndex := range indices {
+			selection := selections[resultIndex]
+			bindingDigest := s.bindingDigest(selection.Binding)
+			entryIndex := sort.Search(len(record.Entries), func(index int) bool { return record.Entries[index].BindingDigest >= bindingDigest })
+			if entryIndex == len(record.Entries) || record.Entries[entryIndex].BindingDigest != bindingDigest || !record.Entries[entryIndex].Artifact.ValidFor(selection.Binding) {
+				continue
+			}
+			metadata := record.Entries[entryIndex].Artifact
+			results[resultIndex] = &metadata
+		}
+	}
+	return results, nil
+}
+
+func (s *Store) RecordReady(ctx context.Context, selection preview.ReadySelection, metadata preview.ArtifactMetadata) error {
+	if err := objectstore.ContextError(ctx); err != nil {
+		return domain.WrapError(domain.ErrorUnavailable, "preview store request canceled", err)
+	}
+	if !selection.Valid() || !metadata.ValidFor(selection.Binding) {
+		return domain.NewError(domain.ErrorInvalid, "invalid preview ready entry")
+	}
+	scopeDigest := s.readyScopeDigest(selection.CacheScope)
+	bindingDigest := s.bindingDigest(selection.Binding)
+	key := readyCatalogKey(scopeDigest)
+	for attempts := 0; attempts < maximumRetries; attempts++ {
+		object, getErr := s.indexBackend.Get(ctx, key)
+		record := readyCatalogRecord{SchemaVersion: schemaVersion, ScopeDigest: scopeDigest, Revision: 1}
+		condition := objectstore.PutCondition{Mode: objectstore.PutCreateOnly}
+		if getErr == nil {
+			var decodeErr error
+			record, decodeErr = decodeReadyCatalog(object.Body, scopeDigest)
+			if decodeErr != nil {
+				s.setReady(false)
+				return domain.NewError(domain.ErrorUnavailable, "preview ready catalog is corrupt")
+			}
+			if record.Revision == math.MaxUint64 {
+				return domain.NewError(domain.ErrorUnavailable, "preview ready catalog revision exhausted")
+			}
+			record.Revision++
+			condition = objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}
+		} else if !errors.Is(getErr, domain.ErrNotFound) {
+			s.setReady(false)
+			return getErr
+		}
+		index := sort.Search(len(record.Entries), func(index int) bool { return record.Entries[index].BindingDigest >= bindingDigest })
+		entry := readyCatalogEntry{BindingDigest: bindingDigest, RecordedAt: s.clock.Now().UTC(), Artifact: metadata}
+		if index < len(record.Entries) && record.Entries[index].BindingDigest == bindingDigest {
+			record.Entries[index] = entry
+		} else {
+			record.Entries = append(record.Entries, readyCatalogEntry{})
+			copy(record.Entries[index+1:], record.Entries[index:])
+			record.Entries[index] = entry
+		}
+		if len(record.Entries) > maximumReadyCatalogItems {
+			evict := 0
+			for candidate := 1; candidate < len(record.Entries); candidate++ {
+				if record.Entries[candidate].RecordedAt.Before(record.Entries[evict].RecordedAt) || record.Entries[candidate].RecordedAt.Equal(record.Entries[evict].RecordedAt) && record.Entries[candidate].BindingDigest < record.Entries[evict].BindingDigest {
+					evict = candidate
+				}
+			}
+			record.Entries = append(record.Entries[:evict], record.Entries[evict+1:]...)
+		}
+		body, encodeErr := encodeReadyCatalog(record)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		if _, putErr := s.indexBackend.Put(ctx, key, body, condition); putErr == nil {
+			return nil
+		} else if !errors.Is(putErr, domain.ErrConflict) && !errors.Is(putErr, domain.ErrPreconditionFailed) {
+			s.setReady(false)
+			return putErr
+		}
+	}
+	return domain.NewError(domain.ErrorUnavailable, "preview ready catalog contention exceeded")
+}
+
 func (s *Store) Read(ctx context.Context, binding preview.Binding, generationID string) (preview.Artifact, error) {
 	if err := objectstore.ContextError(ctx); err != nil {
 		return preview.Artifact{}, domain.WrapError(domain.ErrorUnavailable, "preview store request canceled", err)
@@ -426,6 +553,26 @@ func (s *Store) CreateDownload(ctx context.Context, binding preview.Binding, gen
 	}
 	capability, err := s.transfers.CreateDownload(ctx, objectstore.DownloadRequest{
 		Key: object.Key, Version: object.Version, Filename: "preview.webp", MediaType: preview.ContentTypeWebP,
+		Disposition: domain.DispositionInline, ExpiresAt: s.clock.Now().Add(s.capabilityTTL),
+	})
+	if err != nil {
+		s.setReady(false)
+		return domain.DownloadCapability{}, err
+	}
+	return domain.DownloadCapability{URL: capability.URL, Method: capability.Method, Headers: capability.Headers, ExpiresAt: capability.ExpiresAt}, nil
+}
+
+func (s *Store) CreateKnownDownload(ctx context.Context, binding preview.Binding, metadata preview.ArtifactMetadata) (domain.DownloadCapability, error) {
+	if err := objectstore.ContextError(ctx); err != nil {
+		return domain.DownloadCapability{}, domain.WrapError(domain.ErrorUnavailable, "preview store request canceled", err)
+	}
+	if !metadata.ValidFor(binding) {
+		return domain.DownloadCapability{}, domain.NewError(domain.ErrorInvalid, "invalid preview ready artifact")
+	}
+	digest := s.bindingDigest(binding)
+	generationDigest := s.generationDigest(digest, metadata.GenerationID)
+	capability, err := s.transfers.CreateDownload(ctx, objectstore.DownloadRequest{
+		Key: generationArtifactKey(digest, generationDigest), Immutable: true, Filename: "preview.webp", MediaType: preview.ContentTypeWebP,
 		Disposition: domain.DispositionInline, ExpiresAt: s.clock.Now().Add(s.capabilityTTL),
 	})
 	if err != nil {
@@ -593,6 +740,12 @@ func (s *Store) generationDigest(bindingDigest, generationID string) string {
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
+func (s *Store) readyScopeDigest(cacheScope string) string {
+	hasher := hmac.New(sha256.New, s.key)
+	writeFields(hasher, "ready-scope-v1", cacheScope)
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
 func writeFields(hasher hash.Hash, fields ...string) {
 	var length [8]byte
 	for _, field := range fields {
@@ -612,6 +765,61 @@ func generationArtifactKey(bindingDigest, generationDigest string) objectstore.K
 
 func generationManifestKey(bindingDigest, generationDigest string) objectstore.Key {
 	return objectstore.MustKey("preview/v1/b/" + bindingDigest + "/g/" + generationDigest + "/manifest.json")
+}
+
+func readyCatalogKey(scopeDigest string) objectstore.Key {
+	return objectstore.MustKey("preview/v1/i/" + scopeDigest + "/ready.json")
+}
+
+func encodeReadyCatalog(record readyCatalogRecord) ([]byte, error) {
+	if err := validateReadyCatalog(record); err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(record)
+	if err != nil || len(body) > int(maximumReadyCatalogBytes) {
+		return nil, domain.NewError(domain.ErrorInvalid, "preview ready catalog exceeds its bounded envelope")
+	}
+	return body, nil
+}
+
+func decodeReadyCatalog(body []byte, scopeDigest string) (readyCatalogRecord, error) {
+	if len(body) == 0 || len(body) > int(maximumReadyCatalogBytes) || !json.Valid(body) {
+		return readyCatalogRecord{}, errors.New("invalid preview ready catalog")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var record readyCatalogRecord
+	if err := decoder.Decode(&record); err != nil {
+		return readyCatalogRecord{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) || record.ScopeDigest != scopeDigest {
+		return readyCatalogRecord{}, errors.New("invalid preview ready catalog binding")
+	}
+	if err := validateReadyCatalog(record); err != nil {
+		return readyCatalogRecord{}, err
+	}
+	canonical, err := json.Marshal(record)
+	if err != nil || !bytes.Equal(canonical, body) {
+		return readyCatalogRecord{}, errors.New("non-canonical preview ready catalog")
+	}
+	return record, nil
+}
+
+func validateReadyCatalog(record readyCatalogRecord) error {
+	if record.SchemaVersion != schemaVersion || len(record.ScopeDigest) != sha256.Size*2 || record.Revision == 0 || len(record.Entries) > maximumReadyCatalogItems {
+		return domain.NewError(domain.ErrorInvalid, "invalid preview ready catalog")
+	}
+	previous := ""
+	for _, entry := range record.Entries {
+		if len(entry.BindingDigest) != sha256.Size*2 || previous != "" && entry.BindingDigest <= previous || entry.RecordedAt.IsZero() || entry.Artifact.GenerationID == "" {
+			return domain.NewError(domain.ErrorInvalid, "invalid preview ready catalog entry")
+		}
+		if _, err := hex.DecodeString(entry.BindingDigest); err != nil {
+			return domain.NewError(domain.ErrorInvalid, "invalid preview ready catalog entry")
+		}
+		previous = entry.BindingDigest
+	}
+	return nil
 }
 
 func encode(value any) []byte {

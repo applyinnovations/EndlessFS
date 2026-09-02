@@ -92,7 +92,8 @@ func TestReadyResultAndConcurrencyFailureMapping(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			service := &Service{store: test.store}
-			got, _, err := service.readyResult(context.Background(), binding, result)
+			selection := readySelection(binding.Owner, domain.MustParseUserPath("/ready.webp"), binding)
+			got, _, err := service.readyResult(context.Background(), selection, result)
 			if (err != nil) != test.wantError || !test.wantError && got.State != test.wantState {
 				t.Fatalf("readyResult = %+v, %v", got, err)
 			}
@@ -970,10 +971,19 @@ func (s *scriptedStore) Commit(context.Context, Binding, GenerationClaim, Artifa
 func (s *scriptedStore) Latest(context.Context, Binding) (ArtifactMetadata, error) {
 	return s.latest.Metadata(), s.latestErr
 }
+func (*scriptedStore) ResolveReady(_ context.Context, selections []ReadySelection) ([]*ArtifactMetadata, error) {
+	return make([]*ArtifactMetadata, len(selections)), nil
+}
+func (*scriptedStore) RecordReady(context.Context, ReadySelection, ArtifactMetadata) error {
+	return nil
+}
 func (s *scriptedStore) Read(context.Context, Binding, string) (Artifact, error) {
 	return s.latest, s.latestErr
 }
 func (s *scriptedStore) CreateDownload(context.Context, Binding, string) (domain.DownloadCapability, error) {
+	return domain.DownloadCapability{URL: "http://127.0.0.1:1234/preview", Method: http.MethodGet}, s.capabilityErr
+}
+func (s *scriptedStore) CreateKnownDownload(context.Context, Binding, ArtifactMetadata) (domain.DownloadCapability, error) {
 	return domain.DownloadCapability{URL: "http://127.0.0.1:1234/preview", Method: http.MethodGet}, s.capabilityErr
 }
 func (*scriptedStore) Ready() bool        { return true }

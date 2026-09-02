@@ -2,7 +2,9 @@ package portable
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"sort"
 	"strings"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
+	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
@@ -173,6 +176,43 @@ func normalizeConsistencyDomainMutation(mutation consistencyDomainMutation) (con
 	return mutation, fingerprint, nil
 }
 
+// normalizeMaterializedConsistencyDomainMutation binds a large compact
+// transaction without first placing every change in the bounded head record.
+// Each independently bounded change is length-delimited into the commitment,
+// so the work remains deterministic while the number of logical items is no
+// longer constrained by MaxCanonicalBytes.
+func normalizeMaterializedConsistencyDomainMutation(mutation consistencyDomainMutation) (consistencyDomainMutation, string, error) {
+	if mutation.ID == "" || len(mutation.Changes) == 0 {
+		return consistencyDomainMutation{}, "", domain.NewError(domain.ErrorInvalid, "invalid materialized consistency-domain mutation")
+	}
+	changes := append([]consistencyDomainChange(nil), mutation.Changes...)
+	sort.Slice(changes, func(left, right int) bool { return changes[left].Key < changes[right].Key })
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("endlessfs-consistency-domain-materialized-mutation-v1\x00"))
+	previous := ""
+	for _, change := range changes {
+		if change.Key == "" || change.Key == previous || change.Require < domainValueAny || change.Require > domainValuePresent || change.Require != domainValuePresent && change.ExpectedVersion != "" || change.Delete && len(change.Value) != 0 {
+			return consistencyDomainMutation{}, "", domain.NewError(domain.ErrorInvalid, "invalid materialized consistency-domain change")
+		}
+		previous = change.Key
+		body, err := storageformat.EncodeCanonical(change)
+		if err != nil {
+			return consistencyDomainMutation{}, "", err
+		}
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(body)))
+		_, _ = hash.Write(size[:])
+		_, _ = hash.Write(body)
+	}
+	var resultSize [8]byte
+	binary.BigEndian.PutUint64(resultSize[:], uint64(len(mutation.Result)))
+	_, _ = hash.Write(resultSize[:])
+	_, _ = hash.Write(mutation.Result)
+	mutation.Changes = changes
+	mutation.Result = append([]byte(nil), mutation.Result...)
+	return mutation, base64.RawURLEncoding.EncodeToString(hash.Sum(nil)), nil
+}
+
 func consistencyDomainLogicalVersion(mutationID, fingerprint string, change consistencyDomainChange) string {
 	if change.Delete {
 		return ""
@@ -271,7 +311,7 @@ func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, referen
 		if snapshot.head.Frozen {
 			return consistencyDomainOutcome{}, domain.NewError(domain.ErrorUnavailable, "consistency domain is frozen")
 		}
-		if lock, _, found, lockErr := transitionLockAtHead009(ctx, store, reference, snapshot.head); lockErr != nil {
+		if lock, _, found, lockErr := transitionLockAtHeadWithSession009(ctx, store, reference, snapshot.head, preparedSession); lockErr != nil {
 			return consistencyDomainOutcome{}, lockErr
 		} else if found && mutation.TransitionID != lock.TransitionID {
 			return consistencyDomainOutcome{}, domain.WrapError(domain.ErrorUnavailable, "consistency domain has a pending transition", errTransitionPending009)
@@ -301,6 +341,11 @@ func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, referen
 				return consistencyDomainOutcome{}, compactErr
 			}
 			continue
+		}
+		if preparedSession != nil {
+			if err := preparedSession.flushPack(ctx); err != nil {
+				return consistencyDomainOutcome{}, err
+			}
 		}
 		condition := objectstore.PutCondition{Mode: objectstore.PutCreateOnly}
 		if snapshot.exists {
@@ -351,6 +396,133 @@ func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, referen
 		}
 		return consistencyDomainOutcome{MutationID: mutation.ID, Fingerprint: fingerprint, Revision: revision, RetainUntil: mutation.RetainUntil, Result: append([]byte(nil), mutation.Result...)}, nil
 	}
+}
+
+// mutateMaterializedPrepared folds the current delta window and a large new
+// mutation directly into immutable packed trees, then publishes one head CAS.
+// It is the bounded provider-call path for product-scale transactions: the
+// head carries roots and one compact outcome, never one value per selected
+// item. Callers retry from a fresh authenticated view after a real CAS race.
+func (store *consistencyDomainStore) mutateMaterializedPrepared(ctx context.Context, reference consistencyDomainRef, mutation consistencyDomainMutation, snapshot *consistencyDomainHeadSnapshot, session *consistencyDomainTreeSession) (consistencyDomainOutcome, error) {
+	if err := validateConsistencyDomainRef(reference); err != nil || snapshot == nil || session == nil || !snapshot.exists || !snapshot.head.Registered || snapshot.head.DomainID != reference.ID || snapshot.head.Kind != reference.Kind {
+		if err != nil {
+			return consistencyDomainOutcome{}, err
+		}
+		return consistencyDomainOutcome{}, domain.NewError(domain.ErrorInvalid, "materialized consistency-domain mutation requires a bound live snapshot")
+	}
+	if mutation.RetainUntil.IsZero() {
+		mutation.RetainUntil = store.clock.Now().UTC().Add(terminalOperationRetention)
+	} else {
+		mutation.RetainUntil = mutation.RetainUntil.UTC()
+	}
+	normalized, fingerprint, err := normalizeMaterializedConsistencyDomainMutation(mutation)
+	if err != nil {
+		return consistencyDomainOutcome{}, err
+	}
+	mutation = normalized
+	if outcome, found, err := store.lookupOutcomeAtHeadWithSession(ctx, reference, snapshot.head, mutation.ID, session); err != nil {
+		return consistencyDomainOutcome{}, err
+	} else if found {
+		if outcome.Fingerprint != fingerprint {
+			return consistencyDomainOutcome{}, domain.NewError(domain.ErrorConflict, "consistency-domain idempotency key was reused")
+		}
+		outcome.Replayed = true
+		return outcome, nil
+	}
+	if snapshot.head.Frozen {
+		return consistencyDomainOutcome{}, domain.NewError(domain.ErrorUnavailable, "consistency domain is frozen")
+	}
+	if lock, _, found, lockErr := transitionLockAtHeadWithSession009(ctx, store, reference, snapshot.head, session); lockErr != nil {
+		return consistencyDomainOutcome{}, lockErr
+	} else if found && mutation.TransitionID != lock.TransitionID {
+		return consistencyDomainOutcome{}, domain.WrapError(domain.ErrorUnavailable, "consistency domain has a pending transition", errTransitionPending009)
+	}
+	if err := store.validateMutationAtHeadWithSession(ctx, reference, snapshot.head, mutation.Changes, session); err != nil {
+		return consistencyDomainOutcome{}, err
+	}
+
+	now := store.clock.Now().UTC()
+	latest := make(map[string]storageformat.DomainChange)
+	outcomes := make(map[string]storageformat.DomainChange, len(snapshot.head.Deltas)+1)
+	expiries := make(map[string]storageformat.DomainChange, len(snapshot.head.Deltas)+1)
+	for _, delta := range snapshot.head.Deltas {
+		for _, change := range delta.Changes {
+			latest[change.Key] = change
+		}
+		if !now.Before(delta.RetainUntil) {
+			continue
+		}
+		recorded := storageformat.DomainOutcome{MutationID: delta.MutationID, Fingerprint: delta.Fingerprint, Revision: delta.Revision, RetainUntil: delta.RetainUntil, Result: append([]byte(nil), delta.Result...)}
+		body, encodeErr := storageformat.EncodeCanonical(recorded)
+		if encodeErr != nil {
+			return consistencyDomainOutcome{}, encodeErr
+		}
+		outcomes[delta.MutationID] = storageformat.DomainChange{Key: delta.MutationID, Value: body, LogicalVersion: storageformat.Digest(append([]byte("endlessfs-consistency-domain-outcome-v1\x00"), body...))}
+		expiryKey := consistencyDomainOutcomeExpiryKey(delta.RetainUntil, delta.MutationID)
+		expiries[expiryKey] = storageformat.DomainChange{Key: expiryKey, Value: []byte(delta.MutationID), LogicalVersion: storageformat.Digest([]byte("endlessfs-consistency-domain-outcome-expiry-v1\x00" + expiryKey + "\x00" + delta.MutationID))}
+	}
+	revision := snapshot.head.Revision + 1
+	for _, change := range mutation.Changes {
+		latest[change.Key] = storageformat.DomainChange{Key: change.Key, Delete: change.Delete, Value: append([]byte(nil), change.Value...), LogicalVersion: consistencyDomainLogicalVersion(mutation.ID, fingerprint, change)}
+	}
+	recorded := storageformat.DomainOutcome{MutationID: mutation.ID, Fingerprint: fingerprint, Revision: revision, RetainUntil: mutation.RetainUntil, Result: append([]byte(nil), mutation.Result...)}
+	recordedBody, err := storageformat.EncodeCanonical(recorded)
+	if err != nil {
+		return consistencyDomainOutcome{}, err
+	}
+	outcomes[mutation.ID] = storageformat.DomainChange{Key: mutation.ID, Value: recordedBody, LogicalVersion: storageformat.Digest(append([]byte("endlessfs-consistency-domain-outcome-v1\x00"), recordedBody...))}
+	expiryKey := consistencyDomainOutcomeExpiryKey(mutation.RetainUntil, mutation.ID)
+	expiries[expiryKey] = storageformat.DomainChange{Key: expiryKey, Value: []byte(mutation.ID), LogicalVersion: storageformat.Digest([]byte("endlessfs-consistency-domain-outcome-expiry-v1\x00" + expiryKey + "\x00" + mutation.ID))}
+
+	changes := make([]storageformat.DomainChange, 0, len(latest))
+	for _, change := range latest {
+		changes = append(changes, change)
+	}
+	sort.Slice(changes, func(left, right int) bool { return changes[left].Key < changes[right].Key })
+	root, err := session.apply(ctx, snapshot.head.Base, changes)
+	if err != nil {
+		return consistencyDomainOutcome{}, err
+	}
+	outcomeRoot, expiryRoot, err := store.pruneExpiredOutcomes(ctx, session, snapshot.head.Outcomes, snapshot.head.OutcomeExpiry, now, outcomes, expiries)
+	if err != nil {
+		return consistencyDomainOutcome{}, err
+	}
+	next := snapshot.head
+	next.Base, next.Outcomes, next.OutcomeExpiry = root, outcomeRoot, expiryRoot
+	next.Revision, next.BaseRevision, next.Deltas = revision, revision, nil
+	key := storageformat.DomainHeadKey(reference.Kind, reference.ID)
+	body, err := store.encodeHead(key, *snapshot, next)
+	if err != nil {
+		return consistencyDomainOutcome{}, err
+	}
+	if err := session.flushPack(ctx); err != nil {
+		return consistencyDomainOutcome{}, err
+	}
+	if err := store.step(ctx, StepDomainBeforeHeadCommit); err != nil {
+		return consistencyDomainOutcome{}, err
+	}
+	_, putErr := store.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: snapshot.object.Version})
+	if putErr == nil {
+		if err := store.step(ctx, StepDomainAfterHeadCommit); err != nil {
+			putErr = err
+		}
+	}
+	if putErr != nil {
+		recovered, loadErr := store.loadHead(ctx, reference)
+		if loadErr == nil {
+			if outcome, found, outcomeErr := store.lookupOutcomeAtHead(ctx, reference, recovered.head, mutation.ID); outcomeErr != nil {
+				return consistencyDomainOutcome{}, outcomeErr
+			} else if found {
+				if outcome.Fingerprint != fingerprint {
+					return consistencyDomainOutcome{}, domain.NewError(domain.ErrorConflict, "consistency-domain idempotency key was reused")
+				}
+				outcome.Replayed = true
+				return outcome, nil
+			}
+		}
+		return consistencyDomainOutcome{}, putErr
+	}
+	return consistencyDomainOutcome{MutationID: mutation.ID, Fingerprint: fingerprint, Revision: revision, RetainUntil: mutation.RetainUntil, Result: append([]byte(nil), mutation.Result...)}, nil
 }
 
 // prepareRegistration creates an inert head and registers its deterministic
@@ -409,7 +581,7 @@ func (store *consistencyDomainStore) prepareRegistration(ctx context.Context, re
 }
 
 func (store *consistencyDomainStore) ensureRegistered(ctx context.Context, reference consistencyDomainRef, initial ...consistencyDomainHeadSnapshot) error {
-	for {
+	for range 8 {
 		snapshot, err := store.prepareRegistration(ctx, reference, initial...)
 		initial = nil
 		if err != nil {
@@ -431,6 +603,7 @@ func (store *consistencyDomainStore) ensureRegistered(ctx context.Context, refer
 			return err
 		}
 	}
+	return domain.NewError(domain.ErrorUnavailable, "consistency-domain registration remained contended")
 }
 
 func (store *consistencyDomainStore) writeHeadSnapshot(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead, expiresAt time.Time) (string, error) {
@@ -539,7 +712,9 @@ func (store *consistencyDomainStore) lookupOutcomeAtHeadWithSession(ctx context.
 	if session == nil {
 		session = newConsistencyDomainTreeSession(store, reference)
 	}
-	value, found, err := session.lookup(ctx, head.Outcomes, mutationID)
+	trace := providerbudget.TraceFromContext(ctx)
+	trace.Subsystem = "idempotency-outcome"
+	value, found, err := session.lookup(providerbudget.WithTrace(ctx, trace), head.Outcomes, mutationID)
 	if err != nil || !found {
 		return consistencyDomainOutcome{}, found, err
 	}
@@ -726,6 +901,7 @@ func (store *consistencyDomainStore) compactSnapshot(ctx context.Context, refere
 	}
 	sort.Slice(changes, func(left, right int) bool { return changes[left].Key < changes[right].Key })
 	session := newConsistencyDomainTreeSession(store, reference)
+	session.enablePackedWrites(snapshot.envelope.LogicalVersion)
 	root, err := session.apply(ctx, snapshot.head.Base, changes)
 	if err != nil {
 		return err
@@ -746,6 +922,9 @@ func (store *consistencyDomainStore) compactSnapshot(ctx context.Context, refere
 		return err
 	}
 	if err := store.step(ctx, "consistency-domain:before-compaction-commit"); err != nil {
+		return err
+	}
+	if err := session.flushPack(ctx); err != nil {
 		return err
 	}
 	_, err = store.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: snapshot.object.Version})

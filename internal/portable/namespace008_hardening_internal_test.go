@@ -120,7 +120,7 @@ func TestSchema008NamespaceSortProjectionAndCursorMatrix(t *testing.T) {
 	if _, err := namespaceProjectionKind("invalid"); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid projection kind error = %v", err)
 	}
-	if _, err := files.List(ctx, live, domain.ListRequest{Directory: domain.MustParseUserPath("/"), PageSize: 1001}); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := files.List(ctx, live, domain.ListRequest{Directory: domain.MustParseUserPath("/"), PageSize: 10001}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid namespace page size error = %v", err)
 	}
 }

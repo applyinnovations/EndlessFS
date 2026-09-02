@@ -486,6 +486,9 @@ func TestSchema008NamespaceReadCursorAndProjectionFailureMatrix(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if err := view.session.flushPack(ctx); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := store.domain.mutate(ctx, view.reference, consistencyDomainMutation{ID: "corrupt-child", Changes: []consistencyDomainChange{{Key: namespaceRootKey(domain.AreaLive), Require: domainValueAbsent, Value: body}}}); err != nil {
 			t.Fatal(err)
 		}

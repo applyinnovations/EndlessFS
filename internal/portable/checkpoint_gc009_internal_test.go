@@ -173,7 +173,13 @@ func TestProviderBudgetCheckpointGarbageCollection128Objects(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := append(stateLedger.Events(), fileLedger.Events()...)
-	if report, err := ratchet.CheckExact("maintenance-checkpoint-garbage-128-schema-009", economics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, events); err != nil {
+	garbageEvents := events[:0]
+	for _, event := range events {
+		if event.Operation == "checkpoint-garbage" {
+			garbageEvents = append(garbageEvents, event)
+		}
+	}
+	if report, err := ratchet.CheckExact("maintenance-checkpoint-garbage-128-schema-011", economics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, garbageEvents); err != nil {
 		t.Errorf("128-object checkpoint garbage provider budget: %v; observed=%+v", err, report.Totals)
 	}
 	deletes := 0
@@ -239,7 +245,7 @@ func TestCheckpointGarbageCollectionResumesFromPortableMultiPageCursor(t *testin
 	if err := storageformat.DecodeEnvelope(sessionObject.Body, sessionObject.Key, checkpointGarbageCollectionSchema, &envelope, &session); err != nil {
 		t.Fatal(err)
 	}
-	if session.Phase != checkpointGarbageCollectionSweeping || session.SweepIndex != 0 || session.After == "" {
+	if session.Phase != checkpointGarbageCollectionSweeping || session.SweepIndex != 1 || session.After != "" {
 		t.Fatalf("persisted multi-page progress = %+v", session)
 	}
 

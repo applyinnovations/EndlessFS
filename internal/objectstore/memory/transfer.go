@@ -233,7 +233,7 @@ func (b *Backend) CreateDownload(ctx context.Context, request objectstore.Downlo
 	if err := objectstore.ContextError(ctx); err != nil {
 		return objectstore.DownloadCapability{}, err
 	}
-	if !request.Key.Valid() || request.Version == "" || request.Filename == "" || request.MediaType == "" || !request.ExpiresAt.After(b.clock.Now()) || (request.Disposition != domain.DispositionAttachment && request.Disposition != domain.DispositionInline) {
+	if !request.Key.Valid() || request.Immutable == (request.Version != "") || request.Filename == "" || request.MediaType == "" || !request.ExpiresAt.After(b.clock.Now()) || (request.Disposition != domain.DispositionAttachment && request.Disposition != domain.DispositionInline) {
 		return objectstore.DownloadCapability{}, domain.NewError(domain.ErrorInvalid, "invalid direct download request")
 	}
 	b.mu.Lock()
@@ -242,8 +242,12 @@ func (b *Backend) CreateDownload(ctx context.Context, request objectstore.Downlo
 	if !found {
 		return objectstore.DownloadCapability{}, domain.NewError(domain.ErrorNotFound, "download object not found")
 	}
-	if record.version != request.Version {
+	if !request.Immutable && record.version != request.Version {
 		return objectstore.DownloadCapability{}, domain.NewError(domain.ErrorPreconditionFailed, "download object version does not match")
+	}
+	version := request.Version
+	if request.Immutable {
+		version = record.version
 	}
 	if b.dataPlaneURL == "" {
 		return objectstore.DownloadCapability{}, domain.NewError(domain.ErrorUnavailable, "memory data plane is not configured")
@@ -254,7 +258,7 @@ func (b *Backend) CreateDownload(ctx context.Context, request objectstore.Downlo
 	}
 	hash := sha256.Sum256([]byte(token))
 	b.downloads[hash] = downloadSession{
-		key: request.Key, version: request.Version, filename: request.Filename, mediaType: request.MediaType,
+		key: request.Key, version: version, filename: request.Filename, mediaType: request.MediaType,
 		disposition: request.Disposition, expiresAt: request.ExpiresAt.UTC(),
 	}
 	return objectstore.DownloadCapability{URL: b.dataPlaneURL + "/cap/download/" + token, Method: http.MethodGet, Headers: map[string]string{}, ExpiresAt: request.ExpiresAt.UTC()}, nil

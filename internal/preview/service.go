@@ -267,18 +267,66 @@ func (s *Service) Resolve(ctx context.Context, owner domain.UserID, request Reso
 	if !owner.Valid() || len(request.Items) < 1 || len(request.Items) > MaxResolveItems {
 		return ResolveResponse{}, domain.NewError(domain.ErrorInvalid, "preview resolve must contain 1 to 64 items")
 	}
-	response := ResolveResponse{Items: make([]ItemResult, 0, len(request.Items))}
-	automaticRemaining := maxAutomaticPerBatch
 	for _, item := range request.Items {
 		if err := s.validateItem(item); err != nil {
 			return ResolveResponse{}, err
 		}
-		result, err := s.resolveItem(ctx, owner, item, false, false, false)
+	}
+	response := ResolveResponse{Items: make([]ItemResult, 0, len(request.Items))}
+	if s.store == nil {
+		for _, item := range request.Items {
+			response.Items = append(response.Items, ItemResult{Path: item.Path, Version: item.Version, Variant: item.Variant, State: StateDisabled})
+		}
+		return response, nil
+	}
+	entries, scope, err := s.resolveSourceEntries(ctx, owner, request.Items)
+	if err != nil {
+		return ResolveResponse{}, err
+	}
+	known := make([]*ArtifactMetadata, len(request.Items))
+	selections := make([]ReadySelection, 0, len(request.Items))
+	selectionIndices := make([]int, 0, len(request.Items))
+	for index, item := range request.Items {
+		entry := entries[index]
+		generator := s.generatorFor(entry.MediaType)
+		if entry.Kind != domain.EntryFile || entry.Version != item.Version || generator == nil {
+			continue
+		}
+		binding := previewBinding(scope.UserID(), entry, item.Variant, generator.RecipeID())
+		if !binding.Valid() {
+			return ResolveResponse{}, domain.NewError(domain.ErrorInternal, "source provider omitted preview content identity")
+		}
+		selections = append(selections, readySelection(scope.UserID(), item.Path, binding))
+		selectionIndices = append(selectionIndices, index)
+	}
+	if len(selections) > 0 {
+		resolved, resolveErr := s.store.ResolveReady(ctx, selections)
+		if resolveErr != nil {
+			if !errors.Is(resolveErr, domain.ErrUnavailable) {
+				return ResolveResponse{}, resolveErr
+			}
+			for _, item := range request.Items {
+				response.Items = append(response.Items, ItemResult{Path: item.Path, Version: item.Version, Variant: item.Variant, State: StateUnavailable})
+			}
+			return response, nil
+		}
+		if len(resolved) != len(selections) {
+			return ResolveResponse{}, domain.NewError(domain.ErrorInternal, "preview ready store returned an invalid result")
+		}
+		for index, metadata := range resolved {
+			known[selectionIndices[index]] = metadata
+		}
+	}
+	automaticRemaining := maxAutomaticPerBatch
+	for index, item := range request.Items {
+		result, err := s.resolveItemWithEntry(ctx, scope, item, entries[index], known[index], true, false, false, false)
 		if err != nil {
 			return ResolveResponse{}, err
 		}
 		if result.State == StateMissing && s.options.Automatic && automaticRemaining > 0 {
-			result, err = s.resolveItem(ctx, owner, item, true, false, false)
+			// One bounded fallback per resolve preserves ready artifacts created
+			// before this disposable catalog or reused through a directory move.
+			result, err = s.resolveItemWithEntry(ctx, scope, item, entries[index], nil, false, true, false, false)
 			if err != nil {
 				return ResolveResponse{}, err
 			}
@@ -289,6 +337,61 @@ func (s *Service) Resolve(ctx context.Context, owner domain.UserID, request Reso
 		response.Items = append(response.Items, result)
 	}
 	return response, nil
+}
+
+// resolveSourceEntries authorizes a resolve batch from one snapshot lookup per
+// distinct parent directory. The public resolve limit is smaller than the
+// provider's 1,000-name lookup bound, so a visible grid never performs one
+// namespace Stat (and therefore one provider read sequence) per tile.
+func (s *Service) resolveSourceEntries(ctx context.Context, owner domain.UserID, items []ItemRequest) ([]domain.Entry, domain.Scope, error) {
+	scope, err := domain.NewScope(owner, domain.AreaLive)
+	if err != nil {
+		return nil, domain.Scope{}, err
+	}
+	type parentLookup struct {
+		path  domain.UserPath
+		names []string
+		seen  map[string]struct{}
+	}
+	parents := make(map[string]*parentLookup)
+	parentOrder := make([]string, 0)
+	for _, item := range items {
+		parent := item.Path.Parent()
+		key := parent.String()
+		lookup := parents[key]
+		if lookup == nil {
+			lookup = &parentLookup{path: parent, seen: make(map[string]struct{})}
+			parents[key] = lookup
+			parentOrder = append(parentOrder, key)
+		}
+		if _, duplicate := lookup.seen[item.Path.Name()]; !duplicate {
+			lookup.seen[item.Path.Name()] = struct{}{}
+			lookup.names = append(lookup.names, item.Path.Name())
+		}
+	}
+	resolved := make(map[string]domain.Entry, len(items))
+	for _, key := range parentOrder {
+		lookup := parents[key]
+		children, lookupErr := s.source.LookupChildren(ctx, scope, domain.ChildLookupRequest{Directory: lookup.path, Names: lookup.names})
+		if lookupErr != nil {
+			return nil, domain.Scope{}, lookupErr
+		}
+		if len(children.Entries) != len(lookup.names) {
+			return nil, domain.Scope{}, domain.NewError(domain.ErrorInternal, "preview source lookup returned an invalid result")
+		}
+		for index, name := range lookup.names {
+			resolved[key+"\x00"+name] = children.Entries[index]
+		}
+	}
+	entries := make([]domain.Entry, len(items))
+	for index, item := range items {
+		entry, found := resolved[item.Path.Parent().String()+"\x00"+item.Path.Name()]
+		if !found {
+			return nil, domain.Scope{}, domain.NewError(domain.ErrorInternal, "preview source lookup omitted an item")
+		}
+		entries[index] = entry
+	}
+	return entries, scope, nil
 }
 
 func (s *Service) Generate(ctx context.Context, owner domain.UserID, request GenerateRequest) (Operation, error) {
@@ -579,7 +682,7 @@ func (s *Service) bindingForItem(ctx context.Context, owner domain.UserID, item 
 		return Binding{}, domain.NewError(domain.ErrorPreconditionFailed, "preview source format is no longer supported")
 	}
 	binding := Binding{
-		Owner: owner, ContentID: entry.ContentID, ContentVersion: entry.ContentVersion, MediaType: entry.MediaType,
+		Owner: scope.UserID(), ContentID: entry.ContentID, ContentVersion: entry.ContentVersion, MediaType: entry.MediaType,
 		SourceSize: entry.Size, RecipeID: generator.RecipeID(), Variant: item.Variant,
 	}
 	if !binding.Valid() {
@@ -942,6 +1045,11 @@ func (s *Service) resolveItem(ctx context.Context, owner domain.UserID, item Ite
 	if err != nil {
 		return ItemResult{}, err
 	}
+	return s.resolveItemWithEntry(ctx, scope, item, entry, nil, false, allowGeneration, force, explicit)
+}
+
+func (s *Service) resolveItemWithEntry(ctx context.Context, scope domain.Scope, item ItemRequest, entry domain.Entry, known *ArtifactMetadata, catalogChecked, allowGeneration, force, explicit bool) (ItemResult, error) {
+	result := ItemResult{Path: item.Path, Version: item.Version, Variant: item.Variant}
 	if entry.Kind != domain.EntryFile || entry.Version != item.Version {
 		return ItemResult{}, domain.NewError(domain.ErrorPreconditionFailed, "preview source version does not match")
 	}
@@ -950,15 +1058,22 @@ func (s *Service) resolveItem(ctx context.Context, owner domain.UserID, item Ite
 		result.State, result.Reason = StateUnsupported, "input-format"
 		return result, nil
 	}
-	binding := Binding{
-		Owner: owner, ContentID: entry.ContentID, ContentVersion: entry.ContentVersion, MediaType: entry.MediaType,
-		SourceSize: entry.Size, RecipeID: generator.RecipeID(), Variant: item.Variant,
-	}
+	binding := previewBinding(scope.UserID(), entry, item.Variant, generator.RecipeID())
 	if !binding.Valid() {
 		return ItemResult{}, domain.NewError(domain.ErrorInternal, "source provider omitted preview content identity")
 	}
 	if !force {
-		ready, found, resolveErr := s.readyResult(ctx, binding, result)
+		if known != nil {
+			ready, found, resolveErr := s.knownReadyResult(ctx, binding, *known, result)
+			if resolveErr != nil || found {
+				return ready, resolveErr
+			}
+		}
+		if catalogChecked {
+			result.State = StateMissing
+			return result, nil
+		}
+		ready, found, resolveErr := s.readyResult(ctx, readySelection(scope.UserID(), item.Path, binding), result)
 		if resolveErr != nil || found {
 			return ready, resolveErr
 		}
@@ -991,7 +1106,7 @@ func (s *Service) resolveItem(ctx context.Context, owner domain.UserID, item Ite
 		result.State = StateFailed
 		return result, nil
 	}
-	ready, found, err := s.readyResult(ctx, binding, result)
+	ready, found, err := s.readyResult(ctx, readySelection(scope.UserID(), item.Path, binding), result)
 	if err != nil {
 		return ItemResult{}, err
 	}
@@ -1002,8 +1117,8 @@ func (s *Service) resolveItem(ctx context.Context, owner domain.UserID, item Ite
 	return ready, nil
 }
 
-func (s *Service) readyResult(ctx context.Context, binding Binding, result ItemResult) (ItemResult, bool, error) {
-	artifact, err := s.store.Latest(ctx, binding)
+func (s *Service) readyResult(ctx context.Context, selection ReadySelection, result ItemResult) (ItemResult, bool, error) {
+	artifact, err := s.store.Latest(ctx, selection.Binding)
 	if errors.Is(err, domain.ErrNotFound) {
 		return result, false, nil
 	}
@@ -1015,7 +1130,18 @@ func (s *Service) readyResult(ctx context.Context, binding Binding, result ItemR
 		result.State = StateFailed
 		return result, true, nil
 	}
-	capability, err := s.store.CreateDownload(ctx, binding, artifact.GenerationID)
+	if err := s.store.RecordReady(ctx, selection, artifact); err != nil {
+		if errors.Is(err, domain.ErrUnavailable) {
+			result.State = StateUnavailable
+			return result, true, nil
+		}
+		return ItemResult{}, false, err
+	}
+	return s.knownReadyResult(ctx, selection.Binding, artifact, result)
+}
+
+func (s *Service) knownReadyResult(ctx context.Context, binding Binding, artifact ArtifactMetadata, result ItemResult) (ItemResult, bool, error) {
+	capability, err := s.store.CreateKnownDownload(ctx, binding, artifact)
 	if errors.Is(err, domain.ErrUnavailable) {
 		result.State = StateUnavailable
 		return result, true, nil
@@ -1025,6 +1151,18 @@ func (s *Service) readyResult(ctx context.Context, binding Binding, result ItemR
 	}
 	result.State, result.Artifact, result.Capability = StateReady, &artifact, &capability
 	return result, true, nil
+}
+
+func previewBinding(owner domain.UserID, entry domain.Entry, variant int, recipeID string) Binding {
+	return Binding{
+		Owner: owner, ContentID: entry.ContentID, ContentVersion: entry.ContentVersion, MediaType: entry.MediaType,
+		SourceSize: entry.Size, RecipeID: recipeID, Variant: variant,
+	}
+}
+
+func readySelection(owner domain.UserID, path domain.UserPath, binding Binding) ReadySelection {
+	digest := sha256.Sum256([]byte("endlessfs-preview-ready-scope-v1\x00" + owner.String() + "\x00" + path.Parent().String()))
+	return ReadySelection{CacheScope: base64.RawURLEncoding.EncodeToString(digest[:]), Binding: binding}
 }
 
 func (s *Service) generateOnce(ctx context.Context, scope domain.Scope, entry domain.Entry, binding Binding, generator Generator, force bool) (string, error) {

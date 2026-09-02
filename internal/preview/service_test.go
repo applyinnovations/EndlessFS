@@ -151,9 +151,17 @@ func TestResolveBoundsAutomaticGenerationWorkPerBatch(t *testing.T) {
 		items = append(items, preview.ItemRequest{Path: entry.Path, Version: entry.Version, Variant: 256})
 	}
 
+	before := env.source.Instrumentation()
 	result, err := env.service.Resolve(context.Background(), env.owner, preview.ResolveRequest{Items: items})
 	if err != nil {
 		t.Fatal(err)
+	}
+	after := env.source.Instrumentation()
+	if got := after.ProviderCalls[providermemory.OperationLookupChildren] - before.ProviderCalls[providermemory.OperationLookupChildren]; got != 1 {
+		t.Fatalf("visible batch source lookups = %d, want 1", got)
+	}
+	if got := after.ProviderCalls[providermemory.OperationStat] - before.ProviderCalls[providermemory.OperationStat]; got != 0 {
+		t.Fatalf("visible batch source stats = %d, want 0", got)
 	}
 	ready, missing := 0, 0
 	for _, item := range result.Items {

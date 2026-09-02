@@ -146,7 +146,7 @@ func (e *Engine) createCheckpointWhileClosed(ctx context.Context, checkpointID s
 		completed = existing
 	}
 	if writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema009, e.writer.RequiredFeatures) {
-		if err := e.runCheckpointGarbageCollection(ctx, completed); err != nil {
+		if err := e.runCheckpointGarbageCollectionWithVersions(ctx, completed, summary.garbageVersions); err != nil {
 			return storageformat.Checkpoint{}, err
 		}
 	}
@@ -264,12 +264,22 @@ type checkpointInventorySummary struct {
 	stateObjects    uint64
 	fileObjects     uint64
 	inventoryDigest string
+	garbageVersions map[string]objectstore.ObjectInfo
 }
 
 // prepareCheckpointInventoryMetadata builds checkpoint-v3 directly from
 // provider metadata. It deliberately performs no object-body reads and writes
 // no object-per-item journal. Immutable pages make a restart idempotent.
 func (e *Engine) prepareCheckpointInventoryMetadata(ctx context.Context, checkpointID string, gateEpoch uint64, schema008, schema009 bool) (checkpointInventorySummary, error) {
+	var reachable *checkpointVisitSet
+	if schema009 {
+		var err error
+		reachable, err = newCheckpointVisitSet()
+		if err != nil {
+			return checkpointInventorySummary{}, err
+		}
+		defer reachable.Close()
+	}
 	previousDigest := checkpointInventorySeedV3(checkpointID, gateEpoch)
 	pageIndex := uint64(0)
 	entries := make([]storageformat.CheckpointInventoryEntry, 0, checkpointInventoryPageEntries)
@@ -357,6 +367,17 @@ func (e *Engine) prepareCheckpointInventoryMetadata(ctx context.Context, checkpo
 			stateObjects++
 		}
 		entries = append(entries, storageformat.CheckpointInventoryEntry{FileData: fileData, Object: object})
+		if reachable != nil {
+			role := garbageCollectionStateRole
+			if fileData {
+				role = garbageCollectionFileRole
+			}
+			if seen, seenErr := reachable.Seen(role + "\x00" + object.Key); seenErr != nil {
+				return seenErr
+			} else if seen {
+				return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint inventory repeats an object")
+			}
+		}
 		completed[index]++
 		completedBytes[index] = saturatingInventoryBytes(completedBytes[index], object.Size)
 		report(fileData, false)
@@ -378,9 +399,17 @@ func (e *Engine) prepareCheckpointInventoryMetadata(ctx context.Context, checkpo
 	if err := e.validateCheckpointPageSet(ctx, checkpointID, pageIndex); err != nil {
 		return checkpointInventorySummary{}, err
 	}
-	return checkpointInventorySummary{
+	summary := checkpointInventorySummary{
 		pageCount: pageIndex, stateObjects: stateObjects, fileObjects: fileObjects, inventoryDigest: previousDigest,
-	}, nil
+	}
+	if schema009 {
+		versions, err := e.prepareCheckpointGarbagePlan(ctx, checkpointID, gateEpoch, previousDigest, reachable)
+		if err != nil {
+			return checkpointInventorySummary{}, err
+		}
+		summary.garbageVersions = versions
+	}
+	return summary, nil
 }
 
 func checkpointObjectFromInfo(info objectstore.ObjectInfo) (storageformat.CheckpointObject, error) {
@@ -441,7 +470,7 @@ func isSchema008AuthorityStateKey(key string) bool {
 	if len(segments) == 6 {
 		return segments[4] != "" && segments[5] == "head.json"
 	}
-	return segments[4] != "" && segments[5] == "pages" && strings.HasSuffix(segments[6], ".json")
+	return segments[4] != "" && (segments[5] == "pages" && strings.HasSuffix(segments[6], ".json") || segments[5] == "packs" && strings.HasSuffix(segments[6], ".bin"))
 }
 
 func walkObjectInfos(ctx context.Context, backend objectstore.MetadataBackend, prefix string, visit func(objectstore.ObjectInfo) error) error {

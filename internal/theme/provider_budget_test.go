@@ -60,13 +60,13 @@ func TestProviderBudgetThemePreferenceWorkflows(t *testing.T) {
 	if _, _, err := manager.Preference(ctx, userID); err != nil {
 		t.Fatal(err)
 	}
-	check("theme-get-default-schema-009")
+	check("theme-get-default-schema-011")
 	if _, err := manager.SetPreference(ctx, userID, "endlessfs-dark"); err != nil {
 		t.Fatal(err)
 	}
-	check("theme-set-create-schema-009")
+	check("theme-set-create-schema-011")
 	if _, err := manager.SetPreference(ctx, userID, "endlessfs-light"); err != nil {
 		t.Fatal(err)
 	}
-	check("theme-set-update-schema-009")
+	check("theme-set-update-schema-011")
 }

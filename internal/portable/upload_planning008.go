@@ -5,14 +5,16 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
+	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
-const maximumUploadPlanItems = 1000
+const maximumUploadPlanItems = 10_000
 
 type uploadPlanProjectionToken008 struct {
 	SchemaVersion int                          `json:"schemaVersion"`
@@ -173,7 +175,6 @@ func (s *FileStore) buildUploadPlanningProjection008(ctx context.Context, view *
 			return err
 		}
 		runs = append(runs, root)
-		session.pages = make(map[string]storageformat.DomainPage)
 		chunk = chunk[:0]
 		return nil
 	}
@@ -221,7 +222,7 @@ func (s *FileStore) uploadPlanningProjection008(ctx context.Context, owner domai
 			return duplicateProjectionSnapshot008{}, err
 		}
 		if !view.head.Registered || view.head.Revision == 0 {
-			return duplicateProjectionSnapshot008{head: storageformat.ProjectionHead{SourceRoot: view.roots[domain.AreaLive].Children}, projectionID: projectionID, session: duplicateProjectionSession008(s.engine, owner, projectionID)}, nil
+			return duplicateProjectionSnapshot008{head: storageformat.ProjectionHead{SourceRoot: view.roots[domain.AreaLive].Children}, projectionID: projectionID, session: duplicateProjectionSession008(s.engine, owner, projectionID), view: view}, nil
 		}
 		object, getErr := s.engine.backend.Get(ctx, key)
 		var current storageformat.ProjectionHead
@@ -249,7 +250,7 @@ func (s *FileStore) uploadPlanningProjection008(ctx context.Context, owner domai
 			return duplicateProjectionSnapshot008{}, domain.NewError(domain.ErrorInvalid, "upload planning projection source is inconsistent")
 		}
 		if valid && current.SourceDomainID == view.reference.ID && current.SourceRoot == currentNamespaceRoot {
-			return duplicateProjectionSnapshot008{head: current, root: current.Root, projectionID: projectionID, session: duplicateProjectionSession008(s.engine, owner, projectionID)}, nil
+			return duplicateProjectionSnapshot008{head: current, root: current.Root, projectionID: projectionID, session: duplicateProjectionSession008(s.engine, owner, projectionID), view: view}, nil
 		}
 		session := duplicateProjectionSession008(s.engine, owner, projectionID)
 		var root storageformat.DomainTreeRoot
@@ -278,8 +279,11 @@ func (s *FileStore) uploadPlanningProjection008(ctx context.Context, owner domai
 		if err != nil {
 			return duplicateProjectionSnapshot008{}, err
 		}
+		if err := session.flushPack(ctx); err != nil {
+			return duplicateProjectionSnapshot008{}, err
+		}
 		if _, err := s.engine.backend.Put(ctx, key, body, condition); err == nil {
-			return duplicateProjectionSnapshot008{head: next, root: root, projectionID: projectionID, session: session}, nil
+			return duplicateProjectionSnapshot008{head: next, root: root, projectionID: projectionID, session: session, view: view}, nil
 		} else if !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) {
 			return duplicateProjectionSnapshot008{}, err
 		}
@@ -292,7 +296,7 @@ func validUploadPlanID008(value string) bool {
 
 func validateUploadSizePlan008(owner domain.UserID, request domain.UploadSizePlanRequest) error {
 	if !owner.Valid() || len(request.Items) < 1 || len(request.Items) > maximumUploadPlanItems {
-		return domain.NewError(domain.ErrorInvalid, "upload size plan must contain 1 to 1000 items")
+		return domain.NewError(domain.ErrorInvalid, "upload size plan must contain 1 to 10000 items")
 	}
 	seen := make(map[string]struct{}, len(request.Items))
 	for _, item := range request.Items {
@@ -326,21 +330,66 @@ func uploadPlanningCollect008(ctx context.Context, session *consistencyDomainTre
 	return values, err
 }
 
+// warmUploadPlanningRoots authenticates the independent namespace and derived
+// projection roots in one provider wave. Both objects are immutable and
+// already bound by their authenticated heads, so serializing these reads adds
+// latency without adding a safety guarantee. Later lookups reuse the validated
+// request-local caches and never fetch user-file bodies through the control
+// plane.
+type uploadPlanningRoot008 struct {
+	session *consistencyDomainTreeSession
+	root    storageformat.DomainTreeRoot
+}
+
+func warmUploadPlanningRoots008(ctx context.Context, roots ...uploadPlanningRoot008) error {
+	parallel := providerbudget.TraceFromContext(ctx)
+	parallel.ParallelGroup = "upload-planning-projection-roots"
+	parallelContext, cancel := context.WithCancel(providerbudget.WithTrace(ctx, parallel))
+	defer cancel()
+	var wait sync.WaitGroup
+	var firstErr error
+	var errOnce sync.Once
+	for _, candidate := range roots {
+		if candidate.session == nil || candidate.root.Digest == "" {
+			continue
+		}
+		candidate := candidate
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if _, err := candidate.session.readPage(parallelContext, domainPageRef{root: candidate.root}); err != nil {
+				errOnce.Do(func() { firstErr = err; cancel() })
+			}
+		}()
+	}
+	wait.Wait()
+	if errors.Is(firstErr, domain.ErrNotFound) {
+		return domain.NewError(domain.ErrorConflict, "upload planning snapshot is no longer available")
+	}
+	return firstErr
+}
+
 func (s *FileStore) planUploadSizes008(ctx context.Context, owner domain.UserID, request domain.UploadSizePlanRequest) (domain.UploadSizePlan, error) {
 	if err := validateUploadSizePlan008(owner, request); err != nil {
 		return domain.UploadSizePlan{}, err
 	}
-	store := newNamespaceStore(s.engine)
 	projection, err := s.uploadPlanningProjection008(ctx, owner)
 	if err != nil {
 		return domain.UploadSizePlan{}, err
 	}
-	view, err := store.loadView(ctx, owner, "")
-	if err != nil {
-		return domain.UploadSizePlan{}, err
+	store := newNamespaceStore(s.engine)
+	view := projection.view
+	if view == nil {
+		return domain.UploadSizePlan{}, domain.NewError(domain.ErrorInvalid, "upload planning projection omitted its source view")
 	}
 	if view.roots[domain.AreaLive].Children != projection.head.SourceRoot {
 		return domain.UploadSizePlan{}, domain.NewError(domain.ErrorConflict, "upload planning snapshot changed")
+	}
+	if err := warmUploadPlanningRoots008(ctx,
+		uploadPlanningRoot008{view.session, view.roots[domain.AreaLive].Children},
+		uploadPlanningRoot008{projection.session, projection.root},
+	); err != nil {
+		return domain.UploadSizePlan{}, err
 	}
 	live, _ := domain.NewScope(owner, domain.AreaLive)
 	result := domain.UploadSizePlan{Items: make([]domain.UploadSizePlanDecision, len(request.Items))}
@@ -373,7 +422,7 @@ func (s *FileStore) planUploadSizes008(ctx context.Context, owner domain.UserID,
 
 func validateUploadFingerprintPlan008(owner domain.UserID, request domain.UploadFingerprintPlanRequest) error {
 	if !owner.Valid() || request.Token == "" || len(request.Items) < 1 || len(request.Items) > maximumUploadPlanItems {
-		return domain.NewError(domain.ErrorInvalid, "upload fingerprint plan must contain 1 to 1000 items")
+		return domain.NewError(domain.ErrorInvalid, "upload fingerprint plan must contain 1 to 10000 items")
 	}
 	seen := make(map[string]struct{}, len(request.Items))
 	for _, item := range request.Items {
@@ -405,6 +454,12 @@ func (s *FileStore) planUploadFingerprints008(ctx context.Context, owner domain.
 	}
 	if view.roots[domain.AreaLive].Children != token.SourceRoot {
 		return domain.UploadFingerprintPlan{}, domain.NewError(domain.ErrorConflict, "upload planning snapshot changed")
+	}
+	if err := warmUploadPlanningRoots008(ctx,
+		uploadPlanningRoot008{view.session, view.roots[domain.AreaLive].Children},
+		uploadPlanningRoot008{session, token.Root},
+	); err != nil {
+		return domain.UploadFingerprintPlan{}, err
 	}
 	live, _ := domain.NewScope(owner, domain.AreaLive)
 	result := domain.UploadFingerprintPlan{Items: make([]domain.UploadFingerprintPlanDecision, len(request.Items))}

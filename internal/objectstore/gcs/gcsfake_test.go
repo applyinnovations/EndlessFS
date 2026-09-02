@@ -276,7 +276,10 @@ func (f *fakeGCS) signedGet(writer http.ResponseWriter, request *http.Request, n
 	f.mu.Lock()
 	object, exists := f.objects[name]
 	f.mu.Unlock()
-	if !exists || request.URL.Query().Get("generation") != strconv.FormatInt(object.generation, 10) || request.URL.Query().Get("ifGenerationMatch") != strconv.FormatInt(object.generation, 10) {
+	generation := request.URL.Query().Get("generation")
+	match := request.URL.Query().Get("ifGenerationMatch")
+	versioned := generation != "" || match != ""
+	if !exists || versioned && (generation != strconv.FormatInt(object.generation, 10) || match != strconv.FormatInt(object.generation, 10)) {
 		f.problem(writer, http.StatusPreconditionFailed, "conditionNotMet")
 		return
 	}

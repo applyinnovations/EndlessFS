@@ -143,6 +143,9 @@ type UploadCapability struct {
 	ChunkRules   *ChunkRules       `json:"chunkRules,omitempty"`
 	Framing      UploadFraming     `json:"framing"`
 	DeclaredSize int64             `json:"declaredSize"`
+	BatchID      string            `json:"batchID,omitempty"`
+	BatchIndex   uint64            `json:"batchIndex,omitempty"`
+	BatchCount   uint64            `json:"batchCount,omitempty"`
 }
 
 // UploadState is the safe provider-independent lifecycle exposed by the
@@ -190,6 +193,27 @@ type CompleteUploadRequest struct {
 	Path      UserPath
 	Size      int64
 	MediaType string
+	CRC32C    string
+}
+
+type CompleteUploadBatchItem struct {
+	UploadID UploadID `json:"uploadID"`
+	CRC32C   string   `json:"crc32c"`
+}
+
+type CompleteUploadBatchRequest struct {
+	Items          []CompleteUploadBatchItem
+	IdempotencyKey string
+}
+
+type CompleteUploadBatchResult struct {
+	Entries []Entry `json:"entries"`
+}
+
+type AbortUploadBatchRequest struct {
+	UploadIDs      []UploadID
+	BatchID        string
+	IdempotencyKey string
 }
 
 // UploadSizePlanItem is safe local-file metadata used to decide whether the

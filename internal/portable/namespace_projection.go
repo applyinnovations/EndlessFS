@@ -36,6 +36,9 @@ func newNamespaceProjectionTreeSession(store *consistencyDomainStore, owner doma
 	session.pageKey = func(digest string) objectstore.Key {
 		return storageformat.ProjectionPageKey(owner.String(), kind, digest)
 	}
+	session.packKey = func(packID string) objectstore.Key {
+		return storageformat.ProjectionPagePackKey(owner.String(), kind, packID)
+	}
 	return session
 }
 
@@ -91,6 +94,7 @@ func (store *namespaceStore) namespaceSortProjection(ctx context.Context, view *
 			return snapshot.head.Root, nil
 		}
 		session := newNamespaceProjectionTreeSession(store.domain, owner, projectionID, kind)
+		session.enablePackedWrites(projectionID)
 		root, err := store.buildNamespaceSortProjection(ctx, view, session, directory.Children, field)
 		if err != nil {
 			return storageformat.DomainTreeRoot{}, err
@@ -113,6 +117,9 @@ func (store *namespaceStore) namespaceSortProjection(ctx context.Context, view *
 		key := storageformat.ScopedProjectionHeadKey(owner.String(), kind, projectionID)
 		body, err := storageformat.EncodeEnvelope(namespaceProjectionHeadSchema, key, revision, next)
 		if err != nil {
+			return storageformat.DomainTreeRoot{}, err
+		}
+		if err := session.flushPack(ctx); err != nil {
 			return storageformat.DomainTreeRoot{}, err
 		}
 		if _, err := store.engine.backend.Put(ctx, key, body, condition); err == nil {
@@ -141,7 +148,6 @@ func (store *namespaceStore) buildNamespaceSortProjection(ctx context.Context, v
 		if err != nil {
 			return err
 		}
-		projection.pages = make(map[string]storageformat.DomainPage)
 		runs = append(runs, root)
 		chunk = chunk[:0]
 		return nil

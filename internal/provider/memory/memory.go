@@ -28,7 +28,9 @@ const (
 	OperationCreateDirectory = "create_directory"
 	OperationCreateUpload    = "create_upload"
 	OperationCompleteUpload  = "complete_upload"
+	OperationCompleteUploads = "complete_upload_batch"
 	OperationAbortUpload     = "abort_upload"
+	OperationAbortUploads    = "abort_upload_batch"
 	OperationCreateDownload  = "create_download"
 	OperationUploadData      = "upload_data"
 	OperationDownloadData    = "download_data"
@@ -91,6 +93,9 @@ type upload struct {
 	materialized    bool
 	state           domain.UploadState
 	capabilityHash  [sha256.Size]byte
+	batchID         string
+	batchIndex      uint64
+	batchCount      uint64
 }
 
 type download struct {
@@ -129,6 +134,11 @@ type idempotentUpload struct {
 	capability  domain.UploadCapability
 }
 
+type idempotentUploadCompletionBatch struct {
+	fingerprint string
+	result      domain.CompleteUploadBatchResult
+}
+
 type namespaceBatchResult struct {
 	fingerprint string
 	result      domain.NamespaceBatchResult
@@ -164,6 +174,8 @@ type Provider struct {
 	operations         map[string]domain.Operation
 	idempotency        map[string]idempotentResult
 	uploadIdempotency  map[string]idempotentUpload
+	uploadCompletions  map[string]idempotentUploadCompletionBatch
+	uploadAborts       map[string]string
 	faults             map[string][]Fault
 	metrics            Instrumentation
 	versions           uint64
@@ -208,6 +220,8 @@ func New(options Options) *Provider {
 		operations:           make(map[string]domain.Operation),
 		idempotency:          make(map[string]idempotentResult),
 		uploadIdempotency:    make(map[string]idempotentUpload),
+		uploadCompletions:    make(map[string]idempotentUploadCompletionBatch),
+		uploadAborts:         make(map[string]string),
 		faults:               make(map[string][]Fault),
 		metrics:              Instrumentation{ProviderCalls: make(map[string]uint64)},
 	}
@@ -660,8 +674,8 @@ func normalizePageSize(size int) (int, error) {
 	if size == 0 {
 		return 200, nil
 	}
-	if size < 1 || size > 1000 {
-		return 0, domain.NewError(domain.ErrorInvalid, "page size must be between 1 and 1000")
+	if size < 1 || size > 10_000 {
+		return 0, domain.NewError(domain.ErrorInvalid, "page size must be between 1 and 10000")
 	}
 	return size, nil
 }

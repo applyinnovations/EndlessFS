@@ -229,6 +229,11 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 	if strings.Contains(script, "Promise.all(uploadIDs.map") {
 		t.Error("group cancellation can issue one simultaneous provider request per transfer")
 	}
+	for _, required := range []string{"batchCount: Number.isSafeInteger(transfer.batchCount)", "const completeBatch =", "if (completeBatch) body.batchID = batchID"} {
+		if !strings.Contains(script, required) {
+			t.Errorf("durable compact upload cancellation is missing %q", required)
+		}
+	}
 	for _, forbidden := range []string{"maximumRenderedTransferGroups", "maximumRenderedGroupFiles", "summarizeTransferRows", "more files"} {
 		if strings.Contains(script, forbidden) {
 			t.Errorf("transfer monitor retains manual pagination primitive %q", forbidden)
@@ -249,7 +254,7 @@ func TestSmartUploadPlannerIsBoundedPersistentAndMetadataOnly(t *testing.T) {
 	for _, required := range []string{
 		`["smart-merge", "Smart merge`, `["replace-changed", "Replace changed files`,
 		`["only-new", "Only add new names`, `["keep-both", "Keep both`,
-		`const uploadPlanningBatchSize = 1000;`, `const uploadHashWorkerLimit = 2;`,
+		`const uploadPlanningBatchSize = 10000;`, `const uploadHashWorkerLimit = 2;`,
 		`new Worker("/assets/upload-hash-worker.js")`, `pending.worker.terminate();`,
 		`fingerprintRepeated: async (value, count)`,
 		`transferPlanControllers: new Map()`, `uploadPlanRetryTimers: new Map()`, `controller.abort();`,

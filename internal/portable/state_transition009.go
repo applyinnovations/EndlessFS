@@ -292,7 +292,15 @@ func (e *Engine) decideTransition009(ctx context.Context, plan storageformat.Tra
 }
 
 func transitionLockAtHead009(ctx context.Context, store *consistencyDomainStore, reference consistencyDomainRef, head storageformat.DomainHead) (storageformat.TransitionLock009, consistencyDomainValue, bool, error) {
-	value, found, err := store.lookupAtHead(ctx, reference, head, transitionLockKey009)
+	return transitionLockAtHeadWithSession009(ctx, store, reference, head, nil)
+}
+
+// transitionLockAtHeadWithSession009 shares the caller's authenticated tree
+// session. Transition locks live in the same consistency domain as application
+// values, so consulting them through a fresh session would download the same
+// immutable pack twice during every prepared mutation.
+func transitionLockAtHeadWithSession009(ctx context.Context, store *consistencyDomainStore, reference consistencyDomainRef, head storageformat.DomainHead, session *consistencyDomainTreeSession) (storageformat.TransitionLock009, consistencyDomainValue, bool, error) {
+	value, found, err := store.lookupAtHeadWithSession(ctx, reference, head, transitionLockKey009, session)
 	if err != nil || !found {
 		return storageformat.TransitionLock009{}, consistencyDomainValue{}, found, err
 	}

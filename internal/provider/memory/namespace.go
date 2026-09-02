@@ -88,8 +88,8 @@ func (p *Provider) ListTrash(ctx context.Context, owner domain.UserID, request d
 	if limit == 0 {
 		limit = 200
 	}
-	if limit < 1 || limit > 1000 {
-		return domain.TrashListPage{}, domain.NewError(domain.ErrorInvalid, "trash page limit must be between 1 and 1000")
+	if limit < 1 || limit > 10_000 {
+		return domain.TrashListPage{}, domain.NewError(domain.ErrorInvalid, "trash page limit must be between 1 and 10000")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()

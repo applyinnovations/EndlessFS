@@ -87,10 +87,10 @@ const (
 )
 
 // ProductionScaleTargets records the required next architecture rather than
-// blessing today's measurements. The common mutation shape is three bounded
-// authority/proof reads, one immutable 4 MiB transaction segment, and one
-// conditional head publication. The 1 MiB control-plane request limit makes
-// that segment a conservative envelope for the compact intent; per-item
+// blessing today's measurements. The common mutation shape is an authentication
+// read, a bounded head read, one immutable 4 MiB metadata-pack read and write,
+// and one conditional head publication. The 1 MiB control-plane request limit
+// makes that segment a conservative envelope for the compact intent; per-item
 // success records are reconstructed rather than copied into an outcome tree.
 // The common packed-read shape is three serial authority/head reads plus at
 // most two concurrent 4 MiB projection segments. Workloads larger than these byte
@@ -105,26 +105,52 @@ func ProductionScaleTargets() []ProductionScaleTarget {
 	}
 	mutation := func(segmentCount int64) []ProviderRequestWave {
 		return []ProviderRequestWave{
-			targetWave(RoleState, RequestObjectGet, 3, 1, 0, targetHeadBytes),
+			targetWave(RoleState, RequestObjectGet, 2, 1, 0, targetHeadBytes),
+			targetWave(RoleState, RequestObjectGet, 1, 1, 0, targetTransactionSegmentBytes),
 			targetWave(RoleState, RequestObjectPut, segmentCount, segmentCount, targetTransactionSegmentBytes, 0),
 			targetWave(RoleState, RequestObjectPut, 1, 1, targetHeadBytes, 0),
 		}
 	}
 	replay := func() []ProviderRequestWave {
-		return []ProviderRequestWave{targetWave(RoleState, RequestObjectGet, 4, 1, 0, targetHeadBytes)}
+		return []ProviderRequestWave{
+			targetWave(RoleState, RequestObjectGet, 3, 1, 0, targetHeadBytes),
+			targetWave(RoleState, RequestObjectGet, 1, 1, 0, targetTransactionSegmentBytes),
+		}
 	}
 	denial := func() []ProviderRequestWave {
-		return []ProviderRequestWave{targetWave(RoleState, RequestObjectGet, 3, 1, 0, targetHeadBytes)}
-	}
-	transferBatchState := func(kind RequestKind) []ProviderRequestWave {
 		return []ProviderRequestWave{
-			targetWave(RoleFile, kind, 10_000, 100, 0, 0),
-			targetWave(RoleState, RequestObjectGet, 3, 1, 0, targetHeadBytes),
-			// Ten ordered progress segments bound crash rework to fewer than
-			// 1,000 provider-object operations without a shared-head write per
-			// item. Serial modeling is conservative: each segment is durable
-			// before the next group is exposed to the browser.
+			targetWave(RoleState, RequestObjectGet, 2, 1, 0, targetHeadBytes),
+			targetWave(RoleState, RequestObjectGet, 1, 1, 0, targetTransactionSegmentBytes),
+		}
+	}
+	transferAdmission := func() []ProviderRequestWave {
+		return []ProviderRequestWave{
+			targetWave(RoleFile, RequestUploadBegin, 10_000, 100, 0, 0),
+			targetWave(RoleState, RequestObjectGet, 2, 1, 0, targetHeadBytes),
+			// Ten lease checkpoints are irreducible if crash orphaning is to stay
+			// at most 1,000 sessions; the packed admission facts and head CAS are
+			// the remaining two publications.
 			targetWave(RoleState, RequestObjectPut, 10, 1, targetTransactionSegmentBytes, 0),
+			targetWave(RoleState, RequestObjectPut, 1, 1, targetTransactionSegmentBytes, 0),
+			targetWave(RoleState, RequestObjectPut, 1, 1, targetHeadBytes, 0),
+		}
+	}
+	transferCompletion := func() []ProviderRequestWave {
+		return []ProviderRequestWave{
+			targetWave(RoleFile, RequestObjectVerify, 10_000, 100, 0, 0),
+			targetWave(RoleState, RequestObjectGet, 2, 1, 0, targetHeadBytes),
+			targetWave(RoleState, RequestObjectGet, 1, 1, 0, targetTransactionSegmentBytes),
+			targetWave(RoleState, RequestObjectPut, 9, 1, targetTransactionSegmentBytes, 0),
+			targetWave(RoleState, RequestObjectPut, 1, 1, targetTransactionSegmentBytes, 0),
+			targetWave(RoleState, RequestObjectPut, 1, 1, targetHeadBytes, 0),
+		}
+	}
+	transferCancellation := func() []ProviderRequestWave {
+		return []ProviderRequestWave{
+			targetWave(RoleFile, RequestUploadAbort, 10_000, 100, 0, 0),
+			targetWave(RoleState, RequestObjectGet, 2, 1, 0, targetHeadBytes),
+			targetWave(RoleState, RequestObjectGet, 2, 1, 0, targetTransactionSegmentBytes),
+			targetWave(RoleState, RequestObjectPut, 9, 1, targetTransactionSegmentBytes, 0),
 			targetWave(RoleState, RequestObjectPut, 1, 1, targetHeadBytes, 0),
 		}
 	}
@@ -143,9 +169,9 @@ func ProductionScaleTargets() []ProductionScaleTarget {
 		{ID: "trash-selection-denied", BaselineScenario: "trash-selection-denied", Category: "denial", LogicalItems: 10_000, MaximumBrowserRequests: 1, FeasibilityBasis: "A mismatched signed namespace revision denies before transaction segments are written.", RequestWaves: denial()},
 		{ID: "smart-upload-size-planning", BaselineScenario: "smart-upload-size-planning", Category: "transfer-planning", LogicalItems: 10_000, MaximumBrowserRequests: 1, FeasibilityBasis: "One packed size/fingerprint projection query covers 10,000 local sizes.", RequestWaves: packedRead()},
 		{ID: "smart-upload-all-size-candidates", BaselineScenario: "smart-upload-all-size-candidates", Category: "transfer-planning", LogicalItems: 10_000, MaximumBrowserRequests: 2, FeasibilityBasis: "Only candidates make a second packed projection query after client hashing.", RequestWaves: append(packedRead(), packedRead()...)},
-		{ID: "upload-admission", BaselineScenario: "upload-admission", Category: "transfer-active", LogicalItems: 10_000, MaximumBrowserRequests: 1, FeasibilityBasis: "GCS requires one resumable-session initiation per real object; a progressive application response checkpoints ten immutable 1,000-result segments and publishes one terminal head.", RequestWaves: transferBatchState(RequestUploadBegin)},
-		{ID: "upload-completion", BaselineScenario: "upload-completion", Category: "transfer-active", LogicalItems: 10_000, MaximumBrowserRequests: 1, FeasibilityBasis: "One provider checksum/metadata verification per completed object is retained; ten durable progress segments bound crash replay before one terminal publication.", RequestWaves: transferBatchState(RequestObjectVerify)},
-		{ID: "upload-cancellation", BaselineScenario: "upload-cancellation", Category: "transfer-active", LogicalItems: 10_000, MaximumBrowserRequests: 1, FeasibilityBasis: "GCS exposes one abort per active resumable session; ten durable progress segments bound crash replay before one terminal publication.", RequestWaves: transferBatchState(RequestUploadAbort)},
+		{ID: "upload-admission", BaselineScenario: "upload-admission", Category: "transfer-active", LogicalItems: 10_000, MaximumBrowserRequests: 1, FeasibilityBasis: "GCS requires one resumable-session initiation per real object; ten 1,000-lease checkpoints bound orphaning, while one packed admission object and one head CAS preserve atomic authority.", RequestWaves: transferAdmission()},
+		{ID: "upload-completion", BaselineScenario: "upload-completion", Category: "transfer-active", LogicalItems: 10_000, MaximumBrowserRequests: 1, FeasibilityBasis: "One provider checksum/metadata verification per completed object is retained; nine intermediate checkpoints plus the atomic packed namespace publication bound restart rework to at most 1,000 items.", RequestWaves: transferCompletion()},
+		{ID: "upload-cancellation", BaselineScenario: "upload-cancellation", Category: "transfer-active", LogicalItems: 10_000, MaximumBrowserRequests: 1, FeasibilityBasis: "GCS exposes one abort per active resumable session; nine intermediate checkpoints plus one compact abort-bitmap head CAS bound restart rework to at most 1,000 items without rewriting admission records.", RequestWaves: transferCancellation()},
 		{ID: "visible-grid-preview-resolution", BaselineScenario: "visible-grid-preview-resolution", Category: "preview", LogicalItems: 10_000, MaximumBrowserRequests: 1, FeasibilityBasis: "One batched control-plane resolution reads a single visible-window projection segment plus 32 unavoidable direct thumbnail reads.", RequestWaves: append([]ProviderRequestWave{
 			targetWave(RoleState, RequestObjectGet, 3, 1, 0, targetHeadBytes),
 			targetWave(RolePreviewState, RequestObjectGet, 1, 1, 0, targetTransactionSegmentBytes),
@@ -169,25 +195,25 @@ func ProductionScaleTargets() []ProductionScaleTarget {
 func ProductionScaleScenarios() []ProductionScaleScenario {
 	return []ProductionScaleScenario{
 		{ID: "restored-transfer-ledger-needs-source", Category: "startup", LogicalItems: 10_000, BrowserRequests: 0, RequestBasis: "Dormant history is local IndexedDB state; provider reconciliation is deferred until a source file is reacquired."},
-		{ID: "browse-live-directory", Category: "namespace-read", LogicalItems: 10_000, BrowserRequests: 10, RequestBasis: "Ten sequential 1,000-entry pages.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 10, 1), execution("namespace-list-page-1000-schema-010", 10, 1)}},
-		{ID: "browse-trash", Category: "namespace-read", LogicalItems: 10_000, BrowserRequests: 10, RequestBasis: "Ten sequential 1,000-entry pages.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 10, 1), execution("namespace-list-page-1000-schema-010", 10, 1)}},
-		{ID: "copy-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("batch-copy-10000-schema-009", 1, 1)}},
-		{ID: "move-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("batch-move-10000-schema-009", 1, 1)}},
-		{ID: "trash-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("trash-batch-10000-schema-009", 1, 1)}},
-		{ID: "restore-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("restore-batch-10000-schema-010", 1, 1)}},
-		{ID: "permanent-delete-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("empty-trash-10000-schema-009", 1, 1)}},
-		{ID: "trash-selection-replay", Category: "recovery", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "Retry reads the durable paged outcome and performs no publication.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("trash-batch-10000-replay-schema-010", 1, 1)}},
-		{ID: "restore-selection-replay", Category: "recovery", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "Retry reads the durable paged outcome and performs no publication.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("restore-batch-10000-replay-schema-010", 1, 1)}},
-		{ID: "permanent-delete-selection-replay", Category: "recovery", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "Retry reads the durable paged outcome and performs no publication.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("empty-trash-10000-replay-schema-010", 1, 1)}},
-		{ID: "trash-selection-denied", Category: "denial", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "A stale final item validates the closed snapshot and writes nothing.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 1, 1), execution("trash-batch-10000-denied-schema-010", 1, 1)}},
-		{ID: "smart-upload-size-planning", Category: "transfer-planning", LogicalItems: 10_000, BrowserRequests: 10, RequestBasis: "Ten metadata-only requests of 1,000 local sizes.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 10, 1), execution("upload-plan-sizes-1000-schema-010", 10, 1)}},
-		{ID: "smart-upload-all-size-candidates", Category: "transfer-planning", LogicalItems: 10_000, BrowserRequests: 20, RequestBasis: "Size planning followed by fingerprints only for every size candidate.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 20, 1), execution("upload-plan-sizes-1000-schema-010", 10, 1), execution("upload-plan-fingerprints-1000-schema-010", 10, 1)}},
-		{ID: "upload-admission", Category: "transfer-active", LogicalItems: 10_000, BrowserRequests: 100, RequestBasis: "One hundred batches of 100; each item necessarily creates one provider upload session.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 100, 1), execution("file-create-upload-batch-100-schema-009", 100, 1)}},
-		{ID: "upload-completion", Category: "transfer-active", LogicalItems: 10_000, BrowserRequests: 10_000, RequestBasis: "Only transfers whose object data completed call completion; the configured worker pool bounds concurrency.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 10_000, 100), execution("file-complete-upload-schema-009", 10_000, 100)}},
-		{ID: "upload-cancellation", Category: "transfer-active", LogicalItems: 10_000, BrowserRequests: 10_000, RequestBasis: "Only live provider sessions are aborted; the configured control worker pool prevents an unbounded request surge.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 10_000, 100), execution("file-abort-upload-schema-009", 10_000, 100)}},
-		{ID: "visible-grid-preview-resolution", Category: "preview", LogicalItems: 10_000, BrowserRequests: 32, RequestBasis: "The logical directory is virtualized; only the bounded visible/overscan window resolves previews.", Executions: []BudgetExecution{execution("session-authenticate-schema-009", 32, 2), execution("namespace-stat-schema-009", 32, 2), execution("preview-latest", 32, 2), execution("preview-create-download", 32, 2)}},
-		{ID: "checkpoint-garbage-collection", Category: "maintenance", LogicalItems: 128, BrowserRequests: 0, RequestBasis: "One quiescent maintenance run over the calibrated garbage set.", Executions: []BudgetExecution{execution("maintenance-checkpoint-garbage-128-schema-009", 1, 1)}},
-		{ID: "domain-compaction", Category: "maintenance", LogicalItems: 300, BrowserRequests: 0, RequestBasis: "One bounded compaction run over the calibrated domain history.", Executions: []BudgetExecution{execution("maintenance-domain-compaction-300-schema-009", 1, 1)}},
+		{ID: "browse-live-directory", Category: "namespace-read", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One progressively decoded 10,000-entry response.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("namespace-list-page-10000-schema-011", 1, 1)}},
+		{ID: "browse-trash", Category: "namespace-read", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One progressively decoded 10,000-entry response.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("namespace-list-page-10000-schema-011", 1, 1)}},
+		{ID: "copy-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic packed owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("batch-copy-10000-schema-011", 1, 1)}},
+		{ID: "move-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic packed owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("batch-move-10000-schema-011", 1, 1)}},
+		{ID: "trash-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic packed owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("trash-batch-10000-schema-011", 1, 1)}},
+		{ID: "restore-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic packed owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("restore-batch-10000-schema-011", 1, 1)}},
+		{ID: "permanent-delete-selection", Category: "namespace-mutation", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One atomic packed owner-namespace batch.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("empty-trash-10000-schema-011", 1, 1)}},
+		{ID: "trash-selection-replay", Category: "recovery", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "Retry reconstructs results from the compact transaction descriptor.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("trash-batch-10000-replay-schema-011", 1, 1)}},
+		{ID: "restore-selection-replay", Category: "recovery", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "Retry reconstructs results from the compact transaction descriptor.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("restore-batch-10000-replay-schema-011", 1, 1)}},
+		{ID: "permanent-delete-selection-replay", Category: "recovery", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "Retry reconstructs results from the compact transaction descriptor.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("empty-trash-10000-replay-schema-011", 1, 1)}},
+		{ID: "trash-selection-denied", Category: "denial", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "A mismatched signed revision denies before publication.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("trash-batch-10000-denied-schema-011", 1, 1)}},
+		{ID: "smart-upload-size-planning", Category: "transfer-planning", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One packed metadata-only query covers 10,000 local sizes.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("upload-plan-sizes-10000-schema-011", 1, 1)}},
+		{ID: "smart-upload-all-size-candidates", Category: "transfer-planning", LogicalItems: 10_000, BrowserRequests: 2, RequestBasis: "One size request followed by one fingerprint request only for candidates.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 2, 2), execution("upload-plan-sizes-10000-schema-011", 1, 1), execution("upload-plan-fingerprints-10000-schema-011", 1, 1)}},
+		{ID: "upload-admission", Category: "transfer-active", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One progressive batch response; each real object necessarily creates one provider upload session.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("file-create-upload-batch-10000-schema-011", 1, 1)}},
+		{ID: "upload-completion", Category: "transfer-active", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One progressive completion request records bounded durable progress.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("file-complete-upload-batch-10000-schema-011", 1, 1)}},
+		{ID: "upload-cancellation", Category: "transfer-active", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One progressive cancellation request records bounded durable progress.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("file-abort-upload-batch-10000-schema-011", 1, 1)}},
+		{ID: "visible-grid-preview-resolution", Category: "preview", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One control-plane resolution plus 32 direct visible-window thumbnail reads.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("namespace-stat-schema-011", 1, 1), execution("preview-ready-window-32-schema-011", 1, 1)}},
+		{ID: "checkpoint-garbage-collection", Category: "maintenance", LogicalItems: 128, BrowserRequests: 0, RequestBasis: "One authenticated checkpoint-bound garbage plan and bounded conditional sweep.", Executions: []BudgetExecution{execution("maintenance-checkpoint-garbage-128-schema-011", 1, 1)}},
+		{ID: "domain-compaction", Category: "maintenance", LogicalItems: 300, BrowserRequests: 0, RequestBasis: "One packed compaction run over the calibrated domain history.", Executions: []BudgetExecution{execution("maintenance-domain-compaction-300-schema-011", 1, 1)}},
 	}
 }
 
@@ -200,45 +226,47 @@ func workload(id, category string, budgets ...string) ProductionWorkload {
 // are intentionally absent because they do not cross that boundary.
 func ProductionWorkloads() []ProductionWorkload {
 	workloads := []ProductionWorkload{
-		workload("state/get", "control", "state-get-schema-009", "state-get-missing-schema-009"),
-		workload("state/list", "control", "state-list-empty-schema-009"),
-		workload("state/create", "control", "state-create-schema-009"),
-		workload("state/compare-and-swap", "control", "state-compare-and-swap-schema-009"),
-		workload("state/delete", "control", "state-delete-schema-009"),
-		workload("state/mutate", "control", "state-mutate-two-records-schema-009"),
-		workload("state/transact", "control", "state-transact-two-domains-schema-009"),
+		workload("state/get", "control", "state-get-schema-011", "state-get-missing-schema-011"),
+		workload("state/list", "control", "state-list-empty-schema-011"),
+		workload("state/create", "control", "state-create-schema-011"),
+		workload("state/compare-and-swap", "control", "state-compare-and-swap-schema-011"),
+		workload("state/delete", "control", "state-delete-schema-011"),
+		workload("state/mutate", "control", "state-mutate-two-records-schema-011"),
+		workload("state/transact", "control", "state-transact-two-domains-schema-011"),
 
-		workload("namespace/list", "namespace-read", "namespace-list-page-schema-009", "namespace-list-page-1000-schema-010"),
-		workload("namespace/lookup-children", "namespace-read", "namespace-lookup-children-schema-009"),
-		workload("namespace/stat", "namespace-read", "namespace-stat-schema-009"),
-		workload("namespace/create-directory", "namespace-mutation", "file-create-directory-schema-009"),
-		workload("namespace/copy", "namespace-mutation", "direct-copy-one-file-schema-009", "batch-copy-10000-schema-009"),
-		workload("namespace/move", "namespace-mutation", "direct-move-one-file-schema-009", "batch-move-10000-schema-009"),
-		workload("namespace/batch-copy-move", "namespace-mutation", "batch-copy-10000-schema-009", "batch-move-10000-schema-009"),
-		workload("namespace/trash", "namespace-mutation", "trash-one-file-schema-009", "trash-batch-10000-schema-009", "trash-batch-10000-replay-schema-010", "trash-batch-10000-denied-schema-010"),
-		workload("namespace/restore", "namespace-mutation", "restore-one-file-schema-009", "restore-batch-10000-schema-010", "restore-batch-10000-replay-schema-010"),
-		workload("namespace/delete", "namespace-mutation", "direct-delete-one-file-schema-009"),
-		workload("namespace/delete-trash", "namespace-mutation", "permanent-delete-one-file-schema-009", "empty-trash-10000-schema-009", "empty-trash-10000-replay-schema-010"),
-		workload("namespace/get-operation", "namespace-read", "namespace-get-operation-schema-009"),
+		workload("namespace/list", "namespace-read", "namespace-list-page-schema-011", "namespace-list-page-10000-schema-011"),
+		workload("namespace/lookup-children", "namespace-read", "namespace-lookup-children-schema-011"),
+		workload("namespace/stat", "namespace-read", "namespace-stat-schema-011"),
+		workload("namespace/create-directory", "namespace-mutation", "file-create-directory-schema-011"),
+		workload("namespace/copy", "namespace-mutation", "direct-copy-one-file-schema-011", "batch-copy-10000-schema-011"),
+		workload("namespace/move", "namespace-mutation", "direct-move-one-file-schema-011", "batch-move-10000-schema-011"),
+		workload("namespace/batch-copy-move", "namespace-mutation", "batch-copy-10000-schema-011", "batch-move-10000-schema-011"),
+		workload("namespace/trash", "namespace-mutation", "trash-one-file-schema-011", "trash-batch-10000-schema-011", "trash-batch-10000-replay-schema-011", "trash-batch-10000-denied-schema-011"),
+		workload("namespace/restore", "namespace-mutation", "restore-one-file-schema-011", "restore-batch-10000-schema-011", "restore-batch-10000-replay-schema-011"),
+		workload("namespace/delete", "namespace-mutation", "direct-delete-one-file-schema-011"),
+		workload("namespace/delete-trash", "namespace-mutation", "permanent-delete-one-file-schema-011", "empty-trash-10000-schema-011", "empty-trash-10000-replay-schema-011"),
+		workload("namespace/get-operation", "namespace-read", "namespace-get-operation-schema-011"),
 
-		workload("transfer/create-upload", "transfer", "file-create-upload-cold-schema-009", "file-create-upload-warm-schema-009"),
-		workload("transfer/create-upload-batch", "transfer", "file-create-upload-batch-100-schema-009"),
-		workload("transfer/plan-upload-sizes", "derived-read", "upload-plan-index-cold-256-schema-010", "upload-plan-index-incremental-one-schema-010", "upload-plan-sizes-1000-schema-010"),
-		workload("transfer/plan-upload-fingerprints", "derived-read", "upload-plan-fingerprints-1000-schema-010"),
-		workload("transfer/upload-status", "transfer", "file-upload-status-active-schema-009"),
-		workload("transfer/complete-upload", "transfer", "file-complete-upload-schema-009"),
-		workload("transfer/abort-upload", "transfer", "file-abort-upload-schema-009"),
-		workload("transfer/create-download", "transfer", "file-create-download-schema-009"),
+		workload("transfer/create-upload", "transfer", "file-create-upload-cold-schema-011", "file-create-upload-warm-schema-011"),
+		workload("transfer/create-upload-batch", "transfer", "file-create-upload-batch-100-schema-011", "file-create-upload-batch-10000-schema-011"),
+		workload("transfer/complete-upload-batch", "transfer", "file-complete-upload-batch-10000-schema-011"),
+		workload("transfer/abort-upload-batch", "transfer", "file-abort-upload-batch-10000-schema-011"),
+		workload("transfer/plan-upload-sizes", "derived-read", "upload-plan-index-cold-256-schema-011", "upload-plan-index-incremental-one-schema-011", "upload-plan-sizes-10000-schema-011"),
+		workload("transfer/plan-upload-fingerprints", "derived-read", "upload-plan-fingerprints-10000-schema-011"),
+		workload("transfer/upload-status", "transfer", "file-upload-status-active-schema-011"),
+		workload("transfer/complete-upload", "transfer", "file-complete-upload-schema-011"),
+		workload("transfer/abort-upload", "transfer", "file-abort-upload-schema-011"),
+		workload("transfer/create-download", "transfer", "file-create-download-schema-011"),
 
-		workload("duplicates/list-groups", "derived-read", "duplicates-list-groups-schema-009"),
-		workload("duplicates/list-occurrences", "derived-read", "duplicates-list-occurrences-schema-009"),
-		workload("duplicates/set-group-ignored", "control", "duplicates-set-group-ignored-schema-009"),
-		workload("duplicates/compare-directories", "derived-read", "duplicates-compare-directories-schema-009"),
-		workload("duplicates/list-directory-overlaps", "derived-read", "duplicates-list-directory-overlaps-schema-009"),
-		workload("duplicates/set-directory-ignored", "control", "duplicates-set-directory-ignored-schema-009"),
-		workload("duplicates/preview-reconciliation", "derived-read", "duplicates-preview-reconciliation-schema-009"),
-		workload("duplicates/validate-reconciliation", "derived-read", "duplicates-validate-reconciliation-schema-009"),
-		workload("duplicates/apply-reconciliation", "namespace-mutation", "duplicates-apply-reconciliation-schema-009"),
+		workload("duplicates/list-groups", "derived-read", "duplicates-list-groups-schema-011"),
+		workload("duplicates/list-occurrences", "derived-read", "duplicates-list-occurrences-schema-011"),
+		workload("duplicates/set-group-ignored", "control", "duplicates-set-group-ignored-schema-011"),
+		workload("duplicates/compare-directories", "derived-read", "duplicates-compare-directories-schema-011"),
+		workload("duplicates/list-directory-overlaps", "derived-read", "duplicates-list-directory-overlaps-schema-011"),
+		workload("duplicates/set-directory-ignored", "control", "duplicates-set-directory-ignored-schema-011"),
+		workload("duplicates/preview-reconciliation", "derived-read", "duplicates-preview-reconciliation-schema-011"),
+		workload("duplicates/validate-reconciliation", "derived-read", "duplicates-validate-reconciliation-schema-011"),
+		workload("duplicates/apply-reconciliation", "namespace-mutation", "duplicates-apply-reconciliation-schema-011"),
 
 		workload("preview/validate", "preview", "preview-validate"),
 		workload("preview/check", "preview", "preview-check"),
@@ -248,60 +276,63 @@ func ProductionWorkloads() []ProductionWorkload {
 		workload("preview/latest", "preview", "preview-latest"),
 		workload("preview/read", "preview", "preview-read"),
 		workload("preview/create-download", "preview", "preview-create-download"),
+		workload("preview/resolve-ready", "preview", "preview-resolve-ready", "preview-ready-window-32-schema-011"),
+		workload("preview/record-ready", "preview", "preview-record-ready"),
+		workload("preview/create-known-download", "preview", "preview-create-known-download"),
 
 		workload("data-plane/upload", "data-plane", "file-data-upload-four-bytes"),
 		workload("data-plane/download", "data-plane", "file-data-download-four-bytes"),
 
-		workload("session/issue", "session", "session-issue-schema-009"),
-		workload("session/authenticate", "session", "session-authenticate-schema-009"),
-		workload("session/rotate", "session", "session-rotate-schema-009"),
-		workload("session/logout", "session", "session-logout-schema-009"),
-		workload("session/revoke-user", "session", "session-revoke-user-schema-009"),
+		workload("session/issue", "session", "session-issue-schema-011"),
+		workload("session/authenticate", "session", "session-authenticate-schema-011"),
+		workload("session/rotate", "session", "session-rotate-schema-011"),
+		workload("session/logout", "session", "session-logout-schema-011"),
+		workload("session/revoke-user", "session", "session-revoke-user-schema-011"),
 
-		workload("identity/bootstrap-options", "identity", "identity-bootstrap-options-schema-009"),
-		workload("identity/bootstrap-verify", "identity", "identity-bootstrap-verify-schema-009"),
-		workload("identity/registration-options", "identity", "identity-registration-options-schema-009", "identity-invited-registration-options-schema-009"),
-		workload("identity/registration-verify", "identity", "identity-registration-verify-schema-009", "identity-invited-registration-verify-schema-009"),
-		workload("identity/authentication-options", "identity", "identity-authentication-options-schema-009"),
-		workload("identity/authentication-verify", "identity", "identity-authentication-verify-schema-009"),
-		workload("identity/current-user", "identity", "identity-current-user-schema-009"),
-		workload("identity/update-profile", "identity", "identity-update-profile-schema-009"),
-		workload("identity/list-passkeys", "identity", "identity-list-passkeys-schema-009"),
-		workload("identity/add-passkey-options", "identity", "identity-add-passkey-options-schema-009"),
-		workload("identity/add-passkey-verify", "identity", "identity-add-passkey-verify-schema-009"),
-		workload("identity/remove-passkey", "identity", "identity-remove-passkey-schema-009"),
-		workload("identity/list-invites", "identity", "identity-list-invites-schema-009"),
-		workload("identity/create-invite", "identity", "identity-create-invite-schema-009"),
-		workload("identity/revoke-invite", "identity", "identity-revoke-invite-schema-009"),
-		workload("identity/list-admin-users", "identity", "identity-list-admin-users-schema-009"),
-		workload("identity/disable-user", "identity", "identity-disable-user-schema-009"),
-		workload("identity/enable-user", "identity", "identity-enable-user-schema-009"),
-		workload("identity/grant-admin", "identity", "identity-grant-admin-schema-009"),
-		workload("identity/revoke-admin", "identity", "identity-revoke-admin-schema-009"),
-		workload("identity/create-recovery", "identity", "identity-create-recovery-schema-009"),
-		workload("identity/recovery-options", "identity", "identity-recovery-options-schema-009"),
-		workload("identity/recovery-verify", "identity", "identity-recovery-verify-schema-009"),
+		workload("identity/bootstrap-options", "identity", "identity-bootstrap-options-schema-011"),
+		workload("identity/bootstrap-verify", "identity", "identity-bootstrap-verify-schema-011"),
+		workload("identity/registration-options", "identity", "identity-registration-options-schema-011", "identity-invited-registration-options-schema-011"),
+		workload("identity/registration-verify", "identity", "identity-registration-verify-schema-011", "identity-invited-registration-verify-schema-011"),
+		workload("identity/authentication-options", "identity", "identity-authentication-options-schema-011"),
+		workload("identity/authentication-verify", "identity", "identity-authentication-verify-schema-011"),
+		workload("identity/current-user", "identity", "identity-current-user-schema-011"),
+		workload("identity/update-profile", "identity", "identity-update-profile-schema-011"),
+		workload("identity/list-passkeys", "identity", "identity-list-passkeys-schema-011"),
+		workload("identity/add-passkey-options", "identity", "identity-add-passkey-options-schema-011"),
+		workload("identity/add-passkey-verify", "identity", "identity-add-passkey-verify-schema-011"),
+		workload("identity/remove-passkey", "identity", "identity-remove-passkey-schema-011"),
+		workload("identity/list-invites", "identity", "identity-list-invites-schema-011"),
+		workload("identity/create-invite", "identity", "identity-create-invite-schema-011"),
+		workload("identity/revoke-invite", "identity", "identity-revoke-invite-schema-011"),
+		workload("identity/list-admin-users", "identity", "identity-list-admin-users-schema-011"),
+		workload("identity/disable-user", "identity", "identity-disable-user-schema-011"),
+		workload("identity/enable-user", "identity", "identity-enable-user-schema-011"),
+		workload("identity/grant-admin", "identity", "identity-grant-admin-schema-011"),
+		workload("identity/revoke-admin", "identity", "identity-revoke-admin-schema-011"),
+		workload("identity/create-recovery", "identity", "identity-create-recovery-schema-011"),
+		workload("identity/recovery-options", "identity", "identity-recovery-options-schema-011"),
+		workload("identity/recovery-verify", "identity", "identity-recovery-verify-schema-011"),
 
-		workload("share/create", "share", "share-create-schema-009"),
-		workload("share/list", "share", "share-list-schema-009"),
-		workload("share/revoke", "share", "share-revoke-schema-009"),
-		workload("share/public-list", "share", "share-public-list-schema-009"),
-		workload("share/public-stat", "share", "share-public-stat-schema-009"),
-		workload("share/public-download", "share", "share-public-download-schema-009"),
+		workload("share/create", "share", "share-create-schema-011"),
+		workload("share/list", "share", "share-list-schema-011"),
+		workload("share/revoke", "share", "share-revoke-schema-011"),
+		workload("share/public-list", "share", "share-public-list-schema-011"),
+		workload("share/public-stat", "share", "share-public-stat-schema-011"),
+		workload("share/public-download", "share", "share-public-download-schema-011"),
 
-		workload("theme/get", "preference", "theme-get-default-schema-009"),
-		workload("theme/set", "preference", "theme-set-create-schema-009", "theme-set-update-schema-009"),
+		workload("theme/get", "preference", "theme-get-default-schema-011"),
+		workload("theme/set", "preference", "theme-set-create-schema-011", "theme-set-update-schema-011"),
 
-		workload("maintenance/startup", "maintenance", "maintenance-startup-warm-schema-009"),
-		workload("maintenance/gate-status", "maintenance", "maintenance-gate-status-schema-009"),
-		workload("maintenance/checkpoint", "maintenance", "maintenance-checkpoint-minimal-schema-009", "maintenance-checkpoint-garbage-128-schema-009"),
-		workload("maintenance/verify-checkpoint", "maintenance", "maintenance-verify-checkpoint-minimal-schema-009"),
-		workload("maintenance/visit-checkpoint", "maintenance", "maintenance-visit-checkpoint-minimal-schema-009"),
-		workload("maintenance/open-writes", "maintenance", "maintenance-open-writes-schema-009"),
-		workload("maintenance/compaction", "maintenance", "maintenance-domain-compaction-300-schema-009"),
-		workload("maintenance/recovery", "maintenance", "maintenance-transition-recovery-schema-009"),
-		workload("maintenance/derived-view-rebuild", "maintenance", "maintenance-derived-view-rebuild-schema-009"),
-		workload("maintenance/migration", "maintenance", "maintenance-migration-008-to-010-minimal-fixture"),
+		workload("maintenance/startup", "maintenance", "maintenance-startup-warm-schema-011"),
+		workload("maintenance/gate-status", "maintenance", "maintenance-gate-status-schema-011"),
+		workload("maintenance/checkpoint", "maintenance", "maintenance-checkpoint-minimal-schema-011", "maintenance-checkpoint-garbage-128-schema-011"),
+		workload("maintenance/verify-checkpoint", "maintenance", "maintenance-verify-checkpoint-minimal-schema-011"),
+		workload("maintenance/visit-checkpoint", "maintenance", "maintenance-visit-checkpoint-minimal-schema-011"),
+		workload("maintenance/open-writes", "maintenance", "maintenance-open-writes-schema-011"),
+		workload("maintenance/compaction", "maintenance", "maintenance-domain-compaction-300-schema-011"),
+		workload("maintenance/recovery", "maintenance", "maintenance-transition-recovery-schema-011"),
+		workload("maintenance/derived-view-rebuild", "maintenance", "maintenance-derived-view-rebuild-schema-011"),
+		workload("maintenance/migration", "maintenance", "maintenance-migration-008-to-011-minimal-fixture"),
 	}
 	return append([]ProductionWorkload(nil), workloads...)
 }
@@ -354,9 +385,11 @@ func ProductionProviderRoutes() []ProductionRoute {
 		protected("POST /api/v1/duplicates/directories/reconcile", "duplicates/apply-reconciliation"),
 		protected("POST /api/v1/directories", "namespace/create-directory"),
 		protected("POST /api/v1/uploads", "transfer/create-upload"),
-		route("POST /api/v1/uploads/batch", "one to 100 upload capabilities", "session/authenticate", "transfer/create-upload-batch"),
-		route("POST /api/v1/uploads/plan/sizes", "one to 1000 local metadata items", "session/authenticate", "transfer/plan-upload-sizes"),
-		route("POST /api/v1/uploads/plan/fingerprints", "one to 1000 local fingerprints", "session/authenticate", "transfer/plan-upload-fingerprints"),
+		route("POST /api/v1/uploads/batch", "one to 10000 upload capabilities", "session/authenticate", "transfer/create-upload-batch"),
+		route("POST /api/v1/uploads/batch/complete", "one to 10000 completed uploads", "session/authenticate", "transfer/complete-upload-batch"),
+		route("DELETE /api/v1/uploads/batch", "one to 10000 active uploads", "session/authenticate", "transfer/abort-upload-batch"),
+		route("POST /api/v1/uploads/plan/sizes", "one to 10000 local metadata items", "session/authenticate", "transfer/plan-upload-sizes"),
+		route("POST /api/v1/uploads/plan/fingerprints", "one to 10000 local fingerprints", "session/authenticate", "transfer/plan-upload-fingerprints"),
 		protected("GET /api/v1/uploads/{uploadID}", "transfer/upload-status"),
 		protected("POST /api/v1/uploads/{uploadID}/complete", "transfer/complete-upload"),
 		protected("DELETE /api/v1/uploads/{uploadID}", "transfer/abort-upload"),

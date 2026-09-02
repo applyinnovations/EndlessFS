@@ -808,11 +808,60 @@ func TestSchema008UploadLookupBatchAndStatusFailureBoundaries(t *testing.T) {
 		}
 		engine = openInternalTestEngine(t, memory, clock, strings.NewReader(strings.Repeat(t.Name(), 1<<14)))
 		sessionRecord := checkpointUploadRecord(engine, live.UserID(), "batch-session", clock.Now().Add(time.Hour))
+		sessionRecord.Batch = &storageformat.PortableUploadBatchMember{BatchID: "batch", Index: 0, Count: 1}
 		engine.fileBackend = &transferFailureBackend{Backend: memory, transfers: memory, beginErr: failure}
 		if _, err := engine.Files().activatePortableUploadBatch(ctx, live.UserID(), []portableUploadBatchItem{{record: sessionRecord, fingerprint: "fingerprint"}}, "batch", true); !errors.Is(err, domain.ErrUnavailable) {
 			t.Fatalf("batch session error = %v", err)
 		}
 	})
+}
+
+func TestSchema011UploadBatchAbortOverlayCorruptionFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	defer server.Close()
+	clock := domain.NewFixedClock(time.Date(2066, 4, 5, 6, 7, 8, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(bytes.Repeat([]byte{0x71}, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat(t.Name(), 1<<14)))
+	live := namespaceTestScope(t, domain.AreaLive)
+	capabilities, err := engine.Files().CreateUploadBatch(ctx, live, []domain.CreateUploadRequest{{
+		Path: domain.MustParseUserPath("/abort-overlay-corruption.bin"), Size: 1,
+		MediaType: "application/octet-stream", IdempotencyKey: "abort-overlay-corruption-item",
+	}})
+	if err != nil || len(capabilities) != 1 {
+		t.Fatalf("create upload batch = %+v, %v", capabilities, err)
+	}
+	request := domain.AbortUploadBatchRequest{
+		UploadIDs: []domain.UploadID{capabilities[0].UploadID}, BatchID: capabilities[0].BatchID,
+		IdempotencyKey: "abort-overlay-corruption",
+	}
+	if err := engine.Files().AbortUploadBatch(ctx, live, request); err != nil {
+		t.Fatal(err)
+	}
+	store := newNamespaceStore(engine)
+	view, err := store.loadView(ctx, live.UserID(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := engine.Files().portableUploadBatchAbortAtView(ctx, view, live.UserID(), capabilities[0].BatchID); err != nil || !found {
+		t.Fatalf("load abort overlay = found:%t error:%v", found, err)
+	}
+	cached := view.uploadAborts[capabilities[0].BatchID]
+	if _, err := engine.stateDomainStore().mutatePrepared(ctx, uploadDomainReference(live.UserID()), consistencyDomainMutation{
+		ID: "corrupt-upload-abort-overlay",
+		Changes: []consistencyDomainChange{{
+			Key: uploadBatchAbortKey(capabilities[0].BatchID), Require: domainValuePresent,
+			ExpectedVersion: cached.value.LogicalVersion, Value: []byte(`{"schemaVersion":1}`),
+		}},
+	}, view.headSnapshot, view.session); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Files().UploadStatus(ctx, live, capabilities[0].UploadID); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("corrupt upload abort overlay status error = %v", err)
+	}
 }
 
 func TestSchema008TerminalUploadCleanupProviderFailureMatrix(t *testing.T) {

@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"mime"
@@ -13,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/integrity"
 )
 
 func (p *Provider) CreateUpload(ctx context.Context, scope domain.Scope, request domain.CreateUploadRequest) (domain.UploadCapability, error) {
@@ -127,8 +129,8 @@ func (p *Provider) createUpload(ctx context.Context, scope domain.Scope, request
 }
 
 func (p *Provider) CreateUploadBatch(ctx context.Context, scope domain.Scope, requests []domain.CreateUploadRequest) ([]domain.UploadCapability, error) {
-	if len(requests) < 1 || len(requests) > 100 {
-		return nil, domain.NewError(domain.ErrorInvalid, "upload batch must contain 1 to 100 items")
+	if len(requests) < 1 || len(requests) > 10_000 {
+		return nil, domain.NewError(domain.ErrorInvalid, "upload batch must contain 1 to 10000 items")
 	}
 	p.uploadBatchMu.Lock()
 	defer p.uploadBatchMu.Unlock()
@@ -174,6 +176,21 @@ func (p *Provider) CreateUploadBatch(ctx context.Context, scope domain.Scope, re
 		}
 		capabilities[index] = capability
 	}
+	batchValues := make([]string, 1, len(capabilities)+1)
+	batchValues[0] = scope.UserID().String()
+	for _, capability := range capabilities {
+		batchValues = append(batchValues, string(capability.UploadID))
+	}
+	batchID := operationFingerprint(batchValues...)
+	p.mu.Lock()
+	for index := range capabilities {
+		capabilities[index].BatchID = batchID
+		capabilities[index].BatchIndex = uint64(index)
+		capabilities[index].BatchCount = uint64(len(capabilities))
+		session := p.uploads[capabilities[index].UploadID]
+		session.batchID, session.batchIndex, session.batchCount = batchID, uint64(index), uint64(len(capabilities))
+	}
+	p.mu.Unlock()
 	return capabilities, nil
 }
 
@@ -201,6 +218,12 @@ func (p *Provider) UploadStatus(ctx context.Context, scope domain.Scope, uploadI
 }
 
 func (p *Provider) CompleteUpload(ctx context.Context, scope domain.Scope, request domain.CompleteUploadRequest) (domain.Entry, error) {
+	p.uploadBatchMu.Lock()
+	defer p.uploadBatchMu.Unlock()
+	return p.completeUpload(ctx, scope, request)
+}
+
+func (p *Provider) completeUpload(ctx context.Context, scope domain.Scope, request domain.CompleteUploadRequest) (domain.Entry, error) {
 	if err := validateContextScope(ctx, scope); err != nil {
 		return domain.Entry{}, err
 	}
@@ -261,6 +284,90 @@ func (p *Provider) CompleteUpload(ctx context.Context, scope domain.Scope, reque
 	return entry, nil
 }
 
+func (p *Provider) CompleteUploadBatch(ctx context.Context, scope domain.Scope, request domain.CompleteUploadBatchRequest) (domain.CompleteUploadBatchResult, error) {
+	if err := validateContextScope(ctx, scope); err != nil {
+		return domain.CompleteUploadBatchResult{}, err
+	}
+	if len(request.Items) < 1 || len(request.Items) > 10_000 || validateIdempotencyKey(request.IdempotencyKey) != nil {
+		return domain.CompleteUploadBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid upload completion batch")
+	}
+	p.uploadBatchMu.Lock()
+	defer p.uploadBatchMu.Unlock()
+	fingerprintValues := make([]string, 1, 1+(2*len(request.Items)))
+	fingerprintValues[0] = strconv.Itoa(len(request.Items))
+	seen := make(map[domain.UploadID]struct{}, len(request.Items))
+	for _, item := range request.Items {
+		if item.UploadID == "" {
+			return domain.CompleteUploadBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid upload completion item")
+		}
+		if _, valid := integrity.ParseCRC32C(item.CRC32C); !valid {
+			return domain.CompleteUploadBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid upload completion checksum")
+		}
+		if _, duplicate := seen[item.UploadID]; duplicate {
+			return domain.CompleteUploadBatchResult{}, domain.NewError(domain.ErrorInvalid, "upload completion batch repeats an upload")
+		}
+		seen[item.UploadID] = struct{}{}
+		fingerprintValues = append(fingerprintValues, string(item.UploadID), item.CRC32C)
+	}
+	fingerprint := operationFingerprint(fingerprintValues...)
+	idempotency := idempotencyKey(scope.UserID(), OperationCompleteUploads, request.IdempotencyKey)
+	p.mu.Lock()
+	if prior, found := p.uploadCompletions[idempotency]; found {
+		p.mu.Unlock()
+		if prior.fingerprint != fingerprint {
+			return domain.CompleteUploadBatchResult{}, domain.NewError(domain.ErrorConflict, "idempotency key was used for a different request")
+		}
+		return cloneUploadCompletionBatchResult(prior.result), nil
+	}
+	originalObjects := cloneObjects(p.scopeObjectsLocked(scope))
+	originalUploads := make(map[domain.UploadID]upload, len(request.Items))
+	originalTokens := make(map[[sha256.Size]byte]domain.UploadID, len(p.uploadTokens))
+	for token, uploadID := range p.uploadTokens {
+		originalTokens[token] = uploadID
+	}
+	completions := make([]domain.CompleteUploadRequest, len(request.Items))
+	for index, item := range request.Items {
+		session, found := p.uploads[item.UploadID]
+		if !found || session.scope != scope || session.state != domain.UploadStateActive {
+			p.mu.Unlock()
+			return domain.CompleteUploadBatchResult{}, domain.NewError(domain.ErrorNotFound, "upload not found")
+		}
+		if !session.materialized || integrity.CRC32C(session.data) != item.CRC32C {
+			p.mu.Unlock()
+			return domain.CompleteUploadBatchResult{}, domain.NewError(domain.ErrorPreconditionFailed, "upload checksum does not match")
+		}
+		originalUploads[item.UploadID] = *session
+		completions[index] = domain.CompleteUploadRequest{UploadID: item.UploadID, Path: session.requestedPath, Size: session.size, MediaType: session.mediaType, CRC32C: item.CRC32C}
+	}
+	p.mu.Unlock()
+	entries := make([]domain.Entry, len(completions))
+	for index, completion := range completions {
+		entry, err := p.completeUpload(ctx, scope, completion)
+		if err == nil {
+			entries[index] = entry
+			continue
+		}
+		p.mu.Lock()
+		p.objects[scope] = originalObjects
+		p.uploadTokens = originalTokens
+		for uploadID, session := range originalUploads {
+			copy := session
+			p.uploads[uploadID] = &copy
+		}
+		p.mu.Unlock()
+		return domain.CompleteUploadBatchResult{}, err
+	}
+	result := domain.CompleteUploadBatchResult{Entries: entries}
+	p.mu.Lock()
+	p.uploadCompletions[idempotency] = idempotentUploadCompletionBatch{fingerprint: fingerprint, result: cloneUploadCompletionBatchResult(result)}
+	p.mu.Unlock()
+	return result, nil
+}
+
+func cloneUploadCompletionBatchResult(result domain.CompleteUploadBatchResult) domain.CompleteUploadBatchResult {
+	return domain.CompleteUploadBatchResult{Entries: append([]domain.Entry(nil), result.Entries...)}
+}
+
 func trustedMediaType(declared string, data []byte, materialized bool) string {
 	switch declared {
 	case "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/plain":
@@ -279,6 +386,12 @@ func trustedMediaType(declared string, data []byte, materialized bool) string {
 }
 
 func (p *Provider) AbortUpload(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) error {
+	p.uploadBatchMu.Lock()
+	defer p.uploadBatchMu.Unlock()
+	return p.abortUpload(ctx, scope, uploadID)
+}
+
+func (p *Provider) abortUpload(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) error {
 	if err := validateContextScope(ctx, scope); err != nil {
 		return err
 	}
@@ -297,6 +410,80 @@ func (p *Provider) AbortUpload(ctx context.Context, scope domain.Scope, uploadID
 	session.state = domain.UploadStateAborted
 	delete(p.uploadTokens, session.capabilityHash)
 	return nil
+}
+
+func (p *Provider) AbortUploadBatch(ctx context.Context, scope domain.Scope, request domain.AbortUploadBatchRequest) error {
+	if err := validateContextScope(ctx, scope); err != nil {
+		return err
+	}
+	if len(request.UploadIDs) < 1 || len(request.UploadIDs) > 10_000 || validateIdempotencyKey(request.IdempotencyKey) != nil || request.BatchID != "" && !validMemoryBatchID(request.BatchID) {
+		return domain.NewError(domain.ErrorInvalid, "invalid upload cancellation batch")
+	}
+	p.uploadBatchMu.Lock()
+	defer p.uploadBatchMu.Unlock()
+	fingerprintValues := make([]string, 2, 2+len(request.UploadIDs))
+	fingerprintValues[0] = strconv.Itoa(len(request.UploadIDs))
+	fingerprintValues[1] = request.BatchID
+	seen := make(map[domain.UploadID]struct{}, len(request.UploadIDs))
+	for _, uploadID := range request.UploadIDs {
+		if uploadID == "" {
+			return domain.NewError(domain.ErrorInvalid, "invalid upload cancellation item")
+		}
+		if _, duplicate := seen[uploadID]; duplicate {
+			return domain.NewError(domain.ErrorInvalid, "upload cancellation batch repeats an upload")
+		}
+		seen[uploadID] = struct{}{}
+		fingerprintValues = append(fingerprintValues, string(uploadID))
+	}
+	fingerprint := operationFingerprint(fingerprintValues...)
+	idempotency := idempotencyKey(scope.UserID(), OperationAbortUploads, request.IdempotencyKey)
+	p.mu.Lock()
+	if prior, found := p.uploadAborts[idempotency]; found {
+		p.mu.Unlock()
+		if prior != fingerprint {
+			return domain.NewError(domain.ErrorConflict, "idempotency key was used for a different request")
+		}
+		return nil
+	}
+	original := make(map[domain.UploadID]upload, len(request.UploadIDs))
+	originalTokens := make(map[[sha256.Size]byte]domain.UploadID, len(p.uploadTokens))
+	for token, uploadID := range p.uploadTokens {
+		originalTokens[token] = uploadID
+	}
+	for _, uploadID := range request.UploadIDs {
+		session, found := p.uploads[uploadID]
+		if !found || session.scope != scope || session.state != domain.UploadStateActive {
+			p.mu.Unlock()
+			return domain.NewError(domain.ErrorNotFound, "upload not found")
+		}
+		if request.BatchID != "" && (session.batchID != request.BatchID || session.batchCount != uint64(len(request.UploadIDs))) {
+			p.mu.Unlock()
+			return domain.NewError(domain.ErrorConflict, "upload cancellation does not match one complete admitted batch")
+		}
+		original[uploadID] = *session
+	}
+	p.mu.Unlock()
+	for _, uploadID := range request.UploadIDs {
+		if err := p.abortUpload(ctx, scope, uploadID); err != nil {
+			p.mu.Lock()
+			p.uploadTokens = originalTokens
+			for id, session := range original {
+				copy := session
+				p.uploads[id] = &copy
+			}
+			p.mu.Unlock()
+			return err
+		}
+	}
+	p.mu.Lock()
+	p.uploadAborts[idempotency] = fingerprint
+	p.mu.Unlock()
+	return nil
+}
+
+func validMemoryBatchID(value string) bool {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && base64.RawURLEncoding.EncodeToString(decoded) == value
 }
 
 func (p *Provider) CreateDownload(ctx context.Context, scope domain.Scope, request domain.CreateDownloadRequest) (domain.DownloadCapability, error) {

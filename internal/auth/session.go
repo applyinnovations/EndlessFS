@@ -28,6 +28,10 @@ type SessionRepository interface {
 	Account(context.Context, domain.UserID) (model.Account, state.Version, error)
 }
 
+type sessionAccountRepository interface {
+	SessionAndAccount(context.Context, string) (model.Session, state.Version, model.Account, error)
+}
+
 type SessionManager struct {
 	repository    SessionRepository
 	ids           *domain.IDGenerator
@@ -130,14 +134,24 @@ func (m *SessionManager) Authenticate(ctx context.Context, rawToken string) (Aut
 	if parseErr != nil {
 		return AuthenticatedSession{}, domain.NewError(domain.ErrorUnauthenticated, "invalid session")
 	}
-	record, version, err := m.repository.Session(ctx, rawToken)
+	var record model.Session
+	var version state.Version
+	var account model.Account
+	var err error
+	if combined, ok := m.repository.(sessionAccountRepository); ok {
+		record, version, account, err = combined.SessionAndAccount(ctx, rawToken)
+	} else {
+		record, version, err = m.repository.Session(ctx, rawToken)
+	}
 	if err != nil || record.UserID != owner || !secret.MatchesKeyedHash(m.protectionKey, rawToken, record.SessionTokenHash) {
 		return AuthenticatedSession{}, domain.NewError(domain.ErrorUnauthenticated, "invalid session")
 	}
 	if !m.clock.Now().Before(record.ExpiresAt) {
 		return AuthenticatedSession{}, domain.NewError(domain.ErrorUnauthenticated, "expired session")
 	}
-	account, _, err := m.repository.Account(ctx, record.UserID)
+	if _, ok := m.repository.(sessionAccountRepository); !ok {
+		account, _, err = m.repository.Account(ctx, record.UserID)
+	}
 	if err != nil || account.Status != model.AccountEnabled || effectiveAuthEpoch(account.AuthEpoch) != effectiveAuthEpoch(record.AuthEpoch) {
 		return AuthenticatedSession{}, domain.NewError(domain.ErrorUnauthenticated, "invalid session")
 	}

@@ -3,7 +3,6 @@ package portable
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
@@ -11,6 +10,13 @@ import (
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
+
+func domainTreeStorageKey(reference consistencyDomainRef, root storageformat.DomainTreeRoot) objectstore.Key {
+	if root.PackID != "" {
+		return storageformat.DomainPagePackKey(reference.Kind, reference.ID, root.PackID)
+	}
+	return storageformat.DomainPageKey(reference.Kind, reference.ID, root.Digest)
+}
 
 func replaceObjectBody(t *testing.T, backend *objectmemory.Backend, key objectstore.Key, body []byte) {
 	t.Helper()
@@ -83,30 +89,16 @@ func TestNamespaceAndOutcomePageCorruptionFailsClosed(t *testing.T) {
 		store := newNamespaceStore(engine)
 		live := namespaceTestScope(t, domain.AreaLive)
 		entry := seedNamespaceBatchFiles(t, store, live, 1)[0]
-		var pageKey objectstore.Key
-		for key := range backend.Export() {
-			if strings.Contains(key, "/domains/namespace/") && strings.Contains(key, "/pages/") {
-				pageKey = objectstore.MustKey(key)
-				break
-			}
+		view, err := store.loadView(context.Background(), live.UserID(), "")
+		if err != nil {
+			t.Fatal(err)
 		}
-		if pageKey.String() == "" {
-			t.Fatal("namespace fixture has no immutable page")
-		}
+		pageKey := domainTreeStorageKey(view.reference, view.roots[live.Area()].Children)
 		object, err := backend.Get(context.Background(), pageKey)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var page storageformat.DomainPage
-		if err := decodeCanonicalValue(object.Body, &page); err != nil {
-			t.Fatal(err)
-		}
-		page.Entries[0].Value = append(page.Entries[0].Value, byte('x'))
-		body, err := storageformat.EncodeCanonical(page)
-		if err != nil {
-			t.Fatal(err)
-		}
-		replaceObjectBody(t, backend, pageKey, body)
+		replaceObjectBody(t, backend, pageKey, append(append([]byte(nil), object.Body...), byte('x')))
 		if _, err := store.stat(context.Background(), live, entry.Path); !errors.Is(err, domain.ErrInvalid) {
 			t.Fatalf("corrupt namespace page error = %v; want invalid", err)
 		}
@@ -118,19 +110,17 @@ func TestNamespaceAndOutcomePageCorruptionFailsClosed(t *testing.T) {
 		store := newNamespaceStore(engine)
 		live := namespaceTestScope(t, domain.AreaLive)
 		entry := seedNamespaceBatchFiles(t, store, live, 1)[0]
-		for key := range backend.Export() {
-			if !strings.Contains(key, "/domains/namespace/") || !strings.Contains(key, "/pages/") {
-				continue
-			}
-			parsed := objectstore.MustKey(key)
-			object, err := backend.Get(context.Background(), parsed)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := backend.Delete(context.Background(), parsed, objectstore.DeleteCondition{Version: object.Version}); err != nil {
-				t.Fatal(err)
-			}
-			break
+		view, err := store.loadView(context.Background(), live.UserID(), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		key := domainTreeStorageKey(view.reference, view.roots[live.Area()].Children)
+		object, err := backend.Get(context.Background(), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := backend.Delete(context.Background(), key, objectstore.DeleteCondition{Version: object.Version}); err != nil {
+			t.Fatal(err)
 		}
 		if _, err := store.stat(context.Background(), live, entry.Path); !errors.Is(err, domain.ErrNotFound) {
 			t.Fatalf("missing namespace page error = %v; want not found", err)
@@ -152,7 +142,7 @@ func TestNamespaceAndOutcomePageCorruptionFailsClosed(t *testing.T) {
 		if err != nil || head.head.Outcomes.Digest == "" {
 			t.Fatalf("compacted outcome head = %+v, %v", head.head, err)
 		}
-		key := storageformat.DomainPageKey(reference.Kind, reference.ID, head.head.Outcomes.Digest)
+		key := domainTreeStorageKey(reference, head.head.Outcomes)
 		replaceObjectBody(t, backend, key, []byte("{}"))
 		if _, err := store.mutate(context.Background(), reference, mutation); !errors.Is(err, domain.ErrInvalid) {
 			t.Fatalf("corrupt outcome replay error = %v; want invalid", err)

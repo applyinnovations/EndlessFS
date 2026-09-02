@@ -80,6 +80,7 @@ type duplicateProjectionSnapshot008 struct {
 	root         storageformat.DomainTreeRoot
 	projectionID string
 	session      *consistencyDomainTreeSession
+	view         *namespaceView
 }
 
 func duplicateProjectionID008(owner domain.UserID) string {
@@ -87,7 +88,9 @@ func duplicateProjectionID008(owner domain.UserID) string {
 }
 
 func duplicateProjectionSession008(engine *Engine, owner domain.UserID, projectionID string) *consistencyDomainTreeSession {
-	return newNamespaceProjectionTreeSession(newConsistencyDomainStore(engine.backend, engine.scheduler, engine.clock), owner, projectionID, storageformat.ProjectionDuplicates)
+	session := newNamespaceProjectionTreeSession(newConsistencyDomainStore(engine.backend, engine.scheduler, engine.clock), owner, projectionID, storageformat.ProjectionDuplicates)
+	session.enablePackedWrites(projectionID)
+	return session
 }
 
 func duplicateProjectionOccurrenceKey008(value storageformat.DuplicateProjectionOccurrence) string {
@@ -170,6 +173,9 @@ func (s *FileStore) duplicateProjection008(ctx context.Context, owner domain.Use
 		if err != nil {
 			return duplicateProjectionSnapshot008{}, err
 		}
+		if err := session.flushPack(ctx); err != nil {
+			return duplicateProjectionSnapshot008{}, err
+		}
 		if _, err := s.engine.backend.Put(ctx, key, body, condition); err == nil {
 			return duplicateProjectionSnapshot008{head: next, root: root, projectionID: projectionID, session: session}, nil
 		} else if !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) {
@@ -191,7 +197,6 @@ func (s *FileStore) buildDuplicateProjection008(ctx context.Context, view *names
 			return err
 		}
 		runs = append(runs, root)
-		session.pages = make(map[string]storageformat.DomainPage)
 		chunk = chunk[:0]
 		return nil
 	}
@@ -700,6 +705,9 @@ func (s *FileStore) duplicateDirectoryContent008(ctx context.Context, view *name
 		if snapshot.exists {
 			condition = objectstore.PutCondition{Mode: objectstore.PutMatch, Version: snapshot.object.Version}
 		}
+		if err := content.session.flushPack(ctx); err != nil {
+			return duplicateDirectoryContent008{}, err
+		}
 		if _, err := s.engine.backend.Put(ctx, storageformat.ScopedProjectionHeadKey(owner.String(), storageformat.ProjectionDuplicates, projectionID), body, condition); err == nil {
 			return content, nil
 		} else if !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) {
@@ -753,7 +761,6 @@ func (s *FileStore) buildDuplicateDirectoryContent008(ctx context.Context, view 
 			return err
 		}
 		runs = append(runs, root)
-		session.pages = make(map[string]storageformat.DomainPage)
 		chunk = chunk[:0]
 		return nil
 	}

@@ -55,6 +55,15 @@ type UploadBatchStorage interface {
 	CreateUploadBatch(context.Context, domain.Scope, []domain.CreateUploadRequest) ([]domain.UploadCapability, error)
 }
 
+// UploadTransactionStorage completes or revokes a product-scale selection
+// through one control-plane request and one atomic terminal state publication.
+// Distinct provider objects remain unavoidable per-item effects, but state
+// persistence and browser composition must never repeat per item.
+type UploadTransactionStorage interface {
+	CompleteUploadBatch(context.Context, domain.Scope, domain.CompleteUploadBatchRequest) (domain.CompleteUploadBatchResult, error)
+	AbortUploadBatch(context.Context, domain.Scope, domain.AbortUploadBatchRequest) error
+}
+
 // UploadPlanningStorage exposes metadata-only duplicate lookup. Local file
 // bytes stay in the browser and stored object bytes stay on the data plane.
 type UploadPlanningStorage interface {
@@ -71,6 +80,7 @@ type NamespaceStorage interface {
 	TrashStorage
 	BatchStorage
 	UploadBatchStorage
+	UploadTransactionStorage
 }
 
 // DuplicateStorage is the optional provider-neutral duplicate reconciliation

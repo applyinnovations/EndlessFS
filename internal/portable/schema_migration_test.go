@@ -260,7 +260,7 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 	},
 }
 
-var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.2.0", "v0.2.1", "v0.3.0", "v0.3.1", "v0.3.2", "v0.4.0"}
+var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.2.0", "v0.2.1", "v0.3.0", "v0.3.1", "v0.3.2", "v0.4.0", "v0.5.0", "v0.5.1", "v0.5.2", "v0.6.0"}
 
 func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *testing.T) {
 	history := portable.StorageSchemaHistory()
@@ -641,8 +641,8 @@ func TestMigrationCheckpointInventoryResumesFromBoundedPagesWithoutReadingFileBo
 	if got := interrupted.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads across interrupted migration = %d; want 0", got)
 	}
-	if got := interrupted.totalAttempts(); got != 22 {
-		t.Fatalf("file metadata list calls across interrupted schema-002-to-010 migration = %d; want measured restart ratchet 22", got)
+	if got := interrupted.totalAttempts(); got != 24 {
+		t.Fatalf("file metadata list calls across interrupted schema-002-to-011 migration = %d; want measured restart ratchet 24", got)
 	}
 	progressRecords := 0
 	inventoryPages := 0
@@ -803,8 +803,8 @@ func TestMigrationDoesNotReadFileBodiesAgainImmediatelyBeforeOpeningWrites(t *te
 	if got := counting.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads during migration = %d; want 0", got)
 	}
-	if got := counting.totalAttempts(); got != 11 {
-		t.Fatalf("file metadata listing calls across schema-002-to-010 checkpoint suffix = %d; want measured ratchet 11", got)
+	if got := counting.totalAttempts(); got != 13 {
+		t.Fatalf("file metadata listing calls across schema-002-to-011 checkpoint suffix = %d; want measured ratchet 13", got)
 	}
 }
 
@@ -921,7 +921,7 @@ func TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary(t *testing.T) 
 	for edgeIndex, entry := range history[:len(history)-1] {
 		families := storageSchemaFixturesFor(entry.ID)
 		edgeBoundaries := boundaries
-		if entry.MigrationID == "schema-004-to-005" || entry.MigrationID == "schema-005-to-006" || entry.MigrationID == "schema-006-to-007" || entry.MigrationID == "schema-007-to-008" {
+		if entry.MigrationID == "schema-004-to-005" || entry.MigrationID == "schema-005-to-006" || entry.MigrationID == "schema-006-to-007" || entry.MigrationID == "schema-007-to-008" || entry.MigrationID == "schema-010-to-011" {
 			edgeBoundaries = []string{
 				portable.StepMigrationAfterDetection,
 				portable.StepMigrationAfterGateClosed,

@@ -47,7 +47,7 @@ func TestProviderBudgetCatalogCoversApplicationContractsAndRatchets(t *testing.T
 		}
 	}
 	for _, budget := range ratchet.Epochs[len(ratchet.Epochs)-1].Budgets {
-		current := strings.HasSuffix(budget.Name, "schema-009") || strings.Contains(budget.Name, "008-to-010") || budget.Name == "preview-validate"
+		current := strings.HasSuffix(budget.Name, "schema-011") || strings.Contains(budget.Name, "008-to-011") || strings.HasPrefix(budget.Name, "preview-") || strings.HasPrefix(budget.Name, "file-data-")
 		if current && !referencedBudgets[budget.Name] {
 			t.Errorf("current provider ratchet %q is absent from the production workload catalog", budget.Name)
 		}
@@ -87,6 +87,7 @@ func TestProviderBudgetCatalogCoversApplicationContractsAndRatchets(t *testing.T
 		}},
 		{name: "preview.Store", typeOf: reflect.TypeOf((*preview.Store)(nil)).Elem(), methods: map[string]string{
 			"Validate": "preview/validate", "Check": "preview/check", "Claim": "preview/claim", "Release": "preview/release", "Commit": "preview/commit", "Latest": "preview/latest", "Read": "preview/read", "CreateDownload": "preview/create-download",
+			"ResolveReady": "preview/resolve-ready", "RecordReady": "preview/record-ready", "CreateKnownDownload": "preview/create-known-download",
 		}, local: map[string]bool{"Ready": true, "DataOrigin": true, "BackendKind": true}},
 	}
 	for _, contract := range contracts {

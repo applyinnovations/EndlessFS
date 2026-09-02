@@ -69,24 +69,24 @@ func TestProviderBudgetDuplicateReconciliationWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("maintenance-derived-view-rebuild-schema-009")
+	check("maintenance-derived-view-rebuild-schema-011")
 	fileGroup := duplicateGroupByKind(t, groups.Groups, domain.DuplicateFile)
 
 	groups, err = engine.Files().ListDuplicateGroups(ctx, owner, domain.DuplicateGroupRequest{Limit: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("duplicates-list-groups-schema-009")
+	check("duplicates-list-groups-schema-011")
 	if _, err := engine.Files().ListDuplicateOccurrences(ctx, owner, domain.DuplicateOccurrenceRequest{GroupID: fileGroup.ID, Limit: 20}); err != nil {
 		t.Fatal(err)
 	}
-	check("duplicates-list-occurrences-schema-009")
+	check("duplicates-list-occurrences-schema-011")
 
 	ignored, err := engine.Files().SetDuplicateGroupIgnored(ctx, owner, domain.SetDuplicateIgnoredRequest{GroupID: fileGroup.ID, Ignored: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("duplicates-set-group-ignored-schema-009")
+	check("duplicates-set-group-ignored-schema-011")
 	if _, err := engine.Files().SetDuplicateGroupIgnored(ctx, owner, domain.SetDuplicateIgnoredRequest{GroupID: fileGroup.ID, Ignored: false, ExpectedRevision: ignored.Revision}); err != nil {
 		t.Fatal(err)
 	}
@@ -103,17 +103,17 @@ func TestProviderBudgetDuplicateReconciliationWorkflows(t *testing.T) {
 	if _, err := engine.Files().CompareDuplicateDirectories(ctx, owner, domain.DuplicateDirectoryComparisonRequest{Left: left, Right: right}); err != nil {
 		t.Fatal(err)
 	}
-	check("duplicates-compare-directories-schema-009")
+	check("duplicates-compare-directories-schema-011")
 	if _, err := engine.Files().ListDuplicateDirectoryOverlaps(ctx, owner, domain.DuplicateDirectoryOverlapRequest{Directory: left, Limit: 20}); err != nil {
 		t.Fatal(err)
 	}
-	check("duplicates-list-directory-overlaps-schema-009")
+	check("duplicates-list-directory-overlaps-schema-011")
 
 	pair, err := engine.Files().SetDuplicateDirectoryIgnored(ctx, owner, domain.SetDuplicateDirectoryIgnoredRequest{Left: left, Right: right, Ignored: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("duplicates-set-directory-ignored-schema-009")
+	check("duplicates-set-directory-ignored-schema-011")
 	if _, err := engine.Files().SetDuplicateDirectoryIgnored(ctx, owner, domain.SetDuplicateDirectoryIgnoredRequest{Left: left, Right: right, Ignored: false, ExpectedRevision: pair.Revision}); err != nil {
 		t.Fatal(err)
 	}
@@ -124,13 +124,13 @@ func TestProviderBudgetDuplicateReconciliationWorkflows(t *testing.T) {
 	if err != nil || preview.PlanToken == "" {
 		t.Fatalf("reconciliation preview = %+v, %v", preview, err)
 	}
-	check("duplicates-preview-reconciliation-schema-009")
+	check("duplicates-preview-reconciliation-schema-011")
 	if _, err := engine.Files().ValidateDuplicateReconciliation(ctx, owner, preview.PlanToken); err != nil {
 		t.Fatal(err)
 	}
-	check("duplicates-validate-reconciliation-schema-009")
+	check("duplicates-validate-reconciliation-schema-011")
 	if _, err := engine.Files().ApplyDuplicateReconciliation(ctx, owner, preview.PlanToken, "duplicate-budget-apply-01"); err != nil {
 		t.Fatal(err)
 	}
-	check("duplicates-apply-reconciliation-schema-009")
+	check("duplicates-apply-reconciliation-schema-011")
 }

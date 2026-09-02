@@ -61,8 +61,8 @@ func TestConsistencyDomainTreeDescriptorAndCacheDenialMatrix(t *testing.T) {
 	}
 	missingKnown := newConsistencyDomainTreeSession(newConsistencyDomainStore(objectmemory.New(), nil), reference)
 	missingKnown.known[written.root.Digest] = written.root
-	if _, err := missingKnown.writePage(ctx, page); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("missing known page error = %v", err)
+	if reused, err := missingKnown.writePage(ctx, page); err != nil || reused.root != written.root {
+		t.Fatalf("authenticated immutable page reuse = %+v, %v", reused, err)
 	}
 
 	collisionBackend := objectmemory.New()
@@ -322,5 +322,44 @@ func TestConsistencyDomainTreeStreamingFailureBoundaries(t *testing.T) {
 	page := storageformat.DomainPage{SchemaVersion: 1, DomainID: reference.ID, Kind: reference.Kind, Level: 0, Entries: []storageformat.DomainEntry{entry}}
 	if _, err := conflictSession.writePage(ctx, page); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("conflicting page verification read error = %v", err)
+	}
+}
+
+func TestConsistencyDomainPackedMutationBindingPreventsSharedPrefixCollision(t *testing.T) {
+	ctx := context.Background()
+	reference := consistencyDomainRef{Kind: storageformat.DomainNamespace, ID: "packed-mutation-binding"}
+	backend := objectmemory.New()
+	newSession := func(binding string) *consistencyDomainTreeSession {
+		session := newConsistencyDomainTreeSession(newConsistencyDomainStore(backend, nil), reference)
+		session.enablePackedWrites("same-authenticated-head")
+		if err := session.bindPackedMutation(binding); err != nil {
+			t.Fatal(err)
+		}
+		return session
+	}
+	first := storageformat.DomainPage{SchemaVersion: 1, DomainID: reference.ID, Kind: reference.Kind, Level: 0, Entries: []storageformat.DomainEntry{{Key: "shared", Value: []byte("same"), LogicalVersion: "same-version"}}}
+	left, right := newSession("move-to-left"), newSession("move-to-right")
+	leftFirst, err := left.writePage(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rightFirst, err := right.writePage(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leftFirst.root.Digest != rightFirst.root.Digest || leftFirst.root.PackID == rightFirst.root.PackID {
+		t.Fatalf("shared page digest/pack binding = %+v / %+v", leftFirst.root, rightFirst.root)
+	}
+	for session, value := range map[*consistencyDomainTreeSession]string{left: "left", right: "right"} {
+		page := storageformat.DomainPage{SchemaVersion: 1, DomainID: reference.ID, Kind: reference.Kind, Level: 0, Entries: []storageformat.DomainEntry{{Key: value, Value: []byte(value), LogicalVersion: value + "-version"}}}
+		if _, err := session.writePage(ctx, page); err != nil {
+			t.Fatal(err)
+		}
+		if err := session.flushPack(ctx); err != nil {
+			t.Fatalf("flush %s mutation: %v", value, err)
+		}
+	}
+	if err := left.bindPackedMutation("another-operation"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("late mutation rebind error = %v", err)
 	}
 }

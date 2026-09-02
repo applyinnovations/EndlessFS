@@ -355,6 +355,16 @@ func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition s
 				runtime.Gosched()
 			}
 		case storageformat.GateClosing:
+			// Once consistency domains exist, migration closure must use the
+			// same catalog-first freeze protocol as every other checkpoint.
+			// Merely draining legacy admission records and flipping the global
+			// gate would leave mutable domain heads outside the snapshot.
+			if writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema008, e.writer.RequiredFeatures) {
+				if err := e.finishClosingWrites(ctx, transition.checkpointID); err != nil {
+					return false, err
+				}
+				return true, nil
+			}
 			if err := e.drainAdmissions(ctx, gate.Epoch); err != nil {
 				return false, err
 			}

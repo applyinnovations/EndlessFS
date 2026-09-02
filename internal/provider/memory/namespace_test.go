@@ -54,7 +54,7 @@ func TestNamespaceExtensionsAreAtomicScopedAndIdempotent(t *testing.T) {
 	if _, err := provider.ListTrash(ctx, domain.UserID{}, domain.TrashListRequest{}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid owner = %v", err)
 	}
-	if _, err := provider.ListTrash(ctx, owner, domain.TrashListRequest{Limit: 1001}); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := provider.ListTrash(ctx, owner, domain.TrashListRequest{Limit: 10001}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid limit = %v", err)
 	}
 	canceled, cancel := context.WithCancel(ctx)

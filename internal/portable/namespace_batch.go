@@ -219,6 +219,9 @@ func (store *namespaceStore) batchCopyOrMoveValidated(ctx context.Context, owner
 				return domain.NamespaceBatchResult{}, err
 			}
 		}
+		if err := view.bindMutation(mutationID, fingerprint); err != nil {
+			return domain.NamespaceBatchResult{}, err
+		}
 
 		plans := make([]namespaceBatchMovePlan, 0, len(specs))
 		for index, spec := range specs {
@@ -456,6 +459,9 @@ func (s *FileStore) BatchDeleteFromTrash(ctx context.Context, owner domain.UserI
 				return domain.NamespaceBatchResult{}, err
 			}
 			return *replay, err
+		}
+		if err := view.bindMutation(mutationID, fingerprint); err != nil {
+			return domain.NamespaceBatchResult{}, err
 		}
 		rootFrame := namespaceFrame{key: namespaceFrameKey(domain.AreaTrash, namespaceRootPath()), path: namespaceRootPath(), area: domain.AreaTrash, entry: view.roots[domain.AreaTrash]}
 		edits := make([]namespaceDirectoryEdit, 0, len(trashIDs))

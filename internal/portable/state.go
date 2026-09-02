@@ -259,6 +259,66 @@ func (e *Engine) Get(ctx context.Context, key state.Key) (state.Value, error) {
 	return state.Value{Data: data, Version: state.Version(value.LogicalVersion)}, nil
 }
 
+// GetMany reads keys that share one consistency domain from one authenticated
+// head snapshot and one page cache. Identity authentication uses it for the
+// session and account pair, eliminating duplicate authority reads while
+// preserving one-revision revocation semantics.
+func (e *Engine) GetMany(ctx context.Context, keys []state.Key) ([]state.Value, error) {
+	if len(keys) == 0 || len(keys) > 1000 {
+		return nil, domain.NewError(domain.ErrorInvalid, "state multi-read must contain 1 to 1000 keys")
+	}
+	references := make([]consistencyDomainRef, len(keys))
+	for index, key := range keys {
+		if err := validateStateKey(key); err != nil {
+			return nil, err
+		}
+		reference, err := stateDomainReferenceForKey(key)
+		if err != nil {
+			return nil, err
+		}
+		if index > 0 && reference != references[0] {
+			return nil, domain.NewError(domain.ErrorInvalid, "state multi-read crosses consistency domains")
+		}
+		references[index] = reference
+	}
+	store := e.stateDomainStore()
+	for attempts := 0; attempts < 8; attempts++ {
+		snapshot, err := store.loadHead(ctx, references[0])
+		if err != nil {
+			return nil, err
+		}
+		if !snapshot.exists || !snapshot.head.Registered {
+			return nil, domain.NewError(domain.ErrorNotFound, "consistency-domain value does not exist")
+		}
+		if _, _, found, lockErr := transitionLockAtHead009(ctx, store, references[0], snapshot.head); lockErr != nil {
+			return nil, lockErr
+		} else if found {
+			if err := e.resolveStateTransition009(ctx, references[0]); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		session := newConsistencyDomainTreeSession(store, references[0])
+		values := make([]state.Value, len(keys))
+		for index, key := range keys {
+			value, found, err := store.lookupAtHeadWithSession(ctx, references[0], snapshot.head, key.String(), session)
+			if err != nil {
+				return nil, err
+			}
+			if !found {
+				return nil, domain.NewError(domain.ErrorNotFound, "consistency-domain value does not exist")
+			}
+			data, err := decodeStateValue009(key, value.Data)
+			if err != nil {
+				return nil, err
+			}
+			values[index] = state.Value{Data: data, Version: state.Version(value.LogicalVersion)}
+		}
+		return values, nil
+	}
+	return nil, domain.NewError(domain.ErrorUnavailable, "state multi-read remained transition-contended")
+}
+
 func (e *Engine) List(ctx context.Context, prefix state.Prefix, request state.PageRequest) (state.Page, error) {
 	if !prefix.Valid() {
 		return state.Page{}, domain.NewError(domain.ErrorInvalid, "invalid state prefix")

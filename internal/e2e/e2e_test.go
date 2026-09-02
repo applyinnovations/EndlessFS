@@ -93,7 +93,7 @@ func TestE2EUploadPlannerHashesMD5AndCRC32CInOneWorkerPass(t *testing.T) {
 	if result.LargeMD5 != integrity.MD5(large) || result.LargeCRC32C != integrity.CRC32C(large) {
 		t.Fatalf("multi-chunk browser fingerprint = %+v", result)
 	}
-	if result.WorkerLimit != 2 || result.BatchSize != 1000 {
+	if result.WorkerLimit != 2 || result.BatchSize != 10000 {
 		t.Fatalf("upload planner bounds = %+v", result)
 	}
 	client.assertNoExternalRequests(t, harness)
@@ -1030,7 +1030,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	directoryRequestsAfterScale := countRequestPath(requestedURLs, "/api/v1/files")
 	mu.Unlock()
 	directoryPageRequests := directoryRequestsAfterScale - directoryRequestsBeforeScale
-	if loaded != 10_003 || renderedTiles > 64 || resolveRequestsAfterScale-resolveRequestsBeforeScale > 32 || directoryPageRequests != 11 {
+	if loaded != 10_003 || renderedTiles > 64 || resolveRequestsAfterScale-resolveRequestsBeforeScale > 1 || directoryPageRequests != 1 {
 		t.Fatalf("virtual grid bounds: logical=%d rendered=%d previewRequests=%d directoryPageRequests=%d", loaded, renderedTiles, resolveRequestsAfterScale-resolveRequestsBeforeScale, directoryPageRequests)
 	}
 	var listBenchmark struct {

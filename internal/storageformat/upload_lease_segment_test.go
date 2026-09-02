@@ -2,11 +2,32 @@ package storageformat
 
 import (
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 )
+
+func encodeUploadLeasePayload(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	var encoded bytes.Buffer
+	encoded.Write(uploadLeaseSegmentMagic)
+	writer, err := gzip.NewWriterLevel(&encoded, gzip.BestSpeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.Header.ModTime = time.Unix(0, 0).UTC()
+	writer.Header.OS = 255
+	if _, err := writer.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
+}
 
 func validUploadLeaseSegment() PortableUploadLeaseSegment {
 	batchID := Digest([]byte("batch"))
@@ -47,6 +68,40 @@ func TestPortableUploadLeaseSegmentCanonicalRoundTripAndBindings(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := decode(); !errors.Is(err, domain.ErrInvalid) {
+				t.Fatalf("error = %v, want invalid", err)
+			}
+		})
+	}
+}
+
+func TestPortableUploadLeaseSegmentDecodeRejectsEveryEnvelopeBoundary(t *testing.T) {
+	value := validUploadLeaseSegment()
+	body, err := EncodePortableUploadLeaseSegment(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := EncodeCanonical(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidValue := value
+	invalidValue.SchemaVersion = 0
+	invalidCanonical, err := EncodeCanonical(invalidValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, candidate := range map[string][]byte{
+		"empty":              nil,
+		"magic-only":         append([]byte(nil), uploadLeaseSegmentMagic...),
+		"invalid-gzip":       append(append([]byte(nil), uploadLeaseSegmentMagic...), []byte("not-gzip")...),
+		"empty-expanded":     encodeUploadLeasePayload(t, nil),
+		"invalid-json":       encodeUploadLeasePayload(t, []byte("[")),
+		"invalid-record":     encodeUploadLeasePayload(t, invalidCanonical),
+		"non-canonical-json": encodeUploadLeasePayload(t, append([]byte(" "), canonical...)),
+		"truncated":          body[:len(body)-2],
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodePortableUploadLeaseSegment(candidate, value.BackendKind, value.OwnerID, value.BatchID, value.Segment); !errors.Is(err, domain.ErrInvalid) {
 				t.Fatalf("error = %v, want invalid", err)
 			}
 		})

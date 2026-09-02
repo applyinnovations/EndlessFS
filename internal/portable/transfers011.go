@@ -60,7 +60,7 @@ func (s *FileStore) readUploadTransactionProgress(ctx context.Context, owner dom
 	traced := providerbudget.WithTrace(ctx, providerbudget.Trace{Operation: "upload-" + kind + "-batch", Subsystem: "transaction-progress"})
 	object, err := s.engine.backend.Get(traced, key)
 	if errors.Is(err, domain.ErrNotFound) {
-		return storageformat.UploadTransactionSegment{}, objectstore.Object{Key: key}, nil
+		return storageformat.UploadTransactionSegment{}, objectstore.Object{Key: key}, err
 	}
 	if err != nil {
 		return storageformat.UploadTransactionSegment{}, objectstore.Object{}, err

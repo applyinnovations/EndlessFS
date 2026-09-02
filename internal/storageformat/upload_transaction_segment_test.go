@@ -2,12 +2,33 @@ package storageformat
 
 import (
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/integrity"
 )
+
+func encodeUploadTransactionPayload(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	var encoded bytes.Buffer
+	encoded.Write(uploadTransactionSegmentMagic)
+	writer, err := gzip.NewWriterLevel(&encoded, gzip.BestSpeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.Header.ModTime = time.Unix(0, 0).UTC()
+	writer.Header.OS = 255
+	if _, err := writer.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
+}
 
 func validUploadTransactionSegment() UploadTransactionSegment {
 	return UploadTransactionSegment{
@@ -46,6 +67,40 @@ func TestUploadTransactionSegmentCanonicalRoundTripAndBindings(t *testing.T) {
 	}
 	if canonical, _ := EncodeUploadTransactionSegment(decoded); !bytes.Equal(canonical, body) {
 		t.Fatal("encoding is not deterministic")
+	}
+}
+
+func TestUploadTransactionSegmentDecodeRejectsEveryEnvelopeBoundary(t *testing.T) {
+	value := validUploadTransactionSegment()
+	body, err := EncodeUploadTransactionSegment(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := EncodeCanonical(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidValue := value
+	invalidValue.SchemaVersion = 0
+	invalidCanonical, err := EncodeCanonical(invalidValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, candidate := range map[string][]byte{
+		"empty":              nil,
+		"magic-only":         append([]byte(nil), uploadTransactionSegmentMagic...),
+		"invalid-gzip":       append(append([]byte(nil), uploadTransactionSegmentMagic...), []byte("not-gzip")...),
+		"empty-expanded":     encodeUploadTransactionPayload(t, nil),
+		"invalid-json":       encodeUploadTransactionPayload(t, []byte("[")),
+		"invalid-record":     encodeUploadTransactionPayload(t, invalidCanonical),
+		"non-canonical-json": encodeUploadTransactionPayload(t, append([]byte(" "), canonical...)),
+		"truncated":          body[:len(body)-2],
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := DecodeUploadTransactionSegment(candidate, value.BackendKind, value.OwnerID, value.TransactionID, value.RequestFingerprint, value.Kind, value.Segment); !errors.Is(err, domain.ErrInvalid) {
+				t.Fatalf("error = %v, want invalid", err)
+			}
+		})
 	}
 }
 

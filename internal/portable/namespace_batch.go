@@ -55,14 +55,11 @@ func (s *FileStore) BatchCopyMove(ctx context.Context, owner domain.UserID, requ
 }
 
 func (s *FileStore) BatchMoveToTrash(ctx context.Context, owner domain.UserID, requests []domain.TrashRequest, idempotencyKey string) (domain.NamespaceBatchResult, error) {
-	live, err := domain.NewScope(owner, domain.AreaLive)
-	if err != nil {
-		return domain.NamespaceBatchResult{}, err
+	if !owner.Valid() {
+		return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid trash owner")
 	}
-	trash, err := domain.NewScope(owner, domain.AreaTrash)
-	if err != nil {
-		return domain.NamespaceBatchResult{}, err
-	}
+	live, _ := domain.NewScope(owner, domain.AreaLive)
+	trash, _ := domain.NewScope(owner, domain.AreaTrash)
 	specs := make([]namespaceBatchMoveSpec, len(requests))
 	for index, request := range requests {
 		destination, parseErr := domain.ParseUserPath("/" + request.TrashID)

@@ -697,7 +697,7 @@
 
   function queueGridPreview(entry, frame) {
     const known = state.previewStates.get(entry.path);
-    if (!previewEligible(entry) || (known && known.state !== "ready" && known.state !== "generating") || state.previewQueued.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
+    if (!previewEligible(entry) || (known && known.state !== "ready" && known.state !== "generating") || state.previewQueued.has(entry.path) || state.previewResolving.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
     state.previewQueued.add(entry.path);
     state.previewQueue.push({ entry, frame });
 	if (!state.previewPumpScheduled) {
@@ -721,8 +721,10 @@
 		pumpPreviewQueue();
 		return;
 	}
+	for (const { entry } of batch) state.previewResolving.add(entry.path);
 	state.previewActive = 1;
 	resolveGridPreviewBatch(batch).finally(() => {
+		for (const { entry } of batch) state.previewResolving.delete(entry.path);
 		state.previewActive = 0;
 		pumpPreviewQueue();
 	});

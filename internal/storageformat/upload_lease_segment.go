@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"io"
-	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/state"
@@ -80,25 +79,11 @@ func EncodePortableUploadLeaseSegment(value PortableUploadLeaseSegment) ([]byte,
 	if len(canonical) == 0 || len(canonical) > MaxExpandedUploadLeaseSegmentBytes {
 		return nil, domain.NewError(domain.ErrorInvalid, "expanded upload lease segment exceeds size limit")
 	}
-	var compressed bytes.Buffer
-	compressed.Write(uploadLeaseSegmentMagic)
-	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestSpeed)
-	if err != nil {
-		return nil, domain.WrapError(domain.ErrorInternal, "initialize upload lease segment compression", err)
-	}
-	writer.Header.ModTime = time.Unix(0, 0).UTC()
-	writer.Header.OS = 255
-	if _, err := writer.Write(canonical); err != nil {
-		_ = writer.Close()
-		return nil, domain.WrapError(domain.ErrorInternal, "compress upload lease segment", err)
-	}
-	if err := writer.Close(); err != nil {
-		return nil, domain.WrapError(domain.ErrorInternal, "finish upload lease segment compression", err)
-	}
-	if compressed.Len() > MaxUploadLeaseSegmentBytes {
+	compressed := encodeDeterministicGZIP(uploadLeaseSegmentMagic, canonical)
+	if len(compressed) > MaxUploadLeaseSegmentBytes {
 		return nil, domain.NewError(domain.ErrorInvalid, "upload lease segment exceeds size limit")
 	}
-	return append([]byte(nil), compressed.Bytes()...), nil
+	return compressed, nil
 }
 
 func DecodePortableUploadLeaseSegment(data []byte, backendKind, ownerID, batchID string, segment uint64) (PortableUploadLeaseSegment, error) {

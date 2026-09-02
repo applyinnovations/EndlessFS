@@ -414,6 +414,7 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 	script := string(applicationScript)
 	for _, required := range []string{
 		"renderVirtualGrid", "renderVirtualList", "IntersectionObserver", "gridOverscanRows = 3", "listOverscanRows = 8", "directoryLoading", "URL.revokeObjectURL",
+		"previewResolving: new Set()", "state.previewResolving.has(entry.path)", "state.previewResolving.add(entry.path)", "state.previewResolving.delete(entry.path)",
 		"/api/v1/previews/resolve", "/api/v1/previews/generations", "/api/v1/previews/operations/", "image/webp", "validatedPreviewBlob", "Invalid preview artifact body", "filterLoadedEntries",
 		`crypto.subtle.digest("SHA-256"`, "Invalid preview artifact checksum", "await image.decode()", "previewLoaded",
 		"viewerPreviewCache", "cachedViewerPreview", "cacheViewerPreview",

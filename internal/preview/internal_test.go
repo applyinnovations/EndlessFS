@@ -49,6 +49,11 @@ func TestContentBindingAndArtifactValidationFailures(t *testing.T) {
 	if invalidDigest.ValidFor(binding) {
 		t.Fatal("invalid artifact digest was accepted")
 	}
+	shortDigest := artifact
+	shortDigest.SHA256 = base64.RawURLEncoding.EncodeToString(make([]byte, sha256.Size-1))
+	if shortDigest.ValidFor(binding) {
+		t.Fatal("short artifact digest was accepted")
+	}
 	mismatchedDigest := artifact
 	mismatchedDigest.SHA256 = base64.RawURLEncoding.EncodeToString(make([]byte, sha256.Size))
 	if mismatchedDigest.ValidFor(binding) {
@@ -84,17 +89,21 @@ func TestReadyResultAndConcurrencyFailureMapping(t *testing.T) {
 		wantState State
 		wantError bool
 	}{
+		{name: "not found", store: &scriptedStore{latestErr: domain.ErrNotFound}, wantState: ""},
 		{name: "latest error", store: &scriptedStore{latestErr: domain.NewError(domain.ErrorInvalid, "bad manifest")}, wantState: StateFailed},
 		{name: "latest unavailable", store: &scriptedStore{latestErr: domain.ErrUnavailable}, wantState: StateUnavailable},
+		{name: "record unavailable", store: &scriptedStore{latest: internalArtifact("record-offline", binding.Variant), recordReadyErr: domain.ErrUnavailable}, wantState: StateUnavailable},
+		{name: "record invalid", store: &scriptedStore{latest: internalArtifact("record-invalid", binding.Variant), recordReadyErr: domain.ErrInvalid}, wantError: true},
 		{name: "capability unavailable", store: &scriptedStore{latest: internalArtifact("one", binding.Variant), capabilityErr: domain.NewError(domain.ErrorUnavailable, "offline")}, wantState: StateUnavailable},
 		{name: "capability invalid", store: &scriptedStore{latest: internalArtifact("two", binding.Variant), capabilityErr: domain.NewError(domain.ErrorInvalid, "bad capability")}, wantError: true},
+		{name: "ready", store: &scriptedStore{latest: internalArtifact("ready", binding.Variant)}, wantState: StateReady},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			service := &Service{store: test.store}
 			selection := readySelection(binding.Owner, domain.MustParseUserPath("/ready.webp"), binding)
-			got, _, err := service.readyResult(context.Background(), selection, result)
-			if (err != nil) != test.wantError || !test.wantError && got.State != test.wantState {
+			got, found, err := service.readyResult(context.Background(), selection, result)
+			if (err != nil) != test.wantError || !test.wantError && got.State != test.wantState || test.name == "not found" && found {
 				t.Fatalf("readyResult = %+v, %v", got, err)
 			}
 		})
@@ -948,15 +957,36 @@ func TestResolveGenerationFailureStates(t *testing.T) {
 	if result, err := newService(scriptedGenerator{generated: GeneratedArtifact{Bytes: OnePixelWebP(), Width: 1, Height: 1}}).resolveItem(context.Background(), binding.Owner, item, true, false, false); err != nil || result.State != StateFailed {
 		t.Fatalf("missing committed artifact = %+v, %v", result, err)
 	}
+	disabled := newService(scriptedGenerator{})
+	disabled.store = nil
+	if result, err := disabled.resolveItem(context.Background(), binding.Owner, item, true, false, false); err != nil || result.State != StateDisabled {
+		t.Fatalf("disabled preview = %+v, %v", result, err)
+	}
+	if result, err := newService(scriptedGenerator{}).resolveItem(context.Background(), binding.Owner, item, false, false, false); err != nil || result.State != StateMissing {
+		t.Fatalf("read-only missing preview = %+v, %v", result, err)
+	}
+	inflight := newService(scriptedGenerator{})
+	scope, err := domain.NewScope(binding.Owner, domain.AreaLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := &generationCall{done: make(chan struct{})}
+	inflight.inflight[generationKey(binding)] = call
+	inflightCanceled, cancelInflight := context.WithCancel(context.Background())
+	cancelInflight()
+	if _, err := inflight.generateOnce(inflightCanceled, scope, entry, binding, scriptedGenerator{}, false); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled inflight generation error = %v", err)
+	}
 }
 
 type scriptedStore struct {
-	latest        Artifact
-	latestErr     error
-	validateErr   error
-	capabilityErr error
-	claimErr      error
-	commitErr     error
+	latest         Artifact
+	latestErr      error
+	validateErr    error
+	capabilityErr  error
+	claimErr       error
+	commitErr      error
+	recordReadyErr error
 }
 
 func (s *scriptedStore) Validate(context.Context) error { return s.validateErr }
@@ -974,8 +1004,8 @@ func (s *scriptedStore) Latest(context.Context, Binding) (ArtifactMetadata, erro
 func (*scriptedStore) ResolveReady(_ context.Context, selections []ReadySelection) ([]*ArtifactMetadata, error) {
 	return make([]*ArtifactMetadata, len(selections)), nil
 }
-func (*scriptedStore) RecordReady(context.Context, ReadySelection, ArtifactMetadata) error {
-	return nil
+func (s *scriptedStore) RecordReady(context.Context, ReadySelection, ArtifactMetadata) error {
+	return s.recordReadyErr
 }
 func (s *scriptedStore) Read(context.Context, Binding, string) (Artifact, error) {
 	return s.latest, s.latestErr

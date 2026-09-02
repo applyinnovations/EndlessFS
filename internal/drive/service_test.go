@@ -889,6 +889,58 @@ func TestUploadAbortBatchMoveTrashPagingAndEmptyTrash(t *testing.T) {
 	}
 }
 
+func TestUploadBatchServiceRejectsCardinalityIdentityAndScopeBoundaries(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	validUpload := domain.CreateUploadRequest{
+		Path: domain.MustParseUserPath("/batch.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "batch-upload-item-0001",
+	}
+	if _, err := env.service.CreateUploadBatch(ctx, env.owner, nil); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty admission batch = %v", err)
+	}
+	if _, err := env.service.CreateUploadBatch(ctx, env.owner, make([]domain.CreateUploadRequest, drive.MaxUploadBatchItems+1)); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("oversized admission batch = %v", err)
+	}
+	invalidUpload := validUpload
+	invalidUpload.IdempotencyKey = "short"
+	if _, err := env.service.CreateUploadBatch(ctx, env.owner, []domain.CreateUploadRequest{invalidUpload}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid admission idempotency = %v", err)
+	}
+	if _, err := env.service.CreateUploadBatch(ctx, domain.UserID{}, []domain.CreateUploadRequest{validUpload}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid admission owner = %v", err)
+	}
+
+	validCompletion := domain.CompleteUploadBatchRequest{
+		Items: []domain.CompleteUploadBatchItem{{UploadID: "upload"}}, IdempotencyKey: "batch-complete-0001",
+	}
+	if _, err := env.service.CompleteUploadBatch(ctx, env.owner, domain.CompleteUploadBatchRequest{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty completion batch = %v", err)
+	}
+	invalidCompletion := validCompletion
+	invalidCompletion.IdempotencyKey = "short"
+	if _, err := env.service.CompleteUploadBatch(ctx, env.owner, invalidCompletion); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid completion idempotency = %v", err)
+	}
+	if _, err := env.service.CompleteUploadBatch(ctx, domain.UserID{}, validCompletion); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid completion owner = %v", err)
+	}
+
+	validAbort := domain.AbortUploadBatchRequest{
+		UploadIDs: []domain.UploadID{"upload"}, BatchID: "batch", IdempotencyKey: "batch-abort-0000001",
+	}
+	if err := env.service.AbortUploadBatch(ctx, env.owner, domain.AbortUploadBatchRequest{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty abort batch = %v", err)
+	}
+	invalidAbort := validAbort
+	invalidAbort.IdempotencyKey = "short"
+	if err := env.service.AbortUploadBatch(ctx, env.owner, invalidAbort); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid abort idempotency = %v", err)
+	}
+	if err := env.service.AbortUploadBatch(ctx, domain.UserID{}, validAbort); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid abort owner = %v", err)
+	}
+}
+
 func TestTrashBatchRestoreAndPermanentDeleteAreAtomic(t *testing.T) {
 	env := newDriveEnvironment(t)
 	ctx := context.Background()

@@ -571,6 +571,48 @@ func TestBackendAndTransferReconciliationBranchesFailClosed(t *testing.T) {
 			},
 			want: domain.ErrNotFound,
 		},
+		"progress-complete-object-appears": {
+			handler: func(writer http.ResponseWriter, request *http.Request, calls *int) {
+				if strings.HasPrefix(request.URL.Path, "/storage/v1/") {
+					*calls++
+					if *calls == 1 {
+						writeBoundaryGCSProblem(writer, http.StatusNotFound)
+						return
+					}
+					writeBoundaryObject(writer, key.String(), 1, 4)
+					return
+				}
+				writer.WriteHeader(http.StatusOK)
+			},
+			lease: boundaryLease(now, key, domain.UploadResumable, "SESSION", 4),
+			invoke: func(backend *Backend, sealed []byte) error {
+				progress, err := backend.UploadProgress(context.Background(), sealed)
+				if err == nil && (!progress.Complete || progress.Offset != 4 || progress.Version == "") {
+					return fmt.Errorf("unexpected completed progress: %+v", progress)
+				}
+				return err
+			},
+		},
+		"progress-complete-object-appears-with-wrong-size": {
+			handler: func(writer http.ResponseWriter, request *http.Request, calls *int) {
+				if strings.HasPrefix(request.URL.Path, "/storage/v1/") {
+					*calls++
+					if *calls == 1 {
+						writeBoundaryGCSProblem(writer, http.StatusNotFound)
+						return
+					}
+					writeBoundaryObject(writer, key.String(), 1, 3)
+					return
+				}
+				writer.WriteHeader(http.StatusOK)
+			},
+			lease: boundaryLease(now, key, domain.UploadResumable, "SESSION", 4),
+			invoke: func(backend *Backend, sealed []byte) error {
+				_, err := backend.UploadProgress(context.Background(), sealed)
+				return err
+			},
+			want: domain.ErrPreconditionFailed,
+		},
 		"abort-head-failure": {
 			handler: func(writer http.ResponseWriter, request *http.Request, _ *int) {
 				writeBoundaryGCSProblem(writer, http.StatusTeapot)

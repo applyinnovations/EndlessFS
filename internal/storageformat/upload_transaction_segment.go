@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"io"
-	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/integrity"
@@ -79,25 +78,11 @@ func EncodeUploadTransactionSegment(value UploadTransactionSegment) ([]byte, err
 	if len(canonical) == 0 || len(canonical) > MaxExpandedUploadTransactionSegmentBytes {
 		return nil, domain.NewError(domain.ErrorInvalid, "expanded upload transaction segment exceeds size limit")
 	}
-	var compressed bytes.Buffer
-	compressed.Write(uploadTransactionSegmentMagic)
-	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestSpeed)
-	if err != nil {
-		return nil, domain.WrapError(domain.ErrorInternal, "initialize upload transaction compression", err)
-	}
-	writer.Header.ModTime = time.Unix(0, 0).UTC()
-	writer.Header.OS = 255
-	if _, err := writer.Write(canonical); err != nil {
-		_ = writer.Close()
-		return nil, domain.WrapError(domain.ErrorInternal, "compress upload transaction segment", err)
-	}
-	if err := writer.Close(); err != nil {
-		return nil, domain.WrapError(domain.ErrorInternal, "finish upload transaction compression", err)
-	}
-	if compressed.Len() > MaxUploadTransactionSegmentBytes {
+	compressed := encodeDeterministicGZIP(uploadTransactionSegmentMagic, canonical)
+	if len(compressed) > MaxUploadTransactionSegmentBytes {
 		return nil, domain.NewError(domain.ErrorInvalid, "upload transaction segment exceeds size limit")
 	}
-	return append([]byte(nil), compressed.Bytes()...), nil
+	return compressed, nil
 }
 
 func DecodeUploadTransactionSegment(data []byte, backendKind, ownerID, transactionID, requestFingerprint, kind string, segment uint64) (UploadTransactionSegment, error) {

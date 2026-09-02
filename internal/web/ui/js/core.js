@@ -78,6 +78,7 @@
     previewStates: new Map(),
     previewQueue: [],
     previewQueued: new Set(),
+    previewResolving: new Set(),
     previewActive: 0,
     previewPumpScheduled: false,
     previewControllers: new Map(),

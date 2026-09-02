@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -42,11 +43,106 @@ func TestCapabilityResponseDoesNotWriteUnderStoreLock(t *testing.T) {
 	}
 }
 
+func TestKnownCapabilityFailsClosedWhenCatalogOrArtifactIsMissing(t *testing.T) {
+	store, capability := internalReadyStore(t)
+	if _, err := store.CreateKnownDownload(context.Background(), preview.Binding{}, preview.ArtifactMetadata{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid known artifact error = %v", err)
+	}
+
+	store.mu.Lock()
+	for _, granted := range store.capabilities {
+		delete(store.artifacts, granted.key)
+	}
+	if got := store.bindingCountLocked(); got < 1 {
+		store.mu.Unlock()
+		t.Fatalf("binding count = %d, want at least 1", got)
+	}
+	store.mu.Unlock()
+
+	request := httptest.NewRequest(capability.Method, capability.URL, nil)
+	response := httptest.NewRecorder()
+	store.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing artifact response = %d", response.Code)
+	}
+}
+
 func TestValidationProbeBindingsAreUnique(t *testing.T) {
 	first := validationBinding("first-generation")
 	second := validationBinding("second-generation")
 	if !first.Valid() || !second.Valid() || first.ContentID == second.ContentID {
 		t.Fatalf("validation bindings are not unique: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestMemoryReadyCatalogBoundaryAndLifecycleMatrix(t *testing.T) {
+	store, _ := internalReadyStore(t)
+	owner, err := domain.ParseUserID("AAAAAAAAAAAAAAAAAAAAAA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := preview.Binding{Owner: owner, ContentID: "content", ContentVersion: "version", MediaType: "image/png", SourceSize: 1, RecipeID: "image-webp-q80-v1", Variant: 256}
+	cacheScope := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x73}, sha256.Size))
+	selection := preview.ReadySelection{CacheScope: cacheScope, Binding: binding}
+	artifacts := store.artifacts[store.bindingKey(binding)]
+	if len(artifacts) != 1 {
+		t.Fatalf("artifacts = %d", len(artifacts))
+	}
+	metadata := artifacts[0].Metadata()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for name, run := range map[string]func() error{
+		"resolve-canceled": func() error { _, err := store.ResolveReady(canceled, []preview.ReadySelection{selection}); return err },
+		"resolve-empty":    func() error { _, err := store.ResolveReady(context.Background(), nil); return err },
+		"resolve-large": func() error {
+			_, err := store.ResolveReady(context.Background(), make([]preview.ReadySelection, 65))
+			return err
+		},
+		"resolve-invalid": func() error {
+			_, err := store.ResolveReady(context.Background(), []preview.ReadySelection{{}})
+			return err
+		},
+		"record-canceled": func() error { return store.RecordReady(canceled, selection, metadata) },
+		"record-selection": func() error {
+			return store.RecordReady(context.Background(), preview.ReadySelection{}, metadata)
+		},
+		"record-metadata": func() error {
+			return store.RecordReady(context.Background(), selection, preview.ArtifactMetadata{})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := run(); err == nil {
+				t.Fatal("boundary was accepted")
+			}
+		})
+	}
+	missing, err := store.ResolveReady(context.Background(), []preview.ReadySelection{selection})
+	if err != nil || len(missing) != 1 || missing[0] != nil {
+		t.Fatalf("missing catalog = %+v, %v", missing, err)
+	}
+	unknown := metadata
+	unknown.GenerationID = "missing-generation"
+	if err := store.RecordReady(context.Background(), selection, unknown); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("unknown artifact = %v", err)
+	}
+	if err := store.RecordReady(context.Background(), selection, metadata); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := store.ResolveReady(context.Background(), []preview.ReadySelection{selection})
+	if err != nil || len(resolved) != 1 || resolved[0] == nil || *resolved[0] != metadata {
+		t.Fatalf("resolved catalog = %+v, %v", resolved, err)
+	}
+	store.readyCatalogs[cacheScope][store.bindingKey(binding)] = preview.ArtifactMetadata{GenerationID: "invalid"}
+	resolved, err = store.ResolveReady(context.Background(), []preview.ReadySelection{selection})
+	if err != nil || resolved[0] != nil {
+		t.Fatalf("invalid catalog entry = %+v, %v", resolved, err)
+	}
+	store.SetAvailable(false)
+	if _, err := store.ResolveReady(context.Background(), []preview.ReadySelection{selection}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unavailable resolve = %v", err)
+	}
+	if err := store.RecordReady(context.Background(), selection, metadata); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unavailable record = %v", err)
 	}
 }
 

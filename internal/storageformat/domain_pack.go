@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"io"
 	"sort"
-	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/state"
@@ -42,25 +41,11 @@ func EncodeDomainPagePack(pack DomainPagePack) ([]byte, error) {
 	if len(canonical) == 0 || len(canonical) > MaxExpandedDomainPagePackBytes {
 		return nil, domain.NewError(domain.ErrorInvalid, "expanded consistency-domain page pack exceeds size limit")
 	}
-	var compressed bytes.Buffer
-	compressed.Write(domainPagePackMagic)
-	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestSpeed)
-	if err != nil {
-		return nil, domain.WrapError(domain.ErrorInternal, "initialize consistency-domain page pack compression", err)
-	}
-	writer.Header.ModTime = time.Unix(0, 0).UTC()
-	writer.Header.OS = 255
-	if _, err := writer.Write(canonical); err != nil {
-		_ = writer.Close()
-		return nil, domain.WrapError(domain.ErrorInternal, "compress consistency-domain page pack", err)
-	}
-	if err := writer.Close(); err != nil {
-		return nil, domain.WrapError(domain.ErrorInternal, "finish consistency-domain page pack", err)
-	}
-	if compressed.Len() > MaxDomainPagePackBytes {
+	compressed := encodeDeterministicGZIP(domainPagePackMagic, canonical)
+	if len(compressed) > MaxDomainPagePackBytes {
 		return nil, domain.NewError(domain.ErrorInvalid, "consistency-domain page pack exceeds size limit")
 	}
-	return append([]byte(nil), compressed.Bytes()...), nil
+	return compressed, nil
 }
 
 func DecodeDomainPagePack(data []byte, expectedDomainID string, expectedKind ConsistencyDomainKind, expectedPackID string) (DomainPagePack, error) {

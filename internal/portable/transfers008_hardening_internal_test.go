@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,23 +21,43 @@ type transferFailureBackend struct {
 	objectstore.Backend
 	transfers   objectstore.DirectTransferBackend
 	beginErr    error
+	beginHandle *objectstore.UploadHandle
 	resumeErr   error
+	resumeValue *objectstore.UploadCapability
 	progressErr error
 	abortErr    error
 	abortOK     bool
+	abortCalls  atomic.Int64
 	downloadErr error
+	verifyInfo  *objectstore.ObjectInfo
+	verifyErr   error
 }
 
 func (backend *transferFailureBackend) BackendKind() string { return backend.transfers.BackendKind() }
+func (backend *transferFailureBackend) Verify(ctx context.Context, key objectstore.Key, expected objectstore.ExpectedIntegrity) (objectstore.ObjectInfo, error) {
+	if backend.verifyErr != nil {
+		return objectstore.ObjectInfo{}, backend.verifyErr
+	}
+	if backend.verifyInfo != nil {
+		return *backend.verifyInfo, nil
+	}
+	return backend.Backend.Verify(ctx, key, expected)
+}
 func (backend *transferFailureBackend) BeginUpload(ctx context.Context, request objectstore.UploadRequest) (objectstore.UploadHandle, error) {
 	if backend.beginErr != nil {
 		return objectstore.UploadHandle{}, backend.beginErr
+	}
+	if backend.beginHandle != nil {
+		return *backend.beginHandle, nil
 	}
 	return backend.transfers.BeginUpload(ctx, request)
 }
 func (backend *transferFailureBackend) ResumeUpload(ctx context.Context, lease []byte) (objectstore.UploadCapability, error) {
 	if backend.resumeErr != nil {
 		return objectstore.UploadCapability{}, backend.resumeErr
+	}
+	if backend.resumeValue != nil {
+		return *backend.resumeValue, nil
 	}
 	return backend.transfers.ResumeUpload(ctx, lease)
 }
@@ -47,6 +68,7 @@ func (backend *transferFailureBackend) UploadProgress(ctx context.Context, lease
 	return backend.transfers.UploadProgress(ctx, lease)
 }
 func (backend *transferFailureBackend) AbortUpload(ctx context.Context, lease []byte) error {
+	backend.abortCalls.Add(1)
 	if backend.abortErr != nil {
 		return backend.abortErr
 	}

@@ -586,9 +586,11 @@ base64url(
 
 `canonicalPayloadBytes` excludes the `logicalVersion` field and is produced by the single canonical encoder defined in section 9. A create starts at revision 1. A successful mutation increments the prior revision exactly once, including when the new typed payload is otherwise equal. The version therefore changes for every successful mutation but remains identical when the object body is copied unchanged to another backend.
 
-To mutate schema-009 same-domain authority, the portable engine MUST read the canonical consistency-domain head together with its request-local backend-native version, validate logical preconditions against the authenticated head and referenced immutable pages, prepare changed immutable pages, and conditionally publish the next head against that native version. It then discards the native version. The committed delta or compacted outcome binds the complete normalized intent fingerprint and result. A retry reads canonical authority and returns that result; it never assumes native identifiers survive.
+To mutate schema-009-or-later same-domain authority, the portable engine MUST read the canonical consistency-domain head together with its request-local backend-native version, validate logical preconditions against the authenticated head and referenced immutable pages or page pack, prepare changed immutable metadata, and conditionally publish the next head against that native version. It then discards the native version. The committed delta or compacted outcome binds the complete normalized intent fingerprint and result. A retry reads canonical authority and returns that result; it never assumes native identifiers survive.
 
-The domain revision and captured native head condition fence an ordinary schema-009 writer. A visible same-domain commit increments the contiguous portable domain revision and uses the current request-local native condition on the same head object. Mutation, transition preparation/finalization, or freeze changes that head before a paused writer can publish, so the paused writer's conditional commit fails. Historical portable operation fences remain decode-only migration input and do not justify a runtime lease or admission object around a schema-009 mutation.
+Schema 011 MAY encode the pages required by one bounded domain snapshot in one deterministic content-addressed pack. A pack MUST be no larger than 4 MiB compressed or 32 MiB after bounded expansion; MUST bind the domain ID, domain kind, pack ID, sorted page digests, and canonical page bodies; and MUST authenticate every page exactly as the unpacked representation does. The pack ID MUST bind the complete mutation identity before any page is written, so two mutations sharing an early page cannot alias divergent later pages. Missing, oversized, non-canonical, corrupt, misbound, or digest-inconsistent packs fail closed. Domains that do not fit the pack envelope retain immutable copy-on-write pages. Encoding choice never changes the one-head-CAS visibility, replay, fencing, checkpoint, or raw-copy contract.
+
+The domain revision and captured native head condition fence an ordinary schema-009-or-later writer. A visible same-domain commit increments the contiguous portable domain revision and uses the current request-local native condition on the same head object. Mutation, transition preparation/finalization, or freeze changes that head before a paused writer can publish, so the paused writer's conditional commit fails. Historical portable operation fences remain decode-only migration input and do not justify a runtime lease or admission object around an ordinary mutation.
 
 Immutable file blobs use stable random blob IDs and are never overwritten. Content-addressed or cross-user deduplication is not required. At publication the adapter normalizes the provider-attested `(size, MD5, CRC32C)` tuple into the referencing canonical entry. That tuple is the confirmed duplicate identity and copy-recovery assertion; provider generations, ETags, multipart IDs, and checksum encodings remain transient. A missing or partial tuple never forms a confirmed duplicate group. Combining 128-bit MD5 with 32-bit CRC32C and exact size makes accidental collision negligible for this operational use, but it is not a cryptographic authenticity proof against a chosen-prefix adversary. All user-visible metadata remains in canonical records.
 
@@ -756,6 +758,13 @@ rewrite only changed leaf/ancestor paths and structurally share unchanged
 subtrees. Independent immutable page writes use a bounded concurrency of 32;
 only the later head CAS publishes them.
 
+A schema-011 packed head names one immutable pack containing the authenticated
+page records needed by that bounded snapshot. One request-local decode cache
+serves every lookup in the operation. A bounded materialized mutation writes
+one successor pack and one conditional head; it MUST NOT retain one provider
+object or one outcome row per selected logical item. Uniform batch results are
+reconstructed from the fingerprint-bound compact transaction descriptor.
+
 The canonical catalog contains every registered domain head. A new domain is
 created inert, registered by catalog CAS, and then activated, so catalog freeze
 totally orders with first publication. Prefix listings use authenticated
@@ -771,7 +780,9 @@ rename, Trash, restore, copy-by-reference, and logical delete rewrite only the
 affected edges and ancestor paths; they do not enumerate descendants or issue
 a file-backend copy/delete. An explicit batch validates its selected roots,
 writes bounded immutable pages, and publishes the complete selection with one
-owner head CAS.
+owner head CAS. The ordinary batch limit is 10,000 selected roots. A directory
+edge retains its immutable child root, so provider requests and file-backend
+work are independent of descendant count.
 
 ### Historical schemas 001-009 (migration input only)
 
@@ -781,8 +792,10 @@ predecessor bytes and the behavior required while migrating them. They are not
 schema-009 runtime alternatives and no ordinary request may read, write, or
 fall back to these key families. Schema 010 retains the schema-009 ordinary
 runtime representation and adds an authority-conservation feature and migration
-activation invariant; schema 009 is therefore a migration entry point, not an
-alternate ordinary runtime after schema 010 is current.
+activation invariant. Schema 011 retains that authority, accepts authenticated
+schema-010 page roots after migration, and writes the bounded packed form on a
+subsequent eligible mutation. Schema 009 and schema 010 are therefore migration
+entry points, not alternate writer protocols after schema 011 is current.
 
 Historical schema-004 state is a persistent copy-on-write search tree per fixed namespace. Its constant-size `state-indexes/<namespace>/root.json` visibility root names bounded immutable nodes whose leaves map logical keys to immutable `state-versions` bodies. `Get` and mutation read or rewrite O(log N) nodes; ordered listing reads O(log N + page size). Cursor capabilities are authenticated-encrypted and constant-size, expire, bind the exact prefix/limit, immutable index root, gate epoch, and logical gate version, and reveal neither state keys nor provider keys. The schema-004 migration builds and verifies these indexes before retiring legacy mutable `state/` records. Closed-gate reachability collection removes superseded nodes and version bodies; no cursor token is stored in the bucket.
 
@@ -802,7 +815,7 @@ Duplicate-group, occurrence, and overlap-candidate enumeration is bounded and cu
 
 ### Append-only migration ledger
 
-The append-only storage-schema ledger records ten complete epochs: schema 001, the pre-aggregate format written by v0.1.0–v0.1.4; schema 002, the historical byte-aggregate intermediate; schema 003, the byte-and-file-count format written by v0.1.5–v0.1.14; schema 004, the untagged indexed metadata-only intermediate; schema 005, the resumable-operation-preparation format written by v0.2.x; schema 006, the persistent namespace-snapshot and direct-final-upload format first written by v0.3.0; schema 007, the untagged bounded-inline-operation and user-addressable duplicate-directory format; schema 008, the untagged consistency-domain and owner-namespace-graph format; schema 009, the typed invariant-aligned state-domain and helpable cross-domain-transition format first written by v0.4.0; and schema 010, the authority-conservation format first written by v0.5.0. It contains only adjacent transforms `001 -> 002`, `002 -> 003`, `003 -> 004`, `004 -> 005`, `005 -> 006`, `006 -> 007`, `007 -> 008`, `008 -> 009`, and `009 -> 010`. Startup always executes the complete remaining suffix in that exact order. An unregistered, reordered, branching, direct-jump, or ambiguous epoch fails closed. Release validity ranges and schema transformations are separate: multiple releases can write identical epoch bytes, while an untagged intermediate epoch still remains a permanent migration entry point. Schema 001 predates the gate's `writerFeatures` field, so its exact historical gate representation is unbound even when its writer set carries non-ledger application features. Schemas 002 and later require the exact feature-bound gate representation declared by their epoch; an empty gate can identify only schema 001 and never a later epoch.
+The append-only storage-schema ledger records eleven complete epochs: schema 001, the pre-aggregate format written by v0.1.0–v0.1.4; schema 002, the historical byte-aggregate intermediate; schema 003, the byte-and-file-count format written by v0.1.5–v0.1.14; schema 004, the untagged indexed metadata-only intermediate; schema 005, the resumable-operation-preparation format written by v0.2.x; schema 006, the persistent namespace-snapshot and direct-final-upload format first written by v0.3.0; schema 007, the untagged bounded-inline-operation and user-addressable duplicate-directory format; schema 008, the untagged consistency-domain and owner-namespace-graph format; schema 009, the typed invariant-aligned state-domain and helpable cross-domain-transition format first written by v0.4.0; schema 010, the authority-conservation format first written by v0.5.0; and schema 011, the packed-domain and bounded-upload-transaction format first written by v0.7.0. It contains only adjacent transforms `001 -> 002`, `002 -> 003`, `003 -> 004`, `004 -> 005`, `005 -> 006`, `006 -> 007`, `007 -> 008`, `008 -> 009`, `009 -> 010`, and `010 -> 011`. Startup always executes the complete remaining suffix in that exact order. An unregistered, reordered, branching, direct-jump, or ambiguous epoch fails closed. Release validity ranges and schema transformations are separate: multiple releases can write identical epoch bytes, while an untagged intermediate epoch still remains a permanent migration entry point. Schema 001 predates the gate's `writerFeatures` field, so its exact historical gate representation is unbound even when its writer set carries non-ledger application features. Schemas 002 and later require the exact feature-bound gate representation declared by their epoch; an empty gate can identify only schema 001 and never a later epoch.
 
 When the persisted gate carries predecessor writer features, an expired operation that remains in the unsealed `preparing` state MUST be conditionally changed to terminal failure during gate quiescence without publishing a visibility root; gate closure MUST NOT recompute predecessor preparation pages under current namespace semantics. That CAS denies a stale preparer. A preparation whose gate carries the current writer features MUST resume normally. Sealed running and committed operations MUST recover from their immutable step pages before the gate closes.
 
@@ -810,7 +823,14 @@ Each adjacent transform automatically closes and drains the canonical write gate
 
 Schema 010 and every later epoch MUST register a pre-activation authority verifier in its immutable ledger edge. The central writer-set activation path MUST execute that verifier while the gate and target domains remain frozen and MUST reject an absent or failing verifier. An edge implementation returning success or writing target feature markers is insufficient. For schema 010, the verifier independently reloads the durable conservation proof and proves the complete source-to-receipt-to-target relation. Future edges MUST provide an equivalently complete proof for every authoritative family they can change; a sampled count, successful decode, or engine-open check is not a conservation proof.
 
+Schema 011 changes no predecessor application value. Its verifier MUST
+nevertheless authenticate the complete current typed-domain catalog, heads,
+pages, namespace closure, and checkpoint binding while its own gate is closed;
+feature markers alone cannot activate the epoch.
+
 The fixture matrix distinguishes writer-profile fixtures from complete semantic corpora. For every released predecessor profile, immutable bytes produced by that exact predecessor MUST contain every application authority family it can write, together with an independent semantic oracle. The full suffix MUST preserve those exact values in single- and split-backend layouts, complete a real cryptographic passkey authentication where identity is enabled, and perform a new mutation. Migration qualification MUST run the owning migration packages in full and its 98% denominator MUST include every numbered production migration file plus the ledger; a permissive test-name or source-file regex that silently excludes a later edge is forbidden.
+
+The `010 -> 011` edge is feature-only. It closes and drains the gate, independently verifies the complete typed-domain authority under the exact frozen checkpoint, advances the writer/superblock/gate feature signature, creates its own checkpoint, and reopens at a new epoch. It neither rewrites file blobs nor eagerly rewrites predecessor pages; authenticated schema-010 pages remain readable until an eligible mutation publishes their schema-011 packed successor. Its transient provider leases and upload progress are excluded from authoritative checkpoint closure.
 
 The `003 -> 004` graph discovery and verification phases use authenticated persistent directory marks under the excluded migration-maintenance namespace. A mark binds the exact checkpoint, phase, owner, area, directory, parent root/version and entry name, selected manifest/version, recursive counts, and content summary. Only the active ancestor stack is held in memory. A restart or concurrent replica revalidates a completed child mark and skips all of its descendants; stale, forged, misplaced, or contradictory marks fail closed. Transform and verification use separate marks, and all marks are removed only after successful verification. An interrupted transform may contain a reviewed safe mixture of source, target, and later already-published records; the same edge resumes without downgrading later state. After verification, startup conditionally updates the writer set and superblock, binds the target feature set into the closed gate, creates or verifies that edge's checkpoint, and reopens at a new gate epoch before continuing to the next edge.
 
@@ -822,7 +842,7 @@ Every boundary is deterministic, idempotent, and crash-resumable. Gate feature b
 
 All authoritative properties are encoded in object bodies. Correctness MUST NOT depend on provider custom metadata, tags, ACLs, storage class, object versioning, soft delete, native timestamps, checksums, listing order, folder resources, or preservation of those values by a cross-cloud copy tool. Provider-side integrity and encryption features MAY add defense in depth.
 
-Schema-009 `leases`, `maintenance`, migration-stage, state-query-snapshot,
+Schema-009-or-later `leases`, upload-transaction progress, `maintenance`, migration-stage, state-query-snapshot,
 resolved transition-plan/decision, rebuildable projection, and unreachable
 immutable-page namespaces are excluded from checkpoint inventories. Unresolved
 transition plans or participant locks prevent checkpoint closure. Leases
@@ -834,7 +854,7 @@ the `008 -> 009` checkpoint proves the replacement closure. Completed
 checkpoint inventory pages are durable checkpoint metadata and MUST be copied
 and verified with their root.
 
-Mutation outcomes and idempotency bindings remain replayable for 30 days; Trash retention is separate and indefinite until the owner permanently deletes it. Outcome expiry is itself authenticated by each domain's expiry tree. After a schema-009 checkpoint is published under the closed gate, its authenticated inventory is the immutable mark set for one checkpoint-bound garbage-collection session. The session stores only its checkpoint/gate/inventory binding, sweep index, and exclusive canonical-key cursor. It sweeps only explicitly recognized domain pages or inert heads, resolved transition records, rebuildable projections, transient leases, state-query snapshots, and unreachable immutable blobs. It never opens a file body. Every deletion is conditional on the native version returned by the immediately preceding ordered listing, and the closed gate is revalidated immediately before a destructive page. Unknown reserved objects are never deletion-eligible. Progress is durably advanced only when another provider page remains; an empty or final page can move directly to the terminal session CAS. Writes reopen only after the exact terminal session and checkpoint are reverified. Completed predecessor GC sessions and marks remain excluded durable compatibility residue while a supported predecessor sweeper could still exist; deleting them earlier can make a lagging sweeper unsafe. Forged or stale sessions, a changed gate/checkpoint binding, cycles, missing pages, contradictory aggregates, ambiguous reachability, unordered listing, or misplaced objects fail closed.
+Mutation outcomes and idempotency bindings remain replayable for 30 days; Trash retention is separate and indefinite until the owner permanently deletes it. Outcome expiry is itself authenticated by each domain's expiry tree. After a schema-011 checkpoint is published under the closed gate, its authenticated inventory is the immutable mark set for one checkpoint-bound garbage-collection session. Discovery writes a deterministic portable garbage plan with at most 128 entries per page and authenticates the complete plan before the first deletion. The session stores only its checkpoint/gate/inventory/plan binding and sweep position. It sweeps only explicitly recognized domain pages, packs, or inert heads, resolved transition records, rebuildable projections, transient leases/progress, state-query snapshots, and unreachable immutable blobs. It never opens a file body. Every deletion is conditional on the native version from the frozen discovery/listing result, and the closed gate is revalidated immediately before destructive work. Independent deletes use bounded concurrency; one durable cursor publication makes the page restartable. Unknown reserved objects are never deletion-eligible. Writes reopen only after the exact terminal session and checkpoint are reverified. Completed predecessor GC sessions and marks remain excluded durable compatibility residue while a supported predecessor sweeper could still exist; deleting them earlier can make a lagging sweeper unsafe. Forged or stale sessions, a changed gate/checkpoint binding, corrupt/cyclic/missing plan pages, contradictory aggregates, ambiguous reachability, unordered entries, changed native versions, or misplaced objects fail closed.
 
 ### 9.2 Multi-replica conditional publication, freeze, and recovery
 
@@ -846,7 +866,7 @@ writer feature set. A replica MUST reject a gate whose feature binding differs
 from its validated writer set. Ordinary publication is fenced by the exact
 domain head, not by a per-mutation gate ticket.
 
-For every schema-009 same-domain mutation:
+For every schema-009-or-later same-domain mutation:
 
 1. Resolve the invariant's exact domain and read its authenticated head,
    retaining the native version only for the immediate conditional write.
@@ -910,16 +930,18 @@ startup observes the gate/catalog epoch relationship and completes unfreeze
 before readiness. Process-local maintenance state, a leader, load-balancer
 drain, sticky routing, sleep, or grace period is not a substitute.
 
-Schema-009 public uploads target a newly allocated create-only final blob key.
+Schema-009-or-later public uploads target a newly allocated create-only final blob key.
 Completion verifies provider-attested size and checksums, then atomically
 publishes the blob reference and terminal upload state in the owner namespace
 head without provider rewrite or copy. Expired or aborted capabilities can
 create only unreachable blobs. Historical staging/copy completion is private
 to migration compatibility and cannot be selected by ordinary runtime code.
-Creating a bounded upload batch publishes all owner-scoped upload intents in
-one namespace mutation, creates the unavoidable independent provider sessions
-in parallel, and activates all successful intents in one further namespace
-mutation; it MUST NOT run a complete authoritative state transaction per item.
+Creating a schema-011 upload batch publishes all owner-scoped upload intents in
+one packed namespace mutation, creates the unavoidable independent provider
+sessions with at most 100 concurrent workers, and seals transient cumulative
+lease progress at each 1,000-item boundary. Returning capabilities requires no
+second authoritative activation mutation and MUST NOT run one state transaction
+per item.
 
 If a replica disappears, another replica retries from canonical authority. A
 published fingerprint-bound outcome returns the original result; unpublished
@@ -1240,7 +1262,7 @@ Policy is checked at both ceremony start and verification. Turning registration 
 
 ### 11.1 Listings and metadata
 
-- The default page size is 200 entries; the maximum is 1000.
+- The default page size is 200 entries; the maximum is 10,000.
 - Cursors are opaque, integrity protected or server-validated, scoped to user and directory, and reject tampering or reuse in another scope.
 - Sort options are name, modified time, size, and kind; ordering and tie-breaking are deterministic.
 - Current-folder filtering is a case-insensitive display filter over loaded/listed filenames and is not advertised as indexed search.
@@ -1259,17 +1281,18 @@ Policy is checked at both ceremony start and verification. Turning registration 
 Requirements:
 
 - The control API MUST reject file bodies and request bodies over its documented limit.
-- A single upload and a batch of up to 100 upload initializations are supported.
+- A single upload and a batch of up to 10,000 upload initializations are supported.
 - The browser coalesces concurrently queued upload initialization into batches
-  of at most 100 before starting their independently concurrent direct data
+  of at most 10,000 before starting their independently concurrent direct data
   transfers. Each batch item carries its stable transfer-ledger idempotency key
   so a lost batch response or browser restart can resume that exact upload
   through either initialization route without allocating another blob.
 - The UI uses the 100-worker shared file queue implemented by Google's
   open-source `upload-cloud-storage` action. One settled task releases one
   worker to take the next queued file; queue depth is therefore the effective
-  bound for smaller selections. The worker count matches the 100-item upload
-  initialization batch, and explicit browser Data Saver intent reduces it to
+  bound for smaller selections. The same 100-worker bound applies to independent
+  provider session initiation, metadata verification, and cancellation inside
+  a 10,000-item server transaction. Explicit browser Data Saver intent reduces it to
   one. Browser-reported CPU count, effective connection type, and estimated
   download bandwidth are not upload-capacity signals and MUST NOT cap direct
   upload concurrency. Concurrency is not a user-controlled input. Pinned
@@ -1278,6 +1301,11 @@ Requirements:
 - Completion publication MUST accumulate affected directories and refresh a
   visible directory once after the active upload burst drains. Per-file and
   competing group-level directory refreshes are forbidden.
+- Batch completion and cancellation persist an authenticated prefix every 1,000
+  items, so process loss repeats at most the current 1,000-item segment. The
+  final namespace publication is one owner-head CAS. Whole-batch cancellation
+  publishes one batch-ID/count/bitmap overlay instead of rewriting every
+  admission record; a partial or legacy selection remains individually bound.
 - Resumable upload state tracks the confirmed provider offset, never merely bytes attempted by the browser.
 - Retry uses bounded exponential backoff with jitter and distinguishes retryable from terminal errors.
 - Resume after an interrupted request starts at the provider-confirmed offset.
@@ -1287,11 +1315,11 @@ Requirements:
 - A failed or expired upload does not create a visible complete file.
 - Durable upload intent, scope, destination, size, integrity expectations, and logical progress use canonical records. Provider-native resumable session URLs, multipart IDs, block IDs, and confirmed-native offsets are encrypted transient leases and cannot be required after a portability checkpoint.
 - Completed bytes are committed as an immutable canonical blob before the portable file-entry record becomes visible. A completion race or failed descriptor commit leaves an unreferenced blob for bounded idempotent cleanup, never a visible corrupt entry.
-- A closed-schema client ledger persists safe transfer intent, confirmed offset, retry schedule, and terminal state in IndexedDB on the originating device, partitioned by authenticated owner to prevent exposure between accounts using one browser profile. It MUST NOT persist file bytes, capability URLs or headers, session/CSRF material, provider-native identifiers, or absolute local paths. Browser file handles MAY be persisted when supported; otherwise the user reconnects the source after reload. Closing the browser pauses transfers, and cross-device/account-synchronized queue persistence is not required in v1.
+- A closed-schema client ledger persists safe transfer intent, batch ID/index/count, stable item and transaction idempotency keys, planning decision, confirmed offset, retry schedule, and terminal state in IndexedDB on the originating device, partitioned by authenticated owner to prevent exposure between accounts using one browser profile. It MUST NOT persist file bytes, capability URLs or headers, session/CSRF material, provider-native identifiers, or absolute local paths. Browser file handles MAY be persisted when supported; otherwise the user reconnects the source after reload. Closing the browser pauses transfers, and cross-device/account-synchronized queue persistence is not required in v1.
 - Before a selected file or completed folder discovery begins, the browser asks
   for one duplicate strategy: smart merge, replace changed files, only add new
   names, or keep both. Keep-both follows the direct-upload path without content
-  planning. The other strategies submit at most 1000 `(transfer ID, virtual
+  planning. The other strategies submit at most 10,000 `(transfer ID, virtual
   destination, size)` records to the authenticated control plane. Files whose
   sizes cannot match existing live files are released to the ordinary upload
   queue immediately; planning for ambiguous files continues independently.
@@ -1359,7 +1387,7 @@ Requirements:
 - Destination conflicts fail by default.
 - `replace` requires explicit confirmation and appropriate version preconditions.
 - `rename` conflict mode generates a deterministic human-readable suffix without exceeding path limits.
-- Batch requests contain at most 100 selected source items and return per-item results plus an overall operation ID.
+- Batch requests contain at most 10,000 selected source items and return per-item results plus an overall operation ID.
 - Repeating a request with the same user-scoped idempotency key returns the original outcome.
 - Durable operation manifests, request fingerprints, item progress, compensation state, and final outcomes are canonical and provider independent. Native rewrite/copy continuation tokens are encrypted transient leases only.
 - Move and copy transfer or duplicate both stored source subtree aggregates and update all affected ancestors at the operation's existing single commit point. Aggregate maintenance does not scan descendant blobs.
@@ -1488,7 +1516,9 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 | GET | `/api/v1/files/stat` | Stat one virtual path. |
 | POST | `/api/v1/directories` | Create an empty directory. |
 | POST | `/api/v1/uploads` | Create one upload capability. |
-| POST | `/api/v1/uploads/batch` | Create up to 100 destination-bound upload capabilities. |
+| POST | `/api/v1/uploads/batch` | Create up to 10,000 destination-bound upload capabilities with safe batch recovery bindings. |
+| POST | `/api/v1/uploads/batch/complete` | Verify and atomically publish up to 10,000 uploaded objects with bounded restart progress. |
+| DELETE | `/api/v1/uploads/batch` | Abort up to 10,000 active sessions; a proven complete batch may use its compact abort overlay. |
 | GET | `/api/v1/uploads/{uploadID}` | Return safe upload status/confirmed offset. |
 | POST | `/api/v1/uploads/{uploadID}/complete` | Verify and finalize an upload. |
 | DELETE | `/api/v1/uploads/{uploadID}` | Abort an upload. |
@@ -2106,15 +2136,15 @@ selected as a percentage reduction from the current implementation.
 
 The required GCS production-scale targets and their payload measurements are
 recorded in `docs/provider-request-surface-audit-2026-09-01.md` and emitted by
-`TestProviderBudgetProductionScaleTargetsAreStrictlyBetterAndFeasible` and
-`TestProviderBudgetTargetPayloadEnvelopesAreMeasured`. The current schema-010
-figures in that record are explicit nonconforming baselines. A replacement
-storage architecture is not provider-economics qualified until its real traced
-workloads meet or improve every corresponding target and append those lower
-observations to the ratchet ledger. A target may tighten when an implementation
-proves a cheaper safe request shape. It may be relaxed only with new primary
-provider evidence or a demonstrated invariant that the former request shape
-could not satisfy; preserving the current implementation is not a reason.
+`TestProviderBudgetProductionScaleScenariosConformToTargets` and
+`TestProviderBudgetTargetPayloadEnvelopesAreMeasured`. The schema-010 figures
+in that record are explicit nonconforming historical baselines. Schema 011 is
+provider-economics qualified only when its real traced workloads meet or improve
+every corresponding target and the exact observations are appended to the
+ratchet ledger. A target tightens whenever implementation proves a cheaper safe
+request shape. Any revision requires measured payload/provider evidence and a
+demonstrated correctness invariant; implementation convenience is never
+evidence.
 
 Metadata-work targets scale with encoded segment bytes and distinct affected
 authority roots, not with one state transaction, outcome row, or tree rewrite
@@ -2422,8 +2452,9 @@ Each criterion MUST have an automated test unless marked “inspection”.
 writer-set/write-gate format, domain catalog/head layout, key grammar, canonical
 envelope encoding, typed state-record mapping, logical-version algorithm,
 immutable page and owner namespace mapping, transition plan/decision/lock
-layout, blob layout, retained-outcome/idempotency layout, projection layout,
-garbage-collection session, and checkpoint format.
+layout, packed-page mapping, blob layout, retained-outcome/idempotency layout,
+upload lease/progress/abort mapping, projection layout, garbage-collection
+plan/session, and checkpoint format.
 **AC-024** — Every valid 4096-byte virtual path, including maximum UTF-8 segments and deep nesting, resolves through bounded canonical keys no longer than 240 ASCII bytes; digest collisions and corrupt name/key pairs fail closed.
 **AC-025** — Scans and behavior tests prove that authoritative records contain no provider-native generation, ETag, version ID, bucket/container/account identifier, custom metadata dependency, upload session URL, multipart/block ID, rewrite/copy token, signed URL, or provider capability.
 **AC-026** — Copying only authoritative object keys and bodies from a
@@ -2464,14 +2495,15 @@ leaves bounded unreachable immutable pages.
 move/copy/trash/restore/delete operations expose either the complete
 pre-mutation or complete post-mutation owner namespace revision, never missing,
 duplicate, orphaned, or half-moved visible entries.
-**AC-085** — Schema-009 direct uploads target only a newly allocated
+**AC-085** — Schema-009-or-later direct uploads target only a newly allocated
 create-only final blob key that is unreachable before commit.
 Completion/lost-success/abort/expiry races publish at most one verified
 immutable blob reference through the owner namespace head without provider copy
-and never expose a partial or corrupt entry. A bounded upload batch publishes
-its intents and activation with bounded owner-head mutations while initiating
-the independent provider sessions concurrently; historical staging remains
-decode-only migration compatibility.
+and never expose a partial or corrupt entry. A schema-011 batch publishes up to
+10,000 intents with one bounded owner-head mutation, initiates independent
+provider sessions with 100-worker concurrency, persists authenticated 1,000-item
+restart boundaries, and completes or cancels through one final owner-head
+transition; historical staging remains decode-only migration compatibility.
 **AC-086** — Compatible rolling replicas can join one writer set; replicas with a different writer-set ID, writer protocol, security configuration fingerprint, canonical feature set, or keyring identity fail readiness before serving any bucket-backed request.
 **AC-087** — A paused pre-freeze writer loses its head CAS after catalog/domain
 freeze; checkpoint creation never forces lock deletion or sacrifices consistency
@@ -2484,11 +2516,13 @@ pre-provider rejection of cross-domain misuse, helpable multi-domain commit and
 abort, crash/lost-success recovery at every durable transition boundary,
 reader-assisted completion, exact replay, conflicting-intent denial, and
 checkpoint refusal until every participant lock is resolved.
-**AC-092** — A schema-009 checkpoint-bound collector reclaims only recognized
-objects absent from the authenticated inventory, uses conditional deletion and
-a bounded resumable cursor without reading file bodies, denies unknown or
-misbound state, converges under crashes and concurrent replicas, and reaches a
-verified terminal session before the gate reopens.
+**AC-092** — A schema-011 checkpoint-bound collector reclaims only recognized
+objects absent from the authenticated inventory, authenticates a complete
+portable 128-entry-page garbage plan before deleting, uses bounded concurrent
+conditional deletion and a resumable cursor without reading file bodies,
+denies unknown, changed, corrupt, or misbound state, converges under crashes and
+concurrent replicas, and reaches a verified terminal session before the gate
+reopens.
 
 ### 21.5 Isolation and files
 
@@ -2619,13 +2653,14 @@ An implementation agent should keep this checklist current and attach test names
 - [x] Directory children use immutable high-fan-out trees behind one owner
   namespace head; namespace operations expose only complete pre-commit or
   post-commit views.
-- [x] Schema-009 browser uploads target a newly allocated create-only final
+- [x] Schema-009-or-later browser uploads target a newly allocated create-only final
   blob, verify provider-attested metadata, and publish the reference only
   through the owner namespace-head commit; historical staging is decode-only
   migration compatibility.
-- [x] Bounded upload batches publish owner-scoped intents and activations in
-  batches while independent provider sessions are created concurrently; the
-  shared provider contract proves replay and failed-batch residue denial.
+- [x] Schema-011 upload batches publish up to 10,000 owner-scoped intents in one
+  bounded pack while independent provider sessions use 100-worker concurrency;
+  completion/cancellation restart at authenticated 1,000-item boundaries and
+  the shared provider contract proves replay and failed-batch residue denial.
 - [x] Two-to-eight-replica deterministic crash schedules cover head reads,
   immutable preparation, provider-response loss, head commits, stale writers,
   catalog registration/freeze, gate, lease, and checkpoint boundaries.

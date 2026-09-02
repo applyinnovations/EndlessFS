@@ -2,12 +2,13 @@
 
 ## Outcome
 
-This audit closes the browser request-amplification incident and records the
-complete production provider boundary. It does **not** accept the surviving
-schema-010 request counts as efficient. The measured values below are failure
-baselines: their append-only ratchets prevent regression while the replacement
-architecture is built, but passing a current-baseline ratchet is not evidence
-that a pathway meets its efficiency target.
+This audit closes the browser request-amplification incident, records the
+complete production provider boundary, and preserves the inefficient
+schema-010 measurements as historical failure baselines. Schema 011 implements
+the replacement request shapes and its executable observed ratchets meet or
+beat every target below. The baseline and target catalogs remain separate so a
+future inefficient measurement can never be mistaken for an acceptable
+ceiling.
 
 Provider-backed work is acceptable only when its cardinality follows the data
 that must actually change:
@@ -84,7 +85,7 @@ checkpointing, compaction, recovery, derived-view rebuild, and migration. Every
 catalogued GCS budget must both exist in the append-only ledger and be referenced
 by an executable test.
 
-## Measured current baselines — not acceptance
+## Historical schema-010 baselines — not acceptance
 
 Costs use the reviewed GCS Regional Standard Storage flat-namespace marginal
 pricing fixture, excluding free tier and negotiated discounts. Latency is a
@@ -129,35 +130,44 @@ not meet them. A replacement is not complete until the real executable workload
 events—not a fabricated target trace—meet or beat every count, modeled cost, and
 critical-p95 value and append a tighter observed ratchet.
 
+Implementation exposed two composition errors in the original generic target
+wave without changing any request-count ceiling: a 10,000-upload admission has
+ten required lease checkpoints plus the packed admission and head publication
+(twelve state writes), and the 4 MiB pack must be modeled on both the read and
+write side of a metadata mutation. The corrected request types and measured
+payload sizes below are the feasibility evidence; they adjust modeled price and
+latency rather than excusing an extra request. Cancellation's corrected request
+mix is cheaper than the original estimate.
+
 | Production state / intent | Current → target provider requests | Target browser requests | Target marginal cost (USD) | Target critical p95 |
 |---|---:|---:|---:|---:|
 | Restored transfer history without sources | 0 → 0 | 0 | $0 | 0 s |
 | Browse live directory | 80 → 5 | 1 | $0.0000020 | 0.302 s |
 | Browse Trash | 80 → 5 | 1 | $0.0000020 | 0.302 s |
-| Copy selected roots | 128 → 5 | 1 | $0.0000112 | 0.398 s |
-| Move selected roots | 129 → 5 | 1 | $0.0000112 | 0.398 s |
-| Move selected roots to Trash | 127 → 5 | 1 | $0.0000112 | 0.398 s |
-| Restore selected Trash roots | 167 → 5 | 1 | $0.0000112 | 0.398 s |
-| Permanently delete selected Trash roots | 86 → 5 | 1 | $0.0000112 | 0.398 s |
-| Retry Trash after lost response | 44 → 4 | 1 | $0.0000016 | 0.263 s |
-| Retry restore after lost response | 44 → 4 | 1 | $0.0000016 | 0.263 s |
-| Retry permanent delete after lost response | 44 → 4 | 1 | $0.0000016 | 0.263 s |
-| Denied Trash with stale final item | 44 → 3 | 1 | $0.0000012 | 0.197 s |
+| Copy selected roots | 128 → 5 | 1 | $0.0000112 | 0.437 s |
+| Move selected roots | 129 → 5 | 1 | $0.0000112 | 0.437 s |
+| Move selected roots to Trash | 127 → 5 | 1 | $0.0000112 | 0.437 s |
+| Restore selected Trash roots | 167 → 5 | 1 | $0.0000112 | 0.437 s |
+| Permanently delete selected Trash roots | 86 → 5 | 1 | $0.0000112 | 0.437 s |
+| Retry Trash after lost response | 44 → 4 | 1 | $0.0000016 | 0.302 s |
+| Retry restore after lost response | 44 → 4 | 1 | $0.0000016 | 0.302 s |
+| Retry permanent delete after lost response | 44 → 4 | 1 | $0.0000016 | 0.302 s |
+| Denied Trash with stale final item | 44 → 3 | 1 | $0.0000012 | 0.237 s |
 | Smart-upload size phase | 80 → 5 | 1 | $0.0000020 | 0.302 s |
 | Smart upload when every size is a candidate | 140 → 10 | 2 | $0.0000040 | 0.604 s |
-| Admit actual uploads | 20,700 → 10,014 | 1 | $0.0500562 | 13.478 s background |
-| Complete actual uploaded objects | 100,000 → 10,014 | 1 | $0.0040562 | 7.478 s background |
-| Cancel active provider sessions | 90,000 → 10,014 | 1 | $0.0000562 | 7.478 s background |
+| Admit actual uploads | 20,700 → 10,014 | 1 | $0.0500608 | 13.532 s background |
+| Complete actual uploaded objects | 100,000 → 10,014 | 1 | $0.0040562 | 7.517 s background |
+| Cancel active provider sessions | 90,000 → 10,014 | 1 | $0.0000516 | 7.502 s background |
 | Resolve previews in a 10,000-item grid | 352 → 36 | 1 | $0.0000144 | 0.712 s background |
 | Checkpoint garbage collection | 163 → 131 | 0 | $0.0000058 | 0.332 s |
-| Domain compaction | 15 → 5 | 0 | $0.0000112 | 0.398 s |
+| Domain compaction | 15 → 5 | 0 | $0.0000112 | 0.437 s |
 | Move one directory with 1,000,000 descendants | unmeasured → 4 | 1 | $0.0000062 | 0.278 s |
 
 These ceilings come from executable request-wave plans in
 `providerbudget.ProductionScaleTargets`, evaluated by the same GCS model as the
-observed ratchets. `TestProviderBudgetProductionScaleTargetsAreStrictlyBetterAndFeasible`
-requires a target for every measured massive workload, requires every nonzero
-target to improve count, cost, and critical latency, and emits
+observed ratchets. `TestProviderBudgetProductionScaleScenariosConformToTargets`
+requires a target for every measured massive workload, requires every observed
+metric to meet its target, and emits
 `provider-target-v1`. `TestProviderBudgetTargetPayloadEnvelopesAreMeasured`
 records the byte evidence:
 
@@ -220,7 +230,41 @@ head publication, while genuine conflicts still converge through the native
 generation-match CAS. No provider batch request is counted as an atomic
 multi-object transaction.
 
-## Current schema-010 atomic restore design
+## Implemented schema-011 conformance
+
+The schema-011 executable workload events meet or beat every target for request
+count, modeled marginal cost, critical-p95 latency, and browser composition.
+No row below is a fabricated target trace; each is composed from the exact
+wire-classified events captured by its production-scale fixture.
+
+| Production state / intent | Schema-010 → schema-011 requests | Schema-011 cost (USD) | Schema-011 critical p95 |
+|---|---:|---:|---:|
+| Restored transfer history without sources | 0 → 0 | $0 | 0 s |
+| Browse live directory or Trash | 80 → 3 | $0.0000012 | 0.210 s |
+| Copy selected roots | 128 → 5 | $0.0000112 | 0.409 s |
+| Move selected roots | 129 → 5 | $0.0000112 | 0.433 s |
+| Move selected roots to Trash | 127 → 5 | $0.0000112 | 0.395 s |
+| Restore selected Trash roots | 167 → 5 | $0.0000112 | 0.401 s |
+| Permanently delete selected Trash roots | 86 → 5 | $0.0000112 | 0.386 s |
+| Retry Trash/restore/permanent delete | 44 → 3 | $0.0000012 | 0.200–0.221 s |
+| Denied stale Trash intent | 44 → 3 | $0.0000012 | 0.210 s |
+| Smart-upload size phase | 80 → 5 | $0.0000020 | 0.261 s |
+| Smart upload when every size is a candidate | 140 → 9 | $0.0000036 | 0.392 s |
+| Admit actual uploads | 20,700 → 10,014 | $0.0500608 | 1.259 s |
+| Complete uploaded objects | 100,000 → 10,014 | $0.0040562 | 1.223 s |
+| Cancel active provider sessions | 90,000 → 10,014 | $0.0000516 | 1.178 s |
+| Resolve visible preview window | 352 → 36 | $0.0000144 | 0.360 s |
+| Checkpoint garbage collection | 163 → 131 | $0.0000058 | 0.270 s |
+| Domain compaction | 15 → 5 | $0.0000112 | 0.356 s |
+
+Every namespace row has zero file-provider requests. Upload rows retain the
+10,000 independent provider operations required for 10,000 real objects or
+sessions while reducing state overhead to thirteen raw requests plus the one
+composed authentication read. The implementation and recovery proof are
+recorded in
+[`storage-schema-011-implementation.md`](./storage-schema-011-implementation.md).
+
+## Historical schema-010 atomic restore design
 
 Batch restore derives every original destination from trash metadata inside the
 same closed owner-namespace snapshot used for publication. It validates all

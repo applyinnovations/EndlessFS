@@ -23,13 +23,13 @@ The UI offers four explicit strategies after file/folder selection or drop:
 
 ## Data flow and persistence
 
-1. One control request carries up to 1000 transfer IDs, virtual destinations,
+1. One control request carries up to 10,000 transfer IDs, virtual destinations,
    and sizes. The service queries a derived owner projection plus the pinned
    namespace snapshot.
 2. Unique-size items enter the ordinary direct-upload queue immediately.
 3. At most two dedicated browser workers process ambiguous `File` objects in
    4 MiB chunks. Each chunk updates both MD5 and CRC32C before it is released.
-4. One exact request carries up to 1000 completed fingerprints. Its opaque token
+4. One exact request carries up to 10,000 completed fingerprints. Its opaque token
    pins the owner, projection, live namespace root, and expiry.
 5. The response exposes only an action and, for reuse, a virtual source path
    plus portable logical version. It never exposes provider keys, native
@@ -51,7 +51,9 @@ worker so no unresolved hashing promise or busy slot survives.
 
 Upload planning has a dedicated rebuildable projection ID under the existing
 projection format. It is not authoritative and is excluded from portability
-checkpoints, so adding it does not change schema-010. A cold build streams live
+checkpoints. It was introduced without changing schema-010; schema 011 retains
+the same rebuildable projection semantics while storing its state in bounded
+consistency-domain packs. A cold build streams live
 namespace metadata into size and exact-source postings with bounded page memory.
 Normal refresh compares the prior and current immutable live roots. Equal roots
 and equal directory subtrees are skipped; only removed or added file postings on
@@ -70,21 +72,22 @@ response.
 ## Provider budget evidence
 
 The GCS regional-standard-flat pricing/latency fixture produced these exact
-ratchets on the deterministic schema-010 store:
+schema-011 ratchets on the deterministic packed store:
 
 | Workload | Requests | Modeled cost (USD) | p50 | p95 | p99 | State request types | File requests |
 |---|---:|---:|---:|---:|---:|---|---:|
-| Cold index, 256 files | 15 | $0.0000336 | 360.430 ms | 1.077430 s | 2.652430 s | GET, PUT | 0 |
-| Incremental index, one added file | 14 | $0.0000240 | 325.627 ms | 975.627 ms | 2.405627 s | GET, PUT | 0 |
-| Warm size plan, 1000 items | 6 | $0.0000024 | 134.998 ms | 392.998 ms | 962.998 ms | GET | 0 |
-| Warm exact plan, 1000 items | 4 | $0.0000016 | 90.930 ms | 262.930 ms | 642.930 ms | GET | 0 |
+| Cold index, 256 files | 5 | $0.0000112 | 117.387 ms | 356.387 ms | 881.387 ms | GET, PUT | 0 |
+| Incremental index, one added file | 7 | $0.0000120 | 161.692 ms | 486.692 ms | 1.202 s | GET, PUT | 0 |
+| Warm size plan, 10,000 items | 4 | $0.0000016 | 89.387 ms | 261.387 ms | 641.387 ms | GET | 0 |
+| Warm exact plan, 10,000 items | 3 | $0.0000012 | 67.380 ms | 196.380 ms | 481.380 ms | GET | 0 |
 
-The tests compare one-item and 1000-item warm calls and require the same provider
+The tests compare one-item and 10,000-item warm calls and require the same provider
 request count. CPU work still scales with the submitted items, but provider
 round trips, modeled request price, and aggregate request latency do not. The
-append-only `005-smart-upload-planning` fixture ratchets exact totals and fails
-on drift. Logical reuse composes with the already-ratcheted same-owner batch-copy
-path, which has zero file-provider requests.
+append-only schema-011 GCS fixture ratchets the exact current totals and fails on
+drift; the earlier `005-smart-upload-planning` fixture remains immutable
+historical evidence. Logical reuse composes with the already-ratcheted
+same-owner batch-copy path, which has zero file-provider requests.
 
 ## Automated evidence
 

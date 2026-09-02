@@ -258,6 +258,34 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 		producer: "schema-010", commit: "cc5f66c1837baf928eccadaa08dfdb3d86016f44",
 		wantSize: 27, wantFiles: 1,
 	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-011",
+		profile:  "portable-minimal",
+		file:     "schema-011-portable-minimal.json", digest: "ce3cf675f33b99be0ab545394973274ece2d36d5513dc08510add928015fc37b",
+		producer: "schema-011", commit: "4c5694008e30489e76ad1b7e3c959229d25fa7c1",
+		wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-011",
+		profile:  "writer-profile-preview-disabled",
+		file:     "schema-011-application-disabled.json", digest: "fdb21ba2e68c012615d5b15b17ba3c5619e2e04561d2b4033d8d815a83f38ac5",
+		producer: "schema-011", commit: "4c5694008e30489e76ad1b7e3c959229d25fa7c1",
+		wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-011",
+		profile:  "writer-profile-preview-gcs",
+		file:     "schema-011-application-gcs.json", digest: "91a9b590d34955a8e3e598a3fed2f620b2e7fc5744b7a573d3fe3ee15b938f8f",
+		producer: "schema-011", commit: "4c5694008e30489e76ad1b7e3c959229d25fa7c1",
+		wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-011",
+		profile:  "application-complete",
+		file:     "schema-011-application-complete.json", digest: "3b927c418a3fee261702dbb958b548eb071dd986c7eb5fed3dc5d2dc078fbcbc",
+		producer: "schema-011", commit: "4c5694008e30489e76ad1b7e3c959229d25fa7c1",
+		wantSize: 27, wantFiles: 1,
+	},
 }
 
 var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.2.0", "v0.2.1", "v0.3.0", "v0.3.1", "v0.3.2", "v0.4.0", "v0.5.0", "v0.5.1", "v0.5.2", "v0.6.0"}

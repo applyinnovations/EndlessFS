@@ -123,21 +123,46 @@ checkpoint garbage sweep performs 163 requests, costs $0.0001014, reads no file
 body, and has a modeled 2.860128 s critical p95. The full exact table is the
 versioned GCS schema-009 fixture under `internal/objectstore/gcs/economics`.
 
+## Schema-011 bounded-state ratchet
+
+The schema-011 sparse delta records 106 exact executable workloads. It replaces
+the schema-010 page-tree amplification with bounded domain packs, one-read
+session authentication, 10,000-item upload transactions, a compact whole-batch
+abort overlay, a ready-preview catalog, and a checkpoint-bound garbage plan.
+Every current provider-facing interface method and HTTP route remains mapped to
+at least one exact budget; the catalog test rejects both missing workloads and
+orphan ratchets.
+
+At 10,000 logical items, composed provider totals are 3 requests for a live or
+Trash browse; 5 for copy, move, Trash, restore, or permanent deletion; 3 for a
+lost-response replay; 5 for size-only upload planning; 9 when every size is a
+fingerprint candidate; and 10,014 for admission, completion, or cancellation
+of 10,000 real provider objects/sessions. The transfer total is 10,000 necessary
+file-role operations plus thirteen raw state operations and one authentication
+read. Namespace mutations have exactly zero file-role requests.
+
+The observed target-conformance table, modeled price and latency comparison,
+request-wave derivation, and recovery explanation are recorded in
+[`storage-schema-011-implementation.md`](./storage-schema-011-implementation.md)
+and
+[`provider-request-surface-audit-2026-09-01.md`](./provider-request-surface-audit-2026-09-01.md).
+
 ## Smart-upload planning
 
-The schema-010 smart-upload fixture ratchets four observed paths. These are
+The schema-011 fixture ratchets four current observed paths. These are
 measurements of the implemented architecture, not design targets chosen in
 advance. All four have exactly zero file-backend requests and therefore zero
 stored-object reads, rewrites, downloads, uploads, or deletes. Warm request
-counts are identical for one item and 1000 items because one request evaluates
-a batch against cached immutable projection pages.
+counts are identical for one item and 10,000 items because a bounded set of
+requests evaluates the batch against cached immutable projection packs. The
+earlier schema-010 smart-upload fixture remains immutable historical evidence.
 
 | Workload | Items/change | Requests | Modeled cost (USD) | p50 | p95 | p99 | File requests |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Cold projection build | 256 live files | 15 | $0.0000336 | 360.430 ms | 1.077430 s | 2.652430 s | 0 |
-| Incremental projection refresh | 1 added file in 256 | 14 | $0.0000240 | 325.627 ms | 975.627 ms | 2.405627 s | 0 |
-| Warm size plan | 1000 candidates | 6 | $0.0000024 | 134.998 ms | 392.998 ms | 962.998 ms | 0 |
-| Warm exact-fingerprint plan | 1000 candidates | 4 | $0.0000016 | 90.930 ms | 262.930 ms | 642.930 ms | 0 |
+| Cold projection build | 256 live files | 5 | $0.0000112 | 117.387 ms | 356.387 ms | 881.387 ms | 0 |
+| Incremental projection refresh | 1 added file in 256 | 7 | $0.0000120 | 161.692 ms | 486.692 ms | 1.202 s | 0 |
+| Warm size plan | 10,000 candidates | 4 | $0.0000016 | 89.387 ms | 261.387 ms | 641.387 ms | 0 |
+| Warm exact-fingerprint plan | 10,000 candidates | 3 | $0.0000012 | 67.380 ms | 196.380 ms | 481.380 ms | 0 |
 
 The projection build cost is paid lazily once per owner/projection loss. Normal
 updates Merkle-diff the prior and current immutable live roots, skip shared

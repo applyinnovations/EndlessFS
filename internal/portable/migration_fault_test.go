@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,7 +18,6 @@ import (
 )
 
 func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
-	t.Parallel()
 	predecessors := []storageSchemaFixtureEntry{storageSchemaFixtures[0]}
 	for _, candidate := range storageSchemaFixtures {
 		if candidate.schemaID == "endlessfs-portable-v1/schema-007" && candidate.profile == "application-preview-gcs" {
@@ -30,13 +30,11 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 	}
 
 	for _, family := range predecessors {
-		family := family
 		fixture := loadStorageSchemaFixture(t, family)
 		wantGateEpoch := expectedCurrentGateEpoch(t, portable.StorageSchemaHistory(), family.schemaID, fixture)
+		writer := currentWriterForSchemaFixture(t, fixture)
 		for _, target := range []string{"state", "file"} {
-			target := target
 			t.Run(family.schemaID+"/"+family.profile+"/"+target, func(t *testing.T) {
-				t.Parallel()
 				baselineState := objectmemory.New()
 				baselineFile := objectmemory.New()
 				if err := baselineState.Import(fixture.StateObjects); err != nil {
@@ -48,7 +46,7 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 				baselineClock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
 				baselineFaults := &failNthBackend{}
 				baselineOptions := schemaSplitMigrationOptions(baselineState, baselineFile, baselineClock, 19, nil)
-				baselineOptions.Writer = currentWriterForSchemaFixture(t, fixture)
+				baselineOptions.Writer = writer
 				if target == "state" {
 					baselineFaults.backend = baselineState
 					baselineOptions.Backend = baselineFaults
@@ -60,55 +58,19 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 				if _, err := portable.Open(context.Background(), baselineOptions); err != nil {
 					t.Fatal(err)
 				}
+				baselineFaults.mu.Lock()
 				boundaryCalls := baselineFaults.calls
+				baselineFaults.mu.Unlock()
+				results := runMigrationFaultBoundaries(fixture, writer, target, wantGateEpoch, boundaryCalls+3)
 				consecutiveCompleted := 0
-				for failAt := 1; failAt <= boundaryCalls+3 && consecutiveCompleted < 3; failAt++ {
-					stateBackend := objectmemory.New()
-					fileBackend := objectmemory.New()
-					if err := stateBackend.Import(fixture.StateObjects); err != nil {
-						t.Fatal(err)
+				for _, result := range results {
+					if result.err != nil {
+						t.Fatal(result.err)
 					}
-					if err := fileBackend.Import(fixture.FileObjects); err != nil {
-						t.Fatal(err)
-					}
-
-					clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
-					faults := &failNthBackend{}
-					options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, byte(20+failAt%200), nil)
-					options.Writer = currentWriterForSchemaFixture(t, fixture)
-					switch target {
-					case "state":
-						faults.backend = stateBackend
-						options.Backend = faults
-					case "file":
-						faults.backend = fileBackend
-						options.FileBackend = faults
-					default:
-						t.Fatalf("unknown fault target %q", target)
-					}
-					faults.arm(failAt)
-
-					_, migrationErr := portable.Open(context.Background(), options)
-					calls := faults.calls
-					faults.disable()
-					if migrationErr == nil && failAt > calls {
+					if result.completedBeyondBoundary {
 						consecutiveCompleted++
 					} else {
 						consecutiveCompleted = 0
-					}
-					if migrationErr != nil && !errors.Is(migrationErr, domain.ErrUnavailable) {
-						t.Fatalf("%s interruption %d at %s returned %v; want unavailable", target, failAt, faults.failureOperation, migrationErr)
-					}
-
-					resumeOptions := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, byte(120+failAt%100), nil)
-					resumeOptions.Writer = currentWriterForSchemaFixture(t, fixture)
-					engine, err := portable.Open(context.Background(), resumeOptions)
-					if err != nil {
-						t.Fatalf("resume after %s interruption %d at %s: %v", target, failAt, faults.failureOperation, err)
-					}
-					gate, err := engine.GateStatus(context.Background())
-					if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != wantGateEpoch {
-						t.Fatalf("resume after %s interruption %d gate = %+v, %v", target, failAt, gate, err)
 					}
 				}
 				if consecutiveCompleted < 3 {
@@ -117,6 +79,102 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 			})
 		}
 	}
+}
+
+type migrationFaultBoundaryResult struct {
+	failAt                  int
+	completedBeyondBoundary bool
+	err                     error
+}
+
+// runMigrationFaultBoundaries preserves the exhaustive ordered fault matrix
+// while evaluating independent fresh-backend boundaries with a bounded worker
+// pool. Race instrumentation otherwise makes the growing append-only migration
+// suffix exceed the process timeout even though no individual schedule blocks.
+func runMigrationFaultBoundaries(fixture storageSchemaFixture, writer portable.WriterConfiguration, target string, wantGateEpoch uint64, total int) []migrationFaultBoundaryResult {
+	const maximumWorkers = 8
+	workers := min(maximumWorkers, total)
+	jobs := make(chan int)
+	completed := make(chan migrationFaultBoundaryResult, total)
+	var wait sync.WaitGroup
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for failAt := range jobs {
+				completed <- runMigrationFaultBoundary(fixture, writer, target, wantGateEpoch, failAt)
+			}
+		}()
+	}
+	go func() {
+		for failAt := 1; failAt <= total; failAt++ {
+			jobs <- failAt
+		}
+		close(jobs)
+		wait.Wait()
+		close(completed)
+	}()
+	ordered := make([]migrationFaultBoundaryResult, total)
+	for result := range completed {
+		ordered[result.failAt-1] = result
+	}
+	return ordered
+}
+
+func runMigrationFaultBoundary(fixture storageSchemaFixture, writer portable.WriterConfiguration, target string, wantGateEpoch uint64, failAt int) migrationFaultBoundaryResult {
+	result := migrationFaultBoundaryResult{failAt: failAt}
+	stateBackend := objectmemory.New()
+	fileBackend := objectmemory.New()
+	if err := stateBackend.Import(fixture.StateObjects); err != nil {
+		result.err = fmt.Errorf("%s interruption %d import state fixture: %w", target, failAt, err)
+		return result
+	}
+	if err := fileBackend.Import(fixture.FileObjects); err != nil {
+		result.err = fmt.Errorf("%s interruption %d import file fixture: %w", target, failAt, err)
+		return result
+	}
+
+	clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
+	faults := &failNthBackend{}
+	options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, byte(20+failAt%200), nil)
+	options.Writer = writer
+	switch target {
+	case "state":
+		faults.backend = stateBackend
+		options.Backend = faults
+	case "file":
+		faults.backend = fileBackend
+		options.FileBackend = faults
+	default:
+		result.err = fmt.Errorf("unknown fault target %q", target)
+		return result
+	}
+	faults.arm(failAt)
+
+	_, migrationErr := portable.Open(context.Background(), options)
+	faults.mu.Lock()
+	calls := faults.calls
+	failureOperation := faults.failureOperation
+	faults.mu.Unlock()
+	faults.disable()
+	result.completedBeyondBoundary = migrationErr == nil && failAt > calls
+	if migrationErr != nil && !errors.Is(migrationErr, domain.ErrUnavailable) {
+		result.err = fmt.Errorf("%s interruption %d at %s returned %v; want unavailable", target, failAt, failureOperation, migrationErr)
+		return result
+	}
+
+	resumeOptions := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, byte(120+failAt%100), nil)
+	resumeOptions.Writer = writer
+	engine, err := portable.Open(context.Background(), resumeOptions)
+	if err != nil {
+		result.err = fmt.Errorf("resume after %s interruption %d at %s: %w", target, failAt, failureOperation, err)
+		return result
+	}
+	gate, err := engine.GateStatus(context.Background())
+	if err != nil || gate.Mode != storageformat.GateOpen || gate.Epoch != wantGateEpoch {
+		result.err = fmt.Errorf("resume after %s interruption %d gate = %+v, %v", target, failAt, gate, err)
+	}
+	return result
 }
 
 type migrationContentionBackend struct {

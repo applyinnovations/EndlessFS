@@ -698,7 +698,7 @@
           '';
 
           test = goTask "endlessfs-test" ''
-            go test ./...
+            go test -timeout=30m ./...
           '';
 
           test-unit = goTask "endlessfs-test-unit" ''
@@ -730,7 +730,7 @@
             # Run both owning packages in full. A name regex previously omitted
             # migration implementations and semantic startup tests while still
             # reporting a passing percentage over a partial production set.
-            go test ./internal/portable ./cmd/endlessfs -count=1 \
+            go test -timeout=30m ./internal/portable ./cmd/endlessfs -count=1 \
               -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
             gawk -v only_group=migration -f tools/coverage.awk "$profile"
           '';
@@ -798,7 +798,7 @@
                 cd "$coverage_root/source"
                 export GOFLAGS=-mod=vendor
                 profile="$coverage_root/endlessfs-coverage.out"
-                go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
+                go test -timeout=30m ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
                 if [ -n "''${ENDLESSFS_COVERAGE_PROFILE:-}" ]; then
                   install -m 0644 "$profile" "$ENDLESSFS_COVERAGE_PROFILE"
                 fi
@@ -1050,10 +1050,10 @@
           goCheck =
             name: command: tools:
             goCheckWithSource name testSource command tools;
-          testSuite = goCheck "tests" "go test ./..." [ ];
+          testSuite = goCheck "tests" "go test -timeout=30m ./..." [ ];
           migrationCheck = goCheck "migration" ''
             profile="$TMPDIR/migration-coverage.out"
-            go test ./internal/portable ./cmd/endlessfs -count=1 \
+            go test -timeout=30m ./internal/portable ./cmd/endlessfs -count=1 \
               -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
             gawk -v only_group=migration -f tools/coverage.awk "$profile"
           '' [ pkgs.gawk ];
@@ -1089,6 +1089,15 @@
                   ${self.apps.${system}.pr-check.program} \
                   ${self.apps.${system}.test-coverage.program}; do
                   rg --quiet '^export CGO_ENABLED=0$' "$program"
+                done
+                for program in \
+                  ${self.apps.${system}.test.program} \
+                  ${self.apps.${system}.test-migration.program} \
+                  ${self.apps.${system}.test-coverage.program}; do
+                  rg --fixed-strings --quiet 'go test -timeout=30m' "$program" || {
+                    echo "long-running Go test gate must use the explicit 30-minute process deadline: $program" >&2
+                    exit 1
+                  }
                 done
                 rg --fixed-strings --quiet 'FONTCONFIG_FILE' ${headlessBrowser}/bin/chrome-headless-shell
                 touch "$out"

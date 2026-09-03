@@ -226,13 +226,43 @@
       '';
       raceTestCommand = ''
         # The migration transport matrix deterministically restarts the entire
-        # schema chain at every provider boundary. Run that exhaustive test in
-        # its own package process so race instrumentation cannot make it
-        # contend with the portable package's parallel fault schedules. The
-        # second invocation runs every remaining repository test exactly once.
+        # schema chain at every provider boundary. The portable package also
+        # contains the remaining migration matrix and every ordinary state
+        # transition test. Give the exhaustive transport matrix exclusive
+        # resources, then run the two disjoint portable remainder sets alongside
+        # all other packages. This avoids both a single serial package schedule
+        # and resource contention between the three expensive portable sets.
+        # Every repository test still runs exactly once and every shard must
+        # succeed.
         exhaustive_migration_test='^TestMigrationRecoversFromEveryObjectTransportInterruption$'
-        go test -race -timeout=30m ./internal/portable -run "$exhaustive_migration_test"
-        go test -race -timeout=30m ./... -skip "$exhaustive_migration_test"
+        portable_migration_tests='^TestMigration'
+        other_packages=()
+        while IFS= read -r package; do
+          if [[ "$package" != */internal/portable ]]; then
+            other_packages+=("$package")
+          fi
+        done < <(go list ./...)
+
+        # This matrix saturates a local builder by itself. Running it beside the
+        # other portable shards makes every process slower without increasing
+        # test coverage, so complete it before admitting the parallel phase.
+        go test -race -timeout=30m -count=1 ./internal/portable -run "$exhaustive_migration_test"
+
+        race_pids=()
+        go test -race -timeout=30m -count=1 ./internal/portable -run "$portable_migration_tests" -skip "$exhaustive_migration_test" &
+        race_pids+=("$!")
+        go test -race -timeout=30m -count=1 ./internal/portable -skip "$portable_migration_tests" &
+        race_pids+=("$!")
+        go test -race -timeout=30m -count=1 "''${other_packages[@]}" &
+        race_pids+=("$!")
+
+        race_status=0
+        for race_pid in "''${race_pids[@]}"; do
+          if ! wait "$race_pid"; then
+            race_status=1
+          fi
+        done
+        test "$race_status" -eq 0
       '';
     in
     {
@@ -1099,6 +1129,31 @@
                     exit 1
                   }
                 done
+                race_program=${self.apps.${system}.test-race.program}
+                for required in \
+                  "portable_migration_tests='^TestMigration'" \
+                  'if [[ "$package" != */internal/portable ]]' \
+                  'go test -race -timeout=30m -count=1 ./internal/portable -run "$exhaustive_migration_test"' \
+                  'go test -race -timeout=30m -count=1 ./internal/portable -run "$portable_migration_tests" -skip "$exhaustive_migration_test"' \
+                  'go test -race -timeout=30m -count=1 ./internal/portable -skip "$portable_migration_tests"' \
+                  'go test -race -timeout=30m -count=1 "''${other_packages[@]}"' \
+                  'for race_pid in "''${race_pids[@]}"' \
+                  'test "$race_status" -eq 0'; do
+                  rg --fixed-strings --quiet "$required" "$race_program" || {
+                    echo "race gate must retain the fail-closed portable-package sharding contract: $required" >&2
+                    exit 1
+                  }
+                done
+                test "$(rg --fixed-strings --count 'race_pids+=("$!")' "$race_program")" -eq 3 || {
+                  echo "race gate must wait for exactly three parallel remainder shards" >&2
+                  exit 1
+                }
+                if rg --fixed-strings --quiet \
+                  'go test -race -timeout=30m -count=1 ./internal/portable -run "$exhaustive_migration_test" &' \
+                  "$race_program"; then
+                  echo "race gate must give the exhaustive transport matrix exclusive resources" >&2
+                  exit 1
+                fi
                 rg --fixed-strings --quiet 'FONTCONFIG_FILE' ${headlessBrowser}/bin/chrome-headless-shell
                 touch "$out"
               '';

@@ -178,7 +178,7 @@ spec:
             value: nix run .#pr-check
 
       - name: nix-checks
-        runAfter: [prepare-cache]
+        runAfter: [fast-checks]
         taskRef:
           resolver: cluster
           params:

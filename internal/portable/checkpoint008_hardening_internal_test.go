@@ -499,7 +499,7 @@ func TestSchema008CheckpointClosurePreservesProviderFailureClassification(t *tes
 		t.Fatal(err)
 	}
 	hooks := &hookedBackend{Backend: backend, get: func(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
-		if strings.Contains(key.String(), "/pages/") {
+		if strings.Contains(key.String(), "/pages/") || strings.Contains(key.String(), "/packs/") {
 			return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "domain page temporarily unavailable")
 		}
 		return backend.Get(ctx, key)
@@ -1005,7 +1005,7 @@ func TestSchema008CheckpointUploadDrainAndClosureTraversalBoundaries(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-		key := storageformat.DomainPageKey(reference.Kind, reference.ID, snapshot.head.Base.Digest)
+		key := domainTreeStorageKey(reference, snapshot.head.Base)
 		object, err := memory.Get(ctx, key)
 		if err != nil {
 			t.Fatal(err)

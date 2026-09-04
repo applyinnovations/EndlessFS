@@ -23,6 +23,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/identity"
 	endlesslogging "github.com/applyinnovations/endlessfs/internal/logging"
 	"github.com/applyinnovations/endlessfs/internal/model"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"github.com/applyinnovations/endlessfs/internal/preview"
 	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
 	previewmemory "github.com/applyinnovations/endlessfs/internal/preview/memory"
@@ -580,6 +581,51 @@ func TestIntegrationBatchUploadEmptyTrashAndPublicDownloadRoutes(t *testing.T) {
 	}
 }
 
+func TestIntegrationSelectedTrashRestoreAndDeleteUseAtomicBatchRoutes(t *testing.T) {
+	env := newDriveHTTPEnvironment(t)
+	const origin = "https://drive.example.test"
+	cookies := []*http.Cookie{env.session, env.csrf}
+	createHTTPFile(t, env, env.session, env.csrf, "/batch-one.txt", "one", "batch-route-upload-0001")
+	createHTTPFile(t, env, env.session, env.csrf, "/batch-two.txt", "two", "batch-route-upload-0002")
+
+	trash := performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"paths":["/batch-one.txt","/batch-two.txt"]}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-route-trash-0001"))
+	if trash.Code != http.StatusAccepted {
+		t.Fatalf("trash = %d %s", trash.Code, trash.Body.String())
+	}
+	var trashed drive.BatchResult
+	decodeResponse(t, trash, &trashed)
+	if len(trashed.Items) != 2 {
+		t.Fatalf("trash result = %+v", trashed)
+	}
+	restoreBody, _ := json.Marshal(map[string]any{"trashIDs": []string{trashed.Items[0].TrashID, trashed.Items[1].TrashID}, "conflict": "fail"})
+	restored := performRequest(t, env.handler, http.MethodPost, "/api/v1/trash/restore", origin, string(restoreBody), cookies, driveMutationHeaders(env.csrf.Value, "batch-route-restore-0001"))
+	if restored.Code != http.StatusAccepted || !bytes.Contains(restored.Body.Bytes(), []byte(`"state":"succeeded"`)) {
+		t.Fatalf("restore = %d %s", restored.Code, restored.Body.String())
+	}
+
+	trash = performRequest(t, env.handler, http.MethodPost, "/api/v1/files/trash", origin, `{"paths":["/batch-one.txt","/batch-two.txt"]}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-route-trash-0002"))
+	if trash.Code != http.StatusAccepted {
+		t.Fatalf("retrash = %d %s", trash.Code, trash.Body.String())
+	}
+	decodeResponse(t, trash, &trashed)
+	deleteBody, _ := json.Marshal(map[string]any{"trashIDs": []string{trashed.Items[0].TrashID, trashed.Items[1].TrashID}})
+	deleted := performRequest(t, env.handler, http.MethodPost, "/api/v1/trash/delete", origin, string(deleteBody), cookies, driveMutationHeaders(env.csrf.Value, "batch-route-delete-0001"))
+	if deleted.Code != http.StatusAccepted || !bytes.Contains(deleted.Body.Bytes(), []byte(`"state":"succeeded"`)) {
+		t.Fatalf("delete = %d %s", deleted.Code, deleted.Body.String())
+	}
+	listing := performRequest(t, env.handler, http.MethodGet, "/api/v1/trash", "", "", []*http.Cookie{env.session}, nil)
+	if listing.Code != http.StatusOK || !bytes.Contains(listing.Body.Bytes(), []byte(`"items":[]`)) {
+		t.Fatalf("trash after delete = %d %s", listing.Code, listing.Body.String())
+	}
+
+	for _, target := range []string{"/api/v1/trash/restore", "/api/v1/trash/delete"} {
+		invalid := performRequest(t, env.handler, http.MethodPost, target, origin, `{"trashIDs":[]}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-route-invalid-0001"))
+		if invalid.Code != http.StatusBadRequest {
+			t.Fatalf("invalid %s = %d %s", target, invalid.Code, invalid.Body.String())
+		}
+	}
+}
+
 func TestIntegrationBatchUploadItemIdempotencySurvivesEnvelopeRetry(t *testing.T) {
 	env := newDriveHTTPEnvironment(t)
 	const origin = "https://drive.example.test"
@@ -606,6 +652,92 @@ func TestIntegrationBatchUploadItemIdempotencySurvivesEnvelopeRetry(t *testing.T
 	}
 	if firstResult.Uploads[0].Capability.UploadID != secondResult.Uploads[0].Capability.UploadID {
 		t.Fatalf("batch retry allocated a second upload: %q / %q", firstResult.Uploads[0].Capability.UploadID, secondResult.Uploads[0].Capability.UploadID)
+	}
+}
+
+func TestIntegrationUploadBatchCompletionAndCancellationAreStrictAtomicMutations(t *testing.T) {
+	env := newDriveHTTPEnvironment(t)
+	const origin = "https://drive.example.test"
+	cookies := []*http.Cookie{env.session, env.csrf}
+	createBody := `{"uploads":[{"path":"/batch-complete-a.bin","size":3,"mediaType":"application/octet-stream","idempotencyKey":"batch-complete-item-a"},{"path":"/batch-complete-b.bin","size":4,"mediaType":"application/octet-stream","idempotencyKey":"batch-complete-item-b"}]}`
+	created := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/batch", origin, createBody, cookies, driveMutationHeaders(env.csrf.Value, "batch-complete-admission"))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("batch admission = %d %s", created.Code, created.Body.String())
+	}
+	var admitted struct {
+		Uploads []struct {
+			Capability *domain.UploadCapability `json:"capability"`
+		} `json:"uploads"`
+	}
+	decodeResponse(t, created, &admitted)
+	if len(admitted.Uploads) != 2 || admitted.Uploads[0].Capability == nil || admitted.Uploads[1].Capability == nil {
+		t.Fatalf("batch admission result = %+v", admitted)
+	}
+	bodies := [][]byte{[]byte("one"), []byte("four")}
+	completionItems := make([]map[string]string, len(bodies))
+	for index, body := range bodies {
+		capability := admitted.Uploads[index].Capability
+		request, err := http.NewRequest(capability.Method, capability.URL, bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for name, value := range capability.Headers {
+			request.Header.Set(name, value)
+		}
+		response, err := env.data.Client().Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusNoContent {
+			t.Fatalf("batch data upload %d = %d", index, response.StatusCode)
+		}
+		completionItems[index] = map[string]string{"uploadID": string(capability.UploadID), "crc32c": objectstore.FingerprintFor(body).CRC32C}
+	}
+	completionBody, _ := json.Marshal(map[string]any{"uploads": completionItems})
+	completionHeaders := driveMutationHeaders(env.csrf.Value, "batch-completion-transaction")
+	completed := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/batch/complete", origin, string(completionBody), cookies, completionHeaders)
+	if completed.Code != http.StatusOK || !bytes.Contains(completed.Body.Bytes(), []byte(`"entries"`)) {
+		t.Fatalf("batch completion = %d %s", completed.Code, completed.Body.String())
+	}
+	replayed := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/batch/complete", origin, string(completionBody), cookies, completionHeaders)
+	if replayed.Code != http.StatusOK || replayed.Body.String() != completed.Body.String() {
+		t.Fatalf("batch completion replay = %d %s; first=%s", replayed.Code, replayed.Body.String(), completed.Body.String())
+	}
+	changedItems := append([]map[string]string(nil), completionItems...)
+	changedItems[0] = map[string]string{"uploadID": completionItems[0]["uploadID"], "crc32c": objectstore.FingerprintFor([]byte("bad")).CRC32C}
+	changedBody, _ := json.Marshal(map[string]any{"uploads": changedItems})
+	changed := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/batch/complete", origin, string(changedBody), cookies, completionHeaders)
+	if changed.Code != http.StatusConflict {
+		t.Fatalf("changed completion replay = %d %s", changed.Code, changed.Body.String())
+	}
+	unknown := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/batch/complete", origin, `{"uploads":[],"providerKey":"forbidden"}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-completion-unknown"))
+	if unknown.Code != http.StatusBadRequest {
+		t.Fatalf("unknown completion field = %d %s", unknown.Code, unknown.Body.String())
+	}
+
+	abortCreate := performRequest(t, env.handler, http.MethodPost, "/api/v1/uploads/batch", origin, `{"uploads":[{"path":"/batch-abort.bin","size":1,"mediaType":"application/octet-stream","idempotencyKey":"batch-abort-item-a"}]}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-abort-admission"))
+	if abortCreate.Code != http.StatusCreated {
+		t.Fatalf("abort admission = %d %s", abortCreate.Code, abortCreate.Body.String())
+	}
+	decodeResponse(t, abortCreate, &admitted)
+	abortBody, _ := json.Marshal(map[string]any{"uploadIDs": []domain.UploadID{admitted.Uploads[0].Capability.UploadID}, "batchID": admitted.Uploads[0].Capability.BatchID})
+	abortHeaders := driveMutationHeaders(env.csrf.Value, "batch-abort-transaction")
+	aborted := performRequest(t, env.handler, http.MethodDelete, "/api/v1/uploads/batch", origin, string(abortBody), cookies, abortHeaders)
+	if aborted.Code != http.StatusNoContent {
+		t.Fatalf("batch abort = %d %s", aborted.Code, aborted.Body.String())
+	}
+	replayedAbort := performRequest(t, env.handler, http.MethodDelete, "/api/v1/uploads/batch", origin, string(abortBody), cookies, abortHeaders)
+	if replayedAbort.Code != http.StatusNoContent {
+		t.Fatalf("batch abort replay = %d %s", replayedAbort.Code, replayedAbort.Body.String())
+	}
+	invalidBatch := performRequest(t, env.handler, http.MethodDelete, "/api/v1/uploads/batch", origin, `{"uploadIDs":["upload"],"batchID":"not-a-digest"}`, cookies, driveMutationHeaders(env.csrf.Value, "batch-abort-invalid-binding"))
+	if invalidBatch.Code != http.StatusBadRequest {
+		t.Fatalf("invalid batch abort binding = %d %s", invalidBatch.Code, invalidBatch.Body.String())
+	}
+	crossOwner := performRequest(t, env.handler, http.MethodDelete, "/api/v1/uploads/batch", origin, string(abortBody), []*http.Cookie{env.otherSession, env.otherCSRF}, driveMutationHeaders(env.otherCSRF.Value, "batch-abort-cross-owner"))
+	if crossOwner.Code != http.StatusNotFound {
+		t.Fatalf("cross-owner batch abort = %d %s", crossOwner.Code, crossOwner.Body.String())
 	}
 }
 
@@ -666,7 +798,7 @@ func TestIntegrationBatchCopyMoveAndUploadLifecycleRoutes(t *testing.T) {
 		t.Fatalf("aborted upload status = %+v", abortedStatus)
 	}
 
-	for _, target := range []string{"/api/v1/files?limit=invalid", "/api/v1/files?order=sideways", "/api/v1/trash?limit=1001", "/api/v1/public/shares/missing?limit=0"} {
+	for _, target := range []string{"/api/v1/files?limit=invalid", "/api/v1/files?order=sideways", "/api/v1/trash?limit=10001", "/api/v1/public/shares/missing?limit=0"} {
 		response := performRequest(t, env.handler, http.MethodGet, target, "", "", []*http.Cookie{env.session}, nil)
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("invalid query %q = %d %s", target, response.Code, response.Body.String())
@@ -790,7 +922,9 @@ func TestIntegrationCrossUserPrivateEndpointMatrix(t *testing.T) {
 		{name: "move", method: http.MethodPost, target: "/api/v1/files/move", body: `{"source":"/foreign/owned.txt","destination":"/stolen.txt","expectedSource":"` + string(ownerEntry.Version) + `"}`, want: http.StatusNotFound, key: "cross-attack-move-00001"},
 		{name: "operation", method: http.MethodGet, target: "/api/v1/operations/" + string(ownerOperation.ID), want: http.StatusNotFound},
 		{name: "restore", method: http.MethodPost, target: "/api/v1/trash/" + ownerTrash.Items[0].TrashID + "/restore", body: `{}`, want: http.StatusNotFound, key: "cross-attack-restore-001"},
+		{name: "batch restore", method: http.MethodPost, target: "/api/v1/trash/restore", body: `{"trashIDs":["` + ownerTrash.Items[0].TrashID + `"],"conflict":"fail"}`, want: http.StatusNotFound, key: "cross-attack-batch-restore-1"},
 		{name: "permanent delete", method: http.MethodDelete, target: "/api/v1/trash/" + ownerTrash.Items[0].TrashID, body: `{}`, want: http.StatusNotFound, key: "cross-attack-delete-0001"},
+		{name: "batch permanent delete", method: http.MethodPost, target: "/api/v1/trash/delete", body: `{"trashIDs":["` + ownerTrash.Items[0].TrashID + `"]}`, want: http.StatusNotFound, key: "cross-attack-batch-delete-01"},
 		{name: "create share", method: http.MethodPost, target: "/api/v1/shares", body: `{"path":"/foreign/owned.txt"}`, want: http.StatusNotFound, key: "cross-attack-share-00001"},
 		{name: "revoke share", method: http.MethodDelete, target: "/api/v1/shares/" + ownerShare.Share.ShareID, body: `{}`, want: http.StatusNotFound},
 	}

@@ -545,8 +545,8 @@ func normalizeFilePageSize(size int) (int, error) {
 	if size == 0 {
 		return 200, nil
 	}
-	if size < 1 || size > 1000 {
-		return 0, domain.NewError(domain.ErrorInvalid, "page size must be between 1 and 1000")
+	if size < 1 || size > 10_000 {
+		return 0, domain.NewError(domain.ErrorInvalid, "page size must be between 1 and 10000")
 	}
 	return size, nil
 }

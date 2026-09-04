@@ -345,22 +345,24 @@ func (b *Backend) deleteMaterializedUpload(ctx context.Context, key objectstore.
 }
 
 func (b *Backend) CreateDownload(ctx context.Context, request objectstore.DownloadRequest) (objectstore.DownloadCapability, error) {
-	if b.transfer == nil || !request.Key.Valid() || request.Version == "" || request.Filename == "" || request.MediaType == "" || !request.ExpiresAt.After(b.transfer.clock.Now()) {
+	if b.transfer == nil || !request.Key.Valid() || request.Immutable == (request.Version != "") || request.Filename == "" || request.MediaType == "" || !request.ExpiresAt.After(b.transfer.clock.Now()) {
 		return objectstore.DownloadCapability{}, domain.NewError(domain.ErrorInvalid, "invalid GCS download request")
-	}
-	generation, err := decodeVersion(request.Version)
-	if err != nil {
-		return objectstore.DownloadCapability{}, err
 	}
 	disposition := mime.FormatMediaType(string(request.Disposition), map[string]string{"filename": request.Filename})
 	if disposition == "" {
 		return objectstore.DownloadCapability{}, domain.NewError(domain.ErrorInvalid, "invalid GCS download filename")
 	}
 	query := url.Values{
-		"generation":                   {strconv.FormatInt(generation, 10)},
-		"ifGenerationMatch":            {strconv.FormatInt(generation, 10)},
 		"response-content-type":        {request.MediaType},
 		"response-content-disposition": {disposition},
+	}
+	if !request.Immutable {
+		generation, err := decodeVersion(request.Version)
+		if err != nil {
+			return objectstore.DownloadCapability{}, err
+		}
+		query.Set("generation", strconv.FormatInt(generation, 10))
+		query.Set("ifGenerationMatch", strconv.FormatInt(generation, 10))
 	}
 	signedURL, err := b.signedURL(request.Key, http.MethodGet, request.ExpiresAt, "", nil, query)
 	if err != nil {

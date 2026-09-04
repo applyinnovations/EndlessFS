@@ -63,7 +63,7 @@ func TestProviderConfigurationSortingFaultAndScopeBoundaries(t *testing.T) {
 	if err := validateContextScope(context.Background(), domain.Scope{}); !errors.Is(err, domain.ErrUnauthorized) {
 		t.Fatalf("invalid scope = %v", err)
 	}
-	for value, wantError := range map[int]bool{0: false, 1: false, 1000: false, -1: true, 1001: true} {
+	for value, wantError := range map[int]bool{0: false, 1: false, 1000: false, 10000: false, -1: true, 10001: true} {
 		_, err := normalizePageSize(value)
 		if (err != nil) != wantError {
 			t.Fatalf("normalizePageSize(%d) = %v", value, err)

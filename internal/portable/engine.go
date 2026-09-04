@@ -80,11 +80,17 @@ type SchedulerFunc func(context.Context, string) error
 func (f SchedulerFunc) Step(ctx context.Context, step string) error { return f(ctx, step) }
 
 const (
-	StepDomainBeforeHeadCommit     = "consistency-domain:before-head-commit"
-	StepDomainAfterHeadCommit      = "consistency-domain:after-head-commit"
-	StepUploadBatchAfterIntents    = "upload-batch:after-intents"
-	StepUploadBatchAfterSessions   = "upload-batch:after-sessions"
-	StepUploadBatchAfterActivation = "upload-batch:after-activation"
+	StepDomainBeforeHeadCommit         = "consistency-domain:before-head-commit"
+	StepDomainAfterHeadCommit          = "consistency-domain:after-head-commit"
+	StepUploadBatchAfterIntents        = "upload-batch:after-intents"
+	StepUploadBatchAfterSessions       = "upload-batch:after-sessions"
+	StepUploadBatchAfterActivation     = "upload-batch:after-activation"
+	StepUploadBatchCompletionProgress  = "upload-batch-completion:after-progress"
+	StepUploadBatchCompletionVerified  = "upload-batch-completion:after-verified"
+	StepUploadBatchCompletionPublished = "upload-batch-completion:after-published"
+	StepUploadBatchAbortProgress       = "upload-batch-abort:after-progress"
+	StepUploadBatchAbortApplied        = "upload-batch-abort:after-provider-effects"
+	StepUploadBatchAbortPublished      = "upload-batch-abort:after-published"
 )
 
 type Engine struct {

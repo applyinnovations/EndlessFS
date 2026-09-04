@@ -18,11 +18,12 @@ import (
 const maximumNamespaceBatchItems = storageformat.MaxNamespaceBatchItems
 
 type namespaceBatchMoveSpec struct {
-	from        domain.Scope
-	to          domain.Scope
-	request     domain.CopyRequest
-	trashID     string
-	attachTrash bool
+	from         domain.Scope
+	to           domain.Scope
+	request      domain.CopyRequest
+	trashID      string
+	attachTrash  bool
+	restoreTrash bool
 }
 
 type namespaceBatchMovePlan struct {
@@ -54,14 +55,11 @@ func (s *FileStore) BatchCopyMove(ctx context.Context, owner domain.UserID, requ
 }
 
 func (s *FileStore) BatchMoveToTrash(ctx context.Context, owner domain.UserID, requests []domain.TrashRequest, idempotencyKey string) (domain.NamespaceBatchResult, error) {
-	live, err := domain.NewScope(owner, domain.AreaLive)
-	if err != nil {
-		return domain.NamespaceBatchResult{}, err
+	if !owner.Valid() {
+		return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid trash owner")
 	}
-	trash, err := domain.NewScope(owner, domain.AreaTrash)
-	if err != nil {
-		return domain.NamespaceBatchResult{}, err
-	}
+	live, _ := domain.NewScope(owner, domain.AreaLive)
+	trash, _ := domain.NewScope(owner, domain.AreaTrash)
 	specs := make([]namespaceBatchMoveSpec, len(requests))
 	for index, request := range requests {
 		destination, parseErr := domain.ParseUserPath("/" + request.TrashID)
@@ -74,6 +72,35 @@ func (s *FileStore) BatchMoveToTrash(ctx context.Context, owner domain.UserID, r
 		}
 	}
 	return newNamespaceStore(s.engine).batchCopyOrMove(ctx, owner, specs, true, "batch-trash", idempotencyKey)
+}
+
+func (s *FileStore) BatchRestoreFromTrash(ctx context.Context, owner domain.UserID, trashIDs []string, conflict domain.ConflictMode, idempotencyKey string) (domain.NamespaceBatchResult, error) {
+	if !owner.Valid() {
+		return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid trash owner")
+	}
+	normalized, err := domain.NormalizeConflictMode(conflict)
+	if err != nil {
+		return domain.NamespaceBatchResult{}, err
+	}
+	from, _ := domain.NewScope(owner, domain.AreaTrash)
+	to, _ := domain.NewScope(owner, domain.AreaLive)
+	specs := make([]namespaceBatchMoveSpec, len(trashIDs))
+	seen := make(map[string]struct{}, len(trashIDs))
+	for index, trashID := range trashIDs {
+		if _, duplicate := seen[trashID]; duplicate {
+			return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "trash batch contains duplicate identities")
+		}
+		seen[trashID] = struct{}{}
+		source, err := domain.ParseUserPath("/" + trashID)
+		if err != nil || source.Name() != trashID {
+			return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid trash identity")
+		}
+		specs[index] = namespaceBatchMoveSpec{
+			from: from, to: to, trashID: trashID, restoreTrash: true,
+			request: domain.CopyRequest{Source: source, Conflict: normalized},
+		}
+	}
+	return newNamespaceStore(s.engine).batchCopyOrMove(ctx, owner, specs, true, "batch-restore", idempotencyKey)
 }
 
 func validateNamespaceBatchSize(count int) error {
@@ -93,16 +120,21 @@ func namespaceBatchFingerprint(kind string, specs []namespaceBatchMoveSpec) (str
 		ExpectedSource domain.Version      `json:"expectedSource,omitempty"`
 		ExpectedTarget domain.Version      `json:"expectedTarget,omitempty"`
 		TrashID        string              `json:"trashID,omitempty"`
+		RestoreTrash   bool                `json:"restoreTrash,omitempty"`
 	}
 	// Hash each bounded item before composing the ordered batch fingerprint.
 	// The complete 10,000-item intent therefore remains bound without ever
 	// attempting to encode it as one canonical record.
 	intent := []byte("endlessfs-namespace-batch-v2\x00" + kind)
 	for _, spec := range specs {
+		destination := spec.request.Destination.String()
+		if spec.restoreTrash {
+			destination = "original-trash-path"
+		}
 		value := item{
 			From: areaName(spec.from.Area()), To: areaName(spec.to.Area()), Source: spec.request.Source.String(),
-			Destination: spec.request.Destination.String(), Conflict: spec.request.Conflict,
-			ExpectedSource: spec.request.ExpectedSource, ExpectedTarget: spec.request.ExpectedTarget, TrashID: spec.trashID,
+			Destination: destination, Conflict: spec.request.Conflict,
+			ExpectedSource: spec.request.ExpectedSource, ExpectedTarget: spec.request.ExpectedTarget, TrashID: spec.trashID, RestoreTrash: spec.restoreTrash,
 		}
 		body, err := storageformat.EncodeCanonical(value)
 		if err != nil {
@@ -184,11 +216,14 @@ func (store *namespaceStore) batchCopyOrMoveValidated(ctx context.Context, owner
 				return domain.NamespaceBatchResult{}, err
 			}
 		}
+		if err := view.bindMutation(mutationID, fingerprint); err != nil {
+			return domain.NamespaceBatchResult{}, err
+		}
 
 		plans := make([]namespaceBatchMovePlan, 0, len(specs))
 		for index, spec := range specs {
 			request := spec.request
-			if spec.from.UserID() != owner || spec.to.UserID() != owner || !request.Source.Valid() || request.Source.IsRoot() || !request.Destination.Valid() || request.Destination.IsRoot() {
+			if spec.from.UserID() != owner || spec.to.UserID() != owner || !request.Source.Valid() || request.Source.IsRoot() || !spec.restoreTrash && (!request.Destination.Valid() || request.Destination.IsRoot()) {
 				return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid namespace batch path")
 			}
 			conflict, normalizeErr := domain.NormalizeConflictMode(request.Conflict)
@@ -214,6 +249,15 @@ func (store *namespaceStore) batchCopyOrMoveValidated(ctx context.Context, owner
 			if request.ExpectedSource != "" && request.ExpectedSource != domain.Version(source.Entry.LogicalVersion) {
 				return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorPreconditionFailed, "namespace batch source version does not match")
 			}
+			if spec.restoreTrash {
+				if spec.from.Area() != domain.AreaTrash || spec.to.Area() != domain.AreaLive || len(sourceTrail) != 1 || source.Trash == nil {
+					return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "trash entry metadata is missing")
+				}
+				request.Destination, resolveErr = domain.ParseUserPath(source.Trash.OriginalPath)
+				if resolveErr != nil || request.Destination.IsRoot() {
+					return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "trash entry original path is invalid")
+				}
+			}
 			destinationTrail, resolveErr := store.resolveTrail(ctx, view, spec.to.Area(), request.Destination.Parent())
 			if resolveErr != nil {
 				return domain.NamespaceBatchResult{}, resolveErr
@@ -230,6 +274,8 @@ func (store *namespaceStore) batchCopyOrMoveValidated(ctx context.Context, owner
 					return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid namespace batch trash placement")
 				}
 				placed.Trash = &storageformat.NamespaceTrashMetadata{OriginalPath: request.Source.String(), OriginalVersion: domain.Version(source.Entry.LogicalVersion), TrashedAt: now}
+			} else if spec.restoreTrash {
+				placed.Trash = nil
 			}
 			if !move {
 				placed.NodeID = namespaceNodeID(operationID, fmt.Sprintf("copy-%016x", index))
@@ -244,7 +290,7 @@ func (store *namespaceStore) batchCopyOrMoveValidated(ctx context.Context, owner
 				return domain.NamespaceBatchResult{}, err
 			}
 			plans = append(plans, namespaceBatchMovePlan{
-				spec:        namespaceBatchMoveSpec{from: spec.from, to: spec.to, request: request, trashID: spec.trashID, attachTrash: spec.attachTrash},
+				spec:        namespaceBatchMoveSpec{from: spec.from, to: spec.to, request: request, trashID: spec.trashID, attachTrash: spec.attachTrash, restoreTrash: spec.restoreTrash},
 				sourceTrail: sourceTrail, destinationTrail: destinationTrail, source: source, existing: existing, resolved: resolved, placed: placed,
 			})
 		}
@@ -410,6 +456,9 @@ func (s *FileStore) BatchDeleteFromTrash(ctx context.Context, owner domain.UserI
 				return domain.NamespaceBatchResult{}, err
 			}
 			return *replay, err
+		}
+		if err := view.bindMutation(mutationID, fingerprint); err != nil {
+			return domain.NamespaceBatchResult{}, err
 		}
 		rootFrame := namespaceFrame{key: namespaceFrameKey(domain.AreaTrash, namespaceRootPath()), path: namespaceRootPath(), area: domain.AreaTrash, entry: view.roots[domain.AreaTrash]}
 		edits := make([]namespaceDirectoryEdit, 0, len(trashIDs))

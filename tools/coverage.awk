@@ -16,7 +16,7 @@ function belongs(file, group) {
   if (group == "authorization") return index(file, "/internal/drive/") > 0
   if (group == "path") return index(file, "/internal/domain/") > 0
   if (group == "token") return index(file, "/internal/secret/") > 0
-  if (group == "capability") return file ~ /\/internal\/provider\/memory\/transfer.go$/ || file ~ /\/internal\/portable\/transfers(008)?\.go$/ || file ~ /\/internal\/objectstore\/gcs\/transfers.go$/
+  if (group == "capability") return file ~ /\/internal\/provider\/memory\/transfer.go$/ || file ~ /\/internal\/portable\/transfers([0-9][0-9][0-9])?\.go$/ || file ~ /\/internal\/objectstore\/gcs\/transfers.go$/
   if (group == "state-CAS") return (index(file, "/internal/state/") > 0 && index(file, "/internal/state/statecontract/") == 0) || file ~ /\/internal\/portable\/(state|domain_store|domain_tree|domain_tree_stream).go$/
   if (group == "scope-mapping") return index(file, "/internal/provider/memory/") > 0 || file ~ /\/internal\/portable\/(state|runtime008).go$/
   if (group == "canonical-format-key-version-checkpoint") return index(file, "/internal/storageformat/") > 0 || file ~ /\/internal\/portable\/(engine|checkpoint|checkpoint008|checkpoint_reachability|checkpoint_visit_set).go$/

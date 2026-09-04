@@ -16,9 +16,11 @@ import (
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
+	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/provider/providercontract"
+	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/state"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
@@ -406,6 +408,285 @@ func TestPortableUploadBatchResumesEveryCrashBoundary(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func uploadCapabilityBody(t *testing.T, client *http.Client, capability domain.UploadCapability, body []byte) {
+	t.Helper()
+	request, err := http.NewRequest(capability.Method, capability.URL, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range capability.Headers {
+		request.Header.Set(name, value)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("upload status = %d", response.StatusCode)
+	}
+}
+
+func TestPortableUploadBatchCompletionIsAtomicReplayableAndChecksumBound(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2039, 1, 5, 5, 6, 7, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(151, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	crasher := &stepFailure{step: portable.StepUploadBatchCompletionVerified}
+	engine := openEngine(t, backend, clock, 152, crasher)
+	owner, _ := domain.ParseUserID("VVVVVVVVVVVVVVVVVVVVVQ")
+	scope, _ := domain.NewScope(owner, domain.AreaLive)
+	requests := []domain.CreateUploadRequest{
+		{Path: domain.MustParseUserPath("/atomic-a.bin"), Size: 3, MediaType: "application/octet-stream", IdempotencyKey: "atomic-completion-item-a"},
+		{Path: domain.MustParseUserPath("/atomic-b.bin"), Size: 4, MediaType: "application/octet-stream", IdempotencyKey: "atomic-completion-item-b"},
+	}
+	capabilities, err := engine.Files().CreateUploadBatch(context.Background(), scope, requests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodies := [][]byte{[]byte("one"), []byte("four")}
+	items := make([]domain.CompleteUploadBatchItem, len(capabilities))
+	for index, capability := range capabilities {
+		uploadCapabilityBody(t, server.Client(), capability, bodies[index])
+		items[index] = domain.CompleteUploadBatchItem{UploadID: capability.UploadID, CRC32C: objectstore.FingerprintFor(bodies[index]).CRC32C}
+	}
+	completion := domain.CompleteUploadBatchRequest{Items: items, IdempotencyKey: "atomic-upload-completion-batch"}
+	if _, err := engine.Files().CompleteUploadBatch(context.Background(), scope, completion); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("crashed completion error = %v", err)
+	}
+	for _, request := range requests {
+		if _, err := engine.Files().Stat(context.Background(), scope, request.Path); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("partially published %s: %v", request.Path, err)
+		}
+	}
+	restarted := openEngine(t, backend, clock, 153, nil)
+	result, err := restarted.Files().CompleteUploadBatch(context.Background(), scope, completion)
+	if err != nil || len(result.Entries) != len(requests) {
+		t.Fatalf("resumed completion = %+v, %v", result, err)
+	}
+	replayed, err := restarted.Files().CompleteUploadBatch(context.Background(), scope, completion)
+	if err != nil || len(replayed.Entries) != len(requests) {
+		t.Fatalf("replayed completion = %+v, %v", replayed, err)
+	}
+	for index, request := range requests {
+		entry, statErr := restarted.Files().Stat(context.Background(), scope, request.Path)
+		if statErr != nil || entry.Version != result.Entries[index].Version || replayed.Entries[index] != result.Entries[index] {
+			t.Fatalf("entry %d = %+v, replay=%+v, stat=%+v, %v", index, result.Entries[index], replayed.Entries[index], entry, statErr)
+		}
+	}
+	changed := completion
+	changed.Items = append([]domain.CompleteUploadBatchItem(nil), completion.Items...)
+	changed.Items[0].CRC32C = objectstore.FingerprintFor([]byte("bad")).CRC32C
+	if _, err := restarted.Files().CompleteUploadBatch(context.Background(), scope, changed); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("changed replay error = %v", err)
+	}
+}
+
+func TestPortableUploadBatchAbortIsAtomicAndReplayable(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2039, 1, 5, 6, 7, 8, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(154, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	crasher := &stepFailure{step: portable.StepUploadBatchAbortApplied}
+	engine := openEngine(t, backend, clock, 155, crasher)
+	owner, _ := domain.ParseUserID("VlZWVlZWVlZWVlZWVlZWVg")
+	scope, _ := domain.NewScope(owner, domain.AreaLive)
+	requests := []domain.CreateUploadRequest{
+		{Path: domain.MustParseUserPath("/abort-a.bin"), Size: 3, MediaType: "application/octet-stream", IdempotencyKey: "atomic-abort-item-a"},
+		{Path: domain.MustParseUserPath("/abort-b.bin"), Size: 4, MediaType: "application/octet-stream", IdempotencyKey: "atomic-abort-item-b"},
+	}
+	capabilities, err := engine.Files().CreateUploadBatch(context.Background(), scope, requests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadIDs := []domain.UploadID{capabilities[0].UploadID, capabilities[1].UploadID}
+	abort := domain.AbortUploadBatchRequest{UploadIDs: uploadIDs, BatchID: capabilities[0].BatchID, IdempotencyKey: "atomic-upload-abort-batch"}
+	if err := engine.Files().AbortUploadBatch(context.Background(), scope, abort); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("crashed abort error = %v", err)
+	}
+	restarted := openEngine(t, backend, clock, 156, nil)
+	if err := restarted.Files().AbortUploadBatch(context.Background(), scope, abort); err != nil {
+		t.Fatalf("resumed abort error = %v", err)
+	}
+	if err := restarted.Files().AbortUploadBatch(context.Background(), scope, abort); err != nil {
+		t.Fatalf("replayed abort error = %v", err)
+	}
+	changed := abort
+	changed.UploadIDs = []domain.UploadID{uploadIDs[1], uploadIDs[0]}
+	if err := restarted.Files().AbortUploadBatch(context.Background(), scope, changed); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("changed abort replay error = %v", err)
+	}
+	for _, uploadID := range uploadIDs {
+		status, statusErr := restarted.Files().UploadStatus(context.Background(), scope, uploadID)
+		if statusErr != nil || status.State != domain.UploadStateAborted {
+			t.Fatalf("aborted status = %+v, %v", status, statusErr)
+		}
+	}
+}
+
+func TestPortablePartialBatchAbortRetainsLegacyPerRecordCompatibility(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2039, 1, 5, 6, 8, 9, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(163, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engine := openEngine(t, backend, clock, 164, nil)
+	owner, _ := domain.ParseUserID("WVlZWVlZWVlZWVlZWVlZWQ")
+	scope, _ := domain.NewScope(owner, domain.AreaLive)
+	capabilities, err := engine.Files().CreateUploadBatch(context.Background(), scope, []domain.CreateUploadRequest{
+		{Path: domain.MustParseUserPath("/partial-a.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "partial-a"},
+		{Path: domain.MustParseUserPath("/partial-b.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "partial-b"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := domain.AbortUploadBatchRequest{UploadIDs: []domain.UploadID{capabilities[0].UploadID}, IdempotencyKey: "partial-abort"}
+	if err := engine.Files().AbortUploadBatch(context.Background(), scope, request); err != nil {
+		t.Fatal(err)
+	}
+	first, err := engine.Files().UploadStatus(context.Background(), scope, capabilities[0].UploadID)
+	if err != nil || first.State != domain.UploadStateAborted {
+		t.Fatalf("partial aborted member = %+v, %v", first, err)
+	}
+	second, err := engine.Files().UploadStatus(context.Background(), scope, capabilities[1].UploadID)
+	if err != nil || second.State != domain.UploadStateActive {
+		t.Fatalf("partial retained member = %+v, %v", second, err)
+	}
+}
+
+func TestConcurrentCompletionAndCompactBatchAbortHaveOneAtomicWinner(t *testing.T) {
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2039, 1, 5, 7, 8, 9, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(157, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	first := openEngine(t, backend, clock, 158, nil)
+	second := openEngine(t, backend, clock, 159, nil)
+	owner, _ := domain.ParseUserID("V1dXV1dXV1dXV1dXV1dXVw")
+	scope, _ := domain.NewScope(owner, domain.AreaLive)
+	requests := []domain.CreateUploadRequest{
+		{Path: domain.MustParseUserPath("/race-a.bin"), Size: 3, MediaType: "application/octet-stream", IdempotencyKey: "race-item-a"},
+		{Path: domain.MustParseUserPath("/race-b.bin"), Size: 4, MediaType: "application/octet-stream", IdempotencyKey: "race-item-b"},
+	}
+	capabilities, err := first.Files().CreateUploadBatch(context.Background(), scope, requests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodies := [][]byte{[]byte("one"), []byte("four")}
+	completion := domain.CompleteUploadBatchRequest{Items: make([]domain.CompleteUploadBatchItem, len(capabilities)), IdempotencyKey: "race-completion"}
+	abort := domain.AbortUploadBatchRequest{UploadIDs: make([]domain.UploadID, len(capabilities)), BatchID: capabilities[0].BatchID, IdempotencyKey: "race-abort"}
+	for index, capability := range capabilities {
+		uploadCapabilityBody(t, server.Client(), capability, bodies[index])
+		completion.Items[index] = domain.CompleteUploadBatchItem{UploadID: capability.UploadID, CRC32C: objectstore.FingerprintFor(bodies[index]).CRC32C}
+		abort.UploadIDs[index] = capability.UploadID
+	}
+	start := make(chan struct{})
+	var completed domain.CompleteUploadBatchResult
+	var completeErr, abortErr error
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		<-start
+		completed, completeErr = first.Files().CompleteUploadBatch(context.Background(), scope, completion)
+	}()
+	go func() {
+		defer wait.Done()
+		<-start
+		abortErr = second.Files().AbortUploadBatch(context.Background(), scope, abort)
+	}()
+	close(start)
+	wait.Wait()
+	if (completeErr == nil) == (abortErr == nil) {
+		t.Fatalf("completion/abort winners = complete:%v abort:%v", completeErr, abortErr)
+	}
+	if completeErr == nil {
+		if len(completed.Entries) != len(requests) || !errors.Is(abortErr, domain.ErrConflict) {
+			t.Fatalf("completion winner = %+v; abort error=%v", completed, abortErr)
+		}
+	} else if !errors.Is(completeErr, domain.ErrConflict) && !errors.Is(completeErr, domain.ErrNotFound) && !errors.Is(completeErr, domain.ErrPreconditionFailed) {
+		t.Fatalf("completion loser error = %v", completeErr)
+	}
+	for index, capability := range capabilities {
+		status, statusErr := second.Files().UploadStatus(context.Background(), scope, capability.UploadID)
+		if statusErr != nil {
+			t.Fatal(statusErr)
+		}
+		entry, statErr := second.Files().Stat(context.Background(), scope, requests[index].Path)
+		if completeErr == nil {
+			if status.State != domain.UploadStateCompleted || statErr != nil || entry.Version != completed.Entries[index].Version {
+				t.Fatalf("completed member %d = status:%+v entry:%+v error:%v", index, status, entry, statErr)
+			}
+		} else if status.State != domain.UploadStateAborted || !errors.Is(statErr, domain.ErrNotFound) {
+			t.Fatalf("aborted member %d = status:%+v stat error:%v", index, status, statErr)
+		}
+	}
+}
+
+func TestUploadBatchAbortProgressRestartBoundsRepeatedProviderWork(t *testing.T) {
+	base := objectmemory.New()
+	server := httptest.NewServer(base)
+	t.Cleanup(server.Close)
+	clock := domain.NewFixedClock(time.Date(2039, 1, 5, 8, 9, 10, 0, time.UTC))
+	if err := base.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(160, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	ledger := providerbudget.NewLedger()
+	backend := budgettest.Wrap(providerbudget.RoleFile, base, ledger)
+	crasher := &stepFailure{step: portable.StepUploadBatchAbortProgress}
+	engine := openEngine(t, backend, clock, 161, crasher)
+	owner, _ := domain.ParseUserID("WFhYWFhYWFhYWFhYWFhYWA")
+	scope, _ := domain.NewScope(owner, domain.AreaLive)
+	requests := make([]domain.CreateUploadRequest, 1001)
+	for index := range requests {
+		requests[index] = domain.CreateUploadRequest{
+			Path: domain.MustParseUserPath(fmt.Sprintf("/restart-abort-%04d.bin", index)), Size: 0,
+			MediaType: "application/octet-stream", IdempotencyKey: fmt.Sprintf("restart-abort-item-%04d", index),
+		}
+	}
+	capabilities, err := engine.Files().CreateUploadBatch(context.Background(), scope, requests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abort := domain.AbortUploadBatchRequest{UploadIDs: make([]domain.UploadID, len(capabilities)), BatchID: capabilities[0].BatchID, IdempotencyKey: "restart-abort-batch"}
+	for index, capability := range capabilities {
+		abort.UploadIDs[index] = capability.UploadID
+	}
+	ledger.Reset()
+	if err := engine.Files().AbortUploadBatch(context.Background(), scope, abort); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("progress-boundary crash error = %v", err)
+	}
+	restarted := openEngine(t, backend, clock, 162, nil)
+	if err := restarted.Files().AbortUploadBatch(context.Background(), scope, abort); err != nil {
+		t.Fatalf("resumed abort error = %v", err)
+	}
+	aborts := 0
+	for _, event := range ledger.Events() {
+		if event.Kind == providerbudget.RequestUploadAbort {
+			aborts++
+		}
+	}
+	if repeated := aborts - len(capabilities); repeated < 0 || repeated > storageformat.UploadTransactionSegmentItems {
+		t.Fatalf("abort restart repeated %d provider calls; total=%d logical=%d bound=%d", repeated, aborts, len(capabilities), storageformat.UploadTransactionSegmentItems)
+	}
+	for _, capability := range []domain.UploadCapability{capabilities[0], capabilities[len(capabilities)/2], capabilities[len(capabilities)-1]} {
+		status, statusErr := restarted.Files().UploadStatus(context.Background(), scope, capability.UploadID)
+		if statusErr != nil || status.State != domain.UploadStateAborted {
+			t.Fatalf("resumed abort status = %+v, %v", status, statusErr)
+		}
 	}
 }
 

@@ -32,7 +32,13 @@ func TestGCSBudgetRatchetFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := ledger.Latest("direct-move-one-file"); !ok {
-		t.Fatal("direct move budget is missing")
+	for _, name := range []string{
+		"direct-move-one-file",
+		"namespace-list-page-1000-schema-010",
+		"restore-batch-10000-schema-010",
+	} {
+		if _, ok := ledger.Latest(name); !ok {
+			t.Fatalf("%s budget is missing", name)
+		}
 	}
 }

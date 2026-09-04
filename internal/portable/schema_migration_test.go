@@ -258,9 +258,37 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 		producer: "schema-010", commit: "cc5f66c1837baf928eccadaa08dfdb3d86016f44",
 		wantSize: 27, wantFiles: 1,
 	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-011",
+		profile:  "portable-minimal",
+		file:     "schema-011-portable-minimal.json", digest: "ce3cf675f33b99be0ab545394973274ece2d36d5513dc08510add928015fc37b",
+		producer: "schema-011", commit: "4c5694008e30489e76ad1b7e3c959229d25fa7c1",
+		wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-011",
+		profile:  "writer-profile-preview-disabled",
+		file:     "schema-011-application-disabled.json", digest: "fdb21ba2e68c012615d5b15b17ba3c5619e2e04561d2b4033d8d815a83f38ac5",
+		producer: "schema-011", commit: "4c5694008e30489e76ad1b7e3c959229d25fa7c1",
+		wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-011",
+		profile:  "writer-profile-preview-gcs",
+		file:     "schema-011-application-gcs.json", digest: "91a9b590d34955a8e3e598a3fed2f620b2e7fc5744b7a573d3fe3ee15b938f8f",
+		producer: "schema-011", commit: "4c5694008e30489e76ad1b7e3c959229d25fa7c1",
+		wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-011",
+		profile:  "application-complete",
+		file:     "schema-011-application-complete.json", digest: "3b927c418a3fee261702dbb958b548eb071dd986c7eb5fed3dc5d2dc078fbcbc",
+		producer: "schema-011", commit: "4c5694008e30489e76ad1b7e3c959229d25fa7c1",
+		wantSize: 27, wantFiles: 1,
+	},
 }
 
-var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.2.0", "v0.2.1", "v0.3.0", "v0.3.1", "v0.3.2", "v0.4.0"}
+var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.2.0", "v0.2.1", "v0.3.0", "v0.3.1", "v0.3.2", "v0.4.0", "v0.5.0", "v0.5.1", "v0.5.2", "v0.6.0"}
 
 func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *testing.T) {
 	history := portable.StorageSchemaHistory()
@@ -641,8 +669,8 @@ func TestMigrationCheckpointInventoryResumesFromBoundedPagesWithoutReadingFileBo
 	if got := interrupted.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads across interrupted migration = %d; want 0", got)
 	}
-	if got := interrupted.totalAttempts(); got != 22 {
-		t.Fatalf("file metadata list calls across interrupted schema-002-to-010 migration = %d; want measured restart ratchet 22", got)
+	if got := interrupted.totalAttempts(); got != 24 {
+		t.Fatalf("file metadata list calls across interrupted schema-002-to-011 migration = %d; want measured restart ratchet 24", got)
 	}
 	progressRecords := 0
 	inventoryPages := 0
@@ -803,8 +831,8 @@ func TestMigrationDoesNotReadFileBodiesAgainImmediatelyBeforeOpeningWrites(t *te
 	if got := counting.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads during migration = %d; want 0", got)
 	}
-	if got := counting.totalAttempts(); got != 11 {
-		t.Fatalf("file metadata listing calls across schema-002-to-010 checkpoint suffix = %d; want measured ratchet 11", got)
+	if got := counting.totalAttempts(); got != 13 {
+		t.Fatalf("file metadata listing calls across schema-002-to-011 checkpoint suffix = %d; want measured ratchet 13", got)
 	}
 }
 
@@ -921,7 +949,7 @@ func TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary(t *testing.T) 
 	for edgeIndex, entry := range history[:len(history)-1] {
 		families := storageSchemaFixturesFor(entry.ID)
 		edgeBoundaries := boundaries
-		if entry.MigrationID == "schema-004-to-005" || entry.MigrationID == "schema-005-to-006" || entry.MigrationID == "schema-006-to-007" || entry.MigrationID == "schema-007-to-008" {
+		if entry.MigrationID == "schema-004-to-005" || entry.MigrationID == "schema-005-to-006" || entry.MigrationID == "schema-006-to-007" || entry.MigrationID == "schema-007-to-008" || entry.MigrationID == "schema-010-to-011" {
 			edgeBoundaries = []string{
 				portable.StepMigrationAfterDetection,
 				portable.StepMigrationAfterGateClosed,

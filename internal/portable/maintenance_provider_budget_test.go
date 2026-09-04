@@ -50,14 +50,14 @@ func TestProviderBudgetCurrentSchemaMaintenanceWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkMaintenanceProviderBudget(t, "maintenance-startup-warm-schema-009", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
+	checkMaintenanceProviderBudget(t, "maintenance-startup-warm-schema-011", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
 
 	stateLedger.Reset()
 	fileLedger.Reset()
 	if _, err := engine.GateStatus(ctx); err != nil {
 		t.Fatal(err)
 	}
-	checkMaintenanceProviderBudget(t, "maintenance-gate-status-schema-009", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
+	checkMaintenanceProviderBudget(t, "maintenance-gate-status-schema-011", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
 
 	stateLedger.Reset()
 	fileLedger.Reset()
@@ -65,14 +65,14 @@ func TestProviderBudgetCurrentSchemaMaintenanceWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkMaintenanceProviderBudget(t, "maintenance-checkpoint-minimal-schema-009", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
+	checkMaintenanceProviderBudget(t, "maintenance-checkpoint-minimal-schema-011", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
 
 	stateLedger.Reset()
 	fileLedger.Reset()
 	if err := engine.VerifyCheckpoint(ctx, checkpoint.CheckpointID); err != nil {
 		t.Fatal(err)
 	}
-	checkMaintenanceProviderBudget(t, "maintenance-verify-checkpoint-minimal-schema-009", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
+	checkMaintenanceProviderBudget(t, "maintenance-verify-checkpoint-minimal-schema-011", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
 
 	stateLedger.Reset()
 	fileLedger.Reset()
@@ -83,14 +83,14 @@ func TestProviderBudgetCurrentSchemaMaintenanceWorkflows(t *testing.T) {
 	}); err != nil || visited == 0 {
 		t.Fatalf("VisitCheckpointObjects() visited %d objects: %v", visited, err)
 	}
-	checkMaintenanceProviderBudget(t, "maintenance-visit-checkpoint-minimal-schema-009", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
+	checkMaintenanceProviderBudget(t, "maintenance-visit-checkpoint-minimal-schema-011", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
 
 	stateLedger.Reset()
 	fileLedger.Reset()
 	if err := engine.OpenWrites(ctx, checkpoint.CheckpointID); err != nil {
 		t.Fatal(err)
 	}
-	checkMaintenanceProviderBudget(t, "maintenance-open-writes-schema-009", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
+	checkMaintenanceProviderBudget(t, "maintenance-open-writes-schema-011", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
 }
 
 func TestProviderBudgetTransitionRecoveryWorkflow(t *testing.T) {
@@ -134,7 +134,7 @@ func TestProviderBudgetTransitionRecoveryWorkflow(t *testing.T) {
 	if err != nil || outcome.ID != mutation.ID || !outcome.Replayed {
 		t.Fatalf("recovered transition = %+v, %v", outcome, err)
 	}
-	checkMaintenanceProviderBudget(t, "maintenance-transition-recovery-schema-009", []providerbudget.Role{providerbudget.RoleState}, ledger)
+	checkMaintenanceProviderBudget(t, "maintenance-transition-recovery-schema-011", []providerbudget.Role{providerbudget.RoleState}, ledger)
 }
 
 func TestProviderBudgetMigration008To010MinimalFixture(t *testing.T) {
@@ -167,5 +167,5 @@ func TestProviderBudgetMigration008To010MinimalFixture(t *testing.T) {
 	if _, err := portable.Open(ctx, options); err != nil {
 		t.Fatal(err)
 	}
-	checkMaintenanceProviderBudget(t, "maintenance-migration-008-to-010-minimal-fixture", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
+	checkMaintenanceProviderBudget(t, "maintenance-migration-008-to-011-minimal-fixture", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
 }

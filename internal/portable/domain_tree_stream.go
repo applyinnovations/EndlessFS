@@ -44,7 +44,7 @@ func newConsistencyDomainTreeIteratorAfter(ctx context.Context, session *consist
 		}
 		iterator.stack = append(iterator.stack, domainTreeIteratorFrame{reference: reference, page: page, index: index})
 		child := page.Children[index]
-		reference = domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}
+		reference = domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, PackID: child.PackID, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}
 	}
 }
 
@@ -75,7 +75,7 @@ func (iterator *consistencyDomainTreeIterator) descend(reference domainPageRef) 
 			return nil
 		}
 		child := page.Children[0]
-		reference = domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}
+		reference = domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, PackID: child.PackID, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}
 	}
 }
 
@@ -94,7 +94,7 @@ func (iterator *consistencyDomainTreeIterator) Next() (storageformat.DomainEntry
 			branch.index++
 			if branch.index < len(branch.page.Children) {
 				child := branch.page.Children[branch.index]
-				reference := domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}
+				reference := domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, PackID: child.PackID, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}
 				if err := iterator.descend(reference); err != nil {
 					return storageformat.DomainEntry{}, false, err
 				}
@@ -171,7 +171,7 @@ func (builder *consistencyDomainTreeBuilder) flushLevel(level int) error {
 	}
 	children := make([]storageformat.DomainPageChild, len(references))
 	for index, child := range references {
-		children[index] = storageformat.DomainPageChild{FirstKey: child.firstKey, LastKey: child.lastKey, Digest: child.root.Digest, Level: child.root.Level, EntryCount: child.root.EntryCount, ByteCount: child.root.ByteCount}
+		children[index] = storageformat.DomainPageChild{FirstKey: child.firstKey, LastKey: child.lastKey, Digest: child.root.Digest, PackID: child.root.PackID, LeafKeyFilter: child.leafKeyFilter, Level: child.root.Level, EntryCount: child.root.EntryCount, ByteCount: child.root.ByteCount}
 	}
 	page := storageformat.DomainPage{SchemaVersion: 1, DomainID: builder.session.reference.ID, Kind: builder.session.reference.Kind, Level: level + 1, Children: children}
 	reference, err := builder.session.writePage(builder.ctx, page)

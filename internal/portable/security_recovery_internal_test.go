@@ -17,12 +17,20 @@ import (
 type hookedBackend struct {
 	objectstore.Backend
 	head   func(context.Context, objectstore.Key) (objectstore.ObjectInfo, error)
+	verify func(context.Context, objectstore.Key, objectstore.ExpectedIntegrity) (objectstore.ObjectInfo, error)
 	get    func(context.Context, objectstore.Key) (objectstore.Object, error)
 	open   func(context.Context, objectstore.Key) (objectstore.ObjectReader, error)
 	list   func(context.Context, objectstore.ListRequest) (objectstore.ListPage, error)
 	put    func(context.Context, objectstore.Key, []byte, objectstore.PutCondition) (objectstore.NativeVersion, error)
 	delete func(context.Context, objectstore.Key, objectstore.DeleteCondition) error
 	copy   func(context.Context, objectstore.Key, objectstore.Key, objectstore.CopyCondition) (objectstore.CopyResult, error)
+}
+
+func (backend *hookedBackend) Verify(ctx context.Context, key objectstore.Key, expected objectstore.ExpectedIntegrity) (objectstore.ObjectInfo, error) {
+	if backend.verify != nil {
+		return backend.verify(ctx, key, expected)
+	}
+	return backend.Backend.Verify(ctx, key, expected)
 }
 
 func (backend *hookedBackend) Head(ctx context.Context, key objectstore.Key) (objectstore.ObjectInfo, error) {

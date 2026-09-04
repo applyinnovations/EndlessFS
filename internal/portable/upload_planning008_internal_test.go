@@ -175,6 +175,9 @@ func TestUploadPlanningSupportsAnEmptyNamespaceAndFailsClosedForCorruptDerivedSt
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := session.flushPack(ctx); err != nil {
+		t.Fatal(err)
+	}
 	var validToken uploadPlanProjectionToken008
 	if err := files.decodeDuplicateCursor(valid.Token, &validToken); err != nil {
 		t.Fatal(err)
@@ -228,6 +231,9 @@ func TestUploadPlanningTreatsCollectedPinnedPagesAsAReplanConflict(t *testing.T)
 	}
 	session := duplicateProjectionSession008(engine, live.UserID(), token.ProjectionID)
 	pageKey := session.pageKey(token.Root.Digest)
+	if token.Root.PackID != "" {
+		pageKey = session.packKey(token.Root.PackID)
+	}
 	page, err := backend.Get(ctx, pageKey)
 	if err != nil {
 		t.Fatal(err)

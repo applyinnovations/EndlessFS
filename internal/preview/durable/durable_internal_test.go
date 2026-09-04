@@ -125,6 +125,206 @@ func TestDurableStoreBoundaryAndRetentionMatrix(t *testing.T) {
 	}
 }
 
+func TestDurableReadyCatalogRecordRejectsCorruptionAndAmbiguity(t *testing.T) {
+	options := internalOptions(t, nil, 4)
+	store, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := internalBinding(t)
+	artifact := internalArtifact("ready-generation", binding.Variant).Metadata()
+	scopeDigest := store.readyScopeDigest(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x71}, sha256.Size)))
+	bindingDigest := store.bindingDigest(binding)
+	valid := readyCatalogRecord{
+		SchemaVersion: schemaVersion,
+		ScopeDigest:   scopeDigest,
+		Revision:      1,
+		Entries: []readyCatalogEntry{{
+			BindingDigest: bindingDigest, RecordedAt: options.Clock.Now().UTC(), Artifact: artifact,
+		}},
+	}
+	body, err := encodeReadyCatalog(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodeReadyCatalog(body, scopeDigest)
+	if err != nil || decoded.Revision != valid.Revision || len(decoded.Entries) != 1 {
+		t.Fatalf("round trip = %+v, %v", decoded, err)
+	}
+
+	for name, candidate := range map[string][]byte{
+		"empty":         nil,
+		"invalid-json":  []byte("["),
+		"unknown-field": append(append([]byte(nil), body[:len(body)-1]...), []byte(`,"unknown":true}`)...),
+		"trailing":      append(append([]byte(nil), body...), []byte("{}")...),
+		"non-canonical": append([]byte(" "), body...),
+	} {
+		t.Run("decode-"+name, func(t *testing.T) {
+			if _, err := decodeReadyCatalog(candidate, scopeDigest); err == nil {
+				t.Fatal("corrupt catalog was accepted")
+			}
+		})
+	}
+	if _, err := decodeReadyCatalog(body, strings.Repeat("0", sha256.Size*2)); err == nil {
+		t.Fatal("misbound catalog was accepted")
+	}
+
+	for name, mutate := range map[string]func(*readyCatalogRecord){
+		"schema":   func(record *readyCatalogRecord) { record.SchemaVersion = 0 },
+		"scope":    func(record *readyCatalogRecord) { record.ScopeDigest = "invalid" },
+		"revision": func(record *readyCatalogRecord) { record.Revision = 0 },
+		"too-many": func(record *readyCatalogRecord) {
+			record.Entries = make([]readyCatalogEntry, maximumReadyCatalogItems+1)
+		},
+		"digest-length": func(record *readyCatalogRecord) {
+			record.Entries[0].BindingDigest = "short"
+		},
+		"digest-encoding": func(record *readyCatalogRecord) {
+			record.Entries[0].BindingDigest = strings.Repeat("z", sha256.Size*2)
+		},
+		"recorded-at": func(record *readyCatalogRecord) { record.Entries[0].RecordedAt = time.Time{} },
+		"generation":  func(record *readyCatalogRecord) { record.Entries[0].Artifact.GenerationID = "" },
+		"duplicate": func(record *readyCatalogRecord) {
+			record.Entries = append(record.Entries, record.Entries[0])
+		},
+	} {
+		t.Run("validate-"+name, func(t *testing.T) {
+			candidate := valid
+			candidate.Entries = append([]readyCatalogEntry(nil), valid.Entries...)
+			mutate(&candidate)
+			if _, err := encodeReadyCatalog(candidate); !errors.Is(err, domain.ErrInvalid) {
+				t.Fatalf("error = %v, want invalid", err)
+			}
+		})
+	}
+}
+
+func TestDurableReadyCatalogStoreBoundaries(t *testing.T) {
+	ctx := context.Background()
+	options := internalOptions(t, nil, 4)
+	store, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := internalBinding(t)
+	cacheScope := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x72}, sha256.Size))
+	selection := preview.ReadySelection{CacheScope: cacheScope, Binding: binding}
+	metadata := internalArtifact("ready-generation", binding.Variant).Metadata()
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	for name, run := range map[string]func() error{
+		"resolve-canceled": func() error { _, err := store.ResolveReady(canceled, []preview.ReadySelection{selection}); return err },
+		"resolve-empty":    func() error { _, err := store.ResolveReady(ctx, nil); return err },
+		"resolve-large": func() error {
+			_, err := store.ResolveReady(ctx, make([]preview.ReadySelection, 65))
+			return err
+		},
+		"resolve-invalid":  func() error { _, err := store.ResolveReady(ctx, []preview.ReadySelection{{}}); return err },
+		"record-canceled":  func() error { return store.RecordReady(canceled, selection, metadata) },
+		"record-selection": func() error { return store.RecordReady(ctx, preview.ReadySelection{}, metadata) },
+		"record-metadata":  func() error { return store.RecordReady(ctx, selection, preview.ArtifactMetadata{}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := run(); err == nil {
+				t.Fatal("boundary was accepted")
+			}
+		})
+	}
+	missing, err := store.ResolveReady(ctx, []preview.ReadySelection{selection})
+	if err != nil || len(missing) != 1 || missing[0] != nil {
+		t.Fatalf("missing catalog = %+v, %v", missing, err)
+	}
+	if err := store.RecordReady(ctx, selection, metadata); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordReady(ctx, selection, metadata); err != nil {
+		t.Fatalf("replacement: %v", err)
+	}
+	resolved, err := store.ResolveReady(ctx, []preview.ReadySelection{selection})
+	if err != nil || len(resolved) != 1 || resolved[0] == nil || *resolved[0] != metadata {
+		t.Fatalf("resolved catalog = %+v, %v", resolved, err)
+	}
+
+	backend := options.Backend.(*objectmemory.Backend)
+	scopeDigest := store.readyScopeDigest(cacheScope)
+	key := readyCatalogKey(scopeDigest)
+	object, err := backend.Get(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Put(ctx, key, []byte("corrupt"), objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ResolveReady(ctx, []preview.ReadySelection{selection}); !errors.Is(err, domain.ErrUnavailable) || store.Ready() {
+		t.Fatalf("corrupt resolve = %v, ready=%v", err, store.Ready())
+	}
+	if err := store.RecordReady(ctx, selection, metadata); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("corrupt update = %v", err)
+	}
+
+	exhaustedOptions := internalOptions(t, nil, 4)
+	exhausted, err := New(exhaustedOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exhaustedScope := exhausted.readyScopeDigest(cacheScope)
+	exhaustedRecord := readyCatalogRecord{SchemaVersion: schemaVersion, ScopeDigest: exhaustedScope, Revision: math.MaxUint64}
+	exhaustedBody, err := encodeReadyCatalog(exhaustedRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exhaustedOptions.Backend.Put(ctx, readyCatalogKey(exhaustedScope), exhaustedBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if err := exhausted.RecordReady(ctx, selection, metadata); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("revision exhaustion = %v", err)
+	}
+}
+
+func TestDurableKnownDownloadAndImmutablePublicationFailureMatrix(t *testing.T) {
+	ctx := context.Background()
+	base := objectmemory.New()
+	options := internalOptions(t, base, 4)
+	faults := &operationFaultBackend{Backend: base, DirectTransferBackend: base}
+	options.Backend, options.Transfers = faults, faults
+	store, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := internalBinding(t)
+	metadata := internalArtifact("known-generation", binding.Variant).Metadata()
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := store.CreateKnownDownload(canceled, binding, metadata); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled known download = %v", err)
+	}
+	if _, err := store.CreateKnownDownload(ctx, binding, preview.ArtifactMetadata{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid known download = %v", err)
+	}
+	faults.downloadErr = true
+	if _, err := store.CreateKnownDownload(ctx, binding, metadata); !errors.Is(err, domain.ErrUnavailable) || store.Ready() {
+		t.Fatalf("failed known download = %v, ready=%v", err, store.Ready())
+	}
+
+	key := generationManifestKey(store.bindingDigest(binding), store.generationDigest(store.bindingDigest(binding), metadata.GenerationID))
+	body := []byte("immutable")
+	if _, err := base.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	store.setReady(true)
+	if err := store.putImmutableOrVerify(ctx, key, body); err != nil {
+		t.Fatalf("identical immutable replay = %v", err)
+	}
+	if err := store.putImmutableOrVerify(ctx, key, []byte("different")); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("divergent immutable replay = %v", err)
+	}
+	faults.putErr = domain.NewError(domain.ErrorConflict, "injected immutable conflict")
+	faults.getErrKey = key.String()
+	if err := store.putImmutableOrVerify(ctx, key, body); !errors.Is(err, domain.ErrUnavailable) || store.Ready() {
+		t.Fatalf("immutable verification failure = %v, ready=%v", err, store.Ready())
+	}
+}
+
 func TestDurableStoreCorruptionLifecycleAndOpaqueLayout(t *testing.T) {
 	options := internalOptions(t, nil, 4)
 	store, err := New(options)

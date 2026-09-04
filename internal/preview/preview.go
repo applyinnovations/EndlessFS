@@ -88,6 +88,19 @@ type GenerationClaim struct {
 	ExpiresAt time.Time
 }
 
+// ReadySelection binds one already-authorized live source to an opaque
+// directory-local cache scope. CacheScope is derived by the application and
+// deliberately reveals neither a virtual path nor a provider object key.
+type ReadySelection struct {
+	CacheScope string
+	Binding    Binding
+}
+
+func (selection ReadySelection) Valid() bool {
+	digest, err := base64.RawURLEncoding.DecodeString(selection.CacheScope)
+	return err == nil && len(digest) == sha256.Size && base64.RawURLEncoding.EncodeToString(digest) == selection.CacheScope && selection.Binding.Valid()
+}
+
 func (c GenerationClaim) Valid() bool {
 	return c.ID != "" && len(c.ID) <= 128 && !strings.ContainsAny(c.ID, "\r\n\x00/") && c.Epoch > 0 && !c.ExpiresAt.IsZero()
 }
@@ -176,8 +189,17 @@ type Store interface {
 	Release(context.Context, Binding, GenerationClaim) error
 	Commit(context.Context, Binding, GenerationClaim, Artifact) error
 	Latest(context.Context, Binding) (ArtifactMetadata, error)
+	// ResolveReady reads the disposable ready projection for a bounded visible
+	// batch. Missing entries are nil and fall back to Latest's complete
+	// manifest/integrity validation path.
+	ResolveReady(context.Context, []ReadySelection) ([]*ArtifactMetadata, error)
+	RecordReady(context.Context, ReadySelection, ArtifactMetadata) error
 	Read(context.Context, Binding, string) (Artifact, error)
 	CreateDownload(context.Context, Binding, string) (domain.DownloadCapability, error)
+	// CreateKnownDownload is valid only for metadata returned by ResolveReady or
+	// immediately committed by this store. Artifacts use immutable generation
+	// keys, and the browser independently checks the returned manifest digest.
+	CreateKnownDownload(context.Context, Binding, ArtifactMetadata) (domain.DownloadCapability, error)
 	Ready() bool
 	DataOrigin() string
 }

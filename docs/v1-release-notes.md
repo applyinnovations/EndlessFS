@@ -2,14 +2,40 @@
 
 EndlessFS v1 provides the single-binary passkey identity system, private Drive control plane, direct capability data plane, trash, read-only public sharing, administration and recovery, accessible embedded browser application, and closed data-only theme system described in [the v1 specification](./v1-specification.md).
 
+The v0.7.0 provider-efficiency release appends schema 011. Bounded
+content-addressed domain packs replace per-page request amplification while one
+conditional domain-head CAS remains the visibility point. At 10,000 logical
+items, composed provider totals are 3 for browse; 5 for copy, move, Trash,
+restore, or permanent deletion; 3 for lost-response replay; 5 for size-only
+upload planning; and 9 when every size needs a fingerprint lookup. These
+namespace operations make zero file-provider requests and never relocate file
+bytes.
+
+One browser transaction now admits, completes, or cancels up to 10,000 real
+uploads. The unavoidable object/session operations run through 100 workers;
+authenticated progress every 1,000 items bounds crash rework, and whole-batch
+cancellation publishes one compact bitmap instead of rewriting every admission
+record. Each composed lifecycle phase performs 10,014 provider requests rather
+than 20,700 admission, 100,000 completion, or 90,000 cancellation requests.
+Ready-preview resolution and checkpoint garbage collection are likewise
+bounded by the visible window and one authenticated 128-entry plan page.
+
+The `010 -> 011` feature-only migration verifies complete frozen authority,
+does not rewrite file blobs, and leaves schema-010 pages readable until their
+first eligible packed mutation. Immutable fixtures cover portable-minimal, both
+real application writer profiles, and the complete signed-passkey corpus.
+Request count, modeled cost/latency, crash, lost-success, corruption,
+multi-replica, race, migration, and portability evidence is recorded in
+`docs/storage-schema-011-implementation.md`.
+
 The browser upload scheduler now ports the 100-worker shared-queue model from
 Google's open-source `upload-cloud-storage` action instead of embedding an
 unexplained eight-transfer maximum or guessing from CPU count and estimated
 download speed. One 100-file selection uses one batch admission, starts 100
 browser tasks, saturates all six HTTP/1.1 fixture connections, sends exactly
-100 direct data bodies and completion requests, and refreshes the directory
-once after the burst drains. Data Saver reduces the worker count to one;
-confirmed-offset recovery, cancellation, bounded retry/backoff, and the rule
+100 direct data bodies and one atomic batch-completion request, and refreshes
+the directory once after the burst drains. Data Saver reduces the worker count
+to one; confirmed-offset recovery, cancellation, bounded retry/backoff, and the rule
 that object bytes never enter the Go service remain unchanged. Pinned upstream
 sources and licenses are recorded in
 `docs/upload-worker-pool-upstream-evidence.md`.
@@ -108,14 +134,16 @@ Checkpoint v3 replaces the v0.1.14 body-hashing path with a single ordered provi
 Directory metadata now carries persisted recursive-byte and recursive-file-count aggregates. File upload or replacement, move, copy, trash, restore, and permanent deletion update every affected ancestor and the live or trash area root through the same durable commit as the visible tree mutation. Directory `size` and `fileCount` are therefore cheap prefix-total lookups; an area root reports that area's total logical bytes and files. A file contributes one even when its size is zero, while directories are not counted. Overflow or inconsistent canonical aggregates fail closed. Completion attempts that lose an unrelated ancestor-root race advance through the durable upload record and retry from authoritative state; true same-target races retain one version-precondition winner. Deterministic tests force eight replicas through multi-file, same-upload, and same-target completion races, completion/abort races, contested folder rename/trash/restore/delete, and every folder-operation commit boundary. Both aggregates are covered by checkpoint/raw-copy portability and advertised as required `recursive-byte-aggregates-v1` and `recursive-file-count-aggregates-v1` storage features.
 
 Durable upgrades run through an append-only storage-schema ledger rather than
-release-specific startup branches. It records schemas 001 through 010 with only
+release-specific startup branches. It records schemas 001 through 011 with only
 adjacent transforms. Startup resolves one exact epoch and executes the complete
 remaining suffix. The `007 -> 008` edge installs the owner namespace graph and
 consistency-domain foundation. The `008 -> 009` edge authenticates every source
 domain and state key, binds unchanged application payloads to typed records,
 and deterministically repartitions authority by invariant. The `009 -> 010`
 edge proves and restores retained indexed application authority before the
-central activation barrier permits the new epoch. All edges reuse
+central activation barrier permits the new epoch. The `010 -> 011` edge
+activates bounded packs and upload transactions after verifying the frozen
+typed-domain closure. All edges reuse
 immutable file blobs in place and never read or copy their bodies. Each edge
 quiesces the durable write gate, upgrades and verifies its owned records,
 advances writer/superblock/gate markers, checkpoints, and reopens before the

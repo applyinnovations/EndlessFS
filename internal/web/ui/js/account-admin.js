@@ -260,7 +260,7 @@
       showState("drive-state", "");
       renderFileLoadingItems();
     }
-    const query = new URLSearchParams({ path: state.publicPath, limit: "100" });
+    const query = new URLSearchParams({ path: state.publicPath, limit: String(browserPageSize) });
     if (append && state.publicCursor) query.set("cursor", state.publicCursor);
     try {
       const page = await api(`/api/v1/public/shares/${encodeURIComponent(state.publicToken)}?${query.toString()}`);

@@ -27,6 +27,8 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/directories", api.createDirectory)
 	mux.HandleFunc("POST /api/v1/uploads", api.createUpload)
 	mux.HandleFunc("POST /api/v1/uploads/batch", api.createUploadBatch)
+	mux.HandleFunc("POST /api/v1/uploads/batch/complete", api.completeUploadBatch)
+	mux.HandleFunc("DELETE /api/v1/uploads/batch", api.abortUploadBatch)
 	mux.HandleFunc("POST /api/v1/uploads/plan/sizes", api.planUploadSizes)
 	mux.HandleFunc("POST /api/v1/uploads/plan/fingerprints", api.planUploadFingerprints)
 	mux.HandleFunc("GET /api/v1/uploads/{uploadID}", api.uploadStatus)
@@ -38,6 +40,8 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/files/trash", api.trashFiles)
 	mux.HandleFunc("GET /api/v1/operations/{operationID}", api.operation)
 	mux.HandleFunc("GET /api/v1/trash", api.listTrash)
+	mux.HandleFunc("POST /api/v1/trash/restore", api.restoreTrashBatch)
+	mux.HandleFunc("POST /api/v1/trash/delete", api.deleteTrashBatch)
 	mux.HandleFunc("POST /api/v1/trash/{trashID}/restore", api.restoreTrash)
 	mux.HandleFunc("DELETE /api/v1/trash/{trashID}", api.deleteTrash)
 	mux.HandleFunc("POST /api/v1/trash/empty", api.emptyTrash)
@@ -374,8 +378,8 @@ func parseLimit(value string) (int, error) {
 		return 0, nil
 	}
 	limit, err := strconv.Atoi(value)
-	if err != nil || limit < 1 || limit > 1000 {
-		return 0, domain.NewError(domain.ErrorInvalid, "limit must be between 1 and 1000")
+	if err != nil || limit < 1 || limit > 10_000 {
+		return 0, domain.NewError(domain.ErrorInvalid, "limit must be between 1 and 10000")
 	}
 	return limit, nil
 }
@@ -531,13 +535,14 @@ func (api *identityAPI) createUploadBatch(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var request struct {
-		Uploads []uploadRequest `json:"uploads"`
+		Defaults *uploadRequest  `json:"defaults,omitempty"`
+		Uploads  []uploadRequest `json:"uploads"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
 	}
 	if len(request.Uploads) < 1 || len(request.Uploads) > drive.MaxUploadBatchItems {
-		writeProblem(w, r, domain.NewError(domain.ErrorInvalid, "upload batch must contain 1 to 100 items"))
+		writeProblem(w, r, domain.NewError(domain.ErrorInvalid, "upload batch must contain 1 to 10000 items"))
 		return
 	}
 	type result struct {
@@ -550,6 +555,9 @@ func (api *identityAPI) createUploadBatch(w http.ResponseWriter, r *http.Request
 	validIndexes := make([]int, 0, len(request.Uploads))
 	key := r.Header.Get("Idempotency-Key")
 	for index, item := range request.Uploads {
+		if request.Defaults != nil {
+			item = withUploadDefaults(item, *request.Defaults)
+		}
 		path, err := uploadPath(item)
 		if err != nil {
 			results[index] = result{Index: index, ErrorKind: domain.KindOf(err)}
@@ -581,6 +589,25 @@ func (api *identityAPI) createUploadBatch(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusCreated, map[string]any{"uploads": results})
 }
 
+func withUploadDefaults(item, defaults uploadRequest) uploadRequest {
+	if item.Path == "" {
+		item.Path = defaults.Path
+	}
+	if item.MediaType == "" {
+		item.MediaType = defaults.MediaType
+	}
+	if item.Conflict == "" {
+		item.Conflict = defaults.Conflict
+	}
+	if item.ExpectedVersion == "" {
+		item.ExpectedVersion = defaults.ExpectedVersion
+	}
+	if !item.Resumable {
+		item.Resumable = defaults.Resumable
+	}
+	return item
+}
+
 func (api *identityAPI) uploadStatus(w http.ResponseWriter, r *http.Request) {
 	current, ok := api.authenticated(w, r)
 	if !ok {
@@ -603,6 +630,7 @@ func (api *identityAPI) completeUpload(w http.ResponseWriter, r *http.Request) {
 		Path      string `json:"path"`
 		Size      int64  `json:"size"`
 		MediaType string `json:"mediaType"`
+		CRC32C    string `json:"crc32c,omitempty"`
 	}
 	if !decodeJSON(w, r, &request) {
 		return
@@ -610,13 +638,51 @@ func (api *identityAPI) completeUpload(w http.ResponseWriter, r *http.Request) {
 	path, err := parsePath(request.Path)
 	if err == nil {
 		var entry domain.Entry
-		entry, err = api.drive.CompleteUpload(r.Context(), current.Record.UserID, domain.CompleteUploadRequest{UploadID: domain.UploadID(r.PathValue("uploadID")), Path: path, Size: request.Size, MediaType: request.MediaType})
+		entry, err = api.drive.CompleteUpload(r.Context(), current.Record.UserID, domain.CompleteUploadRequest{UploadID: domain.UploadID(r.PathValue("uploadID")), Path: path, Size: request.Size, MediaType: request.MediaType, CRC32C: request.CRC32C})
 		if err == nil {
 			writeJSON(w, http.StatusOK, entry)
 			return
 		}
 	}
 	writeProblem(w, r, err)
+}
+
+func (api *identityAPI) completeUploadBatch(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.idempotentMutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Uploads []domain.CompleteUploadBatchItem `json:"uploads"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	result, err := api.drive.CompleteUploadBatch(r.Context(), current.Record.UserID, domain.CompleteUploadBatchRequest{Items: request.Uploads, IdempotencyKey: r.Header.Get("Idempotency-Key")})
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (api *identityAPI) abortUploadBatch(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.idempotentMutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		UploadIDs []domain.UploadID `json:"uploadIDs"`
+		BatchID   string            `json:"batchID,omitempty"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if err := api.drive.AbortUploadBatch(r.Context(), current.Record.UserID, domain.AbortUploadBatchRequest{UploadIDs: request.UploadIDs, BatchID: request.BatchID, IdempotencyKey: r.Header.Get("Idempotency-Key")}); err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (api *identityAPI) abortUpload(w http.ResponseWriter, r *http.Request) {
@@ -815,6 +881,27 @@ func (api *identityAPI) restoreTrash(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusAccepted, operation)
 }
+
+func (api *identityAPI) restoreTrashBatch(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.idempotentMutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		TrashIDs []string            `json:"trashIDs"`
+		Conflict domain.ConflictMode `json:"conflict,omitempty"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	result, err := api.drive.RestoreBatch(r.Context(), current.Record.UserID, request.TrashIDs, request.Conflict, r.Header.Get("Idempotency-Key"))
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
 func (api *identityAPI) deleteTrash(w http.ResponseWriter, r *http.Request) {
 	current, ok := api.idempotentMutation(w, r)
 	if !ok {
@@ -830,6 +917,26 @@ func (api *identityAPI) deleteTrash(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusAccepted, operation)
 }
+
+func (api *identityAPI) deleteTrashBatch(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.idempotentMutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		TrashIDs []string `json:"trashIDs"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	result, err := api.drive.PermanentDeleteBatch(r.Context(), current.Record.UserID, request.TrashIDs, r.Header.Get("Idempotency-Key"))
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
 func (api *identityAPI) emptyTrash(w http.ResponseWriter, r *http.Request) {
 	current, ok := api.idempotentMutation(w, r)
 	if !ok {

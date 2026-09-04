@@ -19,6 +19,10 @@ type Repository struct {
 	store state.Store
 }
 
+type stateMultiReader interface {
+	GetMany(context.Context, []state.Key) ([]state.Value, error)
+}
+
 func NewRepository(store state.Store) *Repository {
 	return &Repository{store: store}
 }
@@ -238,6 +242,44 @@ func (r *Repository) Session(ctx context.Context, rawToken string) (model.Sessio
 		return model.Session{}, "", domain.NewError(domain.ErrorNotFound, "session not found")
 	}
 	return getRecord[model.Session](ctx, r.store, sessionKey(owner, rawToken))
+}
+
+// SessionAndAccount authenticates both records from one consistency-domain
+// snapshot when the production store exposes its portable multi-read path.
+// The fallback keeps narrow test stores source-compatible without weakening
+// production's one-revision authentication guarantee.
+func (r *Repository) SessionAndAccount(ctx context.Context, rawToken string) (model.Session, state.Version, model.Account, error) {
+	owner, _, err := secret.ParseScopedBearerToken(rawToken)
+	if err != nil {
+		return model.Session{}, "", model.Account{}, domain.NewError(domain.ErrorNotFound, "session not found")
+	}
+	sessionStateKey := sessionKey(owner, rawToken)
+	accountStateKey := state.MustKey(state.NamespaceAccounts, owner.String())
+	reader, ok := r.store.(stateMultiReader)
+	if !ok {
+		session, version, sessionErr := r.Session(ctx, rawToken)
+		if sessionErr != nil {
+			return model.Session{}, "", model.Account{}, sessionErr
+		}
+		account, _, accountErr := r.Account(ctx, owner)
+		return session, version, account, accountErr
+	}
+	values, err := reader.GetMany(ctx, []state.Key{sessionStateKey, accountStateKey})
+	if err != nil {
+		return model.Session{}, "", model.Account{}, err
+	}
+	if len(values) != 2 {
+		return model.Session{}, "", model.Account{}, domain.NewError(domain.ErrorInvalid, "state multi-read returned an invalid result count")
+	}
+	var session model.Session
+	if err := state.DecodeJSON(values[0].Data, &session); err != nil {
+		return model.Session{}, "", model.Account{}, err
+	}
+	var account model.Account
+	if err := state.DecodeJSON(values[1].Data, &account); err != nil {
+		return model.Session{}, "", model.Account{}, err
+	}
+	return session, values[0].Version, account, nil
 }
 
 func (r *Repository) DeleteSession(ctx context.Context, rawToken string, version state.Version) error {

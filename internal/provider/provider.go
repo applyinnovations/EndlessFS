@@ -42,6 +42,7 @@ type TrashStorage interface {
 type BatchStorage interface {
 	BatchCopyMove(context.Context, domain.UserID, []domain.CopyRequest, bool, string) (domain.NamespaceBatchResult, error)
 	BatchMoveToTrash(context.Context, domain.UserID, []domain.TrashRequest, string) (domain.NamespaceBatchResult, error)
+	BatchRestoreFromTrash(context.Context, domain.UserID, []string, domain.ConflictMode, string) (domain.NamespaceBatchResult, error)
 	BatchDeleteFromTrash(context.Context, domain.UserID, []string, string) (domain.NamespaceBatchResult, error)
 	GetBatchOperation(context.Context, domain.UserID, domain.OperationID) (domain.Operation, error)
 }
@@ -52,6 +53,15 @@ type BatchStorage interface {
 // implementation must not execute one complete state transaction per item.
 type UploadBatchStorage interface {
 	CreateUploadBatch(context.Context, domain.Scope, []domain.CreateUploadRequest) ([]domain.UploadCapability, error)
+}
+
+// UploadTransactionStorage completes or revokes a product-scale selection
+// through one control-plane request and one atomic terminal state publication.
+// Distinct provider objects remain unavoidable per-item effects, but state
+// persistence and browser composition must never repeat per item.
+type UploadTransactionStorage interface {
+	CompleteUploadBatch(context.Context, domain.Scope, domain.CompleteUploadBatchRequest) (domain.CompleteUploadBatchResult, error)
+	AbortUploadBatch(context.Context, domain.Scope, domain.AbortUploadBatchRequest) error
 }
 
 // UploadPlanningStorage exposes metadata-only duplicate lookup. Local file
@@ -70,6 +80,7 @@ type NamespaceStorage interface {
 	TrashStorage
 	BatchStorage
 	UploadBatchStorage
+	UploadTransactionStorage
 }
 
 // DuplicateStorage is the optional provider-neutral duplicate reconciliation

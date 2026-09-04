@@ -53,6 +53,12 @@ func DomainPageKey(kind ConsistencyDomainKind, domainID, pageID string) objectst
 	return fixedKey("domains/" + domainKeyKind(kind) + "/" + digestPart(domainID) + "/pages/" + digestPart(pageID) + ".json")
 }
 
+func DomainPagePackKey(kind ConsistencyDomainKind, domainID, packID string) objectstore.Key {
+	validateDomainKeyPart(domainID)
+	validateDomainKeyPart(packID)
+	return fixedKey("domains/" + domainKeyKind(kind) + "/" + digestPart(domainID) + "/packs/" + digestPart(packID) + ".bin")
+}
+
 func DomainSnapshotKey(kind ConsistencyDomainKind, domainID, digest string) objectstore.Key {
 	validateDomainKeyPart(domainID)
 	validateDomainKeyPart(digest)
@@ -158,6 +164,12 @@ func ProjectionPageKey(ownerID string, kind ProjectionKind, pageID string) objec
 	validateDomainKeyPart(ownerID)
 	validateDomainKeyPart(pageID)
 	return fixedKey("projections/" + digestPart(ownerID) + "/" + projectionKeyKind(kind) + "/pages/" + digestPart(pageID) + ".json")
+}
+
+func ProjectionPagePackKey(ownerID string, kind ProjectionKind, packID string) objectstore.Key {
+	validateDomainKeyPart(ownerID)
+	validateDomainKeyPart(packID)
+	return fixedKey("projections/" + digestPart(ownerID) + "/" + projectionKeyKind(kind) + "/packs/" + digestPart(packID) + ".bin")
 }
 
 func ProjectionPrefix() string { return root + "projections/" }
@@ -410,6 +422,18 @@ func GarbageCollectionSessionKey(checkpointID string) objectstore.Key {
 	return fixedKey("maintenance/gc/" + encodedPart(checkpointID) + "/session.json")
 }
 
+func GarbageCollectionPlanKey(checkpointID string) objectstore.Key {
+	return fixedKey("maintenance/gc/" + encodedPart(checkpointID) + "/plan.json")
+}
+
+func GarbageCollectionPlanPageKey(checkpointID string, index uint64) objectstore.Key {
+	return fixedKey("maintenance/gc/" + encodedPart(checkpointID) + "/plan/" + fmt.Sprintf("%016x.json", index))
+}
+
+func GarbageCollectionPlanPagePrefix(checkpointID string) string {
+	return root + "maintenance/gc/" + encodedPart(checkpointID) + "/plan/"
+}
+
 func GarbageCollectionMarkKey(checkpointID, role, targetKey string) objectstore.Key {
 	return fixedKey("maintenance/gc/" + encodedPart(checkpointID) + "/marks/" + role + "/" + digestPart(targetKey) + ".json")
 }
@@ -435,6 +459,30 @@ func LeaseKey(backendKind, leaseID string) objectstore.Key {
 		panic(err)
 	}
 	return fixedKey(fmt.Sprintf("leases/%s/%s.json", backendKind, encodedPart(leaseID)))
+}
+
+func UploadLeaseSegmentKey(backendKind, batchID string, segment uint64) objectstore.Key {
+	if err := ValidateNamespace(backendKind); err != nil {
+		panic(err)
+	}
+	validateDomainKeyPart(batchID)
+	return fixedKey(fmt.Sprintf("leases/%s/batches/%s/%016x.bin", backendKind, digestPart(batchID), segment))
+}
+
+func UploadTransactionSegmentKey(backendKind, transactionID string, segment uint64) objectstore.Key {
+	if err := ValidateNamespace(backendKind); err != nil {
+		panic(err)
+	}
+	validateDomainKeyPart(transactionID)
+	return fixedKey(fmt.Sprintf("leases/%s/upload-transactions/%s/%016x.bin", backendKind, digestPart(transactionID), segment))
+}
+
+func UploadTransactionProgressKey(backendKind, transactionID string) objectstore.Key {
+	if err := ValidateNamespace(backendKind); err != nil {
+		panic(err)
+	}
+	validateDomainKeyPart(transactionID)
+	return fixedKey(fmt.Sprintf("leases/%s/upload-transactions/%s/progress.bin", backendKind, digestPart(transactionID)))
 }
 
 func LeasePrefix() string { return root + "leases/" }

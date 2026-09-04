@@ -37,11 +37,18 @@ type NamespaceMutationResult struct {
 	Entry              *DirectoryEntry                `json:"entry,omitempty"`
 	Batch              *NamespaceBatch                `json:"batch,omitempty"`
 	Upload             *NamespaceUploadMutationResult `json:"upload,omitempty"`
+	UploadBatch        *NamespaceUploadBatchResult    `json:"uploadBatch,omitempty"`
 }
 
 type NamespaceUploadMutationResult struct {
 	UploadID string `json:"uploadID"`
 	State    string `json:"state"`
+}
+
+type NamespaceUploadBatchResult struct {
+	TransactionID string `json:"transactionID"`
+	ItemCount     uint64 `json:"itemCount"`
+	State         string `json:"state"`
 }
 
 type NamespaceBatch struct {
@@ -107,6 +114,9 @@ func ValidateNamespaceMutationResult(result NamespaceMutationResult) error {
 	if result.Upload != nil {
 		kinds++
 	}
+	if result.UploadBatch != nil {
+		kinds++
+	}
 	if result.SchemaVersion != 1 || !validDomainDigest(result.RequestFingerprint) || kinds != 1 {
 		return domain.NewError(domain.ErrorInvalid, "invalid namespace mutation result")
 	}
@@ -117,6 +127,9 @@ func ValidateNamespaceMutationResult(result NamespaceMutationResult) error {
 	}
 	if result.Upload != nil && (!validDomainText(result.Upload.UploadID) || result.Upload.State != "created" && result.Upload.State != "initializing" && result.Upload.State != "active" && result.Upload.State != "completed" && result.Upload.State != "aborted") {
 		return domain.NewError(domain.ErrorInvalid, "invalid namespace upload result")
+	}
+	if result.UploadBatch != nil && (!validDomainDigest(result.UploadBatch.TransactionID) || result.UploadBatch.ItemCount < 1 || result.UploadBatch.ItemCount > MaxPortableUploadBatchItems || result.UploadBatch.State != "completed" && result.UploadBatch.State != "aborted") {
+		return domain.NewError(domain.ErrorInvalid, "invalid namespace upload batch result")
 	}
 	_, err := EncodeCanonical(result)
 	return err

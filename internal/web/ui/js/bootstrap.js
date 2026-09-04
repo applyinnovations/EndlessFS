@@ -300,11 +300,14 @@
     const dark = matchMedia("(prefers-color-scheme: dark)").matches;
     const themeLoad = api(themePreferenceURL(dark)).then(applyTheme).catch(() => announce("Your selected theme could not be loaded; a built-in appearance remains active."));
     await Promise.all([routeLoad, themeLoad]);
-    await restoreTransferLedger();
     seedTransferPreviewFixture();
     if (document.fonts && document.fonts.ready) await document.fonts.ready;
     byID("loading-view").hidden = true;
     byID("app").dataset.state = "authenticated";
+    // Transfer history is device-local secondary state. Restoring it must
+    // never hold the file workspace behind a full-page loading boundary.
+    // The ledger owns its warning path, so intentionally detach this work.
+    restoreTransferLedger();
   }
 
   async function start() {

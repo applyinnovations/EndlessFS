@@ -489,7 +489,10 @@ func (walker *checkpointReachabilityWalker) walkTree(ctx context.Context, sessio
 
 func (walker *checkpointReachabilityWalker) walkTreePage(ctx context.Context, session *consistencyDomainTreeSession, reference domainPageRef, purpose string, visit func(storageformat.DomainEntry) error) error {
 	key := session.pageKey(reference.root.Digest)
-	seenKey := purpose + "\x00" + key.String()
+	if reference.root.PackID != "" {
+		key = storageformat.DomainPagePackKey(session.reference.Kind, session.reference.ID, reference.root.PackID)
+	}
+	seenKey := purpose + "\x00" + key.String() + "\x00" + reference.root.Digest
 	seen, err := walker.visited.Seen(seenKey)
 	if err != nil {
 		return err
@@ -516,7 +519,7 @@ func (walker *checkpointReachabilityWalker) walkTreePage(ctx context.Context, se
 		return nil
 	}
 	for _, child := range page.Children {
-		childReference := domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}
+		childReference := domainPageRef{root: storageformat.DomainTreeRoot{Digest: child.Digest, PackID: child.PackID, Level: child.Level, EntryCount: child.EntryCount, ByteCount: child.ByteCount}, firstKey: child.FirstKey, lastKey: child.LastKey}
 		if err := walker.walkTreePage(ctx, session, childReference, purpose, visit); err != nil {
 			return err
 		}
@@ -656,7 +659,7 @@ func isSchema008CollectableAuthorityGarbageKey(key string) bool {
 	if len(segments) == 6 && segments[0] == "endlessfs" && segments[1] == "v1" && segments[2] == "domains" && segments[3] == "catalog" && segments[4] == "pages" {
 		return strings.HasSuffix(segments[5], ".json")
 	}
-	if len(segments) != 7 || segments[0] != "endlessfs" || segments[1] != "v1" || segments[2] != "domains" || segments[4] == "" || segments[5] != "pages" || !strings.HasSuffix(segments[6], ".json") {
+	if len(segments) != 7 || segments[0] != "endlessfs" || segments[1] != "v1" || segments[2] != "domains" || segments[4] == "" || segments[5] != "pages" && segments[5] != "packs" || segments[5] == "pages" && !strings.HasSuffix(segments[6], ".json") || segments[5] == "packs" && !strings.HasSuffix(segments[6], ".bin") {
 		return false
 	}
 	switch storageformat.ConsistencyDomainKind(segments[3]) {

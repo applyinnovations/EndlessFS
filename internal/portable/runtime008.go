@@ -92,6 +92,20 @@ func (s *FileStore) CreateUploadBatch(ctx context.Context, scope domain.Scope, r
 	return s.createUploadBatch008(ctx, scope, requests)
 }
 
+func (s *FileStore) CompleteUploadBatch(ctx context.Context, scope domain.Scope, request domain.CompleteUploadBatchRequest) (domain.CompleteUploadBatchResult, error) {
+	if err := validateFileRequest(ctx, scope); err != nil {
+		return domain.CompleteUploadBatchResult{}, err
+	}
+	return s.completeUploadBatch011(ctx, scope, request)
+}
+
+func (s *FileStore) AbortUploadBatch(ctx context.Context, scope domain.Scope, request domain.AbortUploadBatchRequest) error {
+	if err := validateFileRequest(ctx, scope); err != nil {
+		return err
+	}
+	return s.abortUploadBatch011(ctx, scope, request)
+}
+
 func (s *FileStore) UploadStatus(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) (domain.UploadStatus, error) {
 	if err := validateFileRequest(ctx, scope); err != nil {
 		return domain.UploadStatus{}, err

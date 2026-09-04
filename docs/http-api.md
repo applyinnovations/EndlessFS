@@ -50,20 +50,24 @@ in [upload-worker-pool-upstream-evidence.md](./upload-worker-pool-upstream-evide
 | `GET` | `/api/v1/files/stat` | `path` |
 | `POST` | `/api/v1/directories` | `path`, optional `conflict`, `expectedVersion` |
 | `POST` | `/api/v1/uploads` | `path` or directory `path` plus `name`, `size`, `mediaType`, `resumable`, optional conflict/version |
-| `POST` | `/api/v1/uploads/batch` | `uploads` with 1–100 upload initialization objects; each may carry a stable `idempotencyKey` for item-level replay independent of the batch request key |
-| `POST` | `/api/v1/uploads/plan/sizes` | `items` with 1–1000 client transfer `id`, virtual destination `path`, and local `size`; returns per-item target metadata, `fingerprintRequired`, and an opaque exact-phase token |
-| `POST` | `/api/v1/uploads/plan/fingerprints` | Opaque size-phase `token` and 1–1000 ambiguous items with `id`, `path`, `size`, canonical `md5`, and `crc32c`; returns `upload`, `skip`, or same-owner metadata-only `reuse` decisions |
+| `POST` | `/api/v1/uploads/batch` | `uploads` with 1–10,000 upload initialization objects; each may carry a stable `idempotencyKey` for item-level replay independent of the batch request key. Capabilities carry safe `batchID`, `batchIndex`, and `batchCount` recovery bindings. |
+| `POST` | `/api/v1/uploads/batch/complete` | `uploads` with 1–10,000 ordered `uploadID`/provider-attested `crc32c` items; one idempotency key binds the complete atomic publication. |
+| `DELETE` | `/api/v1/uploads/batch` | `uploadIDs` with 1–10,000 ordered IDs and optional `batchID`. The batch ID is accepted only for the complete admitted batch and enables one compact cancellation bitmap; partial/legacy selections remain individually bound. |
+| `POST` | `/api/v1/uploads/plan/sizes` | `items` with 1–10,000 client transfer `id`, virtual destination `path`, and local `size`; returns per-item target metadata, `fingerprintRequired`, and an opaque exact-phase token. |
+| `POST` | `/api/v1/uploads/plan/fingerprints` | Opaque size-phase `token` and 1–10,000 ambiguous items with `id`, `path`, `size`, canonical `md5`, and `crc32c`; returns `upload`, `skip`, or same-owner metadata-only `reuse` decisions. |
 | `GET` | `/api/v1/uploads/{uploadID}` | Owner-scoped `active`, `completed`, `aborted`, or `expired` state with the safe provider-confirmed offset; no capability or provider-native material |
 | `POST` | `/api/v1/uploads/{uploadID}/complete` | `path`, `size`, `mediaType`; stored-object fingerprints come from provider metadata |
 | `DELETE` | `/api/v1/uploads/{uploadID}` | Abort and invalidate the upload capability |
 | `POST` | `/api/v1/downloads` | `path`, exact `version`, optional `preview` |
-| `POST` | `/api/v1/files/copy`, `/move` | Singular `source`/`destination`, or `items` with 1–100 source/destination objects; optional conflict/version fields |
-| `POST` | `/api/v1/files/trash` | `paths` with 1–100 virtual paths |
+| `POST` | `/api/v1/files/copy`, `/move` | Singular `source`/`destination`, or `items` with 1–10,000 source/destination objects; optional conflict/version fields. |
+| `POST` | `/api/v1/files/trash` | `paths` with 1–10,000 virtual paths. |
 | `GET` | `/api/v1/operations/{operationID}` | Poll a session-owner-scoped provider or aggregate operation |
 | `GET` | `/api/v1/trash` | `limit`, owner-scoped opaque `cursor` |
+| `POST` | `/api/v1/trash/restore` | `trashIDs` with 1–10,000 records and optional `conflict`; one atomic owner-namespace publication. |
+| `POST` | `/api/v1/trash/delete` | `trashIDs` with 1–10,000 records; one atomic permanent metadata removal. |
 | `POST` | `/api/v1/trash/{trashID}/restore` | Optional `conflict` (`fail` default or `rename`) |
 | `DELETE` | `/api/v1/trash/{trashID}` | Permanently delete exactly one trash record |
-| `POST` | `/api/v1/trash/empty` | `confirm: true`; bounded to 100 records per call |
+| `POST` | `/api/v1/trash/empty` | `confirm: true`; bounded to 10,000 records per call. |
 
 `preview: true` is accepted only for provider-validated PNG, JPEG, GIF, WebP, PDF, and UTF-8 `text/plain` within `ENDLESSFS_TEXT_PREVIEW_MAX_BYTES`. HTML, JavaScript, SVG, XML, office, unknown, oversized, and media-spoofed files remain attachment-only.
 
@@ -71,7 +75,7 @@ Every entry returns `fileCount`. A file has `fileCount: 1`. A directory has the 
 
 In schema 009, upload capabilities target their final immutable blob key and completion publishes metadata only after provider checksum verification. Same-owner file copies reuse that blob. Folder copy, move, Trash, restore, and deletion attach or detach one immutable snapshot and update only affected namespace ancestors; their synchronous control-plane cost does not grow with the number of descendants and they do not issue provider byte copy/move/delete operations.
 
-Upload planning is a metadata-only control-plane optimization over schema-010
+Upload planning is a metadata-only control-plane optimization over schema-011
 namespace state. The size route may build or incrementally refresh a separate
 rebuildable projection using state-backend GET/PUT operations; the warm size
 and fingerprint routes issue only state-backend GETs. Neither route calls the
@@ -83,6 +87,14 @@ returned virtual source path and logical version, so its authorization,
 idempotency, atomic publication, and conflict rules remain unchanged. Detailed
 request economics and browser recovery evidence are in
 [smart-upload-planning-evidence.md](./smart-upload-planning-evidence.md).
+
+The browser persists upload plan decisions, batch membership, stable item and
+transaction idempotency keys, progress, and terminal state in IndexedDB. A
+refresh or connection loss resumes the same batch rather than allocating new
+provider sessions. Admission, completion, and whole-batch cancellation each
+use one browser control-plane request and bounded server-side provider
+concurrency; object bytes continue to flow only between the browser and the
+direct provider capability.
 
 `GET /api/v1/files` returns `{ "current": Entry, "entries": [Entry...], "nextCursor": "..." }`. `current` is the directory represented by `path`; its `size`, `fileCount`, and every child row come from the same immutable manifest snapshot. Every subsequent page selected by `nextCursor` repeats that exact `current` entry even if the live directory changes between requests.
 

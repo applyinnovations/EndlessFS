@@ -41,11 +41,22 @@ func TestConsistencyDomainTreeDescriptorAndCacheDenialMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	lateBinding := newConsistencyDomainTreeSession(newConsistencyDomainStore(objectmemory.New(), nil), reference)
+	lateBinding.enablePackedWrites("late-binding-source")
+	if _, err := lateBinding.writePage(ctx, page); err != nil {
+		t.Fatal(err)
+	}
+	if err := lateBinding.bindPackedMutation("late-binding-mutation"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("late packed mutation binding error = %v", err)
+	}
 	if err := verifyConsistencyDomainPageRef(page, domainPageRef{root: written.root, firstKey: "wrong", lastKey: written.lastKey}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("descriptor key-bound error = %v", err)
 	}
 	if _, err := session.readPage(ctx, domainPageRef{root: storageformat.DomainTreeRoot{Digest: written.root.Digest, Level: written.root.Level, EntryCount: written.root.EntryCount + 1, ByteCount: written.root.ByteCount}}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("cached descriptor mismatch error = %v", err)
+	}
+	if _, err := session.rebuild(ctx, storageformat.DomainTreeRoot{EntryCount: math.MaxUint64}, nil); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("overflowing rebuild cardinality error = %v", err)
 	}
 
 	corruptCache := newConsistencyDomainTreeSession(newConsistencyDomainStore(objectmemory.New(), nil), reference)
@@ -61,8 +72,8 @@ func TestConsistencyDomainTreeDescriptorAndCacheDenialMatrix(t *testing.T) {
 	}
 	missingKnown := newConsistencyDomainTreeSession(newConsistencyDomainStore(objectmemory.New(), nil), reference)
 	missingKnown.known[written.root.Digest] = written.root
-	if _, err := missingKnown.writePage(ctx, page); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("missing known page error = %v", err)
+	if reused, err := missingKnown.writePage(ctx, page); err != nil || reused.root != written.root {
+		t.Fatalf("authenticated immutable page reuse = %+v, %v", reused, err)
 	}
 
 	collisionBackend := objectmemory.New()
@@ -322,5 +333,232 @@ func TestConsistencyDomainTreeStreamingFailureBoundaries(t *testing.T) {
 	page := storageformat.DomainPage{SchemaVersion: 1, DomainID: reference.ID, Kind: reference.Kind, Level: 0, Entries: []storageformat.DomainEntry{entry}}
 	if _, err := conflictSession.writePage(ctx, page); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("conflicting page verification read error = %v", err)
+	}
+
+	emptyBuilder := newConsistencyDomainTreeBuilder(ctx, newConsistencyDomainTreeSession(newConsistencyDomainStore(objectmemory.New(), nil), reference))
+	if err := emptyBuilder.flushLeaf(); err != nil {
+		t.Fatalf("empty leaf flush = %v", err)
+	}
+	emptyBuilder.levels = [][]domainPageRef{{}}
+	if err := emptyBuilder.flushLevel(0); err != nil {
+		t.Fatalf("empty level flush = %v", err)
+	}
+	if root, err := emptyBuilder.Finish(); err != nil || root.Digest != "" {
+		t.Fatalf("empty finish = %+v, %v", root, err)
+	}
+
+	addFailure := newConsistencyDomainTreeBuilder(ctx, writeSession)
+	if err := addFailure.Add(entry); err != nil {
+		t.Fatal(err)
+	}
+	if err := addFailure.Add(storageformat.DomainEntry{Key: "oversized", Value: make([]byte, storageformat.MaxCanonicalBytes), LogicalVersion: "version"}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("add-triggered leaf publication error = %v", err)
+	}
+	finishFailure := newConsistencyDomainTreeBuilder(ctx, writeSession)
+	finishFailure.levels = [][]domainPageRef{{
+		{root: storageformat.DomainTreeRoot{Digest: storageformat.Digest([]byte("left")), Level: 0, EntryCount: 1}, firstKey: "a", lastKey: "a"},
+		{root: storageformat.DomainTreeRoot{Digest: storageformat.Digest([]byte("right")), Level: 0, EntryCount: 1}, firstKey: "b", lastKey: "b"},
+	}}
+	if _, err := finishFailure.Finish(); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("finish-triggered branch publication error = %v", err)
+	}
+}
+
+func TestConsistencyDomainPackedMutationBindingPreventsSharedPrefixCollision(t *testing.T) {
+	ctx := context.Background()
+	reference := consistencyDomainRef{Kind: storageformat.DomainNamespace, ID: "packed-mutation-binding"}
+	backend := objectmemory.New()
+	newSession := func(binding string) *consistencyDomainTreeSession {
+		session := newConsistencyDomainTreeSession(newConsistencyDomainStore(backend, nil), reference)
+		session.enablePackedWrites("same-authenticated-head")
+		if err := session.bindPackedMutation(binding); err != nil {
+			t.Fatal(err)
+		}
+		return session
+	}
+	first := storageformat.DomainPage{SchemaVersion: 1, DomainID: reference.ID, Kind: reference.Kind, Level: 0, Entries: []storageformat.DomainEntry{{Key: "shared", Value: []byte("same"), LogicalVersion: "same-version"}}}
+	left, right := newSession("move-to-left"), newSession("move-to-right")
+	leftFirst, err := left.writePage(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rightFirst, err := right.writePage(ctx, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leftFirst.root.Digest != rightFirst.root.Digest || leftFirst.root.PackID == rightFirst.root.PackID {
+		t.Fatalf("shared page digest/pack binding = %+v / %+v", leftFirst.root, rightFirst.root)
+	}
+	for session, value := range map[*consistencyDomainTreeSession]string{left: "left", right: "right"} {
+		page := storageformat.DomainPage{SchemaVersion: 1, DomainID: reference.ID, Kind: reference.Kind, Level: 0, Entries: []storageformat.DomainEntry{{Key: value, Value: []byte(value), LogicalVersion: value + "-version"}}}
+		if _, err := session.writePage(ctx, page); err != nil {
+			t.Fatal(err)
+		}
+		if err := session.flushPack(ctx); err != nil {
+			t.Fatalf("flush %s mutation: %v", value, err)
+		}
+	}
+	if err := left.bindPackedMutation("another-operation"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("late mutation rebind error = %v", err)
+	}
+}
+
+func TestConsistencyDomainPackedSessionLifecycleFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	reference := consistencyDomainRef{Kind: storageformat.DomainNamespace, ID: "packed-session-boundaries"}
+	newSession := func(backend objectstore.Backend) *consistencyDomainTreeSession {
+		return newConsistencyDomainTreeSession(newConsistencyDomainStore(backend, nil), reference)
+	}
+	if err := newSession(objectmemory.New()).bindPackedMutation(""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty mutation binding = %v", err)
+	}
+	idempotent := newSession(objectmemory.New())
+	idempotent.enablePackedWrites("head")
+	if err := idempotent.bindPackedMutation("mutation"); err != nil {
+		t.Fatal(err)
+	}
+	if err := idempotent.bindPackedMutation("mutation"); err != nil {
+		t.Fatalf("idempotent mutation binding = %v", err)
+	}
+	if packID, err := idempotent.ensurePackID(""); !errors.Is(err, domain.ErrInvalid) || packID != "" {
+		t.Fatalf("empty page seed = %q, %v", packID, err)
+	}
+	unpacked := newSession(objectmemory.New())
+	if packID, err := unpacked.ensurePackID("page"); err != nil || packID != "" {
+		t.Fatalf("unpacked page seed = %q, %v", packID, err)
+	}
+	if err := unpacked.flushPack(ctx); err != nil {
+		t.Fatalf("empty flush = %v", err)
+	}
+
+	page := storageformat.DomainPage{
+		SchemaVersion: 1, DomainID: reference.ID, Kind: reference.Kind, Level: 0,
+		Entries: []storageformat.DomainEntry{{Key: "key", Value: []byte("value"), LogicalVersion: "version"}},
+	}
+	prepare := func(t *testing.T, backend objectstore.Backend) *consistencyDomainTreeSession {
+		t.Helper()
+		session := newSession(backend)
+		session.enablePackedWrites("head")
+		if err := session.bindPackedMutation("mutation"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := session.writePage(ctx, page); err != nil {
+			t.Fatal(err)
+		}
+		return session
+	}
+	failure := domain.NewError(domain.ErrorUnavailable, "pack transport unavailable")
+	putFailure := &hookedBackend{Backend: objectmemory.New(), put: func(context.Context, objectstore.Key, []byte, objectstore.PutCondition) (objectstore.NativeVersion, error) {
+		return "", failure
+	}}
+	if err := prepare(t, putFailure).flushPack(ctx); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("pack put failure = %v", err)
+	}
+	conflictReadFailure := &hookedBackend{
+		Backend: objectmemory.New(),
+		put: func(context.Context, objectstore.Key, []byte, objectstore.PutCondition) (objectstore.NativeVersion, error) {
+			return "", domain.NewError(domain.ErrorConflict, "exists")
+		},
+		get: func(context.Context, objectstore.Key) (objectstore.Object, error) {
+			return objectstore.Object{}, failure
+		},
+	}
+	if err := prepare(t, conflictReadFailure).flushPack(ctx); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("pack verification read failure = %v", err)
+	}
+	collision := &hookedBackend{
+		Backend: objectmemory.New(),
+		put: func(context.Context, objectstore.Key, []byte, objectstore.PutCondition) (objectstore.NativeVersion, error) {
+			return "", domain.NewError(domain.ErrorConflict, "exists")
+		},
+		get: func(_ context.Context, key objectstore.Key) (objectstore.Object, error) {
+			return objectstore.Object{Key: key, Body: []byte("different")}, nil
+		},
+	}
+	if err := prepare(t, collision).flushPack(ctx); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("pack identity collision = %v", err)
+	}
+
+	waiting := newSession(objectmemory.New())
+	load := &consistencyDomainPackLoad{done: make(chan struct{})}
+	waiting.packLoads["pack"] = load
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := waiting.loadPack(canceled, "pack"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled coalesced pack load = %v", err)
+	}
+	delete(waiting.packLoads, "pack")
+	waiting.packs["cached"] = map[string]storageformat.DomainPage{"page": page}
+	if pages, err := waiting.loadPack(ctx, "cached"); err != nil || len(pages) != 1 {
+		t.Fatalf("cached pack = %+v, %v", pages, err)
+	}
+	corruptBackend := objectmemory.New()
+	corruptKey := storageformat.DomainPagePackKey(reference.Kind, reference.ID, "corrupt")
+	if _, err := corruptBackend.Put(ctx, corruptKey, []byte("corrupt"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newSession(corruptBackend).loadPack(ctx, "corrupt"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("corrupt pack = %v", err)
+	}
+
+	completedLoad := newSession(objectmemory.New())
+	loaded := &consistencyDomainPackLoad{done: make(chan struct{}), pages: map[string]storageformat.DomainPage{"page": page}}
+	close(loaded.done)
+	completedLoad.packLoads["completed"] = loaded
+	if pages, err := completedLoad.loadPack(ctx, "completed"); err != nil || len(pages) != 1 {
+		t.Fatalf("coalesced completed pack load = %+v, %v", pages, err)
+	}
+
+	missingPackedPage := newSession(objectmemory.New())
+	missingPackedPage.packs["pack"] = map[string]storageformat.DomainPage{}
+	if _, err := missingPackedPage.readPage(ctx, domainPageRef{root: storageformat.DomainTreeRoot{Digest: storageformat.Digest([]byte("missing-packed-page")), PackID: "pack", Level: 0, EntryCount: 1}}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("missing packed page error = %v", err)
+	}
+
+	corruptPageBackend := objectmemory.New()
+	corruptDigest := storageformat.Digest([]byte("corrupt-page"))
+	if _, err := corruptPageBackend.Put(ctx, storageformat.DomainPageKey(reference.Kind, reference.ID, corruptDigest), []byte("corrupt"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newSession(corruptPageBackend).readPage(ctx, domainPageRef{root: storageformat.DomainTreeRoot{Digest: corruptDigest, Level: 0, EntryCount: 1}}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("corrupt unpacked page error = %v", err)
+	}
+
+	invalidPage := page
+	invalidPage.SchemaVersion = 0
+	invalidBody, err := storageformat.EncodeCanonical(invalidPage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidDigest := storageformat.Digest(invalidBody)
+	invalidPageBackend := objectmemory.New()
+	if _, err := invalidPageBackend.Put(ctx, storageformat.DomainPageKey(reference.Kind, reference.ID, invalidDigest), invalidBody, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newSession(invalidPageBackend).readPage(ctx, domainPageRef{root: storageformat.DomainTreeRoot{Digest: invalidDigest, Level: 0, EntryCount: 1}}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid unpacked page error = %v", err)
+	}
+
+	alreadyFlushed := newSession(objectmemory.New())
+	alreadyFlushed.enablePackedWrites("head")
+	if err := alreadyFlushed.bindPackedMutation("mutation"); err != nil {
+		t.Fatal(err)
+	}
+	alreadyFlushed.packFlushed = true
+	if _, err := alreadyFlushed.writePage(ctx, page); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("write after pack flush error = %v", err)
+	}
+
+	invalidPack := newSession(objectmemory.New())
+	invalidPack.packID = storageformat.Digest([]byte("invalid-pack"))
+	invalidPack.pendingPack = map[string]storageformat.DomainPage{"invalid": invalidPage}
+	if err := invalidPack.flushPack(ctx); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid pending pack error = %v", err)
+	}
+
+	oversizedPage := page
+	oversizedPage.Entries[0].Value = make([]byte, storageformat.MaxCanonicalBytes)
+	if _, err := newSession(objectmemory.New()).writePages(ctx, []storageformat.DomainPage{oversizedPage, page}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("parallel page preflight bound error = %v", err)
 	}
 }

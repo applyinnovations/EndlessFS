@@ -44,9 +44,27 @@ type checkpointGarbageSweep struct {
 // exact object incarnation it listed, so a key recreated after gate reopening
 // cannot be deleted by that worker.
 func (e *Engine) runCheckpointGarbageCollection(ctx context.Context, checkpoint storageformat.Checkpoint) error {
+	return e.runCheckpointGarbageCollectionWithVersions(ctx, checkpoint, nil)
+}
+
+func (e *Engine) runCheckpointGarbageCollectionWithVersions(ctx context.Context, checkpoint storageformat.Checkpoint, fastVersions map[string]objectstore.ObjectInfo) error {
 	if checkpoint.SchemaVersion != 3 || checkpoint.CheckpointID == "" || checkpoint.InventoryDigest == "" {
 		return domain.NewError(domain.ErrorInvalid, "checkpoint garbage collection requires checkpoint v3")
 	}
+	traced := providerbudget.WithTrace(ctx, providerbudget.Trace{Operation: "checkpoint-garbage", Subsystem: "garbage-collection"})
+	plan, found, err := e.readCheckpointGarbagePlan(traced, checkpoint)
+	if err != nil {
+		return err
+	}
+	if found {
+		return e.runCheckpointGarbagePlan(traced, checkpoint, plan, fastVersions)
+	}
+	return e.runLegacyCheckpointGarbageCollection(traced, checkpoint)
+}
+
+// runLegacyCheckpointGarbageCollection retains recovery support for schema-009
+// checkpoints created before immutable garbage plans were introduced.
+func (e *Engine) runLegacyCheckpointGarbageCollection(ctx context.Context, checkpoint storageformat.Checkpoint) error {
 	session, err := e.readOrCreateCheckpointGarbageSession(ctx, checkpoint)
 	if err != nil {
 		return err

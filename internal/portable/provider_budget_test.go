@@ -52,39 +52,39 @@ func TestProviderBudgetStateStoreContract(t *testing.T) {
 	if _, err := engine.Get(ctx, key); err == nil {
 		t.Fatal("Get(missing) unexpectedly succeeded")
 	}
-	check("state-get-missing-schema-009")
+	check("state-get-missing-schema-011")
 
 	ledger.Reset()
 	if _, err := engine.List(ctx, state.MustPrefix(state.NamespacePreferences), state.PageRequest{Limit: 10}); err != nil {
 		t.Fatal(err)
 	}
-	check("state-list-empty-schema-009")
+	check("state-list-empty-schema-011")
 
 	ledger.Reset()
 	version, err := engine.Create(ctx, key, []byte("one"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("state-create-schema-009")
+	check("state-create-schema-011")
 
 	ledger.Reset()
 	if _, err := engine.Get(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	check("state-get-schema-009")
+	check("state-get-schema-011")
 
 	ledger.Reset()
 	version, err = engine.CompareAndSwap(ctx, key, version, []byte("two"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("state-compare-and-swap-schema-009")
+	check("state-compare-and-swap-schema-011")
 
 	ledger.Reset()
 	if err := engine.Delete(ctx, key, version); err != nil {
 		t.Fatal(err)
 	}
-	check("state-delete-schema-009")
+	check("state-delete-schema-011")
 
 	owner := "YnVkZ2V0LXVzZXItMDAwMDAwMA"
 	ledger.Reset()
@@ -98,7 +98,7 @@ func TestProviderBudgetStateStoreContract(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	check("state-mutate-two-records-schema-009")
+	check("state-mutate-two-records-schema-011")
 
 	ledger.Reset()
 	if _, err := engine.Transact(ctx, state.Mutation{
@@ -111,5 +111,5 @@ func TestProviderBudgetStateStoreContract(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	check("state-transact-two-domains-schema-009")
+	check("state-transact-two-domains-schema-011")
 }

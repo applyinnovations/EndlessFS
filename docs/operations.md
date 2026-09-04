@@ -11,11 +11,12 @@ bucket pairing, base URL/RP identity, registration policy,
 session-secret-derived keyring identity, stable writer-set ID, writer protocol,
 and canonical features. Startup rejects an incompatible writer before it serves
 bucket-backed requests. There is no leader, process-local lock, admission
-transaction, or lease around an ordinary same-domain mutation. Schema 009
+transaction, or lease around an ordinary same-domain mutation. Schema 011
 partitions identity, administration, preview jobs, and the owner namespace by
 their real invariants and binds each state payload to a canonical record type. A
-same-domain mutation writes changed immutable pages and conditionally replaces
-one domain head as its sole visibility point. A genuine cross-domain invariant
+bounded same-domain mutation writes one content-addressed page pack and
+conditionally replaces one domain head as its sole visibility point. Domains
+outside the pack envelope retain authenticated copy-on-write pages. A genuine cross-domain invariant
 uses a helpable immutable plan, participant locks, and one create-only decision;
 readers and checkpoint closure finish the durable decision before exposing the
 participant state.
@@ -31,13 +32,14 @@ immutable pages and unrelated domains continue immediately.
 
 Startup detects one exact epoch in the append-only storage-schema ledger and
 executes every remaining adjacent transformation in order. The current ledger
-contains schemas 001 through 010. Schema 010 adds a verified authority-
-conservation boundary to the schema-009 typed transactional-state and owner-
-namespace-graph runtime. A schema-001 bucket therefore runs
-`001 -> 002 -> 003 -> 004 -> 005 -> 006 -> 007 -> 008 -> 009 -> 010`;
+contains schemas 001 through 011. Schema 010 adds a verified authority-
+conservation boundary to the schema-009 typed transactional-state runtime;
+schema 011 adds bounded packed-domain publication and upload transactions. A
+schema-001 bucket therefore runs
+`001 -> 002 -> 003 -> 004 -> 005 -> 006 -> 007 -> 008 -> 009 -> 010 -> 011`;
 schema 003 runs the suffix beginning `003 -> 004`; schema 008 runs
-`008 -> 009 -> 010`; schema 009 runs `009 -> 010`; and current schema-010 state
-performs no migration. No operator
+`008 -> 009 -> 010 -> 011`; schema 009 runs `009 -> 010 -> 011`; schema 010 runs
+`010 -> 011`; and current schema-011 state performs no migration. No operator
 migration command or bucket edit is required. Unknown or contradictory epoch
 markers fail closed.
 
@@ -72,6 +74,15 @@ bodies only; it never reads or copies file bodies. The writer-set activation
 path itself requires the registered authority verifier, so an edge cannot make
 schema 010 or a later epoch current merely by updating feature markers.
 
+The `010 -> 011` edge is feature-only. Under its own closed gate and checkpoint
+it independently authenticates the complete current domain closure, advances
+the exact writer/superblock/gate feature signature, and reopens at the next gate
+epoch. It does not eagerly rewrite schema-010 pages or any file blob. Existing
+pages remain valid inputs and the first relevant schema-011 mutation publishes
+their packed successor. The same edge activates compact 10,000-item upload
+transactions; transient sealed provider leases and progress records remain
+excluded from authoritative checkpoints.
+
 The `003 -> 004` graph walk persists authenticated transform and verification marks for each completed directory. Every mark is tied to the exact migration checkpoint, parent/root/manifest logical versions, parent entry, aggregates, and content summary. The process holds only the active ancestor stack; after restart, a valid completed mark skips that entire subtree. Several replicas may advance the same deterministic walk through CAS. Stale, forged, misplaced, corrupt, or contradictory marks fail closed and marks are removed only after the independent verification phase succeeds. Provider-ordered scope discovery retains one owner/area at a time. Transforming a historical page manifest retains at most that one legacy directory while deriving its differently ordered persistent indexes; current-index verification and CAS-winner reconciliation are page-bounded.
 
 Every edge is safe to retry after process loss and safe for several new replicas
@@ -80,7 +91,7 @@ An interrupted chain resumes its checkpointed edge and accepts only the
 explicitly reviewed mixture of source, target, and later already-published
 records without downgrading them. Until an edge commits, predecessor records
 remain authoritative and the gate stays closed once migration has begun.
-Immutable schema-004 through schema-010 fixtures cover portable-minimal,
+Immutable schema-004 through schema-011 fixtures cover portable-minimal,
 application-disabled, and application-GCS writer profiles and are pinned to
 their producer revision and fixture digest. Predecessor-produced complete
 application corpora from v0.3.2 through v0.4.0 additionally contain real
@@ -88,12 +99,14 @@ profile/account/passkey/session/role/invite/recovery/share/preference authority.
 Their semantic oracle must complete a newly signed passkey assertion after the
 full migration suffix; opening the engine or listing files is not sufficient.
 
-During a v0.4.x rollout, expect liveness to remain available while readiness is
+During any migration rollout, expect liveness to remain available while readiness is
 false until the closed-gate recovery finishes. Do not recreate credentials or
 edit bucket objects. A conflict, missing legacy state-version, or corrupt proof
 is intentionally a fail-closed startup error. Preserve the source objects and
 inspect the migration error. Exact fixture provenance and the incident analysis
-are in `docs/storage-schema-010-implementation.md`.
+are in `docs/storage-schema-010-implementation.md`; schema-011 format,
+economics, and recovery evidence are in
+`docs/storage-schema-011-implementation.md`.
 
 A live upload capability can temporarily prevent checkpoint closure; allow it
 to finish or expire and retry. Missing roots, cycles, multiple parents,
@@ -175,7 +188,7 @@ The verifier configuration is strict JSON. For GCS:
   "writerSetID": "BASE64URL_WRITER_SET_ID",
   "configurationDigest": "EXPECTED_CONFIGURATION_DIGEST",
   "keyringIdentifiers": ["EXPECTED_KEYRING_ID"],
-  "requiredFeatures": ["consistency-domains-v1", "directory-content-digests-v1", "directory-manifests", "duplicate-catalog-v1", "fenced-operations", "metadata-only-checkpoints-v1", "owner-namespace-graph-v1", "paged-operation-steps-v1", "persistent-directory-indexes-v1", "persistent-namespace-snapshots-v1", "persistent-state-indexes-v1", "portable-checkpoints", "provider-content-fingerprints-v1", "rebuildable-derived-projections-v1", "recursive-byte-aggregates-v1", "recursive-file-count-aggregates-v1", "resumable-operation-preparation-v1", "transactional-state-domains-v1", "user-addressable-duplicate-directories-v1"]
+  "requiredFeatures": ["consistency-domains-v1", "directory-content-digests-v1", "directory-manifests", "duplicate-catalog-v1", "fenced-operations", "metadata-only-checkpoints-v1", "owner-namespace-graph-v1", "packed-consistency-domain-pages-v1", "paged-operation-steps-v1", "persistent-directory-indexes-v1", "persistent-namespace-snapshots-v1", "persistent-state-indexes-v1", "portable-checkpoints", "provider-content-fingerprints-v1", "rebuildable-derived-projections-v1", "recursive-byte-aggregates-v1", "recursive-file-count-aggregates-v1", "resumable-operation-preparation-v1", "transactional-state-domains-v1", "upload-transactions-v1", "user-addressable-duplicate-directories-v1"]
 }
 ```
 
@@ -199,7 +212,7 @@ Capability responses and public configuration use `no-store`. Diagnostics omit t
 
 ## Duplicate maintenance foundation
 
-Schema 009 preserves each owner's live and Trash trees in one persistent
+Schema 011 preserves each owner's live and Trash trees in one persistent
 namespace graph. A folder move, copy-by-reference, Trash, restore, or logical delete
 rewrites only affected edges and ancestor paths; it never enumerates descendants
 or relocates a blob. Same-owner copies share immutable content. Browser uploads
@@ -235,12 +248,16 @@ window. During gate closure EndlessFS freezes the catalog and all domains,
 resolves cross-domain plans, drains upload leases, authenticates the exact
 reachable domain/namespace/blob closure, and excludes unreachable immutable
 pages and rebuildable projections from the checkpoint. The completed
-schema-009 checkpoint is then the immutable mark set for a resumable conditional
-sweep of recognized domain pages, transition residue, projections, leases, and
-blobs. The sweep stores only a portable ordered-key cursor, never reads file
-bodies, and must reach its terminal checkpoint-bound session before writes can
-reopen. Reachability uses a disk-backed exact visited set and bounded merge
-chunks, so service memory does not grow with the full graph.
+schema-011 checkpoint is then the immutable mark set for a resumable conditional
+sweep of recognized domain pages/packs, transition residue, projections,
+leases, and blobs. While the gate is closed, the collector writes and
+authenticates a deterministic portable garbage plan with 128-entry pages. It
+validates the complete plan before the first delete, conditionally deletes the
+planned native versions with bounded concurrency, and durably advances one
+checkpoint-bound cursor. It never reads file bodies and must reach its terminal
+state before writes can reopen. Reachability uses a disk-backed exact visited
+set and bounded merge chunks, so service memory does not grow with the full
+graph.
 
 The schema-009 runtime retains terminal predecessor-GC session/mark objects as
 excluded compatibility residue. A lagging supported predecessor may still hold
@@ -262,7 +279,13 @@ export ENDLESSFS_PREVIEW_FORMATS=image
 
 Configured generators and preview-store access are startup requirements. The process self-tests the packaged image codec, performs a complete deterministic DNG decode through the pinned LibRaw worker, and creates, reads, fully decodes, commits, retrieves, capability-issues, and capability-serves a fixed one-pixel WebP probe before becoming ready. A missing, non-executable, or incompatible RAW decoder prevents startup with a sanitized error. Configuring `video` or `pdf` in the v1.1 image build is an intentional startup error. Preview-store access loss after startup returns `unavailable`, logs `preview_unavailable` without file/store identity, and makes `/readyz` fail while original listing and file operations continue.
 
-Normal durable preview capability issuance does not download the artifact through the control plane. EndlessFS verifies the provider-independent manifest size and CRC32C through the object-store integrity contract, binds the capability to the exact verified object incarnation, and has the browser verify manifest SHA-256 before display. The GCS adapter performs its verification with an object-metadata request; native GCS checksum and generation values are not persisted.
+Durable preview capability issuance never downloads the artifact through the
+control plane. The ordinary exact-generation path verifies provider-independent
+manifest size and CRC32C through an object-metadata request. The virtualized
+ready path instead authenticates the bounded ready catalog and issues a
+capability for the create-only content-addressed artifact key without another
+provider lookup; the browser still verifies the manifest SHA-256 before
+display. Native GCS checksum and generation values are not persisted.
 
 Preview data is disposable. The durable store keeps an HMAC-derived opaque binding head with a bounded committed-generation history plus immutable manifests and WebP objects. Conditional head updates publish visibility, and one-winner claim takeover fences stale generators across replicas. Browser reads use short-lived exact-generation signed `GET` capabilities; the browser verifies the exact WebP type and RIFF/WebP signature before constructing an image blob. Removing or expiring preview objects never removes an original; the next eligible viewport request regenerates them. Rename, move, trash, and restore preserve the opaque content binding so no regeneration is required. Copy and content replacement receive distinct render identities. Provider lifecycle, storage class, billing, retention, and deletion policy remain independent of the authoritative store.
 

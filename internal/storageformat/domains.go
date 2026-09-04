@@ -38,7 +38,12 @@ const (
 
 // DomainTreeRoot is a bounded descriptor for an immutable ordered tree.
 type DomainTreeRoot struct {
-	Digest     string `json:"digest,omitempty"`
+	Digest string `json:"digest,omitempty"`
+	// PackID names the immutable packed-page object that contains Digest. An
+	// empty value retains the schema-010 one-object-per-page representation.
+	// The page digest remains the integrity authority; PackID is only a bounded
+	// physical grouping and therefore never replaces content authentication.
+	PackID     string `json:"packID,omitempty"`
 	Level      int    `json:"level"`
 	EntryCount uint64 `json:"entryCount"`
 	ByteCount  uint64 `json:"byteCount,omitempty"`
@@ -51,12 +56,33 @@ type DomainEntry struct {
 }
 
 type DomainPageChild struct {
-	FirstKey   string `json:"firstKey"`
-	LastKey    string `json:"lastKey"`
-	Digest     string `json:"digest"`
-	Level      int    `json:"level"`
-	EntryCount uint64 `json:"entryCount"`
-	ByteCount  uint64 `json:"byteCount,omitempty"`
+	FirstKey      string `json:"firstKey"`
+	LastKey       string `json:"lastKey"`
+	Digest        string `json:"digest"`
+	PackID        string `json:"packID,omitempty"`
+	LeafKeyFilter string `json:"leafKeyFilter,omitempty"`
+	Level         int    `json:"level"`
+	EntryCount    uint64 `json:"entryCount"`
+	ByteCount     uint64 `json:"byteCount,omitempty"`
+}
+
+// DomainPackedPage binds one canonical page to its content digest inside an
+// immutable page pack. Pages remain independently authenticated so a corrupt,
+// truncated, substituted, or ambiguously duplicated pack fails closed.
+type DomainPackedPage struct {
+	Digest string     `json:"digest"`
+	Page   DomainPage `json:"page"`
+}
+
+// DomainPagePack coalesces all immutable pages prepared by one logical
+// mutation into one provider object. It is not a visibility root: the later
+// domain-head CAS remains the single publication point.
+type DomainPagePack struct {
+	SchemaVersion int                   `json:"schemaVersion"`
+	DomainID      string                `json:"domainID"`
+	Kind          ConsistencyDomainKind `json:"kind"`
+	PackID        string                `json:"packID"`
+	Pages         []DomainPackedPage    `json:"pages"`
 }
 
 // DomainPage is immutable and content addressed. Leaves embed bounded record
@@ -281,8 +307,15 @@ func ValidateDomainPage(page DomainPage, expectedDigest string) error {
 		}
 		previous := ""
 		for _, child := range page.Children {
-			if !validDomainText(child.FirstKey) || child.LastKey < child.FirstKey || !validDomainText(child.LastKey) || !validDomainDigest(child.Digest) || child.Level != page.Level-1 || child.EntryCount == 0 || previous != "" && child.FirstKey <= previous {
+			if !validDomainText(child.FirstKey) || child.LastKey < child.FirstKey || !validDomainText(child.LastKey) || !validDomainDigest(child.Digest) || child.PackID != "" && !validDomainDigest(child.PackID) || child.Level != page.Level-1 || child.EntryCount == 0 || previous != "" && child.FirstKey <= previous || child.Level != 0 && child.LeafKeyFilter != "" {
 				return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain child descriptor")
+			}
+			// Empty filters retain strict read compatibility with schema-010
+			// pages. Schema-011 rewrites add one to every leaf descriptor.
+			if child.LeafKeyFilter != "" {
+				if err := ValidateDomainLeafKeyFilter(child.LeafKeyFilter); err != nil {
+					return err
+				}
 			}
 			previous = child.LastKey
 		}
@@ -298,8 +331,29 @@ func ValidateDomainPage(page DomainPage, expectedDigest string) error {
 }
 
 func validateDomainTreeRoot(root DomainTreeRoot) error {
-	if root.Level < 0 || root.Digest == "" && (root.EntryCount != 0 || root.ByteCount != 0 || root.Level != 0) || root.Digest != "" && !validDomainDigest(root.Digest) {
+	if root.Level < 0 || root.Digest == "" && (root.PackID != "" || root.EntryCount != 0 || root.ByteCount != 0 || root.Level != 0) || root.Digest != "" && !validDomainDigest(root.Digest) || root.PackID != "" && !validDomainDigest(root.PackID) {
 		return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain tree root")
+	}
+	return nil
+}
+
+// ValidateDomainPagePack verifies every member and requires canonical digest
+// order. The pack ID is deliberately opaque: immutable create-only storage and
+// the member digests provide collision/substitution denial without introducing
+// a self-referential whole-pack digest into page descriptors.
+func ValidateDomainPagePack(pack DomainPagePack) error {
+	if pack.SchemaVersion != 1 || !validDomainText(pack.DomainID) || !validDomainKind(pack.Kind) || !validDomainDigest(pack.PackID) || len(pack.Pages) == 0 {
+		return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain page pack")
+	}
+	previous := ""
+	for _, packed := range pack.Pages {
+		if !validDomainDigest(packed.Digest) || previous != "" && packed.Digest <= previous || packed.Page.DomainID != pack.DomainID || packed.Page.Kind != pack.Kind {
+			return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain packed page binding")
+		}
+		if err := ValidateDomainPage(packed.Page, packed.Digest); err != nil {
+			return err
+		}
+		previous = packed.Digest
 	}
 	return nil
 }

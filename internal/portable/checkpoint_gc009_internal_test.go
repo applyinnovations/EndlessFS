@@ -3,7 +3,9 @@ package portable
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -173,7 +175,13 @@ func TestProviderBudgetCheckpointGarbageCollection128Objects(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := append(stateLedger.Events(), fileLedger.Events()...)
-	if report, err := ratchet.CheckExact("maintenance-checkpoint-garbage-128-schema-009", economics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, events); err != nil {
+	garbageEvents := events[:0]
+	for _, event := range events {
+		if event.Operation == "checkpoint-garbage" {
+			garbageEvents = append(garbageEvents, event)
+		}
+	}
+	if report, err := ratchet.CheckExact("maintenance-checkpoint-garbage-128-schema-011", economics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, garbageEvents); err != nil {
 		t.Errorf("128-object checkpoint garbage provider budget: %v; observed=%+v", err, report.Totals)
 	}
 	deletes := 0
@@ -239,7 +247,7 @@ func TestCheckpointGarbageCollectionResumesFromPortableMultiPageCursor(t *testin
 	if err := storageformat.DecodeEnvelope(sessionObject.Body, sessionObject.Key, checkpointGarbageCollectionSchema, &envelope, &session); err != nil {
 		t.Fatal(err)
 	}
-	if session.Phase != checkpointGarbageCollectionSweeping || session.SweepIndex != 0 || session.After == "" {
+	if session.Phase != checkpointGarbageCollectionSweeping || session.SweepIndex != 1 || session.After != "" {
 		t.Fatalf("persisted multi-page progress = %+v", session)
 	}
 
@@ -293,6 +301,41 @@ func TestCheckpointGarbageCollectionConcurrentReplicasConverge(t *testing.T) {
 	}
 	if err := fixture.engine.OpenWrites(ctx, checkpoint.CheckpointID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCheckpointGarbagePlanCardinalityFailsClosedWithoutIntegerNarrowing(t *testing.T) {
+	ctx := context.Background()
+	engine := openCheckpointGarbageTestEngine(t, objectmemory.New(), objectmemory.New(), nil)
+	checkpoint := storageformat.Checkpoint{SchemaVersion: 3, CheckpointID: "checkpoint-garbage-cardinality", GateEpoch: 7, InventoryDigest: "inventory-digest"}
+	entry := storageformat.GarbageCollectionEntry{Role: garbageCollectionStateRole, Key: storageformat.DomainPageKey(storageformat.DomainOwnerControl, "garbage-owner", "cardinality-page").String()}
+	digest := checkpointGarbageEntriesDigest()
+	if err := writeCheckpointGarbageDigestEntry(digest, entry); err != nil {
+		t.Fatal(err)
+	}
+	digestValue := base64.RawURLEncoding.EncodeToString(digest.Sum(nil))
+
+	valid := storageformat.GarbageCollectionPlan{
+		SchemaVersion: checkpointGarbagePlanSchemaNumber, CheckpointID: checkpoint.CheckpointID, GateEpoch: checkpoint.GateEpoch,
+		InventoryDigest: checkpoint.InventoryDigest, PageCount: 1, EntryCount: 1, EntriesDigest: digestValue,
+		Entries: []storageformat.GarbageCollectionEntry{entry},
+	}
+	if err := engine.validateCheckpointGarbagePlan(ctx, checkpoint, valid); err != nil {
+		t.Fatalf("valid partial garbage page error = %v", err)
+	}
+
+	for name, mutate := range map[string]func(*storageformat.GarbageCollectionPlan){
+		"short non-final page": func(plan *storageformat.GarbageCollectionPlan) { plan.PageCount = 2 },
+		"short final page":     func(plan *storageformat.GarbageCollectionPlan) { plan.EntryCount = 2 },
+		"maximum count":        func(plan *storageformat.GarbageCollectionPlan) { plan.EntryCount = math.MaxUint64 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			plan := valid
+			mutate(&plan)
+			if err := engine.validateCheckpointGarbagePlan(ctx, checkpoint, plan); !errors.Is(err, domain.ErrPreconditionFailed) {
+				t.Fatalf("invalid garbage cardinality error = %v; want precondition failed", err)
+			}
+		})
 	}
 }
 

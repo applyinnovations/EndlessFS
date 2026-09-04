@@ -183,7 +183,7 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 		"transferVirtualWindowSize", "renderTransferWindow", "retryFailedTransfers",
 		"discoverLegacyEntry", "discoverFileSystemHandle",
 		"requestPermission", "reconnectStoredTransferSources",
-		"automaticTransferConcurrency", "aggregateTransferSummary", "recordTransferProgress", "scheduleTransferRender",
+		"automaticTransferConcurrency", "configuredTransferConcurrency", "runTransferControlPool", "aggregateTransferSummary", "recordTransferProgress", "scheduleTransferRender",
 		"transferByID", "nextQueuedTransfer", "updateRenderedTransferProgress", "scheduleTransferStructureRender",
 		"dataset.appearance", `state.themeAssets["brand.mark"]`, `state.themeAssets["brand.favicon"]`,
 	} {
@@ -226,6 +226,14 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 			t.Errorf("upload concurrency retains unproven adaptive primitive %q", forbidden)
 		}
 	}
+	if strings.Contains(script, "Promise.all(uploadIDs.map") {
+		t.Error("group cancellation can issue one simultaneous provider request per transfer")
+	}
+	for _, required := range []string{"batchCount: Number.isSafeInteger(transfer.batchCount)", "const completeBatch =", "if (completeBatch) body.batchID = batchID"} {
+		if !strings.Contains(script, required) {
+			t.Errorf("durable compact upload cancellation is missing %q", required)
+		}
+	}
 	for _, forbidden := range []string{"maximumRenderedTransferGroups", "maximumRenderedGroupFiles", "summarizeTransferRows", "more files"} {
 		if strings.Contains(script, forbidden) {
 			t.Errorf("transfer monitor retains manual pagination primitive %q", forbidden)
@@ -246,7 +254,7 @@ func TestSmartUploadPlannerIsBoundedPersistentAndMetadataOnly(t *testing.T) {
 	for _, required := range []string{
 		`["smart-merge", "Smart merge`, `["replace-changed", "Replace changed files`,
 		`["only-new", "Only add new names`, `["keep-both", "Keep both`,
-		`const uploadPlanningBatchSize = 1000;`, `const uploadHashWorkerLimit = 2;`,
+		`const uploadPlanningBatchSize = 10000;`, `const uploadHashWorkerLimit = 2;`,
 		`new Worker("/assets/upload-hash-worker.js")`, `pending.worker.terminate();`,
 		`fingerprintRepeated: async (value, count)`,
 		`transferPlanControllers: new Map()`, `uploadPlanRetryTimers: new Map()`, `controller.abort();`,
@@ -406,6 +414,7 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 	script := string(applicationScript)
 	for _, required := range []string{
 		"renderVirtualGrid", "renderVirtualList", "IntersectionObserver", "gridOverscanRows = 3", "listOverscanRows = 8", "directoryLoading", "URL.revokeObjectURL",
+		"previewResolving: new Set()", "state.previewResolving.has(entry.path)", "state.previewResolving.add(entry.path)", "state.previewResolving.delete(entry.path)",
 		"/api/v1/previews/resolve", "/api/v1/previews/generations", "/api/v1/previews/operations/", "image/webp", "validatedPreviewBlob", "Invalid preview artifact body", "filterLoadedEntries",
 		`crypto.subtle.digest("SHA-256"`, "Invalid preview artifact checksum", "await image.decode()", "previewLoaded",
 		"viewerPreviewCache", "cachedViewerPreview", "cacheViewerPreview",
@@ -1003,7 +1012,9 @@ func TestSelectionActionsFloatWithoutReplacingDriveControls(t *testing.T) {
 		`if (accessChanged) { state.selected.clear(); updateSelection(); }`,
 		`async function restoreSelectedTrash()`,
 		`async function deleteSelectedTrash()`,
-		`for (const entry of entries) {`,
+		`api("/api/v1/trash/restore"`,
+		`api("/api/v1/trash/delete"`,
+		`async function awaitOperation(result)`,
 		`selectionBar.setAttribute("aria-busy", "true");`,
 		`byID("restore-selected").addEventListener("click", restoreSelectedTrash);`,
 		`byID("delete-selected-permanently").addEventListener("click", deleteSelectedTrash);`,
@@ -1641,8 +1652,9 @@ func TestRoutineTrashIsImmediateAndRecoverable(t *testing.T) {
 	}
 	script := string(applicationScript)
 	for _, required := range []string{
-		"showTrashUndo", `/api/v1/trash/${encodeURIComponent(item.trashID)}/restore`,
-		`body: { conflict: "rename" }`,
+		"showTrashUndo", `api("/api/v1/trash/restore"`,
+		`trashIDs: recoverable.map((item) => item.trashID)`,
+		`conflict: "rename"`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("routine trash flow is missing %q", required)

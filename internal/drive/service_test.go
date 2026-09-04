@@ -889,6 +889,104 @@ func TestUploadAbortBatchMoveTrashPagingAndEmptyTrash(t *testing.T) {
 	}
 }
 
+func TestUploadBatchServiceRejectsCardinalityIdentityAndScopeBoundaries(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	validUpload := domain.CreateUploadRequest{
+		Path: domain.MustParseUserPath("/batch.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "batch-upload-item-0001",
+	}
+	if _, err := env.service.CreateUploadBatch(ctx, env.owner, nil); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty admission batch = %v", err)
+	}
+	if _, err := env.service.CreateUploadBatch(ctx, env.owner, make([]domain.CreateUploadRequest, drive.MaxUploadBatchItems+1)); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("oversized admission batch = %v", err)
+	}
+	invalidUpload := validUpload
+	invalidUpload.IdempotencyKey = "short"
+	if _, err := env.service.CreateUploadBatch(ctx, env.owner, []domain.CreateUploadRequest{invalidUpload}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid admission idempotency = %v", err)
+	}
+	if _, err := env.service.CreateUploadBatch(ctx, domain.UserID{}, []domain.CreateUploadRequest{validUpload}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid admission owner = %v", err)
+	}
+
+	validCompletion := domain.CompleteUploadBatchRequest{
+		Items: []domain.CompleteUploadBatchItem{{UploadID: "upload"}}, IdempotencyKey: "batch-complete-0001",
+	}
+	if _, err := env.service.CompleteUploadBatch(ctx, env.owner, domain.CompleteUploadBatchRequest{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty completion batch = %v", err)
+	}
+	invalidCompletion := validCompletion
+	invalidCompletion.IdempotencyKey = "short"
+	if _, err := env.service.CompleteUploadBatch(ctx, env.owner, invalidCompletion); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid completion idempotency = %v", err)
+	}
+	if _, err := env.service.CompleteUploadBatch(ctx, domain.UserID{}, validCompletion); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid completion owner = %v", err)
+	}
+
+	validAbort := domain.AbortUploadBatchRequest{
+		UploadIDs: []domain.UploadID{"upload"}, BatchID: "batch", IdempotencyKey: "batch-abort-0000001",
+	}
+	if err := env.service.AbortUploadBatch(ctx, env.owner, domain.AbortUploadBatchRequest{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty abort batch = %v", err)
+	}
+	invalidAbort := validAbort
+	invalidAbort.IdempotencyKey = "short"
+	if err := env.service.AbortUploadBatch(ctx, env.owner, invalidAbort); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid abort idempotency = %v", err)
+	}
+	if err := env.service.AbortUploadBatch(ctx, domain.UserID{}, validAbort); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid abort owner = %v", err)
+	}
+}
+
+func TestTrashBatchRestoreAndPermanentDeleteAreAtomic(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	first := upload(t, env, env.owner, "/batch-restore-one.txt", []byte("one"), "text/plain", "batch-restore-one-upload")
+	second := upload(t, env, env.owner, "/batch-restore-two.txt", []byte("two"), "text/plain", "batch-restore-two-upload")
+	trashed, err := env.service.Trash(ctx, env.owner, []domain.UserPath{first.Path, second.Path}, "batch-restore-trash-request")
+	if err != nil || len(trashed.Items) != 2 {
+		t.Fatalf("Trash() = %+v, %v", trashed, err)
+	}
+	trashIDs := []string{trashed.Items[0].TrashID, trashed.Items[1].TrashID}
+	restored, err := env.service.RestoreBatch(ctx, env.owner, trashIDs, domain.ConflictFail, "batch-restore-request-001")
+	if err != nil || len(restored.Items) != 2 {
+		t.Fatalf("RestoreBatch() = %+v, %v", restored, err)
+	}
+	for _, entry := range []domain.Entry{first, second} {
+		if current, statErr := env.service.Stat(ctx, env.owner, entry.Path); statErr != nil || current.Size != entry.Size {
+			t.Fatalf("restored %s = %+v, %v", entry.Path, current, statErr)
+		}
+	}
+	if replay, replayErr := env.service.RestoreBatch(ctx, env.owner, trashIDs, domain.ConflictFail, "batch-restore-request-001"); replayErr != nil || replay.OperationID != restored.OperationID {
+		t.Fatalf("RestoreBatch(replay) = %+v, %v", replay, replayErr)
+	}
+	if _, conflictErr := env.service.RestoreBatch(ctx, env.owner, trashIDs, domain.ConflictRename, "batch-restore-request-001"); !errors.Is(conflictErr, domain.ErrConflict) {
+		t.Fatalf("RestoreBatch(changed replay) error = %v", conflictErr)
+	}
+
+	trashed, err = env.service.Trash(ctx, env.owner, []domain.UserPath{first.Path, second.Path}, "batch-delete-trash-request")
+	if err != nil || len(trashed.Items) != 2 {
+		t.Fatalf("Trash(for delete) = %+v, %v", trashed, err)
+	}
+	trashIDs = []string{trashed.Items[0].TrashID, trashed.Items[1].TrashID}
+	deleted, err := env.service.PermanentDeleteBatch(ctx, env.owner, trashIDs, "batch-delete-request-001")
+	if err != nil || len(deleted.Items) != 2 {
+		t.Fatalf("PermanentDeleteBatch() = %+v, %v", deleted, err)
+	}
+	if records, listErr := env.service.TrashList(ctx, env.owner); listErr != nil || len(records) != 0 {
+		t.Fatalf("trash after permanent delete = %+v, %v", records, listErr)
+	}
+	if _, invalidErr := env.service.RestoreBatch(ctx, env.owner, nil, domain.ConflictFail, "batch-restore-invalid-1"); !errors.Is(invalidErr, domain.ErrInvalid) {
+		t.Fatalf("RestoreBatch(empty) error = %v", invalidErr)
+	}
+	if _, invalidErr := env.service.PermanentDeleteBatch(ctx, env.owner, nil, "batch-delete-invalid-1"); !errors.Is(invalidErr, domain.ErrInvalid) {
+		t.Fatalf("PermanentDeleteBatch(empty) error = %v", invalidErr)
+	}
+}
+
 func TestDriveServiceRejectsStorageWithoutAtomicNamespaceExtensions(t *testing.T) {
 	env := newDriveEnvironment(t)
 	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, 32)))

@@ -96,13 +96,16 @@ func TestPortableSortingAndOperationHelpers(t *testing.T) {
 	if size, err := normalizeFilePageSize(0); err != nil || size != 200 {
 		t.Fatalf("default page size = %d, %v", size, err)
 	}
-	for _, size := range []int{-1, 1001} {
+	for _, size := range []int{-1, 10001} {
 		if _, err := normalizeFilePageSize(size); !errors.Is(err, domain.ErrInvalid) {
 			t.Fatalf("invalid page size %d error = %v", size, err)
 		}
 	}
 	if size, err := normalizeFilePageSize(1000); err != nil || size != 1000 {
 		t.Fatalf("page size = %d, %v", size, err)
+	}
+	if size, err := normalizeFilePageSize(10000); err != nil || size != 10000 {
+		t.Fatalf("maximum page size = %d, %v", size, err)
 	}
 	if areaName(domain.AreaLive) != "live" || areaName(domain.AreaTrash) != "trash" {
 		t.Fatal("area name mismatch")

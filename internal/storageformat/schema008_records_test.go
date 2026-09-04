@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/integrity"
 )
 
 func schema008TestTime() time.Time {
@@ -191,6 +192,49 @@ func TestSchema008UploadAndDuplicateProjectionValidationMatrix(t *testing.T) {
 	}
 	cleanup.State = UploadActive
 	requireSchema008Invalid(t, ValidatePortableUploadRecord(cleanup))
+
+	batched := upload
+	batched.Batch = &PortableUploadBatchMember{BatchID: Digest([]byte("batch")), Index: 0, Count: 1}
+	if err := ValidatePortableUploadRecord(batched); err != nil {
+		t.Fatalf("valid batch binding: %v", err)
+	}
+	for name, mutate := range map[string]func(*PortableUploadBatchMember){
+		"batch": func(value *PortableUploadBatchMember) { value.BatchID = "invalid" },
+		"zero":  func(value *PortableUploadBatchMember) { value.Count = 0 },
+		"large": func(value *PortableUploadBatchMember) { value.Count = MaxPortableUploadBatchItems + 1 },
+		"index": func(value *PortableUploadBatchMember) { value.Index = value.Count },
+	} {
+		t.Run("invalid-batch-"+name, func(t *testing.T) {
+			value := batched
+			member := *batched.Batch
+			mutate(&member)
+			value.Batch = &member
+			requireSchema008Invalid(t, ValidatePortableUploadRecord(value))
+		})
+	}
+
+	completed := upload
+	completed.State = UploadCompleted
+	completed.Completion = &PortableUploadCompletion{
+		MD5: integrity.MD5([]byte("body")), CRC32C: integrity.CRC32C([]byte("body")), ModifiedAt: now,
+	}
+	if err := ValidatePortableUploadRecord(completed); err != nil {
+		t.Fatalf("valid completion: %v", err)
+	}
+	for name, mutate := range map[string]func(*PortableUploadRecord){
+		"state": func(value *PortableUploadRecord) { value.State = UploadActive },
+		"time":  func(value *PortableUploadRecord) { value.Completion.ModifiedAt = time.Time{} },
+		"md5":   func(value *PortableUploadRecord) { value.Completion.MD5 = "invalid" },
+		"crc":   func(value *PortableUploadRecord) { value.Completion.CRC32C = "invalid" },
+	} {
+		t.Run("invalid-completion-"+name, func(t *testing.T) {
+			value := completed
+			completion := *completed.Completion
+			value.Completion = &completion
+			mutate(&value)
+			requireSchema008Invalid(t, ValidatePortableUploadRecord(value))
+		})
+	}
 
 	idempotency := PortableUploadIdempotency{SchemaVersion: 1, OwnerID: "owner", KeyDigest: Digest([]byte("key")), Fingerprint: Digest([]byte("fingerprint")), UploadID: "upload"}
 	if err := ValidatePortableUploadIdempotency(idempotency); err != nil {

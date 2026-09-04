@@ -25,8 +25,8 @@ guidelines](https://cloud.google.com/storage/docs/request-rate).
 EndlessFS ports the Google GCS action's 100-worker shared-queue model into the
 existing dependency-free browser scheduler:
 
-- a selected set of up to 100 discovered files is admitted in one existing
-  100-item batch;
+- a selected set of up to 10,000 discovered files is admitted in one durable
+  batch transaction;
 - the scheduler starts up to 100 file tasks, bounded by queue depth;
 - every task sends bytes directly from `File.slice(...)` to its provider
   capability; object bytes never enter the Go service;
@@ -59,8 +59,8 @@ per file.
 - the scheduler has 100 live upload tasks simultaneously;
 - the HTTP/1.1 fixture data plane has all six available wire connections busy;
 - one 100-item batch admission and no single-item admission are issued;
-- exactly 100 direct data-plane body requests and 100 completion requests are
-  issued;
+- exactly 100 direct data-plane body requests and one atomic batch-completion
+  request are issued;
 - all 100 transfers reach the complete UI state; and
 - one coalesced directory listing makes the uploaded files visible.
 

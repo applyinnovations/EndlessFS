@@ -17,7 +17,7 @@ import (
 
 const (
 	MaxBatchItems       = 10_000
-	MaxUploadBatchItems = 100
+	MaxUploadBatchItems = 10_000
 )
 
 type AccountReader interface {
@@ -29,6 +29,7 @@ type Service struct {
 	trash          provider.TrashStorage
 	batch          provider.BatchStorage
 	uploadBatch    provider.UploadBatchStorage
+	uploadTxn      provider.UploadTransactionStorage
 	repository     *repository
 	accounts       AccountReader
 	ids            *domain.IDGenerator
@@ -47,7 +48,7 @@ func NewService(storage provider.Storage, store state.Store, accounts AccountRea
 	if !ok {
 		return nil, domain.NewError(domain.ErrorInvalid, "storage does not implement atomic namespace trash and batch mutations")
 	}
-	return &Service{storage: namespace, trash: namespace, batch: namespace, uploadBatch: namespace, repository: newRepository(store), accounts: accounts, ids: ids, clock: clock, tokenKey: tokenKey, baseURL: strings.TrimRight(baseURL, "/"), dataOrigin: strings.TrimRight(dataOrigin, "/"), textPreviewMax: textPreviewMax}, nil
+	return &Service{storage: namespace, trash: namespace, batch: namespace, uploadBatch: namespace, uploadTxn: namespace, repository: newRepository(store), accounts: accounts, ids: ids, clock: clock, tokenKey: tokenKey, baseURL: strings.TrimRight(baseURL, "/"), dataOrigin: strings.TrimRight(dataOrigin, "/"), textPreviewMax: textPreviewMax}, nil
 }
 
 func (s *Service) DataOrigin() string { return s.dataOrigin }
@@ -183,7 +184,7 @@ func (s *Service) CreateUpload(ctx context.Context, userID domain.UserID, reques
 
 func (s *Service) CreateUploadBatch(ctx context.Context, userID domain.UserID, requests []domain.CreateUploadRequest) ([]domain.UploadCapability, error) {
 	if len(requests) < 1 || len(requests) > MaxUploadBatchItems {
-		return nil, domain.NewError(domain.ErrorInvalid, "upload batch must contain 1 to 100 items")
+		return nil, domain.NewError(domain.ErrorInvalid, "upload batch must contain 1 to 10000 items")
 	}
 	for _, request := range requests {
 		if err := validateIdempotencyKey(request.IdempotencyKey); err != nil {
@@ -229,12 +230,40 @@ func (s *Service) CompleteUpload(ctx context.Context, userID domain.UserID, requ
 	return s.storage.CompleteUpload(ctx, scope, request)
 }
 
+func (s *Service) CompleteUploadBatch(ctx context.Context, userID domain.UserID, request domain.CompleteUploadBatchRequest) (domain.CompleteUploadBatchResult, error) {
+	if len(request.Items) < 1 || len(request.Items) > MaxUploadBatchItems {
+		return domain.CompleteUploadBatchResult{}, domain.NewError(domain.ErrorInvalid, "upload completion batch must contain 1 to 10000 items")
+	}
+	if err := validateIdempotencyKey(request.IdempotencyKey); err != nil {
+		return domain.CompleteUploadBatchResult{}, err
+	}
+	scope, err := liveScope(userID)
+	if err != nil {
+		return domain.CompleteUploadBatchResult{}, err
+	}
+	return s.uploadTxn.CompleteUploadBatch(ctx, scope, request)
+}
+
 func (s *Service) AbortUpload(ctx context.Context, userID domain.UserID, uploadID domain.UploadID) error {
 	scope, err := liveScope(userID)
 	if err != nil {
 		return err
 	}
 	return s.storage.AbortUpload(ctx, scope, uploadID)
+}
+
+func (s *Service) AbortUploadBatch(ctx context.Context, userID domain.UserID, request domain.AbortUploadBatchRequest) error {
+	if len(request.UploadIDs) < 1 || len(request.UploadIDs) > MaxUploadBatchItems {
+		return domain.NewError(domain.ErrorInvalid, "upload cancellation batch must contain 1 to 10000 items")
+	}
+	if err := validateIdempotencyKey(request.IdempotencyKey); err != nil {
+		return err
+	}
+	scope, err := liveScope(userID)
+	if err != nil {
+		return err
+	}
+	return s.uploadTxn.AbortUploadBatch(ctx, scope, request)
 }
 
 func (s *Service) Download(ctx context.Context, userID domain.UserID, request domain.CreateDownloadRequest, preview bool) (domain.DownloadCapability, string, error) {
@@ -400,8 +429,8 @@ func (s *Service) TrashPage(ctx context.Context, userID domain.UserID, limit int
 	if limit == 0 {
 		limit = 200
 	}
-	if limit < 1 || limit > 1000 {
-		return TrashPage{}, domain.NewError(domain.ErrorInvalid, "trash page limit must be between 1 and 1000")
+	if limit < 1 || limit > 10_000 {
+		return TrashPage{}, domain.NewError(domain.ErrorInvalid, "trash page limit must be between 1 and 10000")
 	}
 	page, err := s.trash.ListTrash(ctx, userID, domain.TrashListRequest{Limit: limit, Cursor: cursor})
 	if err != nil {
@@ -426,11 +455,39 @@ func (s *Service) Restore(ctx context.Context, userID domain.UserID, trashID str
 	return s.trash.RestoreFromTrash(ctx, userID, trashID, conflict, idempotencyKey)
 }
 
+func (s *Service) RestoreBatch(ctx context.Context, userID domain.UserID, trashIDs []string, conflict domain.ConflictMode, idempotencyKey string) (BatchResult, error) {
+	if err := validateIdempotencyKey(idempotencyKey); err != nil {
+		return BatchResult{}, err
+	}
+	if len(trashIDs) < 1 || len(trashIDs) > MaxBatchItems {
+		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "restore batch must contain 1 to 10000 items")
+	}
+	result, err := s.batch.BatchRestoreFromTrash(ctx, userID, trashIDs, conflict, idempotencyKey)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	return driveBatchResult(result), nil
+}
+
 func (s *Service) PermanentDelete(ctx context.Context, userID domain.UserID, trashID, idempotencyKey string) (domain.Operation, error) {
 	if err := validateIdempotencyKey(idempotencyKey); err != nil {
 		return domain.Operation{}, err
 	}
 	return s.trash.DeleteFromTrash(ctx, userID, trashID, idempotencyKey)
+}
+
+func (s *Service) PermanentDeleteBatch(ctx context.Context, userID domain.UserID, trashIDs []string, idempotencyKey string) (BatchResult, error) {
+	if err := validateIdempotencyKey(idempotencyKey); err != nil {
+		return BatchResult{}, err
+	}
+	if len(trashIDs) < 1 || len(trashIDs) > MaxBatchItems {
+		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "permanent-delete batch must contain 1 to 10000 items")
+	}
+	result, err := s.batch.BatchDeleteFromTrash(ctx, userID, trashIDs, idempotencyKey)
+	if err != nil {
+		return BatchResult{}, err
+	}
+	return driveBatchResult(result), nil
 }
 
 func (s *Service) EmptyTrash(ctx context.Context, userID domain.UserID, confirmed bool, idempotencyKey string) (BatchResult, error) {

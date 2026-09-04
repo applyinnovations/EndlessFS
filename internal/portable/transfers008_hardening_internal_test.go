@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,23 +21,43 @@ type transferFailureBackend struct {
 	objectstore.Backend
 	transfers   objectstore.DirectTransferBackend
 	beginErr    error
+	beginHandle *objectstore.UploadHandle
 	resumeErr   error
+	resumeValue *objectstore.UploadCapability
 	progressErr error
 	abortErr    error
 	abortOK     bool
+	abortCalls  atomic.Int64
 	downloadErr error
+	verifyInfo  *objectstore.ObjectInfo
+	verifyErr   error
 }
 
 func (backend *transferFailureBackend) BackendKind() string { return backend.transfers.BackendKind() }
+func (backend *transferFailureBackend) Verify(ctx context.Context, key objectstore.Key, expected objectstore.ExpectedIntegrity) (objectstore.ObjectInfo, error) {
+	if backend.verifyErr != nil {
+		return objectstore.ObjectInfo{}, backend.verifyErr
+	}
+	if backend.verifyInfo != nil {
+		return *backend.verifyInfo, nil
+	}
+	return backend.Backend.Verify(ctx, key, expected)
+}
 func (backend *transferFailureBackend) BeginUpload(ctx context.Context, request objectstore.UploadRequest) (objectstore.UploadHandle, error) {
 	if backend.beginErr != nil {
 		return objectstore.UploadHandle{}, backend.beginErr
+	}
+	if backend.beginHandle != nil {
+		return *backend.beginHandle, nil
 	}
 	return backend.transfers.BeginUpload(ctx, request)
 }
 func (backend *transferFailureBackend) ResumeUpload(ctx context.Context, lease []byte) (objectstore.UploadCapability, error) {
 	if backend.resumeErr != nil {
 		return objectstore.UploadCapability{}, backend.resumeErr
+	}
+	if backend.resumeValue != nil {
+		return *backend.resumeValue, nil
 	}
 	return backend.transfers.ResumeUpload(ctx, lease)
 }
@@ -47,6 +68,7 @@ func (backend *transferFailureBackend) UploadProgress(ctx context.Context, lease
 	return backend.transfers.UploadProgress(ctx, lease)
 }
 func (backend *transferFailureBackend) AbortUpload(ctx context.Context, lease []byte) error {
+	backend.abortCalls.Add(1)
 	if backend.abortErr != nil {
 		return backend.abortErr
 	}
@@ -808,11 +830,60 @@ func TestSchema008UploadLookupBatchAndStatusFailureBoundaries(t *testing.T) {
 		}
 		engine = openInternalTestEngine(t, memory, clock, strings.NewReader(strings.Repeat(t.Name(), 1<<14)))
 		sessionRecord := checkpointUploadRecord(engine, live.UserID(), "batch-session", clock.Now().Add(time.Hour))
+		sessionRecord.Batch = &storageformat.PortableUploadBatchMember{BatchID: "batch", Index: 0, Count: 1}
 		engine.fileBackend = &transferFailureBackend{Backend: memory, transfers: memory, beginErr: failure}
 		if _, err := engine.Files().activatePortableUploadBatch(ctx, live.UserID(), []portableUploadBatchItem{{record: sessionRecord, fingerprint: "fingerprint"}}, "batch", true); !errors.Is(err, domain.ErrUnavailable) {
 			t.Fatalf("batch session error = %v", err)
 		}
 	})
+}
+
+func TestSchema011UploadBatchAbortOverlayCorruptionFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	server := httptest.NewServer(backend)
+	defer server.Close()
+	clock := domain.NewFixedClock(time.Date(2066, 4, 5, 6, 7, 8, 0, time.UTC))
+	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(bytes.Repeat([]byte{0x71}, 1<<20)))); err != nil {
+		t.Fatal(err)
+	}
+	engine := openInternalTestEngine(t, backend, clock, strings.NewReader(strings.Repeat(t.Name(), 1<<14)))
+	live := namespaceTestScope(t, domain.AreaLive)
+	capabilities, err := engine.Files().CreateUploadBatch(ctx, live, []domain.CreateUploadRequest{{
+		Path: domain.MustParseUserPath("/abort-overlay-corruption.bin"), Size: 1,
+		MediaType: "application/octet-stream", IdempotencyKey: "abort-overlay-corruption-item",
+	}})
+	if err != nil || len(capabilities) != 1 {
+		t.Fatalf("create upload batch = %+v, %v", capabilities, err)
+	}
+	request := domain.AbortUploadBatchRequest{
+		UploadIDs: []domain.UploadID{capabilities[0].UploadID}, BatchID: capabilities[0].BatchID,
+		IdempotencyKey: "abort-overlay-corruption",
+	}
+	if err := engine.Files().AbortUploadBatch(ctx, live, request); err != nil {
+		t.Fatal(err)
+	}
+	store := newNamespaceStore(engine)
+	view, err := store.loadView(ctx, live.UserID(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := engine.Files().portableUploadBatchAbortAtView(ctx, view, live.UserID(), capabilities[0].BatchID); err != nil || !found {
+		t.Fatalf("load abort overlay = found:%t error:%v", found, err)
+	}
+	cached := view.uploadAborts[capabilities[0].BatchID]
+	if _, err := engine.stateDomainStore().mutatePrepared(ctx, uploadDomainReference(live.UserID()), consistencyDomainMutation{
+		ID: "corrupt-upload-abort-overlay",
+		Changes: []consistencyDomainChange{{
+			Key: uploadBatchAbortKey(capabilities[0].BatchID), Require: domainValuePresent,
+			ExpectedVersion: cached.value.LogicalVersion, Value: []byte(`{"schemaVersion":1}`),
+		}},
+	}, view.headSnapshot, view.session); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Files().UploadStatus(ctx, live, capabilities[0].UploadID); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("corrupt upload abort overlay status error = %v", err)
+	}
 }
 
 func TestSchema008TerminalUploadCleanupProviderFailureMatrix(t *testing.T) {

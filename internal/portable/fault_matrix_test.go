@@ -935,7 +935,7 @@ func TestPortablePublicMethodsRejectInvalidAndCrossOwnerRequests(t *testing.T) {
 	if _, err := engine.Files().List(context.Background(), first, domain.ListRequest{}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid file List() error = %v", err)
 	}
-	if _, err := engine.Files().List(context.Background(), first, domain.ListRequest{Directory: domain.MustParseUserPath("/"), PageSize: 1001}); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := engine.Files().List(context.Background(), first, domain.ListRequest{Directory: domain.MustParseUserPath("/"), PageSize: 10001}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("oversized file List() error = %v", err)
 	}
 	if _, err := engine.Files().List(context.Background(), first, domain.ListRequest{Directory: domain.MustParseUserPath("/"), Sort: "unknown"}); !errors.Is(err, domain.ErrInvalid) {

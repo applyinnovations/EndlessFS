@@ -17,6 +17,11 @@ import (
 
 const namespaceRootPrefix = "root/"
 
+const (
+	namespacePackRebuildMinimumEdits = domainPageMaximumItems
+	namespacePackRebuildMaximumItems = 20_000
+)
+
 type namespaceStore struct {
 	engine *Engine
 	domain *consistencyDomainStore
@@ -31,6 +36,21 @@ type namespaceView struct {
 	roots          map[domain.Area]storageformat.NamespaceEntry
 	rootVersions   map[domain.Area]string
 	rootExists     map[domain.Area]bool
+	uploadAborts   map[string]portableUploadAbortCache
+}
+
+type portableUploadAbortCache struct {
+	record storageformat.PortableUploadBatchAbort
+	value  consistencyDomainValue
+	found  bool
+}
+
+func (view *namespaceView) bindMutation(mutationID, fingerprint string) error {
+	if view == nil || view.session == nil || mutationID == "" || fingerprint == "" {
+		return domain.NewError(domain.ErrorInvalid, "namespace mutation binding is invalid")
+	}
+	seed := storageformat.Digest([]byte("endlessfs-namespace-packed-mutation-v1\x00" + mutationID + "\x00" + fingerprint))
+	return view.session.bindPackedMutation(seed)
 }
 
 type namespaceFrame struct {
@@ -125,16 +145,25 @@ func (store *namespaceStore) loadView(ctx context.Context, owner domain.UserID, 
 			return nil, err
 		}
 	}
+	session := newConsistencyDomainTreeSession(store.domain, reference)
+	headBody, err := storageformat.EncodeCanonical(head)
+	if err != nil {
+		return nil, err
+	}
+	session.enablePackedWrites(storageformat.Digest(headBody))
 	view := &namespaceView{
 		reference: reference, head: head, headSnapshot: headSnapshot, snapshotDigest: snapshotDigest,
-		session: newConsistencyDomainTreeSession(store.domain, reference), roots: make(map[domain.Area]storageformat.NamespaceEntry),
+		session: session, roots: make(map[domain.Area]storageformat.NamespaceEntry),
 		rootVersions: make(map[domain.Area]string), rootExists: make(map[domain.Area]bool),
+		uploadAborts: make(map[string]portableUploadAbortCache),
 	}
 	// Every namespace page root embedded in the authenticated delta window was
 	// successfully published before that head became visible. Remember those
 	// descriptors so an undo/restore that returns to a prior content identity
-	// validates it with a cheap GET instead of paying for a knowingly failing
-	// create-only PUT followed by the same GET.
+	// can reuse the already-authenticated immutable object without another
+	// provider call. The candidate page is encoded and digest-checked below;
+	// checkpoint reachability and garbage collection keep every head-referenced
+	// immutable object alive.
 	for _, delta := range head.Deltas {
 		for _, change := range delta.Changes {
 			if change.Delete || change.Key != namespaceRootKey(domain.AreaLive) && change.Key != namespaceRootKey(domain.AreaTrash) {
@@ -318,7 +347,12 @@ func (store *namespaceStore) applyDirectoryEdits(ctx context.Context, view *name
 		return storageformat.NamespaceEntry{}, domain.NewError(domain.ErrorInvalid, "namespace entry count underflows")
 	}
 	var err error
-	parent.Children, err = view.session.apply(ctx, parent.Children, normalizeDomainChanges(children))
+	normalizedChanges := normalizeDomainChanges(children)
+	if len(normalizedChanges) >= namespacePackRebuildMinimumEdits && parent.Children.EntryCount <= namespacePackRebuildMaximumItems && count <= namespacePackRebuildMaximumItems {
+		parent.Children, err = view.session.rebuild(ctx, parent.Children, normalizedChanges)
+	} else {
+		parent.Children, err = view.session.apply(ctx, parent.Children, normalizedChanges)
+	}
 	if err != nil {
 		return storageformat.NamespaceEntry{}, err
 	}
@@ -423,6 +457,9 @@ func validateNamespaceMutationResult(result storageformat.NamespaceMutationResul
 	if result.Batch != nil {
 		return validateOperation(result.Batch.Operation, true)
 	}
+	if result.UploadBatch != nil {
+		return nil
+	}
 	return nil
 }
 
@@ -435,6 +472,14 @@ func (store *namespaceStore) commit(ctx context.Context, view *namespaceView, mu
 // uses this to make the completed upload outcome and the visible file edge one
 // atomic transition rather than a recoverable cross-domain sequence.
 func (store *namespaceStore) commitWithAdditionalChanges(ctx context.Context, view *namespaceView, mutationID string, requestFingerprint string, changes map[string]storageformat.NamespaceEntry, additional []consistencyDomainChange, result storageformat.NamespaceMutationResult) (storageformat.NamespaceMutationResult, error) {
+	return store.commitWithAdditionalChangesMode(ctx, view, mutationID, requestFingerprint, changes, additional, result, false)
+}
+
+func (store *namespaceStore) commitMaterializedWithAdditionalChanges(ctx context.Context, view *namespaceView, mutationID string, requestFingerprint string, changes map[string]storageformat.NamespaceEntry, additional []consistencyDomainChange, result storageformat.NamespaceMutationResult) (storageformat.NamespaceMutationResult, error) {
+	return store.commitWithAdditionalChangesMode(ctx, view, mutationID, requestFingerprint, changes, additional, result, true)
+}
+
+func (store *namespaceStore) commitWithAdditionalChangesMode(ctx context.Context, view *namespaceView, mutationID string, requestFingerprint string, changes map[string]storageformat.NamespaceEntry, additional []consistencyDomainChange, result storageformat.NamespaceMutationResult, materialized bool) (storageformat.NamespaceMutationResult, error) {
 	if view == nil || view.headSnapshot == nil || view.snapshotDigest != "" {
 		return storageformat.NamespaceMutationResult{}, domain.NewError(domain.ErrorInvalid, "namespace mutation requires a live authoritative head")
 	}
@@ -467,7 +512,13 @@ func (store *namespaceStore) commitWithAdditionalChanges(ctx context.Context, vi
 	if err != nil {
 		return storageformat.NamespaceMutationResult{}, err
 	}
-	outcome, err := store.domain.mutatePrepared(ctx, view.reference, consistencyDomainMutation{ID: mutationID, Changes: mutationChanges, Result: resultBody}, view.headSnapshot, view.session)
+	mutation := consistencyDomainMutation{ID: mutationID, Changes: mutationChanges, Result: resultBody}
+	var outcome consistencyDomainOutcome
+	if materialized {
+		outcome, err = store.domain.mutateMaterializedPrepared(ctx, view.reference, mutation, view.headSnapshot, view.session)
+	} else {
+		outcome, err = store.domain.mutatePrepared(ctx, view.reference, mutation, view.headSnapshot, view.session)
+	}
 	if err != nil {
 		return storageformat.NamespaceMutationResult{}, err
 	}
@@ -777,6 +828,9 @@ func (store *namespaceStore) createDirectory(ctx context.Context, scope domain.S
 			}
 			return domainEntry(resolved, *replay.Entry), nil
 		}
+		if err := view.bindMutation(mutationID, fingerprint); err != nil {
+			return domain.Entry{}, err
+		}
 		trail, err := store.resolveTrail(ctx, view, scope.Area(), request.Path.Parent())
 		if err != nil {
 			return domain.Entry{}, err
@@ -856,6 +910,9 @@ func (store *namespaceStore) publishFileWithChangesAtView(ctx context.Context, i
 				return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "file mutation outcome is missing its entry")
 			}
 			return domainEntry(path, *replay.Entry), nil
+		}
+		if err := view.bindMutation(mutationID, requestFingerprint); err != nil {
+			return domain.Entry{}, err
 		}
 		trail, err := store.resolveTrail(ctx, view, scope.Area(), path.Parent())
 		if err != nil {
@@ -968,6 +1025,9 @@ func (store *namespaceStore) copyOrMoveResolved(ctx context.Context, move, resto
 				return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "copy or move outcome is missing its operation")
 			}
 			return *replay.Operation, nil
+		}
+		if err := view.bindMutation(mutationID, requestFingerprint); err != nil {
+			return domain.Operation{}, err
 		}
 		sourceTrail, err := store.resolveTrail(ctx, view, from.Area(), request.Source.Parent())
 		if err != nil {
@@ -1132,6 +1192,9 @@ func (store *namespaceStore) deleteResolved(ctx context.Context, scope domain.Sc
 				return domain.Operation{}, domain.NewError(domain.ErrorInvalid, "delete outcome is missing its operation")
 			}
 			return *replay.Operation, nil
+		}
+		if err := view.bindMutation(mutationID, requestFingerprint); err != nil {
+			return domain.Operation{}, err
 		}
 		trail, err := store.resolveTrail(ctx, view, scope.Area(), request.Path.Parent())
 		if err != nil {

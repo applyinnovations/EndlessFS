@@ -104,7 +104,7 @@ func TestSchema008CheckpointRejectsCorruptReachableNamespacePage(t *testing.T) {
 	if _, err := store.commit(ctx, view, "checkpoint-corrupt-seed", namespaceRequestFingerprint("checkpoint-corrupt-seed", "300"), map[string]storageformat.NamespaceEntry{namespaceFrameKey(live.Area(), namespaceRootPath()): root}, storageformat.NamespaceMutationResult{Operation: &domain.Operation{ID: "checkpoint-corrupt-seed", State: domain.OperationSucceeded, StartedAt: engine.clock.Now(), UpdatedAt: engine.clock.Now()}}); err != nil {
 		t.Fatal(err)
 	}
-	target := storageformat.DomainPageKey(storageformat.DomainNamespace, live.UserID().String(), root.Children.Digest)
+	target := domainTreeStorageKey(namespaceReference(live.UserID()), root.Children)
 	object, err := backend.Get(ctx, target)
 	if err != nil {
 		t.Fatal(err)

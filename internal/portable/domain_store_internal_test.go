@@ -303,7 +303,7 @@ func TestConsistencyDomainCompactionPersistsValuesAndOutcomesWithoutClaimReads(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report, err := ratchet.CheckExact("maintenance-domain-compaction-300-schema-009", economics, []providerbudget.Role{providerbudget.RoleState}, ledger.Events()); err != nil {
+	if report, err := ratchet.CheckExact("maintenance-domain-compaction-300-schema-011", economics, []providerbudget.Role{providerbudget.RoleState}, ledger.Events()); err != nil {
 		t.Errorf("domain compaction provider budget: %v; observed=%+v", err, report.Totals)
 	}
 	snapshot, err := store.loadHead(ctx, reference)

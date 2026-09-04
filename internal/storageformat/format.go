@@ -39,6 +39,8 @@ const (
 	FeatureDerivedProjections   = "rebuildable-derived-projections-v1"
 	FeatureTransactionalState   = "transactional-state-domains-v1"
 	FeatureStateConservation    = "state-conservation-v1"
+	FeaturePackedDomainPages    = "packed-consistency-domain-pages-v1"
+	FeatureUploadTransactions   = "upload-transactions-v1"
 )
 
 type Envelope struct {
@@ -789,6 +791,35 @@ type GarbageCollectionSession struct {
 	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
+// GarbageCollectionPlan is a provider-independent, immutable deletion plan
+// bound to one closed-gate checkpoint. Provider-native versions are
+// deliberately absent: they are used only from the immediately preceding
+// listing in the process performing a conditional delete.
+type GarbageCollectionPlan struct {
+	SchemaVersion   int                      `json:"schemaVersion"`
+	CheckpointID    string                   `json:"checkpointID"`
+	GateEpoch       uint64                   `json:"gateEpoch"`
+	InventoryDigest string                   `json:"inventoryDigest"`
+	PageCount       uint64                   `json:"pageCount"`
+	EntryCount      uint64                   `json:"entryCount"`
+	EntriesDigest   string                   `json:"entriesDigest"`
+	Entries         []GarbageCollectionEntry `json:"entries,omitempty"`
+}
+
+type GarbageCollectionPlanPage struct {
+	SchemaVersion   int                      `json:"schemaVersion"`
+	CheckpointID    string                   `json:"checkpointID"`
+	GateEpoch       uint64                   `json:"gateEpoch"`
+	InventoryDigest string                   `json:"inventoryDigest"`
+	Index           uint64                   `json:"index"`
+	Entries         []GarbageCollectionEntry `json:"entries"`
+}
+
+type GarbageCollectionEntry struct {
+	Role string `json:"role"`
+	Key  string `json:"key"`
+}
+
 type GarbageCollectionMark struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	CheckpointID  string `json:"checkpointID"`
@@ -821,6 +852,10 @@ func Digest(data []byte) string {
 	sum := sha256.Sum256(data)
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
+
+// ValidDigest reports whether value is in the canonical provider-independent
+// digest encoding used by storage-format bindings.
+func ValidDigest(value string) bool { return validDomainDigest(value) }
 
 func ValidateGate(gate WriteGate) error {
 	if gate.SchemaVersion != 1 || gate.Epoch == 0 || (gate.Mode != GateOpen && gate.Mode != GateClosing && gate.Mode != GateClosed) {

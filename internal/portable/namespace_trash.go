@@ -45,8 +45,8 @@ func (s *FileStore) ListTrash(ctx context.Context, owner domain.UserID, request 
 	if limit == 0 {
 		limit = 200
 	}
-	if limit < 1 || limit > 1000 {
-		return domain.TrashListPage{}, domain.NewError(domain.ErrorInvalid, "trash page limit must be between 1 and 1000")
+	if limit < 1 || limit > 10_000 {
+		return domain.TrashListPage{}, domain.NewError(domain.ErrorInvalid, "trash page limit must be between 1 and 10000")
 	}
 	store := newNamespaceStore(s.engine)
 	bound, snapshotDigest := "", ""

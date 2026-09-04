@@ -22,6 +22,8 @@ func uploadDomainReference(owner domain.UserID) consistencyDomainRef {
 
 func uploadRecordKey(uploadID string) string { return "upload/" + uploadID }
 
+func uploadBatchAbortKey(batchID string) string { return "upload-batch-abort/" + batchID }
+
 func uploadIdempotencyKey(value string) string {
 	return "upload-idempotency/" + storageformat.Digest([]byte(value))
 }
@@ -38,12 +40,11 @@ func decodePortableUploadRecord(body []byte, owner domain.UserID, uploadID strin
 }
 
 func (s *FileStore) portableUpload(ctx context.Context, owner domain.UserID, uploadID string) (storageformat.PortableUploadRecord, consistencyDomainValue, error) {
-	value, err := s.engine.stateDomainStore().get(ctx, uploadDomainReference(owner), uploadRecordKey(uploadID))
+	view, err := newNamespaceStore(s.engine).loadView(ctx, owner, "")
 	if err != nil {
 		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, err
 	}
-	record, err := decodePortableUploadRecord(value.Data, owner, uploadID)
-	return record, value, err
+	return s.portableUploadAtView(ctx, view, owner, uploadID)
 }
 
 // portableUploadSnapshot authenticates the upload record and returns the
@@ -60,12 +61,12 @@ func (s *FileStore) portableUploadSnapshot(ctx context.Context, owner domain.Use
 	if !snapshot.exists || !snapshot.head.Registered {
 		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, consistencyDomainHeadSnapshot{}, nil, domain.NewError(domain.ErrorNotFound, "upload does not exist")
 	}
-	if _, _, found, lockErr := transitionLockAtHead009(ctx, store, reference, snapshot.head); lockErr != nil {
+	session := newConsistencyDomainTreeSession(store, reference)
+	if _, _, found, lockErr := transitionLockAtHeadWithSession009(ctx, store, reference, snapshot.head, session); lockErr != nil {
 		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, consistencyDomainHeadSnapshot{}, nil, lockErr
 	} else if found {
 		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, consistencyDomainHeadSnapshot{}, nil, domain.WrapError(domain.ErrorUnavailable, "upload domain has a pending transition", errTransitionPending009)
 	}
-	session := newConsistencyDomainTreeSession(store, reference)
 	value, found, err := store.lookupAtHeadWithSession(ctx, reference, snapshot.head, uploadRecordKey(uploadID), session)
 	if err != nil {
 		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, consistencyDomainHeadSnapshot{}, nil, err
@@ -74,6 +75,14 @@ func (s *FileStore) portableUploadSnapshot(ctx context.Context, owner domain.Use
 		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, consistencyDomainHeadSnapshot{}, nil, domain.NewError(domain.ErrorNotFound, "upload does not exist")
 	}
 	record, err := decodePortableUploadRecord(value.Data, owner, uploadID)
+	if err == nil && record.Batch != nil {
+		view := &namespaceView{reference: reference, head: snapshot.head, headSnapshot: &snapshot, session: session, uploadAborts: make(map[string]portableUploadAbortCache)}
+		if abort, found, abortErr := s.portableUploadBatchAbortAtView(ctx, view, owner, record.Batch.BatchID); abortErr != nil {
+			return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, consistencyDomainHeadSnapshot{}, nil, abortErr
+		} else if found && abort.Aborts(record.Batch.Index) {
+			record.State, record.CleanupPending, record.Completion = storageformat.UploadAborted, false, nil
+		}
+	}
 	return record, value, snapshot, session, err
 }
 
@@ -89,7 +98,48 @@ func (s *FileStore) portableUploadAtView(ctx context.Context, view *namespaceVie
 		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, domain.NewError(domain.ErrorNotFound, "upload does not exist")
 	}
 	record, err := decodePortableUploadRecord(value.Data, owner, uploadID)
-	return record, value, err
+	if err != nil || record.Batch == nil {
+		return record, value, err
+	}
+	abort, found, err := s.portableUploadBatchAbortAtView(ctx, view, owner, record.Batch.BatchID)
+	if err != nil {
+		return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, err
+	}
+	if found {
+		if abort.Count != record.Batch.Count {
+			return storageformat.PortableUploadRecord{}, consistencyDomainValue{}, domain.NewError(domain.ErrorInvalid, "upload batch abort count is misbound")
+		}
+		if abort.Aborts(record.Batch.Index) {
+			record.State, record.CleanupPending, record.Completion = storageformat.UploadAborted, false, nil
+		}
+	}
+	return record, value, nil
+}
+
+func (s *FileStore) portableUploadBatchAbortAtView(ctx context.Context, view *namespaceView, owner domain.UserID, batchID string) (storageformat.PortableUploadBatchAbort, bool, error) {
+	if view == nil || view.reference != uploadDomainReference(owner) || batchID == "" {
+		return storageformat.PortableUploadBatchAbort{}, false, domain.NewError(domain.ErrorInvalid, "upload batch abort view is misbound")
+	}
+	if cached, ok := view.uploadAborts[batchID]; ok {
+		return cached.record, cached.found, nil
+	}
+	if view.uploadAborts == nil {
+		view.uploadAborts = make(map[string]portableUploadAbortCache)
+	}
+	value, found, err := s.engine.stateDomainStore().lookupAtHeadWithSession(ctx, view.reference, view.head, uploadBatchAbortKey(batchID), view.session)
+	if err != nil {
+		return storageformat.PortableUploadBatchAbort{}, false, err
+	}
+	if !found {
+		view.uploadAborts[batchID] = portableUploadAbortCache{}
+		return storageformat.PortableUploadBatchAbort{}, false, nil
+	}
+	var record storageformat.PortableUploadBatchAbort
+	if err := decodeCanonicalValue(value.Data, &record); err != nil || storageformat.ValidatePortableUploadBatchAbort(record) != nil || record.OwnerID != owner.String() || record.BatchID != batchID {
+		return storageformat.PortableUploadBatchAbort{}, false, domain.NewError(domain.ErrorInvalid, "invalid portable upload batch abort")
+	}
+	view.uploadAborts[batchID] = portableUploadAbortCache{record: record, value: value, found: true}
+	return record, true, nil
 }
 
 func (s *FileStore) portableUploadByIdempotencyAtView(ctx context.Context, view *namespaceView, owner domain.UserID, keyValue, fingerprint string) (storageformat.PortableUploadRecord, bool, error) {
@@ -159,6 +209,42 @@ func (s *FileStore) runtimeUploadLease(ctx context.Context, uploadID string) ([]
 	return append([]byte(nil), object.Body...), object, nil
 }
 
+func (s *FileStore) runtimeUploadLeaseForRecord(ctx context.Context, record storageformat.PortableUploadRecord) ([]byte, objectstore.Object, error) {
+	if record.Batch == nil {
+		return s.runtimeUploadLease(ctx, record.UploadID)
+	}
+	transfers, err := s.transferBackend()
+	if err != nil {
+		return nil, objectstore.Object{}, err
+	}
+	segmentIndex := (record.Batch.Count - 1) / storageformat.MaxUploadLeaseSegmentItems
+	key := storageformat.UploadLeaseSegmentKey(transfers.BackendKind(), record.Batch.BatchID, segmentIndex)
+	object, err := s.engine.backend.Get(ctx, key)
+	if errors.Is(err, domain.ErrNotFound) && segmentIndex != record.Batch.Index/storageformat.MaxUploadLeaseSegmentItems {
+		// Admission may have crashed before publishing the terminal cumulative
+		// segment. An earlier progress segment is still sufficient to resume or
+		// clean up a member that was already exposed.
+		segmentIndex = record.Batch.Index / storageformat.MaxUploadLeaseSegmentItems
+		key = storageformat.UploadLeaseSegmentKey(transfers.BackendKind(), record.Batch.BatchID, segmentIndex)
+		object, err = s.engine.backend.Get(ctx, key)
+	}
+	if err != nil {
+		return nil, objectstore.Object{}, err
+	}
+	segment, err := storageformat.DecodePortableUploadLeaseSegment(object.Body, transfers.BackendKind(), record.OwnerID, record.Batch.BatchID, segmentIndex)
+	if err != nil {
+		return nil, objectstore.Object{}, err
+	}
+	if segment.TotalCount != record.Batch.Count || record.Batch.Index < segment.FirstIndex {
+		return nil, objectstore.Object{}, domain.NewError(domain.ErrorInvalid, "upload lease segment total is misbound")
+	}
+	offset := record.Batch.Index - segment.FirstIndex
+	if offset >= uint64(len(segment.Leases)) || segment.Leases[offset].Index != record.Batch.Index || segment.Leases[offset].UploadID != record.UploadID {
+		return nil, objectstore.Object{}, domain.NewError(domain.ErrorInvalid, "upload lease segment member is missing or misbound")
+	}
+	return append([]byte(nil), segment.Leases[offset].Lease...), object, nil
+}
+
 func (s *FileStore) deleteRuntimeUploadLease(ctx context.Context, uploadID string) error {
 	transfers, err := s.transferBackend()
 	if err != nil {
@@ -215,7 +301,11 @@ func (s *FileStore) cleanupPortableUpload(ctx context.Context, owner domain.User
 	}
 	switch record.State {
 	case storageformat.UploadCompleted:
-		if knownLease != nil {
+		if record.Batch != nil {
+			// A segment is shared by up to 1,000 uploads and remains transient
+			// recovery authority until every member is terminal or expired.
+			err = nil
+		} else if knownLease != nil {
 			transfers, transferErr := s.transferBackend()
 			if transferErr != nil {
 				return transferErr
@@ -232,7 +322,24 @@ func (s *FileStore) cleanupPortableUpload(ctx context.Context, owner domain.User
 			return err
 		}
 	case storageformat.UploadAborted:
-		if err := s.abortAndDeleteRuntimeUploadLease(ctx, uploadID); err != nil {
+		if record.Batch != nil {
+			lease, _, leaseErr := s.runtimeUploadLeaseForRecord(ctx, record)
+			if errors.Is(leaseErr, domain.ErrNotFound) {
+				leaseErr = nil
+			}
+			if leaseErr == nil {
+				transfers, transferErr := s.transferBackend()
+				if transferErr != nil {
+					return transferErr
+				}
+				if abortErr := transfers.AbortUpload(ctx, lease); abortErr != nil && !errors.Is(abortErr, domain.ErrNotFound) {
+					return abortErr
+				}
+			}
+			if leaseErr != nil {
+				return leaseErr
+			}
+		} else if err := s.abortAndDeleteRuntimeUploadLease(ctx, uploadID); err != nil {
 			return err
 		}
 	default:
@@ -284,7 +391,7 @@ func (s *FileStore) resumePortableUpload(ctx context.Context, record storageform
 	if record.State != storageformat.UploadActive {
 		return domain.UploadCapability{}, domain.NewError(domain.ErrorConflict, "upload is no longer active")
 	}
-	lease, _, err := s.runtimeUploadLease(ctx, record.UploadID)
+	lease, _, err := s.runtimeUploadLeaseForRecord(ctx, record)
 	if err != nil {
 		return domain.UploadCapability{}, err
 	}
@@ -535,8 +642,8 @@ func normalizePortableUploadRequest(scope domain.Scope, request domain.CreateUpl
 // and disposable lease objects; it never reruns one state transaction per
 // upload.
 func (s *FileStore) createUploadBatch008(ctx context.Context, scope domain.Scope, requests []domain.CreateUploadRequest) ([]domain.UploadCapability, error) {
-	if len(requests) < 1 || len(requests) > 100 {
-		return nil, domain.NewError(domain.ErrorInvalid, "upload batch must contain 1 to 100 items")
+	if len(requests) < 1 || len(requests) > storageformat.MaxPortableUploadBatchItems {
+		return nil, domain.NewError(domain.ErrorInvalid, "upload batch must contain 1 to 10000 items")
 	}
 	normalized := make([]domain.CreateUploadRequest, len(requests))
 	fingerprints := make([]string, len(requests))
@@ -553,6 +660,7 @@ func (s *FileStore) createUploadBatch008(ctx context.Context, scope domain.Scope
 		seenKeys[request.IdempotencyKey] = struct{}{}
 	}
 	batchFingerprint := namespaceRequestFingerprint("upload-batch", strings.Join(fingerprints, "\x00"))
+	batchID := storageformat.Digest([]byte("endlessfs-upload-batch-v1\x00" + scope.UserID().String() + "\x00" + batchFingerprint))
 	items := make([]portableUploadBatchItem, len(requests))
 	created := false
 	intentsReady := false
@@ -561,6 +669,15 @@ func (s *FileStore) createUploadBatch008(ctx context.Context, scope domain.Scope
 		view, err := namespace.loadView(ctx, scope.UserID(), "")
 		if err != nil {
 			return nil, err
+		}
+		if view.headSnapshot == nil || !view.headSnapshot.exists || !view.headSnapshot.head.Registered {
+			if view.headSnapshot == nil {
+				return nil, domain.NewError(domain.ErrorInvalid, "upload batch registration view is missing")
+			}
+			if err := s.engine.stateDomainStore().ensureRegistered(ctx, uploadDomainReference(scope.UserID()), *view.headSnapshot); err != nil {
+				return nil, err
+			}
+			continue
 		}
 		existing := 0
 		for index, request := range normalized {
@@ -574,6 +691,11 @@ func (s *FileStore) createUploadBatch008(ctx context.Context, scope domain.Scope
 			}
 		}
 		if existing == len(items) {
+			for index := range items {
+				if items[index].record.Batch == nil || items[index].record.Batch.BatchID != batchID || items[index].record.Batch.Index != uint64(index) {
+					return nil, domain.NewError(domain.ErrorInvalid, "upload batch replay has invalid membership")
+				}
+			}
 			intentsReady = true
 			break
 		}
@@ -592,14 +714,12 @@ func (s *FileStore) createUploadBatch008(ctx context.Context, scope domain.Scope
 				return nil, domain.NewError(domain.ErrorConflict, "upload batch resolves more than one item to the same destination")
 			}
 			seenDestinations[resolved.String()] = struct{}{}
-			uploadID, idErr := s.engine.ids.OpaqueID()
-			if idErr != nil {
-				return nil, idErr
-			}
+			uploadID := storageformat.Digest([]byte(fmt.Sprintf("endlessfs-upload-batch-member-v1\x00%s\x00%016x", batchID, index)))
 			record := storageformat.PortableUploadRecord{
 				SchemaVersion: 1, UploadID: uploadID, OwnerID: scope.UserID().String(), Area: areaName(scope.Area()), RequestedPath: request.Path.String(), ResolvedPath: resolved.String(), BlobID: uploadID,
 				Size: request.Size, MediaType: request.MediaType, Conflict: request.Conflict, ExpectedVersion: request.ExpectedVersion, TargetExisted: targetExisted, Resumable: request.Resumable,
 				State: storageformat.UploadInitializing, CreatedAt: now, ExpiresAt: now.Add(s.engine.uploadTTL),
+				Batch: &storageformat.PortableUploadBatchMember{BatchID: batchID, Index: uint64(index), Count: uint64(len(requests))},
 			}
 			recordBody, encodeErr := storageformat.EncodeCanonical(record)
 			if encodeErr != nil {
@@ -620,8 +740,12 @@ func (s *FileStore) createUploadBatch008(ctx context.Context, scope domain.Scope
 		if err != nil {
 			return nil, err
 		}
-		_, err = s.engine.stateDomainStore().mutatePrepared(ctx, uploadDomainReference(scope.UserID()), consistencyDomainMutation{
-			ID: "upload-batch-create:" + storageformat.Digest([]byte(strings.Join(fingerprints, "\x00"))), Changes: changes, Result: resultBody,
+		mutationID := "upload-batch-create:" + storageformat.Digest([]byte(strings.Join(fingerprints, "\x00")))
+		if err := view.bindMutation(mutationID, batchFingerprint); err != nil {
+			return nil, err
+		}
+		_, err = s.engine.stateDomainStore().mutateMaterializedPrepared(ctx, uploadDomainReference(scope.UserID()), consistencyDomainMutation{
+			ID: mutationID, Changes: changes, Result: resultBody,
 		}, view.headSnapshot, view.session)
 		if err == nil {
 			created = true
@@ -644,83 +768,213 @@ func (s *FileStore) createUploadBatch008(ctx context.Context, scope domain.Scope
 }
 
 func (s *FileStore) activatePortableUploadBatch(ctx context.Context, owner domain.UserID, items []portableUploadBatchItem, batchFingerprint string, leasesKnownAbsent bool) ([]domain.UploadCapability, error) {
-	capabilities := make([]domain.UploadCapability, len(items))
-	errorsByIndex := make([]error, len(items))
-	var wait sync.WaitGroup
-	for index := range items {
-		index := index
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			traced := providerbudget.WithTrace(ctx, providerbudget.Trace{Operation: "create-upload-batch", Subsystem: "upload-session", ParallelGroup: "upload-session-batch"})
-			capability, _, err := s.ensurePortableUploadLease(traced, items[index].record, leasesKnownAbsent)
-			if err != nil {
-				errorsByIndex[index] = err
-				return
-			}
-			capabilities[index] = domainUploadCapability(items[index].record.UploadID, capability)
-		}()
+	if len(items) == 0 || items[0].record.Batch == nil {
+		return nil, domain.NewError(domain.ErrorInvalid, "upload batch membership is missing")
 	}
-	wait.Wait()
-	for _, err := range errorsByIndex {
+	batchID := items[0].record.Batch.BatchID
+	capabilities := make([]domain.UploadCapability, len(items))
+	allLeases := make([]storageformat.PortableUploadLease, 0, len(items))
+	for first := 0; first < len(items); first += storageformat.MaxUploadLeaseSegmentItems {
+		last := first + storageformat.MaxUploadLeaseSegmentItems
+		if last > len(items) {
+			last = len(items)
+		}
+		segmentCapabilities, leases, err := s.ensurePortableUploadLeaseSegment(ctx, owner, batchID, uint64(first/storageformat.MaxUploadLeaseSegmentItems), items[first:last], allLeases, leasesKnownAbsent)
 		if err != nil {
 			return nil, err
 		}
+		copy(capabilities[first:last], segmentCapabilities)
+		allLeases = leases
 	}
 	if err := s.engine.step(ctx, StepUploadBatchAfterSessions); err != nil {
 		return nil, err
 	}
-	activationID := "upload-batch-activate:" + storageformat.Digest([]byte(strings.Join(func() []string {
-		ids := make([]string, len(items))
-		for index := range items {
-			ids[index] = items[index].record.UploadID
-		}
-		return ids
-	}(), "\x00")))
-	for attempts := 0; attempts < 8; attempts++ {
-		view, err := newNamespaceStore(s.engine).loadView(ctx, owner, "")
-		if err != nil {
-			return nil, err
-		}
-		changes := make([]consistencyDomainChange, 0, len(items))
-		for index := range items {
-			record, value, readErr := s.portableUploadAtView(ctx, view, owner, items[index].record.UploadID)
-			if readErr != nil {
-				return nil, readErr
-			}
-			switch record.State {
-			case storageformat.UploadActive:
-				continue
-			case storageformat.UploadInitializing:
-				record.State = storageformat.UploadActive
-				body, encodeErr := storageformat.EncodeCanonical(record)
-				if encodeErr != nil {
-					return nil, encodeErr
-				}
-				changes = append(changes, consistencyDomainChange{Key: uploadRecordKey(record.UploadID), Require: domainValuePresent, ExpectedVersion: value.LogicalVersion, Value: body})
-			default:
-				return nil, domain.NewError(domain.ErrorConflict, "upload batch member is no longer active")
-			}
-		}
-		if len(changes) == 0 {
-			return capabilities, nil
-		}
-		resultBody, err := storageformat.EncodeCanonical(storageformat.NamespaceMutationResult{SchemaVersion: 1, RequestFingerprint: namespaceRequestFingerprint("upload-batch-activate", batchFingerprint), Upload: &storageformat.NamespaceUploadMutationResult{UploadID: items[0].record.UploadID, State: "active"}})
-		if err != nil {
-			return nil, err
-		}
-		_, err = s.engine.stateDomainStore().mutatePrepared(ctx, uploadDomainReference(owner), consistencyDomainMutation{ID: activationID, Changes: changes, Result: resultBody}, view.headSnapshot, view.session)
-		if err == nil {
-			if stepErr := s.engine.step(ctx, StepUploadBatchAfterActivation); stepErr != nil {
-				return nil, stepErr
-			}
-			return capabilities, nil
-		}
-		if !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrUnavailable) {
-			return nil, err
+	if err := s.engine.step(ctx, StepUploadBatchAfterActivation); err != nil {
+		return nil, err
+	}
+	_ = batchFingerprint // retained in the durable admission outcome binding.
+	return capabilities, nil
+}
+
+const uploadBatchProviderConcurrency = 100
+
+func (s *FileStore) ensurePortableUploadLeaseSegment(ctx context.Context, owner domain.UserID, batchID string, segmentIndex uint64, items []portableUploadBatchItem, priorLeases []storageformat.PortableUploadLease, knownAbsent bool) ([]domain.UploadCapability, []storageformat.PortableUploadLease, error) {
+	transfers, err := s.transferBackend()
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(items) < 1 || len(items) > storageformat.MaxUploadLeaseSegmentItems {
+		return nil, nil, domain.NewError(domain.ErrorInvalid, "invalid upload lease segment cardinality")
+	}
+	if items[0].record.Batch == nil {
+		return nil, nil, domain.NewError(domain.ErrorInvalid, "upload lease segment batch binding is missing")
+	}
+	firstIndex := segmentIndex * storageformat.MaxUploadLeaseSegmentItems
+	totalCount := items[0].record.Batch.Count
+	if uint64(len(priorLeases)) != firstIndex || totalCount < firstIndex+uint64(len(items)) {
+		return nil, nil, domain.NewError(domain.ErrorInvalid, "invalid upload lease progress")
+	}
+	for offset, item := range items {
+		if item.record.Batch == nil || item.record.Batch.BatchID != batchID || item.record.Batch.Count != totalCount || item.record.Batch.Index != firstIndex+uint64(offset) || item.record.OwnerID != owner.String() || item.record.State != storageformat.UploadInitializing && item.record.State != storageformat.UploadActive {
+			return nil, nil, domain.NewError(domain.ErrorInvalid, "misbound upload lease segment member")
 		}
 	}
-	return nil, domain.NewError(domain.ErrorUnavailable, "upload batch activation remained contended")
+	key := storageformat.UploadLeaseSegmentKey(transfers.BackendKind(), batchID, segmentIndex)
+	if !knownAbsent {
+		object, getErr := s.engine.backend.Get(ctx, key)
+		if getErr == nil {
+			stored, decodeErr := storageformat.DecodePortableUploadLeaseSegment(object.Body, transfers.BackendKind(), owner.String(), batchID, segmentIndex)
+			if decodeErr != nil || stored.TotalCount != totalCount {
+				if decodeErr != nil {
+					return nil, nil, decodeErr
+				}
+				return nil, nil, domain.NewError(domain.ErrorInvalid, "upload lease segment total is misbound")
+			}
+			capabilities, resumeErr := resumePortableUploadLeaseSegment(ctx, transfers, items, stored)
+			if resumeErr != nil {
+				return nil, nil, resumeErr
+			}
+			leases, mergeErr := mergePortableUploadLeaseProgress(priorLeases, stored, firstIndex, totalCount)
+			return capabilities, leases, mergeErr
+		}
+		if !errors.Is(getErr, domain.ErrNotFound) {
+			return nil, nil, getErr
+		}
+	}
+
+	handles := make([]objectstore.UploadHandle, len(items))
+	errorsByIndex := make([]error, len(items))
+	jobs := make(chan int)
+	workers := uploadBatchProviderConcurrency
+	if workers > len(items) {
+		workers = len(items)
+	}
+	var wait sync.WaitGroup
+	wait.Add(workers)
+	for worker := 0; worker < workers; worker++ {
+		go func() {
+			defer wait.Done()
+			for index := range jobs {
+				record := items[index].record
+				traced := providerbudget.WithTrace(ctx, providerbudget.Trace{Operation: "create-upload-batch", Subsystem: "upload-session", ParallelGroup: "upload-session-batch"})
+				handle, beginErr := transfers.BeginUpload(traced, objectstore.UploadRequest{
+					UploadID: record.UploadID, Key: storageformat.BlobKey(record.OwnerID, record.BlobID), Size: record.Size,
+					MediaType: record.MediaType, Resumable: record.Resumable, ExpiresAt: record.ExpiresAt,
+				})
+				if beginErr == nil && (len(handle.Lease) < 1 || len(handle.Lease) > storageformat.MaxSealedUploadLeaseBytes) {
+					beginErr = domain.NewError(domain.ErrorInvalid, "provider upload lease exceeds the bounded segment envelope")
+				}
+				handles[index], errorsByIndex[index] = handle, beginErr
+			}
+		}()
+	}
+	for index := range items {
+		jobs <- index
+	}
+	close(jobs)
+	wait.Wait()
+	for _, beginErr := range errorsByIndex {
+		if beginErr != nil {
+			abortUploadHandles(ctx, transfers, handles)
+			return nil, nil, beginErr
+		}
+	}
+	segmentLeases := make([]storageformat.PortableUploadLease, len(items))
+	stored := storageformat.PortableUploadLeaseSegment{
+		SchemaVersion: 1, BackendKind: transfers.BackendKind(), OwnerID: owner.String(), BatchID: batchID,
+		Segment: segmentIndex, TotalCount: totalCount, FirstIndex: firstIndex,
+	}
+	capabilities := make([]domain.UploadCapability, len(items))
+	for index, handle := range handles {
+		segmentLeases[index] = storageformat.PortableUploadLease{Index: items[index].record.Batch.Index, UploadID: items[index].record.UploadID, Lease: append([]byte(nil), handle.Lease...)}
+		capabilities[index] = domainUploadCapability(items[index].record.UploadID, handle.Capability)
+		capabilities[index].BatchID = batchID
+		capabilities[index].BatchIndex = items[index].record.Batch.Index
+		capabilities[index].BatchCount = items[index].record.Batch.Count
+	}
+	allLeases := append(append([]storageformat.PortableUploadLease(nil), priorLeases...), segmentLeases...)
+	stored.Leases = segmentLeases
+	if uint64(len(allLeases)) == totalCount {
+		stored.FirstIndex = 0
+		stored.Leases = allLeases
+	}
+	body, err := storageformat.EncodePortableUploadLeaseSegment(stored)
+	if err != nil {
+		abortUploadHandles(ctx, transfers, handles)
+		return nil, nil, err
+	}
+	if _, err := s.engine.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err == nil {
+		return capabilities, allLeases, nil
+	} else if !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) {
+		abortUploadHandles(ctx, transfers, handles)
+		return nil, nil, err
+	}
+	winnerObject, err := s.engine.backend.Get(ctx, key)
+	if err != nil {
+		abortUploadHandles(ctx, transfers, handles)
+		return nil, nil, err
+	}
+	winner, err := storageformat.DecodePortableUploadLeaseSegment(winnerObject.Body, transfers.BackendKind(), owner.String(), batchID, segmentIndex)
+	if err != nil {
+		abortUploadHandles(ctx, transfers, handles)
+		return nil, nil, err
+	}
+	if !bytes.Equal(winnerObject.Body, body) {
+		abortUploadHandles(ctx, transfers, handles)
+	}
+	resumed, resumeErr := resumePortableUploadLeaseSegment(ctx, transfers, items, winner)
+	if resumeErr != nil {
+		return nil, nil, resumeErr
+	}
+	leases, mergeErr := mergePortableUploadLeaseProgress(priorLeases, winner, firstIndex, totalCount)
+	return resumed, leases, mergeErr
+}
+
+func mergePortableUploadLeaseProgress(prior []storageformat.PortableUploadLease, stored storageformat.PortableUploadLeaseSegment, firstIndex, totalCount uint64) ([]storageformat.PortableUploadLease, error) {
+	if stored.TotalCount != totalCount {
+		return nil, domain.NewError(domain.ErrorInvalid, "upload lease progress total is misbound")
+	}
+	if stored.FirstIndex == 0 && uint64(len(stored.Leases)) == totalCount {
+		return append([]storageformat.PortableUploadLease(nil), stored.Leases...), nil
+	}
+	if uint64(len(prior)) != firstIndex || stored.FirstIndex != firstIndex {
+		return nil, domain.NewError(domain.ErrorInvalid, "upload lease progress is non-contiguous")
+	}
+	return append(append([]storageformat.PortableUploadLease(nil), prior...), stored.Leases...), nil
+}
+
+func abortUploadHandles(ctx context.Context, transfers objectstore.DirectTransferBackend, handles []objectstore.UploadHandle) {
+	for _, handle := range handles {
+		if len(handle.Lease) != 0 {
+			_ = transfers.AbortUpload(ctx, handle.Lease)
+		}
+	}
+}
+
+func resumePortableUploadLeaseSegment(ctx context.Context, transfers objectstore.DirectTransferBackend, items []portableUploadBatchItem, stored storageformat.PortableUploadLeaseSegment) ([]domain.UploadCapability, error) {
+	capabilities := make([]domain.UploadCapability, len(items))
+	for index, item := range items {
+		if item.record.Batch == nil || item.record.Batch.Count != stored.TotalCount || item.record.Batch.Index < stored.FirstIndex {
+			return nil, domain.NewError(domain.ErrorInvalid, "upload lease segment does not match authority")
+		}
+		offset := item.record.Batch.Index - stored.FirstIndex
+		if offset >= uint64(len(stored.Leases)) {
+			return nil, domain.NewError(domain.ErrorInvalid, "upload lease segment cardinality does not match authority")
+		}
+		lease := stored.Leases[offset]
+		if lease.UploadID != item.record.UploadID || lease.Index != item.record.Batch.Index {
+			return nil, domain.NewError(domain.ErrorInvalid, "upload lease segment does not match authority")
+		}
+		capability, err := transfers.ResumeUpload(ctx, lease.Lease)
+		if err != nil {
+			return nil, err
+		}
+		capabilities[index] = domainUploadCapability(lease.UploadID, capability)
+		capabilities[index].BatchID = stored.BatchID
+		capabilities[index].BatchIndex = lease.Index
+		capabilities[index].BatchCount = stored.TotalCount
+	}
+	return capabilities, nil
 }
 
 func (s *FileStore) uploadStatus008(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) (domain.UploadStatus, error) {
@@ -759,7 +1013,7 @@ func (s *FileStore) uploadStatus008(ctx context.Context, scope domain.Scope, upl
 		status.State = domain.UploadStateExpired
 		return status, nil
 	}
-	lease, _, err := s.runtimeUploadLease(ctx, record.UploadID)
+	lease, _, err := s.runtimeUploadLeaseForRecord(ctx, record)
 	if err != nil {
 		return domain.UploadStatus{}, err
 	}
@@ -817,7 +1071,7 @@ func (s *FileStore) completeUpload008(ctx context.Context, scope domain.Scope, r
 	if record.State != storageformat.UploadActive || !s.engine.clock.Now().Before(record.ExpiresAt) {
 		return domain.Entry{}, domain.NewError(domain.ErrorConflict, "upload is not active")
 	}
-	lease, leaseObject, err := s.runtimeUploadLease(ctx, record.UploadID)
+	lease, leaseObject, err := s.runtimeUploadLeaseForRecord(ctx, record)
 	if err != nil {
 		return domain.Entry{}, err
 	}

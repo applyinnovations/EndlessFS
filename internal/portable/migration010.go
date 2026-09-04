@@ -366,6 +366,39 @@ func sameSchema010ConservationInventory(left, right schema010Conservation) bool 
 }
 
 func (e *Engine) schema010ReceiptForEntry(ctx context.Context, root schema010ConservationRoot, entry storageformat.StateIndexEntry, freezeEpoch uint64) (schema010ConservationReceipt, error) {
+	receipt, err := e.schema010ExpectedReceiptForEntry(ctx, root, entry)
+	if err != nil {
+		return schema010ConservationReceipt{}, err
+	}
+	reference := consistencyDomainRef{Kind: receipt.TargetDomainKind, ID: receipt.TargetDomainID}
+	if err := e.prepareSchema010Target(ctx, reference, freezeEpoch); err != nil {
+		return schema010ConservationReceipt{}, err
+	}
+	snapshot, err := e.stateDomainStore().loadHead(ctx, reference)
+	if err != nil {
+		return schema010ConservationReceipt{}, err
+	}
+	if snapshot.exists && snapshot.head.Registered {
+		current, found, err := e.stateDomainStore().lookupAtHead(ctx, reference, snapshot.head, receipt.TargetKey)
+		if err != nil {
+			return schema010ConservationReceipt{}, err
+		}
+		if found {
+			if current.LogicalVersion != entry.LogicalVersion || !bytes.Equal(current.Data, receipt.TargetValue) {
+				return schema010ConservationReceipt{}, domain.NewError(domain.ErrorConflict, "schema-010 recovery target conflicts with indexed authority")
+			}
+			receipt.Disposition = schema010DispositionAlreadyPresent
+		}
+	}
+	return receipt, nil
+}
+
+// schema010ExpectedReceiptForEntry derives every immutable source and target
+// binding without inspecting or changing consistency-domain freeze state. The
+// schema-010 edge wraps this with its target preparation; successor epochs use
+// the read-only derivation to re-prove conservation under their own closed
+// global gate.
+func (e *Engine) schema010ExpectedReceiptForEntry(ctx context.Context, root schema010ConservationRoot, entry storageformat.StateIndexEntry) (schema010ConservationReceipt, error) {
 	logical, err := parseExistingStateKey(entry.LogicalKey)
 	if err != nil || entry.LogicalVersion == "" || stateNamespace(logical) != root.Namespace {
 		return schema010ConservationReceipt{}, domain.NewError(domain.ErrorInvalid, "invalid schema-007 state-index entry during recovery")
@@ -384,26 +417,6 @@ func (e *Engine) schema010ReceiptForEntry(ctx context.Context, root schema010Con
 	if err != nil {
 		return schema010ConservationReceipt{}, err
 	}
-	if err := e.prepareSchema010Target(ctx, reference, freezeEpoch); err != nil {
-		return schema010ConservationReceipt{}, err
-	}
-	disposition := schema010DispositionRecover
-	snapshot, err := e.stateDomainStore().loadHead(ctx, reference)
-	if err != nil {
-		return schema010ConservationReceipt{}, err
-	}
-	if snapshot.exists && snapshot.head.Registered {
-		current, found, err := e.stateDomainStore().lookupAtHead(ctx, reference, snapshot.head, target.String())
-		if err != nil {
-			return schema010ConservationReceipt{}, err
-		}
-		if found {
-			if current.LogicalVersion != entry.LogicalVersion || !bytes.Equal(current.Data, targetValue) {
-				return schema010ConservationReceipt{}, domain.NewError(domain.ErrorConflict, "schema-010 recovery target conflicts with indexed authority")
-			}
-			disposition = schema010DispositionAlreadyPresent
-		}
-	}
 	return schema010ConservationReceipt{
 		SchemaVersion: schema010ConservationSchema,
 		SourceRootKey: root.RootKey, SourceRootDigest: root.RootDigest,
@@ -411,7 +424,7 @@ func (e *Engine) schema010ReceiptForEntry(ctx context.Context, root schema010Con
 		SourceVersionKey: versionKey.String(), SourceVersionDigest: storageformat.Digest(object.Body),
 		TargetDomainKind: reference.Kind, TargetDomainID: reference.ID, TargetKey: target.String(),
 		TargetRecordType: recordType, TargetValue: targetValue, TargetValueDigest: storageformat.Digest(targetValue),
-		Disposition: disposition,
+		Disposition: schema010DispositionRecover,
 	}, nil
 }
 
@@ -709,10 +722,14 @@ func (e *Engine) publishSchema010Catalog(ctx context.Context, source storageform
 }
 
 func (e *Engine) verifySchema010Conservation(ctx context.Context, proof schema010Conservation) error {
+	return e.verifySchema010ConservationAtActivation(ctx, proof, true)
+}
+
+func (e *Engine) verifySchema010ConservationAtActivation(ctx context.Context, proof schema010Conservation, requireFrozenTargets bool) error {
 	if _, err := validateSchema010Conservation(proof); err != nil {
 		return err
 	}
-	if err := e.verifySchema010ReceiptTargets(ctx, proof); err != nil {
+	if err := e.verifySchema010ReceiptTargetsAtActivation(ctx, proof, requireFrozenTargets); err != nil {
 		return err
 	}
 	var sourceCount uint64
@@ -742,7 +759,12 @@ func (e *Engine) verifySchema010Conservation(ctx context.Context, proof schema01
 				return err
 			}
 			for _, entry := range entries {
-				receipt, err := e.schema010ReceiptForEntry(ctx, rootProof, entry, proof.FreezeEpoch)
+				var receipt schema010ConservationReceipt
+				if requireFrozenTargets {
+					receipt, err = e.schema010ReceiptForEntry(ctx, rootProof, entry, proof.FreezeEpoch)
+				} else {
+					receipt, err = e.schema010ExpectedReceiptForEntry(ctx, rootProof, entry)
+				}
 				if err != nil {
 					return err
 				}
@@ -787,12 +809,16 @@ func (e *Engine) verifySchema010Conservation(ctx context.Context, proof schema01
 }
 
 func (e *Engine) verifySchema010ReceiptTargets(ctx context.Context, proof schema010Conservation) error {
+	return e.verifySchema010ReceiptTargetsAtActivation(ctx, proof, true)
+}
+
+func (e *Engine) verifySchema010ReceiptTargetsAtActivation(ctx context.Context, proof schema010Conservation, requireFrozenTargets bool) error {
 	catalog := newDomainCatalog(e.backend, e.scheduler)
 	snapshot, err := catalog.load(ctx)
 	if err != nil {
 		return err
 	}
-	if snapshot.head.FreezeEpoch != proof.FreezeEpoch {
+	if requireFrozenTargets && snapshot.head.FreezeEpoch != proof.FreezeEpoch {
 		return domain.NewError(domain.ErrorPreconditionFailed, "schema-010 target catalog is not frozen")
 	}
 	request := objectstore.ListRequest{Prefix: storageformat.Schema010MigrationReceiptPrefix(), Limit: 1000}
@@ -824,7 +850,7 @@ func (e *Engine) verifySchema010ReceiptTargets(ctx context.Context, proof schema
 			if err != nil {
 				return err
 			}
-			if !head.exists || !head.head.Registered || !head.head.Frozen || head.head.FreezeEpoch != proof.FreezeEpoch {
+			if !head.exists || !head.head.Registered || (requireFrozenTargets && (!head.head.Frozen || head.head.FreezeEpoch != proof.FreezeEpoch)) {
 				return domain.NewError(domain.ErrorPreconditionFailed, "schema-010 target domain is not frozen")
 			}
 			value, found, err := e.stateDomainStore().lookupAtHead(ctx, reference, head.head, receipt.TargetKey)

@@ -22,6 +22,7 @@ func TestStorageSchemaLedgerIsLinearAndAppendOnly(t *testing.T) {
 		"endlessfs-portable-v1/schema-008",
 		"endlessfs-portable-v1/schema-009",
 		"endlessfs-portable-v1/schema-010",
+		"endlessfs-portable-v1/schema-011",
 	}
 	if len(storageSchemaLedger) != len(wantIDs) {
 		t.Fatalf("storage schema ledger length = %d; want %d", len(storageSchemaLedger), len(wantIDs))
@@ -110,7 +111,7 @@ func TestStorageSchemaGateDetectionUsesEpochBindingRepresentation(t *testing.T) 
 	if _, found := detectWriteGateSchema([]string{"directory-manifests"}, current); found {
 		t.Fatal("partially feature-bound legacy gate was accepted")
 	}
-	for _, schemaID := range []storageSchemaID{storageSchema002, storageSchema003, storageSchema004, storageSchema005, storageSchema006, storageSchema007, storageSchema008, storageSchema009, storageSchema010} {
+	for _, schemaID := range []storageSchemaID{storageSchema002, storageSchema003, storageSchema004, storageSchema005, storageSchema006, storageSchema007, storageSchema008, storageSchema009, storageSchema010, storageSchema011} {
 		features, _ := schemaFeatures(schemaID, current)
 		detected, found := detectWriteGateSchema(features, current)
 		if !found || detected.id != schemaID {
@@ -130,7 +131,8 @@ func TestStorageSchemaReleaseLedgerDefinesDerivedValidityRanges(t *testing.T) {
 		"endlessfs-portable-v1/schema-007": nil,
 		"endlessfs-portable-v1/schema-008": nil,
 		"endlessfs-portable-v1/schema-009": {{First: "v0.4.0", Before: "v0.5.0"}},
-		"endlessfs-portable-v1/schema-010": {{First: "v0.5.0"}},
+		"endlessfs-portable-v1/schema-010": {{First: "v0.5.0", Before: "v0.7.0"}},
+		"endlessfs-portable-v1/schema-011": {{First: "v0.7.0"}},
 	}
 	for _, schema := range storageSchemaLedger {
 		got := releaseRangesForSchema(schema.id)
@@ -177,6 +179,9 @@ func TestStorageSchemaLedgerResolvesReleaseValidityRanges(t *testing.T) {
 		{release: "v0.4.999", want: "endlessfs-portable-v1/schema-009", found: true},
 		{release: "v0.5.0", want: "endlessfs-portable-v1/schema-010", found: true},
 		{release: "v0.5.999", want: "endlessfs-portable-v1/schema-010", found: true},
+		{release: "v0.6.0", want: "endlessfs-portable-v1/schema-010", found: true},
+		{release: "v0.7.0", want: "endlessfs-portable-v1/schema-011", found: true},
+		{release: "v0.7.999", want: "endlessfs-portable-v1/schema-011", found: true},
 		{release: "v0.0.9"},
 		{release: "0.1.7"},
 		{release: "v0.1"},
@@ -213,20 +218,21 @@ func TestStorageSchemaLedgerBuildsEveryRemainingMigrationPath(t *testing.T) {
 	}{
 		{
 			from: "endlessfs-portable-v1/schema-001",
-			want: []storageMigrationID{"schema-001-to-002", "schema-002-to-003", "schema-003-to-004", "schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010"},
+			want: []storageMigrationID{"schema-001-to-002", "schema-002-to-003", "schema-003-to-004", "schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"},
 		},
 		{
 			from: "endlessfs-portable-v1/schema-002",
-			want: []storageMigrationID{"schema-002-to-003", "schema-003-to-004", "schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010"},
+			want: []storageMigrationID{"schema-002-to-003", "schema-003-to-004", "schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"},
 		},
-		{from: "endlessfs-portable-v1/schema-003", want: []storageMigrationID{"schema-003-to-004", "schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010"}},
-		{from: "endlessfs-portable-v1/schema-004", want: []storageMigrationID{"schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010"}},
-		{from: "endlessfs-portable-v1/schema-005", want: []storageMigrationID{"schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010"}},
-		{from: "endlessfs-portable-v1/schema-006", want: []storageMigrationID{"schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010"}},
-		{from: "endlessfs-portable-v1/schema-007", want: []storageMigrationID{"schema-007-to-008", "schema-008-to-009", "schema-009-to-010"}},
-		{from: "endlessfs-portable-v1/schema-008", want: []storageMigrationID{"schema-008-to-009", "schema-009-to-010"}},
-		{from: "endlessfs-portable-v1/schema-009", want: []storageMigrationID{"schema-009-to-010"}},
-		{from: "endlessfs-portable-v1/schema-010"},
+		{from: "endlessfs-portable-v1/schema-003", want: []storageMigrationID{"schema-003-to-004", "schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"}},
+		{from: "endlessfs-portable-v1/schema-004", want: []storageMigrationID{"schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"}},
+		{from: "endlessfs-portable-v1/schema-005", want: []storageMigrationID{"schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"}},
+		{from: "endlessfs-portable-v1/schema-006", want: []storageMigrationID{"schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"}},
+		{from: "endlessfs-portable-v1/schema-007", want: []storageMigrationID{"schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"}},
+		{from: "endlessfs-portable-v1/schema-008", want: []storageMigrationID{"schema-008-to-009", "schema-009-to-010", "schema-010-to-011"}},
+		{from: "endlessfs-portable-v1/schema-009", want: []storageMigrationID{"schema-009-to-010", "schema-010-to-011"}},
+		{from: "endlessfs-portable-v1/schema-010", want: []storageMigrationID{"schema-010-to-011"}},
+		{from: "endlessfs-portable-v1/schema-011"},
 	}
 	for _, test := range tests {
 		t.Run(fmt.Sprint(test.from), func(t *testing.T) {

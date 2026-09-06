@@ -24,6 +24,7 @@ var applicationScriptSources = []string{
 	"ui/js/upload-planner.js",
 	"ui/js/previews.js",
 	"ui/js/operations.js",
+	"ui/js/duplicates.js",
 	"ui/js/account-admin.js",
 	"ui/js/bootstrap.js",
 }
@@ -33,6 +34,7 @@ var applicationStylesheetSources = []string{
 	"ui/css/shell.css",
 	"ui/css/files.css",
 	"ui/css/transfers.css",
+	"ui/css/duplicates.css",
 	"ui/css/settings-admin.css",
 	"ui/css/overlays.css",
 	"ui/css/responsive.css",
@@ -95,7 +97,7 @@ func validThemeCSSURL(value string) bool {
 
 func applicationPath(path string) bool {
 	switch path {
-	case "/", "/bootstrap", "/register", "/recover", "/trash", "/settings", "/admin":
+	case "/", "/bootstrap", "/register", "/recover", "/trash", "/duplicates", "/settings", "/admin":
 		return true
 	}
 	return oneSegmentAfter(path, "/register/invite/") || oneSegmentAfter(path, "/recover/")

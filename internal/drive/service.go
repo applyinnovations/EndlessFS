@@ -3,6 +3,7 @@ package drive
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -16,8 +17,9 @@ import (
 )
 
 const (
-	MaxBatchItems       = 10_000
-	MaxUploadBatchItems = 10_000
+	MaxBatchItems         = 10_000
+	MaxUploadBatchItems   = 10_000
+	maxReviewedTrashItems = 100
 )
 
 type AccountReader interface {
@@ -354,6 +356,14 @@ type BatchResult struct {
 	Items       []ItemResult       `json:"items"`
 }
 
+// TrashItem pins a reviewed live path to the portable logical version that was
+// displayed to the caller. It keeps duplicate cleanup from moving a path after
+// that path has changed into different content.
+type TrashItem struct {
+	Path    domain.UserPath
+	Version domain.Version
+}
+
 type TrashPage struct {
 	Items      []TrashEntry `json:"items"`
 	NextCursor string       `json:"nextCursor,omitempty"`
@@ -376,35 +386,61 @@ type TrashEntry struct {
 }
 
 func (s *Service) Trash(ctx context.Context, userID domain.UserID, paths []domain.UserPath, idempotencyKey string) (BatchResult, error) {
+	items := make([]TrashItem, 0, len(paths))
+	for _, path := range paths {
+		items = append(items, TrashItem{Path: path})
+	}
+	return s.trashItems(ctx, userID, items, idempotencyKey, false)
+}
+
+// TrashVersioned applies the ordinary recoverable trash workflow only when
+// every selected path still has the logical version reviewed by the caller.
+func (s *Service) TrashVersioned(ctx context.Context, userID domain.UserID, items []TrashItem, idempotencyKey string) (BatchResult, error) {
+	return s.trashItems(ctx, userID, items, idempotencyKey, true)
+}
+
+func (s *Service) trashItems(ctx context.Context, userID domain.UserID, items []TrashItem, idempotencyKey string, requireVersion bool) (BatchResult, error) {
 	if err := validateIdempotencyKey(idempotencyKey); err != nil {
 		return BatchResult{}, err
 	}
-	if len(paths) < 1 || len(paths) > MaxBatchItems {
-		return BatchResult{}, domain.NewError(domain.ErrorInvalid, "trash batch must contain 1 to 10000 items")
+	maximum := MaxBatchItems
+	if requireVersion {
+		maximum = maxReviewedTrashItems
+	}
+	if len(items) < 1 || len(items) > maximum {
+		return BatchResult{}, domain.NewError(domain.ErrorInvalid, fmt.Sprintf("trash batch must contain 1 to %d items", maximum))
 	}
 	if _, err := liveScope(userID); err != nil {
 		return BatchResult{}, err
 	}
-	seen := make(map[string]struct{}, len(paths))
-	for _, path := range paths {
-		if !path.Valid() || path.IsRoot() {
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if !item.Path.Valid() || item.Path.IsRoot() {
 			return BatchResult{}, domain.NewError(domain.ErrorInvalid, "trash path is invalid")
 		}
-		if _, duplicate := seen[path.String()]; duplicate {
+		if requireVersion && !validReviewedVersion(item.Version) {
+			return BatchResult{}, domain.NewError(domain.ErrorInvalid, "reviewed trash version is invalid")
+		}
+		if _, duplicate := seen[item.Path.String()]; duplicate {
 			return BatchResult{}, domain.NewError(domain.ErrorInvalid, "trash batch contains duplicate paths")
 		}
-		seen[path.String()] = struct{}{}
+		seen[item.Path.String()] = struct{}{}
 	}
-	requests := make([]domain.TrashRequest, len(paths))
-	for index, path := range paths {
+	requests := make([]domain.TrashRequest, len(items))
+	for index, item := range items {
 		key := idempotencyKey + ":" + strconv.Itoa(index)
-		requests[index] = domain.TrashRequest{Path: path, TrashID: s.derivedID("trash", userID, key), IdempotencyKey: key}
+		requests[index] = domain.TrashRequest{Path: item.Path, ExpectedVersion: item.Version, TrashID: s.derivedID("trash", userID, key), IdempotencyKey: key}
 	}
 	result, err := s.batch.BatchMoveToTrash(ctx, userID, requests, idempotencyKey)
 	if err != nil {
 		return BatchResult{}, err
 	}
 	return driveBatchResult(result), nil
+}
+
+func validReviewedVersion(version domain.Version) bool {
+	value := string(version)
+	return value != "" && len(value) <= 512 && utf8.ValidString(value) && !strings.ContainsAny(value, "\r\n\x00")
 }
 
 func (s *Service) TrashList(ctx context.Context, userID domain.UserID) ([]model.Trash, error) {

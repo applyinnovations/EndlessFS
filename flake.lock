@@ -26,13 +26,13 @@
       "flake": false,
       "locked": {
         "lastModified": 312732000,
-        "narHash": "sha256-MoMGhRCWvIGlLAr8yKNrVBUTW3JaE75DaJ2o+tsAmTA=",
+        "narHash": "sha256-s2OYKCOdttXTVNXz14RHCyAG5CSh1BRe+KiCs5SezFk=",
         "type": "tarball",
-        "url": "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1787929740610734"
+        "url": "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1788377541191635"
       },
       "original": {
         "type": "tarball",
-        "url": "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1787929740610734"
+        "url": "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1788377541191635"
       }
     }
   },

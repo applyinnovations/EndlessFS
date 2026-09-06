@@ -889,6 +889,36 @@ func TestUploadAbortBatchMoveTrashPagingAndEmptyTrash(t *testing.T) {
 	}
 }
 
+func TestVersionPinnedTrashRejectsAChangedSourceAndAcceptsTheReviewedVersion(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	entry := upload(t, env, env.owner, "/reviewed-copy.txt", []byte("reviewed"), "text/plain", "reviewed-trash-upload-1")
+
+	for _, version := range []domain.Version{"", "bad\nversion", domain.Version(strings.Repeat("v", 513))} {
+		if _, err := env.service.TrashVersioned(ctx, env.owner, []drive.TrashItem{{Path: entry.Path, Version: version}}, fmt.Sprintf("reviewed-trash-invalid-%d", len(version))); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid reviewed version %q = %v", version, err)
+		}
+	}
+	if _, err := env.service.TrashVersioned(ctx, env.owner, make([]drive.TrashItem, 101), "reviewed-trash-oversized"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("oversized reviewed trash = %v", err)
+	}
+
+	if _, err := env.service.TrashVersioned(ctx, env.owner, []drive.TrashItem{{Path: entry.Path, Version: "stale-version"}}, "reviewed-trash-stale-01"); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("stale version-pinned trash = %v", err)
+	}
+	if _, err := env.service.Stat(ctx, env.owner, entry.Path); err != nil {
+		t.Fatalf("stale version-pinned trash removed the source: %v", err)
+	}
+
+	trashed, err := env.service.TrashVersioned(ctx, env.owner, []drive.TrashItem{{Path: entry.Path, Version: entry.Version}}, "reviewed-trash-valid-001")
+	if err != nil || len(trashed.Items) != 1 || trashed.Items[0].State != domain.OperationSucceeded || trashed.Items[0].TrashID == "" {
+		t.Fatalf("valid version-pinned trash = %+v, %v", trashed, err)
+	}
+	if _, err := env.service.Stat(ctx, env.owner, entry.Path); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("valid version-pinned trash retained source: %v", err)
+	}
+}
+
 func TestUploadBatchServiceRejectsCardinalityIdentityAndScopeBoundaries(t *testing.T) {
 	env := newDriveEnvironment(t)
 	ctx := context.Background()

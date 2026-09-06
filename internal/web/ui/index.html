@@ -22,6 +22,7 @@
         <nav id="workspace-tabs" class="tabs app-tabs" aria-label="Workspace">
           <a class="tab" href="/" data-route="drive">Files</a>
           <a class="tab" href="/trash" data-route="trash">Trash</a>
+          <a class="tab" href="/duplicates" data-route="duplicates">Duplicates</a>
           <a class="tab" href="/settings" data-route="settings">Settings</a>
           <a id="admin-nav" class="tab" href="/admin" data-route="admin" hidden>Admin</a>
         </nav>
@@ -43,6 +44,7 @@
         <nav class="mobile-navigation-routes" aria-label="Workspace">
           <a class="mobile-navigation-item" href="/" data-route="drive">Files</a>
           <a class="mobile-navigation-item" href="/trash" data-route="trash">Trash</a>
+          <a class="mobile-navigation-item" href="/duplicates" data-route="duplicates">Duplicates</a>
           <a class="mobile-navigation-item" href="/settings" data-route="settings">Settings</a>
           <a id="mobile-admin-nav" class="mobile-navigation-item" href="/admin" data-route="admin" hidden>Admin</a>
         </nav>
@@ -172,6 +174,47 @@
 
             <section id="trash-view" class="view file-browser-view" hidden aria-labelledby="browser-title"><div id="trash-browser-host" class="file-browser-host"></div></section>
 
+            <section id="duplicates-view" class="view" hidden aria-labelledby="duplicates-title">
+              <div class="surface-header duplicate-header">
+                <div><h1 id="duplicates-title" tabindex="-1">Duplicates</h1><p>Review exact copies and overlapping folders without reading object bodies.</p></div>
+                <button id="duplicate-refresh" class="icon-button" type="button" aria-label="Refresh duplicates" data-icon="refresh"></button>
+              </div>
+              <div class="duplicate-dashboard">
+                <section class="duplicate-panel" aria-labelledby="duplicate-exact-title">
+                  <div class="duplicate-panel-heading">
+                    <div><h2 id="duplicate-exact-title" tabindex="-1">Exact copies</h2><p>Each result has identical content. Reclaimable storage is shown per group so nested copies are never counted twice.</p></div>
+                    <fieldset id="duplicate-kind" class="presentation-choice duplicate-kind-choice" aria-label="Duplicate type">
+                      <input id="duplicate-kind-directory" name="duplicate-kind" type="radio" value="directory" checked><label for="duplicate-kind-directory">Folders</label>
+                      <input id="duplicate-kind-file" name="duplicate-kind" type="radio" value="file"><label for="duplicate-kind-file">Files</label>
+                    </fieldset>
+                  </div>
+                  <div id="duplicate-summary" class="duplicate-summary" aria-live="polite"></div>
+                  <div id="duplicate-groups" class="duplicate-groups" aria-label="Exact duplicate groups"></div>
+                  <div id="duplicate-groups-state" class="state-panel" hidden></div>
+                  <button id="duplicate-groups-more" class="quiet duplicate-more" type="button" hidden>Load more exact copies</button>
+                  <details id="duplicate-ignored-disclosure" class="duplicate-ignored" hidden>
+                    <summary><span>Ignored exact copies</span><span id="duplicate-ignored-count" class="duplicate-badge">0</span></summary>
+                    <div id="duplicate-ignored-groups" class="duplicate-groups"></div>
+                  </details>
+                </section>
+
+                <section class="duplicate-panel duplicate-overlap-panel" aria-labelledby="duplicate-overlap-title">
+                  <div class="duplicate-panel-heading"><div><h2 id="duplicate-overlap-title" tabindex="-1">Folder overlap</h2><p>Find folders that share any content, then remove only the common copies from one side. Unique files stay where they are.</p></div></div>
+                  <form id="duplicate-folder-form" class="duplicate-folder-form">
+                    <label for="duplicate-folder-path"><span>Folder to inspect</span><span class="duplicate-path-input"><input id="duplicate-folder-path" type="text" placeholder="/Projects/Project A" maxlength="4096" autocomplete="off" spellcheck="false" required><button type="submit">Find matches</button></span></label>
+                  </form>
+                  <div id="duplicate-overlap-summary" class="duplicate-summary" aria-live="polite"></div>
+                  <div id="duplicate-overlaps" class="duplicate-overlaps" aria-label="Folder overlap matches"></div>
+                  <div id="duplicate-overlaps-state" class="state-panel" hidden></div>
+                  <button id="duplicate-overlaps-more" class="quiet duplicate-more" type="button" hidden>Load more folder matches</button>
+                  <details id="duplicate-ignored-overlaps-disclosure" class="duplicate-ignored" hidden>
+                    <summary><span>Ignored folder matches</span><span id="duplicate-ignored-overlap-count" class="duplicate-badge">0</span></summary>
+                    <div id="duplicate-ignored-overlaps" class="duplicate-overlaps"></div>
+                  </details>
+                </section>
+              </div>
+            </section>
+
             <section id="settings-view" class="view" hidden aria-labelledby="settings-title">
               <div class="surface-header"><h1 id="settings-title" tabindex="-1">Settings</h1></div>
               <div class="settings-list">
@@ -275,6 +318,14 @@
       <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
       <div id="action-tooltip" class="action-tooltip" role="tooltip" hidden></div>
       <dialog id="action-dialog" class="action-sheet" role="dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description"><form id="dialog-form" method="dialog"><div class="sheet-heading"><h2 id="dialog-title">Confirm</h2><button id="dialog-cancel" class="icon-button" value="cancel" type="button" aria-label="Close" data-icon="x"></button></div><p id="dialog-description"></p><div id="dialog-fields"></div><div class="dialog-actions"><button id="dialog-confirm" class="icon-button" value="confirm" type="submit" aria-label="Continue" data-icon="check"></button></div></form></dialog>
+
+      <dialog id="duplicate-reconciliation-dialog" class="duplicate-reconciliation-dialog" role="dialog" aria-labelledby="duplicate-reconciliation-title" aria-describedby="duplicate-reconciliation-description">
+        <div class="sheet-heading"><div><h2 id="duplicate-reconciliation-title">Review duplicate cleanup</h2><p id="duplicate-reconciliation-description">Only the common copies listed below will move to Trash. Unique files stay where they are.</p></div><button id="duplicate-reconciliation-close" class="icon-button" type="button" aria-label="Close duplicate cleanup" data-icon="x"></button></div>
+        <div id="duplicate-reconciliation-summary" class="duplicate-reconciliation-summary"></div>
+        <div id="duplicate-reconciliation-items" class="duplicate-reconciliation-items" tabindex="0" aria-label="Files included in this cleanup"></div>
+        <p id="duplicate-reconciliation-more" class="field-help" hidden>This folder pair has more common files. Apply this bounded batch, then review the refreshed result.</p>
+        <div class="dialog-actions"><button id="duplicate-reconciliation-cancel" class="quiet" type="button">Cancel</button><button id="duplicate-reconciliation-apply" class="danger" type="button">Move to Trash</button></div>
+      </dialog>
 
       <dialog id="preview-dialog" class="media-viewer" role="dialog" aria-labelledby="preview-title">
         <div class="preview-heading">

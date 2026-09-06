@@ -1525,7 +1525,7 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 | POST | `/api/v1/downloads` | Create a short-lived capability for an authorized file/version. |
 | POST | `/api/v1/files/copy` | Start idempotent file/tree copy. |
 | POST | `/api/v1/files/move` | Start idempotent rename/move. |
-| POST | `/api/v1/files/trash` | Move one or more items to trash. |
+| POST | `/api/v1/files/trash` | Move one or more items to trash, optionally pinned to each reviewed portable logical version. |
 | GET | `/api/v1/operations/{operationID}` | Poll a user-scoped operation. |
 | GET | `/api/v1/trash` | List trash records with exact file/directory size, recursive file count, and file media type through one bounded tree lookup per page. |
 | POST | `/api/v1/trash/restore` | Atomically restore 1–10,000 selected trash roots with one conflict policy and one owner-namespace publication. |
@@ -1535,6 +1535,8 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 | POST | `/api/v1/trash/empty` | Confirmed empty-trash operation. |
 
 The browser sends virtual paths only. Any JSON field resembling a provider key, bucket, owner prefix, or arbitrary capability URL is rejected.
+
+Duplicate-review cleanup uses the version-pinned trash form. The request contains one to 100 `{path, version}` items and is mutually exclusive with the ordinary `paths` form. A stale reviewed version rejects the atomic batch with `precondition_failed` without moving any selected path.
 
 The browser uses the maximum 1,000-entry page for virtualized live, Trash, and
 public-share browsing. A terminal operation or batch result is authoritative and

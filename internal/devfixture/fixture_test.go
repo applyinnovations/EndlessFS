@@ -77,6 +77,28 @@ func TestSeedBuildsRepresentativeDeterministicWorkspace(t *testing.T) {
 	if _, ok := data.bodies["/Projects/Launch plan.pdf"]; !ok {
 		t.Fatal("fixture is missing PDF preview ground truth")
 	}
+	for left, right := range map[string]string{
+		"/Projects/Project Atlas/Brief.txt":          "/Backups/Projects/Project Atlas/Brief.txt",
+		"/Projects/Project Atlas/Assets/Palette.csv": "/Backups/Projects/Project Atlas/Assets/Palette.csv",
+		"/Photography/Selects/Coastline notes.txt":   "/Backups/Photography/Selects/Coastline notes.txt",
+		"/Brand/Published/Release notes.txt":         "/Backups/Brand/Published/Release notes.txt",
+	} {
+		if string(data.bodies[left]) == "" || string(data.bodies[left]) != string(data.bodies[right]) {
+			t.Errorf("duplicate fixture bodies %q and %q do not match", left, right)
+		}
+	}
+	if _, ok := data.bodies["/Photography/Selects/Only in working set.txt"]; !ok {
+		t.Error("partial duplicate fixture is missing its left-only file")
+	}
+	if _, ok := data.bodies["/Backups/Photography/Selects/Only in backup.txt"]; !ok {
+		t.Error("partial duplicate fixture is missing its right-only file")
+	}
+	if len(files.ignoredDirectoryPairs) != 1 || !files.ignoredDirectoryPairs[0].Ignored {
+		t.Fatalf("ignored duplicate directory pairs = %+v, want one intentional mirror", files.ignoredDirectoryPairs)
+	}
+	if len(files.ignoredGroups) != 1 || !files.ignoredGroups[0].Ignored || files.ignoredGroups[0].GroupID != "fixture-brand-published" {
+		t.Fatalf("ignored exact duplicate groups = %+v, want intentional published mirror", files.ignoredGroups)
+	}
 }
 
 func TestLoginHandlerIssuesLocalCookiesWithoutExposingTokens(t *testing.T) {
@@ -154,11 +176,37 @@ func (r *recordingRepository) CreateAdminRoles(_ context.Context, value model.Ad
 }
 
 type recordingFiles struct {
-	directories []domain.UserPath
-	uploads     []domain.CreateUploadRequest
-	completed   []domain.CompleteUploadRequest
-	trashed     []domain.UserPath
-	shared      []domain.UserPath
+	directories           []domain.UserPath
+	uploads               []domain.CreateUploadRequest
+	completed             []domain.CompleteUploadRequest
+	trashed               []domain.UserPath
+	shared                []domain.UserPath
+	ignoredDirectoryPairs []domain.SetDuplicateDirectoryIgnoredRequest
+	ignoredGroups         []domain.SetDuplicateIgnoredRequest
+}
+
+func (f *recordingFiles) SetDuplicateDirectoryIgnored(_ context.Context, _ domain.UserID, request domain.SetDuplicateDirectoryIgnoredRequest) (domain.DuplicateDirectoryIgnore, error) {
+	f.ignoredDirectoryPairs = append(f.ignoredDirectoryPairs, request)
+	return domain.DuplicateDirectoryIgnore{Ignored: request.Ignored, Revision: 1}, nil
+}
+
+func (*recordingFiles) DuplicateGroups(_ context.Context, _ domain.UserID, _ domain.DuplicateGroupRequest) (domain.DuplicateGroupPage, error) {
+	return domain.DuplicateGroupPage{Groups: []domain.DuplicateGroup{{ID: "fixture-brand-published", Kind: domain.DuplicateDirectory, OccurrenceCount: 2}}}, nil
+}
+
+func (*recordingFiles) DuplicateOccurrences(_ context.Context, _ domain.UserID, request domain.DuplicateOccurrenceRequest) (domain.DuplicateOccurrencePage, error) {
+	if request.GroupID != "fixture-brand-published" {
+		return domain.DuplicateOccurrencePage{}, nil
+	}
+	return domain.DuplicateOccurrencePage{Occurrences: []domain.DuplicateOccurrence{
+		{GroupID: request.GroupID, Kind: domain.DuplicateDirectory, Area: domain.AreaLive, AreaName: "live", Path: domain.MustParseUserPath("/Brand/Published")},
+		{GroupID: request.GroupID, Kind: domain.DuplicateDirectory, Area: domain.AreaLive, AreaName: "live", Path: domain.MustParseUserPath("/Backups/Brand/Published")},
+	}}, nil
+}
+
+func (f *recordingFiles) SetDuplicateIgnored(_ context.Context, _ domain.UserID, request domain.SetDuplicateIgnoredRequest) (domain.DuplicateIgnore, error) {
+	f.ignoredGroups = append(f.ignoredGroups, request)
+	return domain.DuplicateIgnore{GroupID: request.GroupID, Ignored: request.Ignored, Revision: 1}, nil
 }
 
 func (f *recordingFiles) CreateDirectory(_ context.Context, _ domain.UserID, request domain.CreateDirectoryRequest) (domain.Entry, error) {

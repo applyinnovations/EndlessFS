@@ -183,7 +183,7 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 		"transferVirtualWindowSize", "renderTransferWindow", "retryFailedTransfers",
 		"discoverLegacyEntry", "discoverFileSystemHandle",
 		"requestPermission", "reconnectStoredTransferSources",
-		"automaticTransferConcurrency", "aggregateTransferSummary", "recordTransferProgress", "scheduleTransferRender",
+		"automaticTransferConcurrency", "configuredTransferConcurrency", "runTransferControlPool", "aggregateTransferSummary", "recordTransferProgress", "scheduleTransferRender",
 		"transferByID", "nextQueuedTransfer", "updateRenderedTransferProgress", "scheduleTransferStructureRender",
 		"dataset.appearance", `state.themeAssets["brand.mark"]`, `state.themeAssets["brand.favicon"]`,
 	} {
@@ -202,6 +202,38 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 	if strings.Contains(script+string(mustRead("ui/index.html")), "transfer-concurrency") {
 		t.Error("transfer concurrency remains exposed as a user-controlled input")
 	}
+	schedulerStart := strings.Index(script, "function automaticTransferConcurrency()")
+	if schedulerStart < 0 {
+		t.Fatal("automatic transfer scheduler is missing")
+	}
+	schedulerEnd := strings.Index(script[schedulerStart:], "\n  function installUploadWorkerPoolTestFixture")
+	if schedulerEnd < 0 {
+		t.Fatal("automatic transfer scheduler boundary is missing")
+	}
+	scheduler := script[schedulerStart : schedulerStart+schedulerEnd]
+	for _, forbidden := range []string{"navigator.hardwareConcurrency", "connection.downlink", "connection.effectiveType"} {
+		if strings.Contains(scheduler, forbidden) {
+			t.Errorf("upload concurrency still depends on unreliable device/network guess %q", forbidden)
+		}
+	}
+	for _, required := range []string{"maximumTransferConcurrency", "Math.min(configured, pending)", "queueUploadDirectoryRefresh", "flushUploadDirectoryRefresh"} {
+		if !strings.Contains(script, required) {
+			t.Errorf("upload concurrency is missing upstream worker-pool primitive %q", required)
+		}
+	}
+	for _, forbidden := range []string{"adaptiveTransferScheduler", "recordSuccessfulTransfer", "recordTransferFailure"} {
+		if strings.Contains(script, forbidden) {
+			t.Errorf("upload concurrency retains unproven adaptive primitive %q", forbidden)
+		}
+	}
+	if strings.Contains(script, "Promise.all(uploadIDs.map") {
+		t.Error("group cancellation can issue one simultaneous provider request per transfer")
+	}
+	for _, required := range []string{"batchCount: Number.isSafeInteger(transfer.batchCount)", "const completeBatch =", "if (completeBatch) body.batchID = batchID"} {
+		if !strings.Contains(script, required) {
+			t.Errorf("durable compact upload cancellation is missing %q", required)
+		}
+	}
 	for _, forbidden := range []string{"maximumRenderedTransferGroups", "maximumRenderedGroupFiles", "summarizeTransferRows", "more files"} {
 		if strings.Contains(script, forbidden) {
 			t.Errorf("transfer monitor retains manual pagination primitive %q", forbidden)
@@ -214,6 +246,47 @@ func TestBrowserSourceKeepsSecretsEphemeralAndUntrustedTextOutOfHTML(t *testing.
 	}
 }
 
+func TestSmartUploadPlannerIsBoundedPersistentAndMetadataOnly(t *testing.T) {
+	t.Parallel()
+
+	script := string(applicationScript)
+	worker := string(mustRead("ui/js/upload-hash-worker.js"))
+	for _, required := range []string{
+		`["smart-merge", "Smart merge`, `["replace-changed", "Replace changed files`,
+		`["only-new", "Only add new names`, `["keep-both", "Keep both`,
+		`const uploadPlanningBatchSize = 10000;`, `const uploadHashWorkerLimit = 2;`,
+		`new Worker("/assets/upload-hash-worker.js")`, `pending.worker.terminate();`,
+		`fingerprintRepeated: async (value, count)`,
+		`transferPlanControllers: new Map()`, `uploadPlanRetryTimers: new Map()`, `controller.abort();`,
+		`staleSnapshot = error instanceof APIError && error.status === 409`, `Duplicate check will retry automatically.`,
+		`/api/v1/uploads/plan/sizes`, `/api/v1/uploads/plan/fingerprints`,
+		`strategy: transfer.strategy`, `planPhase: transfer.planPhase`,
+		`md5: transfer.md5`, `crc32c: transfer.crc32c`,
+		"const reuseKey = `${activeReuse[0].transfer.id}-content-reuse`;",
+		`resetUploadPlanForReconnectedSource(transfer);`, `transfer.md5 = "";`, `transfer.crc32c = "";`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("smart upload planner is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		`const chunkSize = 4 << 20;`,
+		`file.slice(offset, Math.min(file.size, offset + chunkSize)).arrayBuffer()`,
+		`for (const value of incoming) crc =`,
+		`processMD5Block(state, bytes, position)`,
+		`return { md5: base64URL(md5), crc32c: base64URL(crcBytes) };`,
+	} {
+		if !strings.Contains(worker, required) {
+			t.Errorf("one-pass upload hash worker is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{`file.arrayBuffer()`, `fetch(`, `XMLHttpRequest`, `providerKey`, `capability`} {
+		if strings.Contains(worker, forbidden) {
+			t.Errorf("upload hash worker contains forbidden whole-file or network primitive %q", forbidden)
+		}
+	}
+}
+
 func TestLocalTransferPreviewFixtureIsDefaultAndScaleOriented(t *testing.T) {
 	t.Parallel()
 
@@ -221,6 +294,7 @@ func TestLocalTransferPreviewFixtureIsDefaultAndScaleOriented(t *testing.T) {
 	for _, required := range []string{
 		`state.config.localFixture`,
 		`for (let index = 0; index < 2000; index += 1)`,
+		`const size = index < 4 ? (8 + index) * (2 ** 30)`,
 		`fixture: true`,
 		"renderTransfers();\n    setTransferSheetOpen(false);",
 		`seedTransferPreviewFixture();`,
@@ -340,6 +414,7 @@ func TestMediaBrowserShellUsesVirtualizedLazyWebPGridAndAccessibleViewer(t *test
 	script := string(applicationScript)
 	for _, required := range []string{
 		"renderVirtualGrid", "renderVirtualList", "IntersectionObserver", "gridOverscanRows = 3", "listOverscanRows = 8", "directoryLoading", "URL.revokeObjectURL",
+		"previewResolving: new Set()", "state.previewResolving.has(entry.path)", "state.previewResolving.add(entry.path)", "state.previewResolving.delete(entry.path)",
 		"/api/v1/previews/resolve", "/api/v1/previews/generations", "/api/v1/previews/operations/", "image/webp", "validatedPreviewBlob", "Invalid preview artifact body", "filterLoadedEntries",
 		`crypto.subtle.digest("SHA-256"`, "Invalid preview artifact checksum", "await image.decode()", "previewLoaded",
 		"viewerPreviewCache", "cachedViewerPreview", "cacheViewerPreview",
@@ -799,15 +874,16 @@ func TestBrowserSourcesAreSplitIntoOrderedDomains(t *testing.T) {
 	t.Parallel()
 
 	scriptMarkers := map[string]string{
-		"ui/js/core.js":          "const state = {",
-		"ui/js/files.js":         "async function loadDirectory",
-		"ui/js/storage-map.js":   "const storageMapMaximumTiles",
-		"ui/js/transfers.js":     "function transferFileSize",
-		"ui/js/previews.js":      "async function download",
-		"ui/js/operations.js":    "async function copyMove",
-		"ui/js/duplicates.js":    "async function loadDuplicateGroups",
-		"ui/js/account-admin.js": "async function createShare",
-		"ui/js/bootstrap.js":     "function ask",
+		"ui/js/core.js":           "const state = {",
+		"ui/js/files.js":          "async function loadDirectory",
+		"ui/js/storage-map.js":    "const storageMapMaximumTiles",
+		"ui/js/transfers.js":      "function transferFileSize",
+		"ui/js/upload-planner.js": "function chooseUploadStrategy",
+		"ui/js/previews.js":       "async function download",
+		"ui/js/operations.js":     "async function copyMove",
+		"ui/js/duplicates.js":     "async function loadDuplicateGroups",
+		"ui/js/account-admin.js":  "async function createShare",
+		"ui/js/bootstrap.js":      "function ask",
 	}
 	stylesheetMarkers := map[string]string{
 		"ui/css/foundation.css":     ":root {",
@@ -974,7 +1050,9 @@ func TestSelectionActionsFloatWithoutReplacingDriveControls(t *testing.T) {
 		`if (accessChanged) { state.selected.clear(); updateSelection(); }`,
 		`async function restoreSelectedTrash()`,
 		`async function deleteSelectedTrash()`,
-		`for (const entry of entries) {`,
+		`api("/api/v1/trash/restore"`,
+		`api("/api/v1/trash/delete"`,
+		`async function awaitOperation(result)`,
 		`selectionBar.setAttribute("aria-busy", "true");`,
 		`byID("restore-selected").addEventListener("click", restoreSelectedTrash);`,
 		`byID("delete-selected-permanently").addEventListener("click", deleteSelectedTrash);`,
@@ -1519,6 +1597,7 @@ func TestNewProjectBrandShellAndAssetManifest(t *testing.T) {
 	}{
 		{path: "/assets/ui.css", contentType: "text/css; charset=utf-8"},
 		{path: "/assets/ui.js", contentType: "text/javascript; charset=utf-8"},
+		{path: "/assets/upload-hash-worker.js", contentType: "text/javascript; charset=utf-8"},
 		{path: "/assets/brand/endlessfs-mark.svg", contentType: "image/svg+xml"},
 		{path: "/assets/fonts/inter-regular.woff2", contentType: "font/woff2"},
 		{path: "/assets/fonts/inter-medium.woff2", contentType: "font/woff2"},
@@ -1528,6 +1607,9 @@ func TestNewProjectBrandShellAndAssetManifest(t *testing.T) {
 		Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, asset.path, nil))
 		if response.Code != http.StatusOK || response.Header().Get("Content-Type") != asset.contentType {
 			t.Errorf("GET %s = %d %q", asset.path, response.Code, response.Header().Get("Content-Type"))
+		}
+		if asset.path == "/assets/upload-hash-worker.js" && response.Header().Get("Cache-Control") != "public, max-age=3600" {
+			t.Errorf("GET %s cache = %q; mutable asset URL must not be immutable", asset.path, response.Header().Get("Cache-Control"))
 		}
 	}
 	for _, obsolete := range []string{"/assets/app.css", "/assets/app.js"} {
@@ -1608,8 +1690,9 @@ func TestRoutineTrashIsImmediateAndRecoverable(t *testing.T) {
 	}
 	script := string(applicationScript)
 	for _, required := range []string{
-		"showTrashUndo", `/api/v1/trash/${encodeURIComponent(item.trashID)}/restore`,
-		`body: { conflict: "rename" }`,
+		"showTrashUndo", `api("/api/v1/trash/restore"`,
+		`trashIDs: recoverable.map((item) => item.trashID)`,
+		`conflict: "rename"`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("routine trash flow is missing %q", required)

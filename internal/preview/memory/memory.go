@@ -53,6 +53,7 @@ type Store struct {
 	available        bool
 	ready            bool
 	artifacts        map[string][]preview.Artifact
+	readyCatalogs    map[string]map[string]preview.ArtifactMetadata
 	claims           map[string]preview.GenerationClaim
 	capabilities     map[[sha256.Size]byte]capability
 	maxGenerations   int
@@ -93,7 +94,7 @@ func New(options Options) (*Store, error) {
 	}
 	return &Store{
 		clock: options.Clock, ids: options.IDs, key: key, capabilityTTL: options.CapabilityTTL,
-		allowedOrigin: options.AllowedOrigin, available: true, artifacts: make(map[string][]preview.Artifact), claims: make(map[string]preview.GenerationClaim),
+		allowedOrigin: options.AllowedOrigin, available: true, artifacts: make(map[string][]preview.Artifact), readyCatalogs: make(map[string]map[string]preview.ArtifactMetadata), claims: make(map[string]preview.GenerationClaim),
 		maxGenerations: options.MaxGenerations, maxCapabilities: options.MaxCapabilities, maxBindings: options.MaxBindings, maxArtifactBytes: options.MaxArtifactBytes,
 		capabilities: make(map[[sha256.Size]byte]capability),
 	}, nil
@@ -326,6 +327,60 @@ func (s *Store) Latest(ctx context.Context, binding preview.Binding) (preview.Ar
 	return items[len(items)-1].Metadata(), nil
 }
 
+func (s *Store) ResolveReady(ctx context.Context, selections []preview.ReadySelection) ([]*preview.ArtifactMetadata, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, domain.WrapError(domain.ErrorUnavailable, "preview store request canceled", err)
+	}
+	if len(selections) < 1 || len(selections) > 64 {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid preview ready batch")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requireAvailableLocked(); err != nil {
+		return nil, err
+	}
+	results := make([]*preview.ArtifactMetadata, len(selections))
+	for index, selection := range selections {
+		if !selection.Valid() {
+			return nil, domain.NewError(domain.ErrorInvalid, "invalid preview ready selection")
+		}
+		metadata, found := s.readyCatalogs[selection.CacheScope][s.bindingKey(selection.Binding)]
+		if !found || !metadata.ValidFor(selection.Binding) {
+			continue
+		}
+		copy := metadata
+		results[index] = &copy
+	}
+	return results, nil
+}
+
+func (s *Store) RecordReady(ctx context.Context, selection preview.ReadySelection, metadata preview.ArtifactMetadata) error {
+	if err := ctx.Err(); err != nil {
+		return domain.WrapError(domain.ErrorUnavailable, "preview store request canceled", err)
+	}
+	if !selection.Valid() || !metadata.ValidFor(selection.Binding) {
+		return domain.NewError(domain.ErrorInvalid, "invalid preview ready entry")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requireAvailableLocked(); err != nil {
+		return err
+	}
+	bindingKey := s.bindingKey(selection.Binding)
+	found := false
+	for _, artifact := range s.artifacts[bindingKey] {
+		found = found || artifact.GenerationID == metadata.GenerationID && artifact.Metadata() == metadata
+	}
+	if !found {
+		return domain.NewError(domain.ErrorNotFound, "preview artifact not found")
+	}
+	if s.readyCatalogs[selection.CacheScope] == nil {
+		s.readyCatalogs[selection.CacheScope] = make(map[string]preview.ArtifactMetadata)
+	}
+	s.readyCatalogs[selection.CacheScope][bindingKey] = metadata
+	return nil
+}
+
 func (s *Store) Read(ctx context.Context, binding preview.Binding, generationID string) (preview.Artifact, error) {
 	if err := ctx.Err(); err != nil {
 		return preview.Artifact{}, domain.WrapError(domain.ErrorUnavailable, "preview store request canceled", err)
@@ -381,6 +436,13 @@ func (s *Store) CreateDownload(ctx context.Context, binding preview.Binding, gen
 	expiresAt := s.clock.Now().Add(s.capabilityTTL)
 	s.capabilities[tokenHash(token)] = capability{key: key, generationID: generationID, expiresAt: expiresAt}
 	return domain.DownloadCapability{URL: s.baseURL + "/cap/preview/" + token, Method: http.MethodGet, ExpiresAt: expiresAt}, nil
+}
+
+func (s *Store) CreateKnownDownload(ctx context.Context, binding preview.Binding, metadata preview.ArtifactMetadata) (domain.DownloadCapability, error) {
+	if !metadata.ValidFor(binding) {
+		return domain.DownloadCapability{}, domain.NewError(domain.ErrorInvalid, "invalid preview ready artifact")
+	}
+	return s.CreateDownload(ctx, binding, metadata.GenerationID)
 }
 
 func (s *Store) ServeHTTP(writer http.ResponseWriter, request *http.Request) {

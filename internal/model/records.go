@@ -36,6 +36,7 @@ type Account struct {
 	SchemaVersion int           `json:"schemaVersion"`
 	UserID        domain.UserID `json:"userID"`
 	Status        AccountStatus `json:"status"`
+	AuthEpoch     uint64        `json:"authEpoch,omitempty"`
 	CreatedAt     time.Time     `json:"createdAt"`
 	UpdatedAt     time.Time     `json:"updatedAt"`
 }
@@ -239,6 +240,31 @@ func (r *RegistrationOperation) Validate() error {
 	return nil
 }
 
+// AuthenticationOperation contains only the public, replay-safe outcome of a
+// verified assertion. Session and CSRF secrets are deterministically derived
+// from the server-held protection key and OperationID, so a lost HTTP response
+// can be replayed without ever persisting either raw secret.
+type AuthenticationOperation struct {
+	SchemaVersion int             `json:"schemaVersion"`
+	OperationID   string          `json:"operationID"`
+	Status        OperationStatus `json:"status"`
+	UserID        domain.UserID   `json:"userID"`
+	CredentialID  string          `json:"credentialID"`
+	AuthEpoch     uint64          `json:"authEpoch"`
+	CreatedAt     time.Time       `json:"createdAt"`
+	CommittedAt   time.Time       `json:"committedAt"`
+}
+
+func (r *AuthenticationOperation) Validate() error {
+	if err := validateSchema(r.SchemaVersion); err != nil {
+		return err
+	}
+	if !validOpaqueID(r.OperationID) || r.Status != OperationCommitted || !r.UserID.Valid() || !validBase64URL(r.CredentialID, 1) || r.AuthEpoch == 0 {
+		return domain.NewError(domain.ErrorInvalid, "invalid authentication operation")
+	}
+	return validateTimes(r.CreatedAt, r.CommittedAt)
+}
+
 type BootstrapState struct {
 	SchemaVersion int                   `json:"schemaVersion"`
 	Status        OperationStatus       `json:"status"`
@@ -338,6 +364,7 @@ type Session struct {
 	SchemaVersion         int           `json:"schemaVersion"`
 	SessionTokenHash      string        `json:"sessionTokenHash"`
 	UserID                domain.UserID `json:"userID"`
+	AuthEpoch             uint64        `json:"authEpoch,omitempty"`
 	CSRFTokenHash         string        `json:"csrfTokenHash"`
 	CreatedAt             time.Time     `json:"createdAt"`
 	ExpiresAt             time.Time     `json:"expiresAt"`

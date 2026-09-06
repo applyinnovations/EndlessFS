@@ -150,3 +150,37 @@ func TestMustStateConstructorsPanicForInvalidValues(t *testing.T) {
 		})
 	}
 }
+
+func TestAtomicMutationNormalizationRejectsEveryInvalidChangeShape(t *testing.T) {
+	validKey := MustKey(NamespaceAccounts, "owner", "record")
+	otherKey := MustKey(NamespaceAccounts, "owner", "other")
+	tests := []struct {
+		name     string
+		mutation Mutation
+	}{
+		{name: "oversized-result", mutation: Mutation{ID: "oversized-result", Result: make([]byte, MaxRecordBytes+1), Changes: []Change{{Key: validKey, Requirement: RequirementAny}}}},
+		{name: "invalid-key", mutation: Mutation{ID: "invalid-key", Changes: []Change{{Key: Key{}, Requirement: RequirementAny}}}},
+		{name: "invalid-requirement", mutation: Mutation{ID: "invalid-requirement", Changes: []Change{{Key: validKey, Requirement: Requirement(99)}}}},
+		{name: "unexpected-version", mutation: Mutation{ID: "unexpected-version", Changes: []Change{{Key: validKey, Requirement: RequirementAbsent, ExpectedVersion: "version"}}}},
+		{name: "deletion-requirement", mutation: Mutation{ID: "deletion-requirement", Changes: []Change{{Key: validKey, Requirement: RequirementAny, Delete: true}}}},
+		{name: "deletion-data", mutation: Mutation{ID: "deletion-data", Changes: []Change{{Key: validKey, Requirement: RequirementPresent, Delete: true, Data: []byte("value")}}}},
+		{name: "oversized-data", mutation: Mutation{ID: "oversized-data", Changes: []Change{{Key: otherKey, Requirement: RequirementAny, Data: make([]byte, MaxRecordBytes+1)}}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, _, err := NormalizeMutation(test.mutation); !errors.Is(err, domain.ErrInvalid) {
+				t.Fatalf("NormalizeMutation() error = %v; want invalid", err)
+			}
+		})
+	}
+
+	store := NewMemoryStore()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.Mutate(canceled, Mutation{ID: "canceled", Changes: []Change{{Key: validKey, Requirement: RequirementAny}}}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled mutation error = %v; want unavailable", err)
+	}
+	if _, err := store.Mutate(context.Background(), Mutation{ID: "missing-present", Changes: []Change{{Key: validKey, Requirement: RequirementPresent, ExpectedVersion: "version"}}}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing present mutation error = %v; want not found", err)
+	}
+}

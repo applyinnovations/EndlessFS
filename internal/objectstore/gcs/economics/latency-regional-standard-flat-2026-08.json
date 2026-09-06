@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "provider": "gcs",
+  "profile": "regional-standard-flat",
+  "sourceURL": "https://cloud.google.com/blog/products/storage-data-transfer/how-colossus-optimizes-data-placement-for-performance",
+  "researchedDate": "2026-08-24",
+  "methodology": "Conservative same-region engineering estimates for serial provider calls. Google Cloud documents request-rate behavior and latency variables but does not publish per-operation p50, p95, or p99 guarantees; these reviewed values are regression-budget inputs, not provider measurements or an SLA.",
+  "limitations": [
+    "Actual latency varies with client and bucket location, network path, object size, request rate, access pattern, namespace hotspots, retries, and current service load",
+    "Operation totals sum per-request estimates and therefore model the serial critical path; applications that prove bounded parallelism may introduce a separately reviewed model",
+    "The byte term assumes approximately 100 MiB/s and is intentionally a planning estimate rather than a Google Cloud performance claim"
+  ],
+  "supportingSourceURLs": [
+    "https://docs.cloud.google.com/storage/docs/request-rate",
+    "https://docs.cloud.google.com/storage/docs/best-practices",
+    "https://docs.cloud.google.com/storage/docs/troubleshooting"
+  ],
+  "requests": {
+    "object_head": { "p50Micros": 20000, "p95Micros": 60000, "p99Micros": 150000 },
+    "object_verify": { "p50Micros": 20000, "p95Micros": 60000, "p99Micros": 150000 },
+    "object_get": { "p50Micros": 22000, "p95Micros": 65000, "p99Micros": 160000, "responseMicrosPerGiB": 10240000 },
+    "object_open": { "p50Micros": 22000, "p95Micros": 65000, "p99Micros": 160000, "responseMicrosPerGiB": 10240000 },
+    "object_list": { "p50Micros": 30000, "p95Micros": 100000, "p99Micros": 250000 },
+    "object_put": { "p50Micros": 25000, "p95Micros": 80000, "p99Micros": 200000, "requestMicrosPerGiB": 10240000 },
+    "object_delete": { "p50Micros": 20000, "p95Micros": 60000, "p99Micros": 150000 },
+    "object_copy": { "p50Micros": 40000, "p95Micros": 150000, "p99Micros": 400000 },
+    "upload_begin": { "p50Micros": 40000, "p95Micros": 120000, "p99Micros": 300000 },
+    "upload_resume": { "p50Micros": 0, "p95Micros": 0, "p99Micros": 0 },
+    "upload_progress": { "p50Micros": 20000, "p95Micros": 60000, "p99Micros": 150000 },
+    "upload_abort": { "p50Micros": 20000, "p95Micros": 60000, "p99Micros": 150000 },
+    "download_sign": { "p50Micros": 0, "p95Micros": 0, "p99Micros": 0 },
+    "data_upload": { "p50Micros": 30000, "p95Micros": 100000, "p99Micros": 250000, "requestMicrosPerGiB": 10240000 },
+    "data_download": { "p50Micros": 30000, "p95Micros": 100000, "p99Micros": 250000, "responseMicrosPerGiB": 10240000 }
+  }
+}

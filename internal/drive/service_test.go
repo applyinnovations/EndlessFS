@@ -83,18 +83,37 @@ func newDriveEnvironment(t *testing.T) driveEnvironment {
 	return driveEnvironment{service: service, storage: storage, client: server.Client(), clock: clock, repo: repository, store: store, owner: owner, other: other}
 }
 
-type lookupOnlyStorage struct {
-	provider.Storage
-	entries         map[string]domain.Entry
-	lookupErr       error
-	currentOverride *domain.Entry
-	lookupCalls     int
-	statCalls       int
-}
+type baseStorageOnly struct{ provider.Storage }
 
 type reconciliationStorage struct {
-	provider.Storage
-	selection domain.DuplicateReconciliationSelection
+	provider.NamespaceStorage
+	selection  domain.DuplicateReconciliationSelection
+	applyCalls int
+}
+
+type uploadPlanningStorage struct {
+	provider.NamespaceStorage
+	sizeOwner        domain.UserID
+	sizeRequest      domain.UploadSizePlanRequest
+	fingerprintOwner domain.UserID
+	fingerprintReq   domain.UploadFingerprintPlanRequest
+}
+
+func (s *uploadPlanningStorage) PlanUploadSizes(_ context.Context, owner domain.UserID, request domain.UploadSizePlanRequest) (domain.UploadSizePlan, error) {
+	s.sizeOwner = owner
+	s.sizeRequest = request
+	return domain.UploadSizePlan{
+		Token: "size-plan-token",
+		Items: []domain.UploadSizePlanDecision{{ID: request.Items[0].ID, FingerprintRequired: true}},
+	}, nil
+}
+
+func (s *uploadPlanningStorage) PlanUploadFingerprints(_ context.Context, owner domain.UserID, request domain.UploadFingerprintPlanRequest) (domain.UploadFingerprintPlan, error) {
+	s.fingerprintOwner = owner
+	s.fingerprintReq = request
+	return domain.UploadFingerprintPlan{
+		Items: []domain.UploadFingerprintPlanDecision{{ID: request.Items[0].ID, Action: domain.UploadPlanSkip}},
+	}, nil
 }
 
 func (s *reconciliationStorage) ListDuplicateGroups(context.Context, domain.UserID, domain.DuplicateGroupRequest) (domain.DuplicateGroupPage, error) {
@@ -132,30 +151,31 @@ func (s *reconciliationStorage) ValidateDuplicateReconciliation(_ context.Contex
 	return s.selection, nil
 }
 
-func (s *lookupOnlyStorage) LookupChildren(_ context.Context, _ domain.Scope, request domain.ChildLookupRequest) (domain.ChildLookup, error) {
-	s.lookupCalls++
-	if s.lookupErr != nil {
-		return domain.ChildLookup{}, s.lookupErr
+func (s *reconciliationStorage) ApplyDuplicateReconciliation(ctx context.Context, owner domain.UserID, token, idempotencyKey string) (domain.NamespaceBatchResult, error) {
+	s.applyCalls++
+	selection, err := s.ValidateDuplicateReconciliation(ctx, owner, token)
+	if err != nil {
+		return domain.NamespaceBatchResult{}, err
 	}
-	result := domain.ChildLookup{Current: domain.Entry{Path: request.Directory, Kind: domain.EntryDirectory, Version: "root", ModifiedAt: time.Unix(0, 0).UTC()}}
-	for _, name := range request.Names {
-		entry, ok := s.entries[name]
-		if !ok {
-			return domain.ChildLookup{}, domain.NewError(domain.ErrorNotFound, "entry not found")
+	if len(selection.Items) < 1 || len(selection.Items) > drive.MaxBatchItems {
+		return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorInvalid, "invalid bounded reconciliation selection")
+	}
+	live, err := domain.NewScope(owner, domain.AreaLive)
+	if err != nil {
+		return domain.NamespaceBatchResult{}, err
+	}
+	requests := make([]domain.TrashRequest, len(selection.Items))
+	for index, item := range selection.Items {
+		keep, statErr := s.NamespaceStorage.Stat(ctx, live, item.Keep.Path)
+		if statErr != nil {
+			return domain.NamespaceBatchResult{}, statErr
 		}
-		result.Current.Size += entry.Size
-		result.Current.FileCount += entry.FileCount
-		result.Entries = append(result.Entries, entry)
+		if keep.Version != item.Keep.Version {
+			return domain.NamespaceBatchResult{}, domain.NewError(domain.ErrorPreconditionFailed, "duplicate keep occurrence changed")
+		}
+		requests[index] = domain.TrashRequest{Path: item.Remove.Path, ExpectedVersion: item.Remove.Version, TrashID: fmt.Sprintf("reconcile-%d", index)}
 	}
-	if s.currentOverride != nil {
-		result.Current = *s.currentOverride
-	}
-	return result, nil
-}
-
-func (s *lookupOnlyStorage) Stat(context.Context, domain.Scope, domain.UserPath) (domain.Entry, error) {
-	s.statCalls++
-	return domain.Entry{}, domain.NewError(domain.ErrorInvalid, "unexpected per-row stat")
+	return s.NamespaceStorage.BatchMoveToTrash(ctx, owner, requests, idempotencyKey)
 }
 
 func fixedUserID(t *testing.T, value byte) domain.UserID {
@@ -254,7 +274,7 @@ func TestIntegrationDirectTransfersAndIsolation(t *testing.T) {
 	}
 }
 
-func TestDuplicateReconciliationAppliesPinnedTrashPlanAndRecordsAudit(t *testing.T) {
+func TestDuplicateReconciliationDelegatesOneAtomicProviderMutation(t *testing.T) {
 	env := newDriveEnvironment(t)
 	ctx := context.Background()
 	for _, path := range []string{"/left", "/right"} {
@@ -265,7 +285,7 @@ func TestDuplicateReconciliationAppliesPinnedTrashPlanAndRecordsAudit(t *testing
 	remove := upload(t, env, env.owner, "/left/same.bin", []byte("same"), "application/octet-stream", "reconcile-remove-upload")
 	keep := upload(t, env, env.owner, "/right/same.bin", []byte("same"), "application/octet-stream", "reconcile-keep-upload")
 	groupID := secret.Hash("same-content-group")
-	wrapped := &reconciliationStorage{Storage: env.storage, selection: domain.DuplicateReconciliationSelection{
+	wrapped := &reconciliationStorage{NamespaceStorage: env.storage, selection: domain.DuplicateReconciliationSelection{
 		Left:       domain.DuplicateOccurrence{GroupID: groupID, Kind: domain.DuplicateDirectory, Area: domain.AreaLive, AreaName: "live", Path: domain.MustParseUserPath("/left"), Version: "left-version"},
 		Right:      domain.DuplicateOccurrence{GroupID: groupID, Kind: domain.DuplicateDirectory, Area: domain.AreaLive, AreaName: "live", Path: domain.MustParseUserPath("/right"), Version: "right-version"},
 		RemoveFrom: domain.DuplicateSideLeft,
@@ -285,22 +305,17 @@ func TestDuplicateReconciliationAppliesPinnedTrashPlanAndRecordsAudit(t *testing
 	if err != nil || len(result.Items) != 1 || result.Items[0].State != domain.OperationSucceeded || result.Items[0].TrashID == "" {
 		t.Fatalf("ApplyDuplicateReconciliation() = %+v, %v", result, err)
 	}
+	if wrapped.applyCalls != 1 {
+		t.Fatalf("atomic reconciliation calls = %d, want one", wrapped.applyCalls)
+	}
 	if _, err := service.Stat(ctx, env.owner, remove.Path); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("reconciled source remains live: %v", err)
 	}
 	if current, err := service.Stat(ctx, env.owner, keep.Path); err != nil || current.Version != keep.Version {
 		t.Fatalf("preserved occurrence = %+v, %v", current, err)
 	}
-	page, err := env.store.List(ctx, statememory.MustPrefix(statememory.NamespaceOperations, "batch", env.owner.String()), statememory.PageRequest{Limit: 10})
-	if err != nil || len(page.Items) != 1 {
-		t.Fatalf("reconciliation audit page = %+v, %v", page, err)
-	}
-	var audit model.BatchOperation
-	if err := statememory.DecodeJSON(page.Items[0].Value.Data, &audit); err != nil {
-		t.Fatal(err)
-	}
-	if audit.Kind != "duplicate_reconciliation" || audit.ItemCount != 1 || audit.SucceededCount != 1 || audit.ReclaimableBytes != remove.Size || audit.RequestDigest == "" {
-		t.Fatalf("reconciliation audit = %+v", audit)
+	if operation, err := wrapped.GetBatchOperation(ctx, env.owner, result.OperationID); err != nil || operation.State != domain.OperationSucceeded {
+		t.Fatalf("durable reconciliation outcome = %+v, %v", operation, err)
 	}
 }
 
@@ -309,7 +324,7 @@ func TestDuplicateCatalogMethodsForwardAndFailClosedWhenUnsupported(t *testing.T
 	ctx := context.Background()
 	ids := domain.NewIDGenerator(&hashReader{})
 	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, 32)))
-	wrapped := &reconciliationStorage{Storage: env.storage}
+	wrapped := &reconciliationStorage{NamespaceStorage: env.storage}
 	service, err := drive.NewService(wrapped, env.store, env.repo, ids, env.clock, key, "http://127.0.0.1:8080", "http://127.0.0.1:8081", 1<<20)
 	if err != nil {
 		t.Fatal(err)
@@ -375,12 +390,57 @@ func TestDuplicateCatalogMethodsForwardAndFailClosedWhenUnsupported(t *testing.T
 	}
 }
 
+func TestUploadPlanningMethodsForwardAuthenticatedOwnerAndFailClosedWhenUnsupported(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	ids := domain.NewIDGenerator(&hashReader{})
+	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, 32)))
+	wrapper := &uploadPlanningStorage{NamespaceStorage: env.storage}
+	service, err := drive.NewService(wrapper, env.store, env.repo, ids, env.clock, key, "http://127.0.0.1:8080", "http://127.0.0.1:8081", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sizeRequest := domain.UploadSizePlanRequest{Items: []domain.UploadSizePlanItem{{
+		ID: "photo-1", Path: domain.MustParseUserPath("/photo.jpg"), Size: 12,
+	}}}
+	sizePlan, err := service.PlanUploadSizes(ctx, env.owner, sizeRequest)
+	if err != nil || sizePlan.Token != "size-plan-token" || len(sizePlan.Items) != 1 || !sizePlan.Items[0].FingerprintRequired {
+		t.Fatalf("PlanUploadSizes() = %+v, %v", sizePlan, err)
+	}
+	if wrapper.sizeOwner != env.owner || len(wrapper.sizeRequest.Items) != 1 || wrapper.sizeRequest.Items[0].Path != sizeRequest.Items[0].Path {
+		t.Fatalf("size planning delegation = owner %q request %+v", wrapper.sizeOwner, wrapper.sizeRequest)
+	}
+
+	fingerprintRequest := domain.UploadFingerprintPlanRequest{
+		Token: "size-plan-token",
+		Items: []domain.UploadFingerprintPlanItem{{
+			ID: "photo-1", Path: domain.MustParseUserPath("/photo.jpg"), Size: 12,
+			MD5: "kAFQmDzST7DWlj99KOF/cg==", CRC32C: "9ONpcA==",
+		}},
+	}
+	fingerprintPlan, err := service.PlanUploadFingerprints(ctx, env.owner, fingerprintRequest)
+	if err != nil || len(fingerprintPlan.Items) != 1 || fingerprintPlan.Items[0].Action != domain.UploadPlanSkip {
+		t.Fatalf("PlanUploadFingerprints() = %+v, %v", fingerprintPlan, err)
+	}
+	if wrapper.fingerprintOwner != env.owner || wrapper.fingerprintReq.Token != fingerprintRequest.Token {
+		t.Fatalf("fingerprint planning delegation = owner %q request %+v", wrapper.fingerprintOwner, wrapper.fingerprintReq)
+	}
+
+	if _, err := env.service.PlanUploadSizes(ctx, env.owner, sizeRequest); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unsupported PlanUploadSizes() error = %v", err)
+	}
+	if _, err := env.service.PlanUploadFingerprints(ctx, env.owner, fingerprintRequest); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unsupported PlanUploadFingerprints() error = %v", err)
+	}
+}
+
 func TestDuplicateReconciliationRejectsInvalidOrStalePlans(t *testing.T) {
 	env := newDriveEnvironment(t)
 	ctx := context.Background()
 	ids := domain.NewIDGenerator(&hashReader{})
 	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, 32)))
-	wrapped := &reconciliationStorage{Storage: env.storage}
+	wrapped := &reconciliationStorage{NamespaceStorage: env.storage}
 	service, err := drive.NewService(wrapped, env.store, env.repo, ids, env.clock, key, "http://127.0.0.1:8080", "http://127.0.0.1:8081", 1<<20)
 	if err != nil {
 		t.Fatal(err)
@@ -415,14 +475,14 @@ func TestDuplicateReconciliationRejectsInvalidOrStalePlans(t *testing.T) {
 		Keep:    domain.DuplicateOccurrence{Path: keep.Path, Version: "stale-version", Size: keep.Size},
 	}}
 	result, err := service.ApplyDuplicateReconciliation(ctx, env.owner, "valid-plan-token", "duplicate-stale-plan-001")
-	if err != nil || len(result.Items) != 1 || result.Items[0].State != domain.OperationFailed || result.Items[0].ErrorKind != domain.ErrorPreconditionFailed {
+	if !errors.Is(err, domain.ErrPreconditionFailed) || len(result.Items) != 0 {
 		t.Fatalf("stale plan result = %+v, %v", result, err)
 	}
 	if _, err := service.Stat(ctx, env.owner, remove.Path); err != nil {
 		t.Fatalf("stale plan removed source: %v", err)
 	}
 	wrapped.selection.Items[0].Keep.Path = domain.MustParseUserPath("/missing-keep.bin")
-	if result, err := service.ApplyDuplicateReconciliation(ctx, env.owner, "valid-plan-token", "duplicate-missing-keep-01"); err != nil || result.Items[0].ErrorKind != domain.ErrorNotFound {
+	if result, err := service.ApplyDuplicateReconciliation(ctx, env.owner, "valid-plan-token", "duplicate-missing-keep-01"); !errors.Is(err, domain.ErrNotFound) || len(result.Items) != 0 {
 		t.Fatalf("missing keep result = %+v, %v", result, err)
 	}
 }
@@ -629,8 +689,8 @@ func TestTrashPageReturnsExactPersistedMetadataWithoutPerRowStats(t *testing.T) 
 	if err != nil || len(page.Items) != len(paths) || page.NextCursor != "" {
 		t.Fatalf("TrashPage() = %+v, %v", page, err)
 	}
-	if after.ProviderCalls[providermemory.OperationLookupChildren]-before.ProviderCalls[providermemory.OperationLookupChildren] != 1 || after.ProviderCalls[providermemory.OperationStat] != before.ProviderCalls[providermemory.OperationStat] {
-		t.Fatalf("TrashPage provider calls before=%v after=%v; want one batch lookup and no Stat", before.ProviderCalls, after.ProviderCalls)
+	if after.ProviderCalls[providermemory.OperationLookupChildren] != before.ProviderCalls[providermemory.OperationLookupChildren] || after.ProviderCalls[providermemory.OperationStat] != before.ProviderCalls[providermemory.OperationStat] {
+		t.Fatalf("TrashPage provider calls before=%v after=%v; want authoritative namespace metadata with no legacy lookup or Stat", before.ProviderCalls, after.ProviderCalls)
 	}
 	items := make(map[string]drive.TrashEntry, len(page.Items))
 	for _, item := range page.Items {
@@ -658,87 +718,6 @@ func TestTrashPageReturnsExactPersistedMetadataWithoutPerRowStats(t *testing.T) 
 	otherPage, err := env.service.TrashPage(ctx, env.other, 1000, "")
 	if err != nil || len(otherPage.Items) != 0 {
 		t.Fatalf("cross-owner TrashPage() = %+v, %v", otherPage, err)
-	}
-}
-
-func TestTrashPageScalesToOneThousandLegacyRecordsWithOneBatchLookup(t *testing.T) {
-	env := newDriveEnvironment(t)
-	storage := &lookupOnlyStorage{entries: make(map[string]domain.Entry, 1000)}
-	for index := range 1000 {
-		sum := sha256.Sum256([]byte(fmt.Sprintf("legacy-trash-%04d", index)))
-		trashID := base64.RawURLEncoding.EncodeToString(sum[:])
-		trashedPath := domain.MustParseUserPath("/" + trashID)
-		record := model.Trash{
-			SchemaVersion: model.SchemaVersion, TrashID: trashID, OwnerUserID: env.owner,
-			OriginalPath: domain.MustParseUserPath(fmt.Sprintf("/legacy-%04d.bin", index)), TrashedPath: trashedPath,
-			Kind: domain.EntryFile, TrashedAt: env.clock.Now(), OriginalVersion: "legacy-v1",
-		}
-		data, err := statememory.EncodeJSON(&record)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := env.store.Create(context.Background(), statememory.MustKey(statememory.NamespaceTrash, env.owner.String(), trashID), data); err != nil {
-			t.Fatal(err)
-		}
-		storage.entries[trashID] = domain.Entry{Path: trashedPath, Name: trashID, Kind: domain.EntryFile, Size: int64(index), FileCount: 1, MediaType: "application/octet-stream", ModifiedAt: env.clock.Now(), Version: "legacy-v1"}
-	}
-	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, 32)))
-	service, err := drive.NewService(storage, env.store, env.repo, domain.NewIDGenerator(&hashReader{}), env.clock, key, "http://127.0.0.1:8080", "http://127.0.0.1:8081", 1<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	page, err := service.TrashPage(context.Background(), env.owner, 1000, "")
-	if err != nil || len(page.Items) != 1000 || page.NextCursor != "" {
-		t.Fatalf("TrashPage(1000) = %d items, cursor=%q, %v", len(page.Items), page.NextCursor, err)
-	}
-	if storage.lookupCalls != 1 || storage.statCalls != 0 {
-		t.Fatalf("storage calls: lookup=%d stat=%d; want 1 and 0", storage.lookupCalls, storage.statCalls)
-	}
-	for name, entry := range storage.entries {
-		entry.Size = -1
-		storage.entries[name] = entry
-		break
-	}
-	if _, err := service.TrashPage(context.Background(), env.owner, 1000, ""); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("negative legacy aggregate error = %v", err)
-	}
-	for name, entry := range storage.entries {
-		entry.Size = 1
-		storage.entries[name] = entry
-	}
-	for name, entry := range storage.entries {
-		entry.FileCount = -1
-		storage.entries[name] = entry
-		break
-	}
-	if _, err := service.TrashPage(context.Background(), env.owner, 1000, ""); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("negative legacy file count error = %v", err)
-	}
-	for name, entry := range storage.entries {
-		entry.FileCount = 1
-		storage.entries[name] = entry
-	}
-	storage.lookupErr = domain.NewError(domain.ErrorNotFound, "missing tree entry")
-	if _, err := service.TrashPage(context.Background(), env.owner, 1000, ""); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("missing legacy tree entry error = %v", err)
-	}
-	storage.lookupErr = domain.NewError(domain.ErrorUnavailable, "tree unavailable")
-	if _, err := service.TrashPage(context.Background(), env.owner, 1000, ""); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("unavailable legacy tree error = %v", err)
-	}
-	storage.lookupErr = nil
-	storage.currentOverride = &domain.Entry{Path: domain.MustParseUserPath("/"), Kind: domain.EntryFile, Size: 1, MediaType: "text/plain", ModifiedAt: env.clock.Now(), Version: "bad-root"}
-	if _, err := service.TrashPage(context.Background(), env.owner, 1000, ""); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid trash root metadata error = %v", err)
-	}
-	storage.currentOverride = nil
-	for name, entry := range storage.entries {
-		entry.Path = domain.MustParseUserPath("/wrong")
-		storage.entries[name] = entry
-		break
-	}
-	if _, err := service.TrashPage(context.Background(), env.owner, 1000, ""); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("mismatched trash row error = %v", err)
 	}
 }
 
@@ -862,11 +841,11 @@ func TestUploadAbortBatchMoveTrashPagingAndEmptyTrash(t *testing.T) {
 		{Source: source.Path, Destination: domain.MustParseUserPath("/moved.txt")},
 		{Source: domain.MustParseUserPath("/missing.txt"), Destination: domain.MustParseUserPath("/never.txt")},
 	}, true, "boundary-move-batch-01")
-	if err != nil || len(batch.Items) != 2 || batch.Items[0].State != domain.OperationSucceeded || batch.Items[1].State != domain.OperationFailed {
-		t.Fatalf("move batch = %+v, %v", batch, err)
+	if !errors.Is(err, domain.ErrNotFound) || len(batch.Items) != 0 {
+		t.Fatalf("atomic move batch = %+v, %v", batch, err)
 	}
-	if operation, err := env.service.Operation(ctx, env.owner, batch.Items[0].OperationID); err != nil || operation.State != domain.OperationSucceeded {
-		t.Fatalf("provider operation = %+v, %v", operation, err)
+	if current, statErr := env.service.Stat(ctx, env.owner, source.Path); statErr != nil || current.Version != source.Version {
+		t.Fatalf("failed atomic batch changed source = %+v, %v", current, statErr)
 	}
 	if _, err := env.service.BatchCopyMove(ctx, env.owner, nil, false, "boundary-empty-batch-1"); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("empty copy batch = %v", err)
@@ -920,10 +899,12 @@ func TestVersionPinnedTrashRejectsAChangedSourceAndAcceptsTheReviewedVersion(t *
 			t.Fatalf("invalid reviewed version %q = %v", version, err)
 		}
 	}
+	if _, err := env.service.TrashVersioned(ctx, env.owner, make([]drive.TrashItem, 101), "reviewed-trash-oversized"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("oversized reviewed trash = %v", err)
+	}
 
-	stale, err := env.service.TrashVersioned(ctx, env.owner, []drive.TrashItem{{Path: entry.Path, Version: "stale-version"}}, "reviewed-trash-stale-01")
-	if err != nil || len(stale.Items) != 1 || stale.Items[0].State != domain.OperationFailed || stale.Items[0].ErrorKind != domain.ErrorPreconditionFailed {
-		t.Fatalf("stale version-pinned trash = %+v, %v", stale, err)
+	if _, err := env.service.TrashVersioned(ctx, env.owner, []drive.TrashItem{{Path: entry.Path, Version: "stale-version"}}, "reviewed-trash-stale-01"); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("stale version-pinned trash = %v", err)
 	}
 	if _, err := env.service.Stat(ctx, env.owner, entry.Path); err != nil {
 		t.Fatalf("stale version-pinned trash removed the source: %v", err)
@@ -935,6 +916,112 @@ func TestVersionPinnedTrashRejectsAChangedSourceAndAcceptsTheReviewedVersion(t *
 	}
 	if _, err := env.service.Stat(ctx, env.owner, entry.Path); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("valid version-pinned trash retained source: %v", err)
+	}
+}
+
+func TestUploadBatchServiceRejectsCardinalityIdentityAndScopeBoundaries(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	validUpload := domain.CreateUploadRequest{
+		Path: domain.MustParseUserPath("/batch.bin"), Size: 1, MediaType: "application/octet-stream", IdempotencyKey: "batch-upload-item-0001",
+	}
+	if _, err := env.service.CreateUploadBatch(ctx, env.owner, nil); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty admission batch = %v", err)
+	}
+	if _, err := env.service.CreateUploadBatch(ctx, env.owner, make([]domain.CreateUploadRequest, drive.MaxUploadBatchItems+1)); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("oversized admission batch = %v", err)
+	}
+	invalidUpload := validUpload
+	invalidUpload.IdempotencyKey = "short"
+	if _, err := env.service.CreateUploadBatch(ctx, env.owner, []domain.CreateUploadRequest{invalidUpload}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid admission idempotency = %v", err)
+	}
+	if _, err := env.service.CreateUploadBatch(ctx, domain.UserID{}, []domain.CreateUploadRequest{validUpload}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid admission owner = %v", err)
+	}
+
+	validCompletion := domain.CompleteUploadBatchRequest{
+		Items: []domain.CompleteUploadBatchItem{{UploadID: "upload"}}, IdempotencyKey: "batch-complete-0001",
+	}
+	if _, err := env.service.CompleteUploadBatch(ctx, env.owner, domain.CompleteUploadBatchRequest{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty completion batch = %v", err)
+	}
+	invalidCompletion := validCompletion
+	invalidCompletion.IdempotencyKey = "short"
+	if _, err := env.service.CompleteUploadBatch(ctx, env.owner, invalidCompletion); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid completion idempotency = %v", err)
+	}
+	if _, err := env.service.CompleteUploadBatch(ctx, domain.UserID{}, validCompletion); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid completion owner = %v", err)
+	}
+
+	validAbort := domain.AbortUploadBatchRequest{
+		UploadIDs: []domain.UploadID{"upload"}, BatchID: "batch", IdempotencyKey: "batch-abort-0000001",
+	}
+	if err := env.service.AbortUploadBatch(ctx, env.owner, domain.AbortUploadBatchRequest{}); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("empty abort batch = %v", err)
+	}
+	invalidAbort := validAbort
+	invalidAbort.IdempotencyKey = "short"
+	if err := env.service.AbortUploadBatch(ctx, env.owner, invalidAbort); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid abort idempotency = %v", err)
+	}
+	if err := env.service.AbortUploadBatch(ctx, domain.UserID{}, validAbort); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid abort owner = %v", err)
+	}
+}
+
+func TestTrashBatchRestoreAndPermanentDeleteAreAtomic(t *testing.T) {
+	env := newDriveEnvironment(t)
+	ctx := context.Background()
+	first := upload(t, env, env.owner, "/batch-restore-one.txt", []byte("one"), "text/plain", "batch-restore-one-upload")
+	second := upload(t, env, env.owner, "/batch-restore-two.txt", []byte("two"), "text/plain", "batch-restore-two-upload")
+	trashed, err := env.service.Trash(ctx, env.owner, []domain.UserPath{first.Path, second.Path}, "batch-restore-trash-request")
+	if err != nil || len(trashed.Items) != 2 {
+		t.Fatalf("Trash() = %+v, %v", trashed, err)
+	}
+	trashIDs := []string{trashed.Items[0].TrashID, trashed.Items[1].TrashID}
+	restored, err := env.service.RestoreBatch(ctx, env.owner, trashIDs, domain.ConflictFail, "batch-restore-request-001")
+	if err != nil || len(restored.Items) != 2 {
+		t.Fatalf("RestoreBatch() = %+v, %v", restored, err)
+	}
+	for _, entry := range []domain.Entry{first, second} {
+		if current, statErr := env.service.Stat(ctx, env.owner, entry.Path); statErr != nil || current.Size != entry.Size {
+			t.Fatalf("restored %s = %+v, %v", entry.Path, current, statErr)
+		}
+	}
+	if replay, replayErr := env.service.RestoreBatch(ctx, env.owner, trashIDs, domain.ConflictFail, "batch-restore-request-001"); replayErr != nil || replay.OperationID != restored.OperationID {
+		t.Fatalf("RestoreBatch(replay) = %+v, %v", replay, replayErr)
+	}
+	if _, conflictErr := env.service.RestoreBatch(ctx, env.owner, trashIDs, domain.ConflictRename, "batch-restore-request-001"); !errors.Is(conflictErr, domain.ErrConflict) {
+		t.Fatalf("RestoreBatch(changed replay) error = %v", conflictErr)
+	}
+
+	trashed, err = env.service.Trash(ctx, env.owner, []domain.UserPath{first.Path, second.Path}, "batch-delete-trash-request")
+	if err != nil || len(trashed.Items) != 2 {
+		t.Fatalf("Trash(for delete) = %+v, %v", trashed, err)
+	}
+	trashIDs = []string{trashed.Items[0].TrashID, trashed.Items[1].TrashID}
+	deleted, err := env.service.PermanentDeleteBatch(ctx, env.owner, trashIDs, "batch-delete-request-001")
+	if err != nil || len(deleted.Items) != 2 {
+		t.Fatalf("PermanentDeleteBatch() = %+v, %v", deleted, err)
+	}
+	if records, listErr := env.service.TrashList(ctx, env.owner); listErr != nil || len(records) != 0 {
+		t.Fatalf("trash after permanent delete = %+v, %v", records, listErr)
+	}
+	if _, invalidErr := env.service.RestoreBatch(ctx, env.owner, nil, domain.ConflictFail, "batch-restore-invalid-1"); !errors.Is(invalidErr, domain.ErrInvalid) {
+		t.Fatalf("RestoreBatch(empty) error = %v", invalidErr)
+	}
+	if _, invalidErr := env.service.PermanentDeleteBatch(ctx, env.owner, nil, "batch-delete-invalid-1"); !errors.Is(invalidErr, domain.ErrInvalid) {
+		t.Fatalf("PermanentDeleteBatch(empty) error = %v", invalidErr)
+	}
+}
+
+func TestDriveServiceRejectsStorageWithoutAtomicNamespaceExtensions(t *testing.T) {
+	env := newDriveEnvironment(t)
+	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, 32)))
+	if _, err := drive.NewService(baseStorageOnly{Storage: env.storage}, env.store, env.repo, domain.NewIDGenerator(&hashReader{}), env.clock, key, "http://127.0.0.1:8080", "http://127.0.0.1:8081", 1<<20); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("storage without schema-008 extensions error = %v", err)
 	}
 }
 
@@ -1032,7 +1119,7 @@ func TestDriveMutationAndProviderFaultMatrix(t *testing.T) {
 		}
 	}
 	missingBatch, err := env.service.Trash(ctx, env.owner, []domain.UserPath{domain.MustParseUserPath("/missing.txt")}, "trash-missing-item-001")
-	if err != nil || len(missingBatch.Items) != 1 || missingBatch.Items[0].State != domain.OperationFailed {
+	if !errors.Is(err, domain.ErrNotFound) || len(missingBatch.Items) != 0 {
 		t.Fatalf("missing trash item = %+v, %v", missingBatch, err)
 	}
 	replayEntry := upload(t, env, env.owner, "/replay.txt", []byte("replay"), "text/plain", "trash-replay-upload-01")
@@ -1045,7 +1132,7 @@ func TestDriveMutationAndProviderFaultMatrix(t *testing.T) {
 		t.Fatalf("trash replay = %+v, %v", replay, err)
 	}
 	conflict, err := env.service.Trash(ctx, env.owner, []domain.UserPath{domain.MustParseUserPath("/different.txt")}, "trash-replay-key-0001")
-	if err != nil || conflict.Items[0].State != domain.OperationFailed || conflict.Items[0].ErrorKind != domain.ErrorConflict {
+	if !errors.Is(err, domain.ErrConflict) || len(conflict.Items) != 0 {
 		t.Fatalf("trash replay conflict = %+v, %v", conflict, err)
 	}
 	if _, err := env.service.Restore(ctx, env.owner, first.Items[0].TrashID, domain.ConflictFail, "restore-fault-key-0001"); err != nil {
@@ -1060,10 +1147,6 @@ func TestDriveMutationAndProviderFaultMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env.storage.InjectFault(providermemory.OperationStat, providermemory.FaultUnavailable)
-	if _, err := env.service.Restore(ctx, env.owner, statTrash.Items[0].TrashID, domain.ConflictFail, "restore-stat-fault-01"); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("restore stat fault = %v", err)
-	}
 	env.storage.InjectFault(providermemory.OperationMove, providermemory.FaultUnavailable)
 	if _, err := env.service.Restore(ctx, env.owner, statTrash.Items[0].TrashID, domain.ConflictFail, "restore-move-fault-01"); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("restore move fault = %v", err)
@@ -1072,10 +1155,6 @@ func TestDriveMutationAndProviderFaultMatrix(t *testing.T) {
 	deleteTrash, err := env.service.Trash(ctx, env.owner, []domain.UserPath{deleteEntry.Path}, "delete-fault-trash-001")
 	if err != nil {
 		t.Fatal(err)
-	}
-	env.storage.InjectFault(providermemory.OperationStat, providermemory.FaultUnavailable)
-	if _, err := env.service.PermanentDelete(ctx, env.owner, deleteTrash.Items[0].TrashID, "delete-stat-fault-001"); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("delete stat fault = %v", err)
 	}
 	env.storage.InjectFault(providermemory.OperationDelete, providermemory.FaultUnavailable)
 	if _, err := env.service.PermanentDelete(ctx, env.owner, deleteTrash.Items[0].TrashID, "delete-data-fault-001"); !errors.Is(err, domain.ErrUnavailable) {

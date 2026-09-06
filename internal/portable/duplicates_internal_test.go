@@ -1,12 +1,14 @@
 package portable
 
 import (
+	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
-	"github.com/applyinnovations/endlessfs/internal/storageformat"
+	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 )
 
 func TestDuplicateDirectoryComparisonRejectsByteOverflow(t *testing.T) {
@@ -17,13 +19,17 @@ func TestDuplicateDirectoryComparisonRejectsByteOverflow(t *testing.T) {
 	}
 }
 
-func TestDuplicateDirectoryComparisonRejectsZeroByteIdentitySizeMismatch(t *testing.T) {
-	store := &FileStore{}
-	iterator := &directoryContentIndexIterator{exhausted: true, values: []storageformat.DirectoryContentIndexEntry{
-		{GroupID: "group", Size: 0}, {GroupID: "group", Size: 1},
-	}}
-	_, _, _, _, err := store.nextDirectoryContentGroup(iterator)
-	if !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("nextDirectoryContentGroup() error = %v; want invalid size mismatch", err)
+func TestDuplicateOccurrencePaginationSurfacesCursorGenerationFailure(t *testing.T) {
+	ctx := context.Background()
+	engine := openNamespaceTestEngine(t, objectmemory.New())
+	live := namespaceTestScope(t, domain.AreaLive)
+	seedNamespaceBatchFiles(t, newNamespaceStore(engine), live, 3)
+	groups, err := engine.Files().ListDuplicateGroups(ctx, live.UserID(), domain.DuplicateGroupRequest{Kind: domain.DuplicateFile, Limit: 1})
+	if err != nil || len(groups.Groups) != 1 {
+		t.Fatalf("duplicate group seed = %+v, %v", groups, err)
+	}
+	engine.ids = domain.NewIDGenerator(strings.NewReader(""))
+	if _, err := engine.Files().ListDuplicateOccurrences(ctx, live.UserID(), domain.DuplicateOccurrenceRequest{GroupID: groups.Groups[0].ID, Limit: 1}); err == nil {
+		t.Fatal("duplicate occurrence pagination discarded cursor-generation failure")
 	}
 }

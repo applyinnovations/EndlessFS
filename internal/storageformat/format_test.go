@@ -70,6 +70,32 @@ func TestCanonicalEnvelopeAndLogicalVersion(t *testing.T) {
 	}
 }
 
+func TestSchema011CanonicalRecordsRejectNonCanonicalAndMisboundValues(t *testing.T) {
+	stateBody, err := EncodeStateRecord009(StateRecordUpload, []byte(`{"state":"active"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeStateRecord009(append([]byte(" "), stateBody...), StateRecordUpload); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("non-canonical state record error = %v", err)
+	}
+
+	result := NamespaceMutationResult{
+		SchemaVersion: 1, RequestFingerprint: Digest([]byte("request")),
+		UploadBatch: &NamespaceUploadBatchResult{TransactionID: "invalid", ItemCount: 1, State: "completed"},
+	}
+	if err := ValidateNamespaceMutationResult(result); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("misbound upload batch result error = %v", err)
+	}
+
+	abort := PortableUploadBatchAbort{
+		SchemaVersion: 1, OwnerID: "owner", BatchID: "invalid", Count: 1,
+		Aborted: []byte{1}, ModifiedAt: time.Date(2045, 1, 2, 3, 4, 5, 0, time.UTC),
+	}
+	if err := ValidatePortableUploadBatchAbort(abort); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("misbound upload abort error = %v", err)
+	}
+}
+
 func TestCanonicalDirectoryRootCarriesRecursiveAggregatesTransition(t *testing.T) {
 	root := DirectoryRoot{
 		SchemaVersion: 1, DirectoryID: RootDirectoryID, ManifestID: "manifest", RecursiveBytes: 42, RecursiveFileCount: 7,
@@ -201,7 +227,11 @@ func TestCanonicalKeyLayoutAndBounds(t *testing.T) {
 		"checkpoint":             CheckpointKey("checkpoint-id"),
 		"checkpoint work":        CheckpointWorkKey("checkpoint-id", "endlessfs/v1/superblock.json"),
 		"checkpoint page":        CheckpointInventoryPageKey("checkpoint-id", 42),
+		"garbage plan page":      GarbageCollectionPlanPageKey("checkpoint-id", 7),
 		"lease":                  LeaseKey("gcs", "lease-id"),
+		"upload lease segment":   UploadLeaseSegmentKey("gcs", Digest([]byte("batch")), 3),
+		"upload transaction":     UploadTransactionSegmentKey("gcs", Digest([]byte("transaction")), 4),
+		"upload progress":        UploadTransactionProgressKey("gcs", Digest([]byte("transaction"))),
 	} {
 		if !key.Valid() || len(key.String()) > objectstore.MaxKeyBytes {
 			t.Fatalf("%s key invalid: %q", name, key.String())
@@ -339,6 +369,10 @@ func TestCanonicalKeyNamespacePanicsFailClosed(t *testing.T) {
 		func() { StateVersionKey("INVALID", "key", "version") },
 		func() { StateVersionLogicalPrefix("INVALID", "key") },
 		func() { LeaseKey("INVALID", "lease") },
+		func() { UploadLeaseSegmentKey("INVALID", Digest([]byte("batch")), 0) },
+		func() { UploadTransactionSegmentKey("INVALID", Digest([]byte("transaction")), 1) },
+		func() { UploadTransactionProgressKey("INVALID", Digest([]byte("transaction"))) },
+		func() { Schema010MigrationReceiptKey("domain", "") },
 	} {
 		func() {
 			defer func() {
@@ -359,6 +393,7 @@ func TestScalableStateAndOperationKeyFamiliesAreCanonical(t *testing.T) {
 		"operation-step-set-prefix":    FileOperationStepPageSetPrefix("user", "operation", "steps"),
 		"operation-preparation-prefix": FileOperationPreparationPrefix("user", "operation"),
 		"migration-directory-prefix":   MigrationDirectoryMarkScopePrefix("checkpoint", "verify", "user", "live"),
+		"garbage-plan-prefix":          GarbageCollectionPlanPagePrefix("checkpoint"),
 	} {
 		if !strings.HasPrefix(value, "endlessfs/v1/") || strings.Contains(value, "//") {
 			t.Fatalf("%s key = %q", name, value)

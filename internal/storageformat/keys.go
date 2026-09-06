@@ -35,6 +35,145 @@ func SuperblockKey() objectstore.Key { return fixedKey("superblock.json") }
 func WriterSetKey() objectstore.Key  { return fixedKey("control/writer-set.json") }
 func WriteGateKey() objectstore.Key  { return fixedKey("control/write-gate.json") }
 
+func DomainCatalogHeadKey() objectstore.Key { return fixedKey("domains/catalog/head.json") }
+
+func DomainCatalogPageKey(pageID string) objectstore.Key {
+	validateDomainKeyPart(pageID)
+	return fixedKey("domains/catalog/pages/" + digestPart(pageID) + ".json")
+}
+
+func DomainHeadKey(kind ConsistencyDomainKind, domainID string) objectstore.Key {
+	validateDomainKeyPart(domainID)
+	return fixedKey("domains/" + domainKeyKind(kind) + "/" + digestPart(domainID) + "/head.json")
+}
+
+func DomainPageKey(kind ConsistencyDomainKind, domainID, pageID string) objectstore.Key {
+	validateDomainKeyPart(domainID)
+	validateDomainKeyPart(pageID)
+	return fixedKey("domains/" + domainKeyKind(kind) + "/" + digestPart(domainID) + "/pages/" + digestPart(pageID) + ".json")
+}
+
+func DomainPagePackKey(kind ConsistencyDomainKind, domainID, packID string) objectstore.Key {
+	validateDomainKeyPart(domainID)
+	validateDomainKeyPart(packID)
+	return fixedKey("domains/" + domainKeyKind(kind) + "/" + digestPart(domainID) + "/packs/" + digestPart(packID) + ".bin")
+}
+
+func DomainSnapshotKey(kind ConsistencyDomainKind, domainID, digest string) objectstore.Key {
+	validateDomainKeyPart(domainID)
+	validateDomainKeyPart(digest)
+	return fixedKey("domains/" + domainKeyKind(kind) + "/" + digestPart(domainID) + "/snapshots/" + digestPart(digest) + ".json")
+}
+
+func StateQuerySnapshotKey(digest string) objectstore.Key {
+	validateDomainKeyPart(digest)
+	return fixedKey("domains/state-query-snapshots/" + digestPart(digest) + ".json")
+}
+
+func StateQuerySnapshotPrefix() string { return root + "domains/state-query-snapshots/" }
+
+func TransitionPlanKey(transitionID string) objectstore.Key {
+	validateDomainKeyPart(transitionID)
+	return fixedKey("transitions/plans/" + digestPart(transitionID) + ".json")
+}
+
+func TransitionDecisionKey(transitionID string) objectstore.Key {
+	validateDomainKeyPart(transitionID)
+	return fixedKey("transitions/decisions/" + digestPart(transitionID) + ".json")
+}
+
+func TransitionPrefix() string { return root + "transitions/" }
+
+func DomainPrefix() string { return root + "domains/" }
+
+func Schema008MigrationStageKey(domainIdentity, sourceIdentity string) objectstore.Key {
+	validateDomainKeyPart(domainIdentity)
+	validateDomainKeyPart(sourceIdentity)
+	return fixedKey("migrations/schema-007-to-008/staged/" + digestPart(domainIdentity) + "/" + digestPart(sourceIdentity) + ".json")
+}
+
+func Schema008MigrationStagePrefix() string {
+	return root + "migrations/schema-007-to-008/staged/"
+}
+
+func Schema008MigrationStageDomainPrefix(domainIdentity string) string {
+	validateDomainKeyPart(domainIdentity)
+	return Schema008MigrationStagePrefix() + digestPart(domainIdentity) + "/"
+}
+
+func Schema008MigrationSourceMarkerKey(sourceIdentity string) objectstore.Key {
+	validateDomainKeyPart(sourceIdentity)
+	return fixedKey("migrations/schema-007-to-008/sources/" + digestPart(sourceIdentity) + ".json")
+}
+
+func Schema008MigrationSourceMarkerPrefix() string {
+	return root + "migrations/schema-007-to-008/sources/"
+}
+
+func Schema008MigrationSubtreeKey(sourceIdentity string) objectstore.Key {
+	validateDomainKeyPart(sourceIdentity)
+	return fixedKey("migrations/schema-007-to-008/subtrees/" + digestPart(sourceIdentity) + ".json")
+}
+
+func Schema008MigrationSubtreePrefix() string {
+	return root + "migrations/schema-007-to-008/subtrees/"
+}
+
+func Schema009MigrationStageKey(domainIdentity, sourceIdentity string) objectstore.Key {
+	validateDomainKeyPart(domainIdentity)
+	validateDomainKeyPart(sourceIdentity)
+	return fixedKey("migrations/schema-008-to-009/staged/" + digestPart(domainIdentity) + "/" + digestPart(sourceIdentity) + ".json")
+}
+
+func Schema009MigrationStagePrefix() string {
+	return root + "migrations/schema-008-to-009/staged/"
+}
+
+func Schema009MigrationStageCompleteKey() objectstore.Key {
+	return fixedKey("migrations/schema-008-to-009/staging-complete.json")
+}
+
+func Schema010MigrationReceiptKey(domainIdentity, targetKey string) objectstore.Key {
+	validateDomainKeyPart(domainIdentity)
+	if targetKey == "" {
+		panic("empty schema-010 migration target key")
+	}
+	return fixedKey("migrations/schema-009-to-010/receipts/" + digestPart(domainIdentity) + "/" + digestPart(targetKey) + ".json")
+}
+
+func Schema010MigrationReceiptPrefix() string {
+	return root + "migrations/schema-009-to-010/receipts/"
+}
+
+func Schema010MigrationConservationKey() objectstore.Key {
+	return fixedKey("migrations/schema-009-to-010/conservation.json")
+}
+
+func ProjectionHeadKey(ownerID string, kind ProjectionKind) objectstore.Key {
+	validateDomainKeyPart(ownerID)
+	return fixedKey("projections/" + digestPart(ownerID) + "/" + projectionKeyKind(kind) + "/head.json")
+}
+
+func ScopedProjectionHeadKey(ownerID string, kind ProjectionKind, projectionID string) objectstore.Key {
+	validateDomainKeyPart(ownerID)
+	validateDomainKeyPart(projectionID)
+	return fixedKey("projections/" + digestPart(ownerID) + "/" + projectionKeyKind(kind) + "/heads/" + digestPart(projectionID) + ".json")
+}
+
+func ProjectionPageKey(ownerID string, kind ProjectionKind, pageID string) objectstore.Key {
+	validateDomainKeyPart(ownerID)
+	validateDomainKeyPart(pageID)
+	return fixedKey("projections/" + digestPart(ownerID) + "/" + projectionKeyKind(kind) + "/pages/" + digestPart(pageID) + ".json")
+}
+
+func ProjectionPagePackKey(ownerID string, kind ProjectionKind, packID string) objectstore.Key {
+	validateDomainKeyPart(ownerID)
+	validateDomainKeyPart(packID)
+	return fixedKey("projections/" + digestPart(ownerID) + "/" + projectionKeyKind(kind) + "/packs/" + digestPart(packID) + ".bin")
+}
+
+func ProjectionPrefix() string { return root + "projections/" }
+
 func StateKey(namespace, logicalKey string) objectstore.Key {
 	if err := ValidateNamespace(namespace); err != nil {
 		panic(err)
@@ -243,6 +382,18 @@ func IdempotencyKey(userID, key string) objectstore.Key {
 	return fixedKey("idempotency/" + encodedPart(userID) + "/" + digestPart(key) + ".json")
 }
 
+// Schema007IdempotencyKeyFromDigest reconstructs the schema-007 object key
+// from the canonical digest stored in its record. It exists only so the
+// forward migration can authenticate the legacy key/body binding without
+// knowing the original client idempotency string.
+func Schema007IdempotencyKeyFromDigest(userID, digest string) (objectstore.Key, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(digest)
+	if err != nil || len(decoded) != sha256.Size || base64.RawURLEncoding.EncodeToString(decoded) != digest {
+		return objectstore.Key{}, domain.NewError(domain.ErrorInvalid, "invalid schema-007 idempotency digest")
+	}
+	return fixedKey("idempotency/" + encodedPart(userID) + "/" + base32Lower.EncodeToString(decoded) + ".json"), nil
+}
+
 func IdempotencyPrefix() string { return root + "idempotency/" }
 
 func CheckpointKey(checkpointID string) objectstore.Key {
@@ -271,6 +422,18 @@ func GarbageCollectionSessionKey(checkpointID string) objectstore.Key {
 	return fixedKey("maintenance/gc/" + encodedPart(checkpointID) + "/session.json")
 }
 
+func GarbageCollectionPlanKey(checkpointID string) objectstore.Key {
+	return fixedKey("maintenance/gc/" + encodedPart(checkpointID) + "/plan.json")
+}
+
+func GarbageCollectionPlanPageKey(checkpointID string, index uint64) objectstore.Key {
+	return fixedKey("maintenance/gc/" + encodedPart(checkpointID) + "/plan/" + fmt.Sprintf("%016x.json", index))
+}
+
+func GarbageCollectionPlanPagePrefix(checkpointID string) string {
+	return root + "maintenance/gc/" + encodedPart(checkpointID) + "/plan/"
+}
+
 func GarbageCollectionMarkKey(checkpointID, role, targetKey string) objectstore.Key {
 	return fixedKey("maintenance/gc/" + encodedPart(checkpointID) + "/marks/" + role + "/" + digestPart(targetKey) + ".json")
 }
@@ -296,6 +459,30 @@ func LeaseKey(backendKind, leaseID string) objectstore.Key {
 		panic(err)
 	}
 	return fixedKey(fmt.Sprintf("leases/%s/%s.json", backendKind, encodedPart(leaseID)))
+}
+
+func UploadLeaseSegmentKey(backendKind, batchID string, segment uint64) objectstore.Key {
+	if err := ValidateNamespace(backendKind); err != nil {
+		panic(err)
+	}
+	validateDomainKeyPart(batchID)
+	return fixedKey(fmt.Sprintf("leases/%s/batches/%s/%016x.bin", backendKind, digestPart(batchID), segment))
+}
+
+func UploadTransactionSegmentKey(backendKind, transactionID string, segment uint64) objectstore.Key {
+	if err := ValidateNamespace(backendKind); err != nil {
+		panic(err)
+	}
+	validateDomainKeyPart(transactionID)
+	return fixedKey(fmt.Sprintf("leases/%s/upload-transactions/%s/%016x.bin", backendKind, digestPart(transactionID), segment))
+}
+
+func UploadTransactionProgressKey(backendKind, transactionID string) objectstore.Key {
+	if err := ValidateNamespace(backendKind); err != nil {
+		panic(err)
+	}
+	validateDomainKeyPart(transactionID)
+	return fixedKey(fmt.Sprintf("leases/%s/upload-transactions/%s/progress.bin", backendKind, digestPart(transactionID)))
 }
 
 func LeasePrefix() string { return root + "leases/" }

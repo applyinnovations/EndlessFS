@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"time"
@@ -208,6 +209,25 @@ func (e *Engine) runStorageMigration003To004(ctx context.Context, transition sto
 // creates its own checkpoint; it deliberately avoids a redundant directory
 // graph walk and reachability collection.
 func (e *Engine) runStorageMigration004To005(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
+	return e.runFeatureOnlyStorageMigration(ctx, transition, superblockObject, superblock)
+}
+
+// Schema 006 freezes existing schema-005 directory roots as immutable snapshot
+// sources. New writes publish persistent manifest pins and lazy content deltas,
+// so no predecessor application object needs rewriting at this boundary.
+func (e *Engine) runStorageMigration005To006(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
+	return e.runFeatureOnlyStorageMigration(ctx, transition, superblockObject, superblock)
+}
+
+// Schema 007 narrows duplicate-directory candidates to user-addressable
+// directories. Historical area-root similarity records remain immutable
+// compatibility residue and are ignored by schema-007 readers; new writes no
+// longer mutate them. No schema-006 authoritative object body is rewritten.
+func (e *Engine) runStorageMigration006To007(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
+	return e.runFeatureOnlyStorageMigration(ctx, transition, superblockObject, superblock)
+}
+
+func (e *Engine) runFeatureOnlyStorageMigration(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock) error {
 	e.observeMigration(MigrationProgress{MigrationID: transition.id.String(), Stage: MigrationStageStarted})
 	if err := e.step(ctx, MigrationStepName(string(transition.id), StepMigrationAfterDetection)); err != nil {
 		return err
@@ -279,7 +299,10 @@ func (e *Engine) runStorageMigration004To005(ctx context.Context, transition sto
 }
 
 func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition storageMigration) (bool, error) {
-	for range 16 {
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, domain.WrapError(domain.ErrorUnavailable, fmt.Sprintf("feature-only storage migration gate contention cancelled for %s", transition.id), err)
+		}
 		object, envelope, gate, err := e.readGate(ctx)
 		if err != nil {
 			return false, err
@@ -328,7 +351,20 @@ func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition s
 			if _, err = e.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil && !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
 				return false, err
 			}
+			if err != nil {
+				runtime.Gosched()
+			}
 		case storageformat.GateClosing:
+			// Once consistency domains exist, migration closure must use the
+			// same catalog-first freeze protocol as every other checkpoint.
+			// Merely draining legacy admission records and flipping the global
+			// gate would leave mutable domain heads outside the snapshot.
+			if writeGateSchemaAtLeast(gate.WriterFeatures, storageSchema008, e.writer.RequiredFeatures) {
+				if err := e.finishClosingWrites(ctx, transition.checkpointID); err != nil {
+					return false, err
+				}
+				return true, nil
+			}
 			if err := e.drainAdmissions(ctx, gate.Epoch); err != nil {
 				return false, err
 			}
@@ -349,6 +385,7 @@ func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition s
 			}
 			if _, err = e.backend.Put(ctx, currentObject.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: currentObject.Version}); err != nil {
 				if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+					runtime.Gosched()
 					continue
 				}
 				return false, err
@@ -356,7 +393,6 @@ func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition s
 			return true, nil
 		}
 	}
-	return false, domain.NewError(domain.ErrorUnavailable, "feature-only storage migration gate remained contended")
 }
 
 func (e *Engine) runAggregateSchemaMigration(ctx context.Context, transition storageMigration, superblockObject objectstore.Object, superblock storageformat.Superblock, plan aggregateMigrationPlan) error {
@@ -591,7 +627,10 @@ func (e *Engine) readStoredWriterSet(ctx context.Context) (objectstore.Object, s
 }
 
 func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition storageMigration, plan aggregateMigrationPlan) (bool, error) {
-	for range 16 {
+	for {
+		if err := ctx.Err(); err != nil {
+			return false, domain.WrapError(domain.ErrorUnavailable, fmt.Sprintf("storage-schema migration gate contention cancelled for %s", transition.id), err)
+		}
 		object, envelope, gate, err := e.readGate(ctx)
 		if err != nil {
 			return false, err
@@ -631,7 +670,11 @@ func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition stora
 				return false, encodeErr
 			}
 			_, err = e.backend.Put(ctx, object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version})
-			if err == nil || errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+				runtime.Gosched()
 				continue
 			}
 			return false, err
@@ -646,6 +689,7 @@ func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition stora
 				return true, nil
 			}
 			if errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrConflict) {
+				runtime.Gosched()
 				continue
 			}
 			return false, err
@@ -653,11 +697,29 @@ func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition stora
 			return true, nil
 		}
 	}
-	return false, domain.NewError(domain.ErrorUnavailable, "storage-schema migration gate remained contended")
 }
 
-func (e *Engine) migrateAllDirectoryAggregates(ctx context.Context, transition storageMigration, plan aggregateMigrationPlan) error {
-	return e.migrateAllDirectoryAggregatesPhase(ctx, transition, plan, "")
+// readClosedStorageMigrationGate binds migration work to the exact closed gate
+// epoch that authorized it. A lagging replica must not read an already-reopened
+// gate and use its incremented epoch to freeze or transform state. If another
+// replica completed the edge in between closure and this read, the lagging
+// runner has no suffix left to perform.
+func (e *Engine) readClosedStorageMigrationGate(ctx context.Context, transition storageMigration) (storageformat.WriteGate, bool, error) {
+	_, _, gate, err := e.readGate(ctx)
+	if err != nil {
+		return storageformat.WriteGate{}, false, err
+	}
+	if gate.Mode == storageformat.GateClosed && gate.CheckpointID == transition.checkpointID {
+		return gate, true, nil
+	}
+	complete, completeErr := e.storageMigrationComplete(ctx, transition)
+	if completeErr != nil {
+		return storageformat.WriteGate{}, false, completeErr
+	}
+	if complete {
+		return storageformat.WriteGate{}, false, nil
+	}
+	return storageformat.WriteGate{}, false, domain.NewError(domain.ErrorPreconditionFailed, "storage migration gate changed after closure")
 }
 
 func (e *Engine) migrateAllDirectoryAggregatesPhase(ctx context.Context, transition storageMigration, plan aggregateMigrationPlan, phase string) error {
@@ -1130,7 +1192,7 @@ func (e *Engine) readMigrationDirectoryRoot(ctx context.Context, scope domain.Sc
 	var schema001Envelope storageformat.Envelope
 	var schema001 schema001DirectoryRoot
 	if err := storageformat.DecodeEnvelope(object.Body, key, directoryRootSchema, &schema001Envelope, &schema001); err != nil {
-		return migrationDirectoryRoot{}, err
+		return migrationDirectoryRoot{}, domain.WrapError(domain.ErrorInvalid, "cannot decode predecessor directory root "+key.String(), err)
 	}
 	if schema001.SchemaVersion != 1 || schema001.DirectoryID != directoryID || schema001.ManifestID == "" || schema001.Pending != nil {
 		return migrationDirectoryRoot{}, domain.NewError(domain.ErrorInvalid, "invalid schema-001 directory root")
@@ -1168,7 +1230,7 @@ func (e *Engine) readMigrationDirectoryManifest(ctx context.Context, scope domai
 	var schema001Envelope storageformat.Envelope
 	var schema001 schema001DirectoryManifest
 	if err := storageformat.DecodeEnvelope(object.Body, key, directoryManifestSchema, &schema001Envelope, &schema001); err != nil {
-		return migrationDirectoryManifest{}, err
+		return migrationDirectoryManifest{}, domain.WrapError(domain.ErrorInvalid, "cannot decode predecessor directory manifest "+key.String(), err)
 	}
 	current = storageformat.DirectoryManifest{
 		SchemaVersion: schema001.SchemaVersion, DirectoryID: schema001.DirectoryID, ManifestID: schema001.ManifestID,
@@ -1188,8 +1250,13 @@ func validateMigrationManifest(manifest storageformat.DirectoryManifest, directo
 		_, contentIndexErr := directoryContentIndexManifestRoot(manifest)
 		validShape = accumulatorErr == nil && digestErr == nil && contentIndexErr == nil && digest == manifest.ContentDigest && len(manifest.PageIDs) == 0 && validateDirectorySortIndexRoots(manifest.SortIndexes, manifest.EntryCount) == nil && (manifest.EntryCount == 0 && manifest.IndexRootID == "" && manifest.IndexRootDigest == "" || manifest.EntryCount > 0 && manifest.IndexRootID != "" && manifest.IndexRootDigest != "")
 	}
+	if manifest.SchemaVersion == 3 {
+		accumulator, accumulatorErr := decodeDirectoryContentAccumulator(manifest.ContentAccumulator)
+		digest, digestErr := directoryContentAccumulatorDigest(accumulator, manifest.EntryCount)
+		validShape = accumulatorErr == nil && digestErr == nil && validateDirectoryManifestContent(manifest) == nil && digest == manifest.ContentDigest && len(manifest.PageIDs) == 0 && validateDirectorySortIndexRoots(manifest.SortIndexes, manifest.EntryCount) == nil && (manifest.EntryCount == 0 && manifest.IndexRootID == "" && manifest.IndexRootDigest == "" || manifest.EntryCount > 0 && manifest.IndexRootID != "" && manifest.IndexRootDigest != "")
+	}
 	if !validShape || manifest.DirectoryID != directoryID || manifest.ManifestID != manifestID || manifest.EntryCount < 0 || manifest.RecursiveBytes < 0 || manifest.RecursiveFileCount < 0 || manifest.CreatedAt.IsZero() {
-		return domain.NewError(domain.ErrorInvalid, fmt.Sprintf("invalid directory manifest during migration (schema=%d entries=%d pages=%d index=%t)", manifest.SchemaVersion, manifest.EntryCount, len(manifest.PageIDs), manifest.IndexRootID != ""))
+		return domain.NewError(domain.ErrorInvalid, fmt.Sprintf("invalid directory manifest during migration (directory=%s manifest=%s schema=%d entries=%d pages=%d index=%t)", directoryID, manifestID, manifest.SchemaVersion, manifest.EntryCount, len(manifest.PageIDs), manifest.IndexRootID != ""))
 	}
 	return nil
 }
@@ -1318,6 +1385,15 @@ func deterministicMigrationID(schema storageSchemaID, value string) string {
 }
 
 func (e *Engine) activateMigrationWriterSet(ctx context.Context, transition storageMigration) error {
+	conservationIndex, _ := schemaIndex(storageSchema010)
+	if targetIndex, found := schemaIndex(transition.to); found && targetIndex >= conservationIndex {
+		if transition.verifyAuthority == nil {
+			return domain.NewError(domain.ErrorPreconditionFailed, "storage migration has no pre-activation authority verifier")
+		}
+		if err := transition.verifyAuthority(e, ctx, transition); err != nil {
+			return domain.WrapError(domain.KindOf(err), "verify authoritative state before migration activation", err)
+		}
+	}
 	targetFeatures, _ := schemaFeatures(transition.to, e.writer.RequiredFeatures)
 	for range 8 {
 		object, envelope, writer, err := e.readStoredWriterSet(ctx)
@@ -1350,6 +1426,13 @@ func (e *Engine) activateMigrationWriterSet(ctx context.Context, transition stor
 
 func (e *Engine) activateMigrationSuperblock(ctx context.Context, transition storageMigration, initial objectstore.Object, decoded storageformat.Superblock) error {
 	targetFeatures, _ := schemaFeatures(transition.to, e.writer.RequiredFeatures)
+	boundBody, err := storageformat.EncodeCanonical(decoded)
+	if err != nil {
+		return err
+	}
+	if initial.Key != storageformat.SuperblockKey() || !bytes.Equal(initial.Body, boundBody) {
+		return domain.NewError(domain.ErrorPreconditionFailed, "migration superblock snapshot is not bound to its object")
+	}
 	object, superblock := initial, decoded
 	for range 8 {
 		if err := validateCompatibleSuperblock(superblock); err != nil {
@@ -1359,7 +1442,24 @@ func (e *Engine) activateMigrationSuperblock(ctx context.Context, transition sto
 			return nil
 		}
 		detected, found := detectStorageSchema(superblock.RequiredFeatures, e.writer.RequiredFeatures)
-		if !found || detected.id != transition.from {
+		if !found {
+			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable superblock during migration")
+		}
+		if detected.id != transition.from {
+			detectedIndex, _ := schemaIndex(detected.id)
+			fromIndex, _ := schemaIndex(transition.from)
+			if detectedIndex < fromIndex {
+				var rereadErr error
+				object, rereadErr = e.backend.Get(ctx, storageformat.SuperblockKey())
+				if rereadErr != nil {
+					return rereadErr
+				}
+				if rereadErr = decodeCanonicalSuperblock(object.Body, &superblock); rereadErr != nil {
+					return rereadErr
+				}
+				runtime.Gosched()
+				continue
+			}
 			return domain.NewError(domain.ErrorPreconditionFailed, "incompatible portable superblock during migration")
 		}
 		superblock.RequiredFeatures = append([]string(nil), targetFeatures...)
@@ -1372,6 +1472,7 @@ func (e *Engine) activateMigrationSuperblock(ctx context.Context, transition sto
 		} else if !errors.Is(err, domain.ErrPreconditionFailed) && !errors.Is(err, domain.ErrConflict) {
 			return err
 		}
+		runtime.Gosched()
 		object, err = e.backend.Get(ctx, storageformat.SuperblockKey())
 		if err != nil {
 			return err

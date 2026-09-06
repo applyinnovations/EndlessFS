@@ -21,11 +21,17 @@ type listSnapshot struct {
 	index  int
 }
 
+type memoryMutationOutcome struct {
+	fingerprint string
+	outcome     MutationOutcome
+}
+
 // MemoryStore is a deterministic, concurrency-safe Store implementation.
 type MemoryStore struct {
 	mu        sync.RWMutex
 	records   map[string]memoryRecord
 	snapshots map[string]*listSnapshot
+	outcomes  map[string]memoryMutationOutcome
 	versions  uint64
 	cursors   uint64
 }
@@ -34,7 +40,70 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		records:   make(map[string]memoryRecord),
 		snapshots: make(map[string]*listSnapshot),
+		outcomes:  make(map[string]memoryMutationOutcome),
 	}
+}
+
+// Mutate applies all changes while holding the store's single deterministic
+// commit lock. Preconditions are checked in full before any record is changed.
+func (s *MemoryStore) Mutate(ctx context.Context, mutation Mutation) (MutationOutcome, error) {
+	return s.applyMutation(ctx, mutation)
+}
+
+// Transact has the same single-lock implementation in memory because the
+// deterministic backend has one in-process consistency domain. Object-store
+// implementations provide the durable multi-domain decision protocol.
+func (s *MemoryStore) Transact(ctx context.Context, mutation Mutation) (MutationOutcome, error) {
+	return s.applyMutation(ctx, mutation)
+}
+
+func (s *MemoryStore) applyMutation(ctx context.Context, mutation Mutation) (MutationOutcome, error) {
+	if err := contextError(ctx); err != nil {
+		return MutationOutcome{}, err
+	}
+	normalized, fingerprint, err := NormalizeMutation(mutation)
+	if err != nil {
+		return MutationOutcome{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if recorded, found := s.outcomes[normalized.ID]; found {
+		if recorded.fingerprint != fingerprint {
+			return MutationOutcome{}, domain.NewError(domain.ErrorConflict, "atomic state idempotency key was reused")
+		}
+		outcome := cloneMutationOutcome(recorded.outcome)
+		outcome.Replayed = true
+		return outcome, nil
+	}
+	for _, change := range normalized.Changes {
+		record, found := s.records[change.Key.value]
+		switch change.Requirement {
+		case RequirementAbsent:
+			if found {
+				return MutationOutcome{}, domain.NewError(domain.ErrorConflict, "state record already exists")
+			}
+		case RequirementPresent:
+			if !found {
+				return MutationOutcome{}, domain.NewError(domain.ErrorNotFound, "state record not found")
+			}
+			if change.ExpectedVersion != "" && record.version != change.ExpectedVersion {
+				return MutationOutcome{}, domain.NewError(domain.ErrorPreconditionFailed, "stale state version")
+			}
+		}
+	}
+	outcome := MutationOutcome{ID: normalized.ID, Result: append([]byte(nil), normalized.Result...), Changes: make([]ChangeResult, 0, len(normalized.Changes))}
+	for _, change := range normalized.Changes {
+		if change.Delete {
+			delete(s.records, change.Key.value)
+			outcome.Changes = append(outcome.Changes, ChangeResult{Key: change.Key})
+			continue
+		}
+		version := s.nextVersion()
+		s.records[change.Key.value] = memoryRecord{data: append([]byte(nil), change.Data...), version: version}
+		outcome.Changes = append(outcome.Changes, ChangeResult{Key: change.Key, Version: version})
+	}
+	s.outcomes[normalized.ID] = memoryMutationOutcome{fingerprint: fingerprint, outcome: cloneMutationOutcome(outcome)}
+	return outcome, nil
 }
 
 func (s *MemoryStore) Get(ctx context.Context, key Key) (Value, error) {

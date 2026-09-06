@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -48,6 +49,11 @@ func TestContentBindingAndArtifactValidationFailures(t *testing.T) {
 	if invalidDigest.ValidFor(binding) {
 		t.Fatal("invalid artifact digest was accepted")
 	}
+	shortDigest := artifact
+	shortDigest.SHA256 = base64.RawURLEncoding.EncodeToString(make([]byte, sha256.Size-1))
+	if shortDigest.ValidFor(binding) {
+		t.Fatal("short artifact digest was accepted")
+	}
 	mismatchedDigest := artifact
 	mismatchedDigest.SHA256 = base64.RawURLEncoding.EncodeToString(make([]byte, sha256.Size))
 	if mismatchedDigest.ValidFor(binding) {
@@ -83,16 +89,21 @@ func TestReadyResultAndConcurrencyFailureMapping(t *testing.T) {
 		wantState State
 		wantError bool
 	}{
+		{name: "not found", store: &scriptedStore{latestErr: domain.ErrNotFound}, wantState: ""},
 		{name: "latest error", store: &scriptedStore{latestErr: domain.NewError(domain.ErrorInvalid, "bad manifest")}, wantState: StateFailed},
 		{name: "latest unavailable", store: &scriptedStore{latestErr: domain.ErrUnavailable}, wantState: StateUnavailable},
+		{name: "record unavailable", store: &scriptedStore{latest: internalArtifact("record-offline", binding.Variant), recordReadyErr: domain.ErrUnavailable}, wantState: StateUnavailable},
+		{name: "record invalid", store: &scriptedStore{latest: internalArtifact("record-invalid", binding.Variant), recordReadyErr: domain.ErrInvalid}, wantError: true},
 		{name: "capability unavailable", store: &scriptedStore{latest: internalArtifact("one", binding.Variant), capabilityErr: domain.NewError(domain.ErrorUnavailable, "offline")}, wantState: StateUnavailable},
 		{name: "capability invalid", store: &scriptedStore{latest: internalArtifact("two", binding.Variant), capabilityErr: domain.NewError(domain.ErrorInvalid, "bad capability")}, wantError: true},
+		{name: "ready", store: &scriptedStore{latest: internalArtifact("ready", binding.Variant)}, wantState: StateReady},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			service := &Service{store: test.store}
-			got, _, err := service.readyResult(context.Background(), binding, result)
-			if (err != nil) != test.wantError || !test.wantError && got.State != test.wantState {
+			selection := readySelection(binding.Owner, domain.MustParseUserPath("/ready.webp"), binding)
+			got, found, err := service.readyResult(context.Background(), selection, result)
+			if (err != nil) != test.wantError || !test.wantError && got.State != test.wantState || test.name == "not found" && found {
 				t.Fatalf("readyResult = %+v, %v", got, err)
 			}
 		})
@@ -110,7 +121,21 @@ func TestReadyResultAndConcurrencyFailureMapping(t *testing.T) {
 	}
 	userBlocked := &Service{global: make(chan struct{}, 1), perUser: map[string]*userLimit{owner.String(): {semaphore: make(chan struct{}, 1)}}}
 	userBlocked.perUser[owner.String()].semaphore <- struct{}{}
-	if _, err := userBlocked.acquire(canceled, owner); !errors.Is(err, domain.ErrUnavailable) {
+	userContext, cancelUser := context.WithCancel(context.Background())
+	userResult := make(chan error, 1)
+	go func() {
+		_, err := userBlocked.acquire(userContext, owner)
+		userResult <- err
+	}()
+	for attempts := 0; attempts < 10000 && len(userBlocked.global) == 0; attempts++ {
+		runtime.Gosched()
+	}
+	if len(userBlocked.global) == 0 {
+		cancelUser()
+		t.Fatal("per-user acquire did not reach the blocked semaphore")
+	}
+	cancelUser()
+	if err := <-userResult; !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("per-user canceled acquire error = %v", err)
 	}
 }
@@ -377,12 +402,22 @@ func TestDurableOperationIndexCleansExpiredRecordsAndBoundsContention(t *testing
 	store := state.NewMemoryStore()
 	service := &Service{state: store, clock: clock}
 	firstID, secondID := operationIDsInSameShard()
-	first := operationIndexEntry{OperationID: firstID, IdempotencyDigest: "expired-digest", ExpiresAt: clock.Now().Add(time.Minute)}
+	firstDigestBytes := sha256.Sum256([]byte("expired-digest"))
+	firstDigest := base64.RawURLEncoding.EncodeToString(firstDigestBytes[:])
+	first := operationIndexEntry{OperationID: firstID, IdempotencyDigest: firstDigest, ExpiresAt: clock.Now().Add(time.Minute)}
 	if err := service.registerOperation(context.Background(), owner, first); err != nil {
 		t.Fatal(err)
 	}
 	operationKey := previewOperationKey(owner, firstID)
-	if _, err := store.Create(context.Background(), operationKey, []byte(`{}`)); err != nil {
+	operationBody, err := state.EncodeJSON(operationRecord{
+		SchemaVersion: 1, OwnerID: owner.String(), Fingerprint: "fingerprint", IdempotencyDigest: firstDigest,
+		LeaseEpoch: 1, LeaseExpiresAt: clock.Now().Add(30 * time.Second), ExpiresAt: first.ExpiresAt,
+		Operation: Operation{ID: firstID, State: domain.OperationRunning, StartedAt: clock.Now(), UpdatedAt: clock.Now()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(context.Background(), operationKey, operationBody); err != nil {
 		t.Fatal(err)
 	}
 	idempotencyKey := state.MustKey(state.NamespaceIdempotency, "preview", owner.String(), first.IdempotencyDigest)
@@ -401,11 +436,11 @@ func TestDurableOperationIndexCleansExpiredRecordsAndBoundsContention(t *testing
 	if err := service.registerOperation(context.Background(), owner, second); !errors.Is(err, domain.ErrInternal) {
 		t.Fatalf("operation identity collision error = %v", err)
 	}
-	if err := (&Service{state: &getFailureStore{Store: store, err: domain.ErrUnavailable}, clock: clock}).registerOperation(context.Background(), owner, second); !errors.Is(err, domain.ErrUnavailable) {
+	if err := (&Service{state: &getFailureStore{AtomicStore: store, err: domain.ErrUnavailable}, clock: clock}).registerOperation(context.Background(), owner, second); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("operation index read error = %v", err)
 	}
 	third := operationIndexEntry{OperationID: operationIDForShard(operationShard(second.OperationID), "store-error"), IdempotencyDigest: "store-error", ExpiresAt: clock.Now().Add(time.Hour)}
-	if err := (&Service{state: &compareAndSwapErrorStore{Store: store, err: domain.ErrUnavailable}, clock: clock}).registerOperation(context.Background(), owner, third); !errors.Is(err, domain.ErrUnavailable) {
+	if err := (&Service{state: &compareAndSwapErrorStore{AtomicStore: store, err: domain.ErrUnavailable}, clock: clock}).registerOperation(context.Background(), owner, third); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("operation index write error = %v", err)
 	}
 	if _, err := store.Get(context.Background(), operationKey); !errors.Is(err, domain.ErrNotFound) {
@@ -443,11 +478,114 @@ func TestDurableOperationIndexCleansExpiredRecordsAndBoundsContention(t *testing
 		t.Fatalf("operation index capacity error = %v", err)
 	}
 
-	contentionStore := &compareAndSwapFailureStore{Store: store}
+	contentionStore := &compareAndSwapFailureStore{AtomicStore: store}
 	contentionService := &Service{state: contentionStore, clock: clock}
 	thirdID := operationIDForShard(shard, "contention")
 	if err := contentionService.registerOperation(context.Background(), owner, operationIndexEntry{OperationID: thirdID, IdempotencyDigest: "contention", ExpiresAt: clock.Now().Add(time.Hour)}); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("operation index contention error = %v", err)
+	}
+}
+
+func TestExpiredPreviewBindingCleanupRejectsEveryPartialRelationship(t *testing.T) {
+	ctx := context.Background()
+	owner := internalBinding(t).Owner
+	now := time.Date(2048, 5, 6, 7, 8, 9, 0, time.UTC)
+	operationID := domain.OperationID("expired-cleanup-operation")
+	digest := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x51}, sha256.Size))
+	expiresAt := now.Add(-time.Second)
+	idempotency := idempotencyRecord{SchemaVersion: 1, Fingerprint: "fingerprint", OperationID: operationID, ExpiresAt: expiresAt}
+	idempotencyKey := state.MustKey(state.NamespaceIdempotency, "preview", owner.String(), digest)
+	operation := operationRecord{
+		SchemaVersion: 1, OwnerID: owner.String(), Fingerprint: idempotency.Fingerprint, IdempotencyDigest: digest,
+		LeaseEpoch: 1, LeaseExpiresAt: now.Add(-time.Minute), ExpiresAt: expiresAt,
+		Operation: Operation{ID: operationID, State: domain.OperationRunning, StartedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-2 * time.Minute)},
+	}
+	indexEntry := operationIndexEntry{OperationID: operationID, IdempotencyDigest: digest, ExpiresAt: expiresAt}
+	indexSnapshot := operationIndexSnapshot{record: operationIndexRecord{SchemaVersion: 1, Entries: []operationIndexEntry{indexEntry}}}
+
+	if err := (&Service{state: state.NewMemoryStore()}).cleanupExpiredOperationIndex(ctx, owner, operationIndexSnapshot{record: operationIndexRecord{SchemaVersion: 1, Entries: []operationIndexEntry{{OperationID: "future", IdempotencyDigest: "future", ExpiresAt: now.Add(time.Hour)}}}}, now); err != nil {
+		t.Fatalf("future-only cleanup error = %v", err)
+	}
+	if err := (&Service{state: state.NewMemoryStore()}).cleanupExpiredOperationIndex(ctx, owner, indexSnapshot, now); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("missing idempotency cleanup error = %v", err)
+	}
+	if err := (&Service{state: &getFailureStore{AtomicStore: state.NewMemoryStore(), err: domain.ErrUnavailable}}).cleanupExpiredOperationIndex(ctx, owner, indexSnapshot, now); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("idempotency read cleanup error = %v", err)
+	}
+	corruptIdempotencyStore := state.NewMemoryStore()
+	if _, err := corruptIdempotencyStore.Create(ctx, idempotencyKey, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Service{state: corruptIdempotencyStore}).cleanupExpiredOperationIndex(ctx, owner, indexSnapshot, now); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("corrupt idempotency cleanup error = %v", err)
+	}
+
+	if err := (&Service{state: state.NewMemoryStore()}).cleanupExpiredPreviewBinding(ctx, owner, idempotencyKey, "v1", idempotency); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("missing operation cleanup error = %v", err)
+	}
+	if err := (&Service{state: &getFailureStore{AtomicStore: state.NewMemoryStore(), err: domain.ErrUnavailable}}).cleanupExpiredPreviewBinding(ctx, owner, idempotencyKey, "v1", idempotency); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("operation read cleanup error = %v", err)
+	}
+	corruptOperationStore := state.NewMemoryStore()
+	if _, err := corruptOperationStore.Create(ctx, previewOperationKey(owner, operationID), []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Service{state: corruptOperationStore}).cleanupExpiredPreviewBinding(ctx, owner, idempotencyKey, "v1", idempotency); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("corrupt operation cleanup error = %v", err)
+	}
+
+	newOperationStore := func(t *testing.T) *state.MemoryStore {
+		t.Helper()
+		store := state.NewMemoryStore()
+		seedOperationRecord(t, store, owner, operation)
+		return store
+	}
+	wrongKey := state.MustKey(state.NamespaceIdempotency, "preview", owner.String(), base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x52}, sha256.Size)))
+	if err := (&Service{state: newOperationStore(t)}).cleanupExpiredPreviewBinding(ctx, owner, wrongKey, "v1", idempotency); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("wrong idempotency key cleanup error = %v", err)
+	}
+	if err := (&Service{state: newOperationStore(t)}).cleanupExpiredPreviewBinding(ctx, owner, idempotencyKey, "v1", idempotency); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("missing operation index cleanup error = %v", err)
+	}
+
+	seedIndex := func(t *testing.T, store *state.MemoryStore, entries []operationIndexEntry) {
+		t.Helper()
+		body, err := state.EncodeJSON(operationIndexRecord{SchemaVersion: 1, Entries: entries})
+		if err != nil {
+			t.Fatal(err)
+		}
+		indexKey := state.MustKey(state.NamespaceOperations, "preview-index", owner.String(), operationShard(operationID))
+		if _, err := store.Create(ctx, indexKey, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mismatchedIndexStore := newOperationStore(t)
+	mismatched := indexEntry
+	mismatched.IdempotencyDigest = "different"
+	seedIndex(t, mismatchedIndexStore, []operationIndexEntry{mismatched})
+	if err := (&Service{state: mismatchedIndexStore}).cleanupExpiredPreviewBinding(ctx, owner, idempotencyKey, "v1", idempotency); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("mismatched index cleanup error = %v", err)
+	}
+
+	missingEntryStore := newOperationStore(t)
+	otherID := operationIDForShard(operationShard(operationID), "other-cleanup-operation")
+	seedIndex(t, missingEntryStore, []operationIndexEntry{{OperationID: otherID, IdempotencyDigest: "other", ExpiresAt: expiresAt}})
+	if err := (&Service{state: missingEntryStore}).cleanupExpiredPreviewBinding(ctx, owner, idempotencyKey, "v1", idempotency); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("missing index entry cleanup error = %v", err)
+	}
+
+	successStore := newOperationStore(t)
+	idempotencyBody, err := state.EncodeJSON(idempotency)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idempotencyVersion, err := successStore.Create(ctx, idempotencyKey, idempotencyBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedIndex(t, successStore, []operationIndexEntry{indexEntry, {OperationID: otherID, IdempotencyDigest: "other", ExpiresAt: now.Add(time.Hour)}})
+	if err := (&Service{state: successStore}).cleanupExpiredPreviewBinding(ctx, owner, idempotencyKey, idempotencyVersion, idempotency); err != nil {
+		t.Fatalf("valid cleanup error = %v", err)
 	}
 }
 
@@ -512,6 +650,40 @@ func TestHydrateOperationReauthorizesExactGenerationAndRejectsDrift(t *testing.T
 	unsafe.Operation.StartedAt, unsafe.Operation.UpdatedAt = time.Now(), time.Now()
 	if validOperationRecord(unsafe, binding.Owner, hydrated.ID) {
 		t.Fatal("persisted bearer capability was accepted")
+	}
+}
+
+func TestBindingForItemRejectsEverySourceRelationshipGap(t *testing.T) {
+	binding := internalBinding(t)
+	item := ItemRequest{Path: domain.MustParseUserPath("/source.png"), Version: "source-version", Variant: binding.Variant}
+	entry := domain.Entry{
+		Path: item.Path, Kind: domain.EntryFile, Version: item.Version, Size: binding.SourceSize,
+		MediaType: binding.MediaType, ContentID: binding.ContentID, ContentVersion: binding.ContentVersion,
+	}
+	newService := func(source *scriptedStorage, generators []Generator) *Service {
+		return &Service{options: Options{Resolutions: []int{binding.Variant}}, source: source, generators: generators}
+	}
+	if _, err := newService(&scriptedStorage{stat: entry}, []Generator{scriptedGenerator{}}).bindingForItem(context.Background(), domain.UserID{}, item); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid owner binding error = %v", err)
+	}
+	if _, err := newService(&scriptedStorage{statErr: domain.ErrUnavailable}, []Generator{scriptedGenerator{}}).bindingForItem(context.Background(), binding.Owner, item); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("source stat binding error = %v", err)
+	}
+	mismatched := entry
+	mismatched.Version = "changed"
+	if _, err := newService(&scriptedStorage{stat: mismatched}, []Generator{scriptedGenerator{}}).bindingForItem(context.Background(), binding.Owner, item); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("source version binding error = %v", err)
+	}
+	if _, err := newService(&scriptedStorage{stat: entry}, nil).bindingForItem(context.Background(), binding.Owner, item); !errors.Is(err, domain.ErrPreconditionFailed) {
+		t.Fatalf("unsupported source binding error = %v", err)
+	}
+	invalid := entry
+	invalid.ContentID = ""
+	if _, err := newService(&scriptedStorage{stat: invalid}, []Generator{scriptedGenerator{}}).bindingForItem(context.Background(), binding.Owner, item); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid source binding error = %v", err)
+	}
+	if version := mutationVersion(state.MutationOutcome{}, state.MustKey(state.NamespaceOperations, "preview", binding.Owner.String(), "missing")); version != "" {
+		t.Fatalf("missing mutation version = %q", version)
 	}
 }
 
@@ -589,7 +761,7 @@ func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
 	binding := internalBinding(t)
 	owner := binding.Owner
 	clock := domain.NewFixedClock(time.Date(2047, 4, 5, 6, 7, 8, 0, time.UTC))
-	newService := func(store state.Store) *Service {
+	newService := func(store state.AtomicStore) *Service {
 		return &Service{
 			state: store, clock: clock, ids: domain.NewIDGenerator(bytes.NewReader(make([]byte, 4096))),
 			options: Options{OperationTimeout: time.Minute, OperationRetention: time.Hour},
@@ -636,12 +808,12 @@ func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
 	}
 
 	clock.Advance(2 * time.Minute)
-	preconditionService := newService(&compareAndSwapFailureStore{Store: store})
+	preconditionService := newService(&compareAndSwapFailureStore{AtomicStore: store})
 	claim, err = preconditionService.claimOperation(context.Background(), owner, idempotencyKey, fingerprint)
 	if err != nil || claim.claimed {
 		t.Fatalf("lost durable takeover race = %+v, %v", claim, err)
 	}
-	unavailableService := newService(&compareAndSwapErrorStore{Store: store, err: domain.ErrUnavailable})
+	unavailableService := newService(&compareAndSwapErrorStore{AtomicStore: store, err: domain.ErrUnavailable})
 	if _, err := unavailableService.claimOperation(context.Background(), owner, idempotencyKey, fingerprint); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("durable takeover store error = %v", err)
 	}
@@ -659,6 +831,20 @@ func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
 	if _, err := expiredStore.Create(context.Background(), expiredStateKey, expiredBody); err != nil {
 		t.Fatal(err)
 	}
+	expiredBindingRecord := operationRecord{
+		SchemaVersion: 1, OwnerID: owner.String(), Fingerprint: fingerprint, IdempotencyDigest: expiredDigest, LeaseEpoch: 1,
+		LeaseExpiresAt: clock.Now().Add(-2 * time.Second), ExpiresAt: clock.Now().Add(-time.Second),
+		Operation: Operation{ID: "expired-operation", State: domain.OperationRunning, StartedAt: clock.Now().Add(-time.Hour), UpdatedAt: clock.Now().Add(-time.Minute)},
+	}
+	seedOperationRecord(t, expiredStore, owner, expiredBindingRecord)
+	indexKey := state.MustKey(state.NamespaceOperations, "preview-index", owner.String(), operationShard("expired-operation"))
+	indexBody, err := state.EncodeJSON(operationIndexRecord{SchemaVersion: 1, Entries: []operationIndexEntry{{OperationID: "expired-operation", IdempotencyDigest: expiredDigest, ExpiresAt: expiredBindingRecord.ExpiresAt}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := expiredStore.Create(context.Background(), indexKey, indexBody); err != nil {
+		t.Fatal(err)
+	}
 	claim, err = expiredService.claimOperation(context.Background(), owner, expiredKey, fingerprint)
 	if err != nil || !claim.claimed || claim.record.Operation.ID == "expired-operation" {
 		t.Fatalf("expired idempotency replacement = %+v, %v", claim, err)
@@ -672,10 +858,10 @@ func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
 	if _, _, err := newService(corruptStore).readOperation(context.Background(), owner, "corrupt-operation"); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("corrupt operation read error = %v", err)
 	}
-	if _, _, err := newService(&getFailureStore{Store: corruptStore, err: domain.ErrUnavailable}).readOperation(context.Background(), owner, "corrupt-operation"); !errors.Is(err, domain.ErrUnavailable) {
+	if _, _, err := newService(&getFailureStore{AtomicStore: corruptStore, err: domain.ErrUnavailable}).readOperation(context.Background(), owner, "corrupt-operation"); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("unavailable operation read error = %v", err)
 	}
-	if _, err := newService(&getFailureStore{Store: corruptStore, err: domain.ErrUnavailable}).claimOperation(context.Background(), owner, "preview-state-error-0001", fingerprint); !errors.Is(err, domain.ErrUnavailable) {
+	if _, err := newService(&getFailureStore{AtomicStore: corruptStore, err: domain.ErrUnavailable}).claimOperation(context.Background(), owner, "preview-state-error-0001", fingerprint); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("unavailable idempotency read error = %v", err)
 	}
 
@@ -684,24 +870,34 @@ func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	finishClaim := operationClaim{record: record, operationKey: previewOperationKey(owner, operationID), operationVersion: operationValue.Version, claimed: true}
-	if _, err := newService(&compareAndSwapErrorStore{Store: store, err: domain.ErrUnavailable}).finishOperation(context.Background(), finishClaim, record.Operation); !errors.Is(err, domain.ErrUnavailable) {
+	if _, err := newService(&compareAndSwapErrorStore{AtomicStore: store, err: domain.ErrUnavailable}).finishOperation(context.Background(), finishClaim, record.Operation); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("finish operation store error = %v", err)
 	}
 	invalidOwnerClaim := finishClaim
 	invalidOwnerClaim.record.OwnerID = "invalid"
-	if _, err := newService(&compareAndSwapFailureStore{Store: store}).finishOperation(context.Background(), invalidOwnerClaim, record.Operation); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := newService(&compareAndSwapFailureStore{AtomicStore: store}).finishOperation(context.Background(), invalidOwnerClaim, record.Operation); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("finish operation owner error = %v", err)
 	}
-	readFailureStore := &getFailureStore{Store: &compareAndSwapFailureStore{Store: store}, err: domain.ErrUnavailable}
+	readFailureStore := &getFailureStore{AtomicStore: &compareAndSwapFailureStore{AtomicStore: store}, err: domain.ErrUnavailable}
 	if _, err := newService(readFailureStore).finishOperation(context.Background(), finishClaim, record.Operation); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("finish operation concurrent read error = %v", err)
 	}
 
-	for failAt := 2; failAt <= 3; failAt++ {
-		failureStore := &nthCreateFailureStore{Store: state.NewMemoryStore(), failAt: failAt}
+	for failAt := 1; failAt <= 1; failAt++ {
+		failureStore := &nthCreateFailureStore{AtomicStore: state.NewMemoryStore(), failAt: failAt}
 		failureService := newService(failureStore)
 		if _, err := failureService.claimOperation(context.Background(), owner, fmt.Sprintf("preview-create-failure-%04d", failAt), fingerprint); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("create failure %d error = %v", failAt, err)
+			t.Fatalf("atomic claim failure %d error = %v", failAt, err)
+		}
+		for _, prefix := range []state.Prefix{
+			state.MustPrefix(state.NamespaceOperations, "preview", owner.String()),
+			state.MustPrefix(state.NamespaceOperations, "preview-index", owner.String()),
+			state.MustPrefix(state.NamespaceIdempotency, "preview", owner.String()),
+		} {
+			page, listErr := failureStore.List(context.Background(), prefix, state.PageRequest{})
+			if listErr != nil || len(page.Items) != 0 {
+				t.Fatalf("failed atomic preview claim left records under %q: %+v, %v", prefix.String(), page, listErr)
+			}
 		}
 	}
 	idFailureService := newService(state.NewMemoryStore())
@@ -761,15 +957,36 @@ func TestResolveGenerationFailureStates(t *testing.T) {
 	if result, err := newService(scriptedGenerator{generated: GeneratedArtifact{Bytes: OnePixelWebP(), Width: 1, Height: 1}}).resolveItem(context.Background(), binding.Owner, item, true, false, false); err != nil || result.State != StateFailed {
 		t.Fatalf("missing committed artifact = %+v, %v", result, err)
 	}
+	disabled := newService(scriptedGenerator{})
+	disabled.store = nil
+	if result, err := disabled.resolveItem(context.Background(), binding.Owner, item, true, false, false); err != nil || result.State != StateDisabled {
+		t.Fatalf("disabled preview = %+v, %v", result, err)
+	}
+	if result, err := newService(scriptedGenerator{}).resolveItem(context.Background(), binding.Owner, item, false, false, false); err != nil || result.State != StateMissing {
+		t.Fatalf("read-only missing preview = %+v, %v", result, err)
+	}
+	inflight := newService(scriptedGenerator{})
+	scope, err := domain.NewScope(binding.Owner, domain.AreaLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := &generationCall{done: make(chan struct{})}
+	inflight.inflight[generationKey(binding)] = call
+	inflightCanceled, cancelInflight := context.WithCancel(context.Background())
+	cancelInflight()
+	if _, err := inflight.generateOnce(inflightCanceled, scope, entry, binding, scriptedGenerator{}, false); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("canceled inflight generation error = %v", err)
+	}
 }
 
 type scriptedStore struct {
-	latest        Artifact
-	latestErr     error
-	validateErr   error
-	capabilityErr error
-	claimErr      error
-	commitErr     error
+	latest         Artifact
+	latestErr      error
+	validateErr    error
+	capabilityErr  error
+	claimErr       error
+	commitErr      error
+	recordReadyErr error
 }
 
 func (s *scriptedStore) Validate(context.Context) error { return s.validateErr }
@@ -784,10 +1001,19 @@ func (s *scriptedStore) Commit(context.Context, Binding, GenerationClaim, Artifa
 func (s *scriptedStore) Latest(context.Context, Binding) (ArtifactMetadata, error) {
 	return s.latest.Metadata(), s.latestErr
 }
+func (*scriptedStore) ResolveReady(_ context.Context, selections []ReadySelection) ([]*ArtifactMetadata, error) {
+	return make([]*ArtifactMetadata, len(selections)), nil
+}
+func (s *scriptedStore) RecordReady(context.Context, ReadySelection, ArtifactMetadata) error {
+	return s.recordReadyErr
+}
 func (s *scriptedStore) Read(context.Context, Binding, string) (Artifact, error) {
 	return s.latest, s.latestErr
 }
 func (s *scriptedStore) CreateDownload(context.Context, Binding, string) (domain.DownloadCapability, error) {
+	return domain.DownloadCapability{URL: "http://127.0.0.1:1234/preview", Method: http.MethodGet}, s.capabilityErr
+}
+func (s *scriptedStore) CreateKnownDownload(context.Context, Binding, ArtifactMetadata) (domain.DownloadCapability, error) {
 	return domain.DownloadCapability{URL: "http://127.0.0.1:1234/preview", Method: http.MethodGet}, s.capabilityErr
 }
 func (*scriptedStore) Ready() bool        { return true }
@@ -897,14 +1123,18 @@ func operationShard(operationID domain.OperationID) string {
 	return strconv.Itoa(int(digest[0]) % operationIndexShards)
 }
 
-type compareAndSwapFailureStore struct{ state.Store }
+type compareAndSwapFailureStore struct{ state.AtomicStore }
 
 func (*compareAndSwapFailureStore) CompareAndSwap(context.Context, state.Key, state.Version, []byte) (state.Version, error) {
 	return "", domain.NewError(domain.ErrorPreconditionFailed, "injected contention")
 }
 
+func (*compareAndSwapFailureStore) Mutate(context.Context, state.Mutation) (state.MutationOutcome, error) {
+	return state.MutationOutcome{}, domain.NewError(domain.ErrorPreconditionFailed, "injected contention")
+}
+
 type compareAndSwapErrorStore struct {
-	state.Store
+	state.AtomicStore
 	err error
 }
 
@@ -912,15 +1142,28 @@ func (s *compareAndSwapErrorStore) CompareAndSwap(context.Context, state.Key, st
 	return "", s.err
 }
 
+func (s *compareAndSwapErrorStore) Mutate(context.Context, state.Mutation) (state.MutationOutcome, error) {
+	return state.MutationOutcome{}, s.err
+}
+
 type getFailureStore struct {
-	state.Store
+	state.AtomicStore
 	err error
 }
 
 type nthCreateFailureStore struct {
-	state.Store
+	state.AtomicStore
 	failAt  int
 	creates int
+	mutates int
+}
+
+func (s *nthCreateFailureStore) Mutate(ctx context.Context, mutation state.Mutation) (state.MutationOutcome, error) {
+	s.mutates++
+	if s.mutates == s.failAt {
+		return state.MutationOutcome{}, domain.NewError(domain.ErrorUnavailable, "injected atomic mutation failure")
+	}
+	return s.AtomicStore.Mutate(ctx, mutation)
 }
 
 func (s *nthCreateFailureStore) Create(ctx context.Context, key state.Key, body []byte) (state.Version, error) {
@@ -928,7 +1171,7 @@ func (s *nthCreateFailureStore) Create(ctx context.Context, key state.Key, body 
 	if s.creates == s.failAt {
 		return "", domain.NewError(domain.ErrorUnavailable, "injected create failure")
 	}
-	return s.Store.Create(ctx, key, body)
+	return s.AtomicStore.Create(ctx, key, body)
 }
 
 func (s *getFailureStore) Get(context.Context, state.Key) (state.Value, error) {

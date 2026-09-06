@@ -258,7 +258,7 @@
     try {
       const endpoint = storageView
         ? `/api/v1/files/storage-map?path=${encodeURIComponent(directory)}`
-        : `/api/v1/files?path=${encodeURIComponent(directory)}&limit=100&sort=${sort}&order=${order}${cursor}`;
+        : `/api/v1/files?path=${encodeURIComponent(directory)}&limit=${browserPageSize}&sort=${sort}&order=${order}${cursor}`;
       const page = await api(endpoint);
       if (request !== state.directoryRequest) return;
       state.currentEntry = page.current;
@@ -697,64 +697,114 @@
 
   function queueGridPreview(entry, frame) {
     const known = state.previewStates.get(entry.path);
-    if (!previewEligible(entry) || (known && known.state !== "ready" && known.state !== "generating") || state.previewQueued.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
+    if (!previewEligible(entry) || (known && known.state !== "ready" && known.state !== "generating") || state.previewQueued.has(entry.path) || state.previewResolving.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
     state.previewQueued.add(entry.path);
     state.previewQueue.push({ entry, frame });
-    pumpPreviewQueue();
+	if (!state.previewPumpScheduled) {
+		state.previewPumpScheduled = true;
+		queueMicrotask(() => {
+			state.previewPumpScheduled = false;
+			pumpPreviewQueue();
+		});
+	}
   }
 
   function pumpPreviewQueue() {
-    const maximum = Math.max(1, Math.min(8, state.config && state.config.previewMaxConcurrency ? state.config.previewMaxConcurrency : 2));
-    while (state.previewActive < maximum && state.previewQueue.length) {
-      const queued = state.previewQueue.shift();
-      state.previewQueued.delete(queued.entry.path);
-      if (!queued.frame.isConnected) continue;
-      state.previewActive += 1;
-      const controller = new AbortController();
-      state.previewControllers.set(queued.entry.path, controller);
-      resolveGridPreview(queued.entry, queued.frame, controller).finally(() => {
-        if (state.previewControllers.get(queued.entry.path) === controller) state.previewControllers.delete(queued.entry.path);
-        state.previewActive -= 1;
-        pumpPreviewQueue();
-      });
+	if (state.previewActive || !state.previewQueue.length) return;
+	const batch = [];
+	while (batch.length < 64 && state.previewQueue.length) {
+		const queued = state.previewQueue.shift();
+		state.previewQueued.delete(queued.entry.path);
+		if (queued.frame.isConnected) batch.push(queued);
+	}
+	if (!batch.length) {
+		pumpPreviewQueue();
+		return;
+	}
+	for (const { entry } of batch) state.previewResolving.add(entry.path);
+	state.previewActive = 1;
+	resolveGridPreviewBatch(batch).finally(() => {
+		for (const { entry } of batch) state.previewResolving.delete(entry.path);
+		state.previewActive = 0;
+		pumpPreviewQueue();
+	});
+  }
+
+	async function resolveGridPreviewBatch(batch) {
+    try {
+		const response = await api("/api/v1/previews/resolve", {
+			method: "POST",
+			body: { items: batch.map(({ entry, frame }) => ({ path: entry.path, version: entry.version, variant: previewVariant(frame.getBoundingClientRect().width || 96) })) },
+		});
+		if (!response || !Array.isArray(response.items) || response.items.length !== batch.length) throw new Error("Invalid preview batch response");
+		const downloads = [];
+		for (let index = 0; index < batch.length; index += 1) {
+			const { entry, frame } = batch[index];
+			const result = response.items[index];
+			state.previewStates.set(entry.path, result);
+			const currentFrame = connectedGridFrame(entry.path) || frame;
+			if (currentFrame.isConnected) currentFrame.dataset.previewState = result.state;
+			if (result.state === "ready" && result.capability) {
+				clearGridPreviewRetry(entry.path);
+				if (currentFrame.isConnected) downloads.push({ entry, frame: currentFrame, result });
+			} else if (result.state === "generating") {
+				scheduleGridPreviewRetry(entry, currentFrame);
+			} else {
+				clearGridPreviewRetry(entry.path);
+			}
+		}
+		await runPreviewDownloadPool(downloads);
+		if (byID("filter-preview").value) renderFiles();
+    } catch (error) {
+		if (error.name === "AbortError") return;
+		for (const { entry, frame } of batch) {
+			const result = { state: "unavailable" };
+			state.previewStates.set(entry.path, result);
+			const currentFrame = connectedGridFrame(entry.path) || frame;
+			if (currentFrame.isConnected) currentFrame.dataset.previewState = result.state;
+			clearGridPreviewRetry(entry.path);
+		}
     }
   }
 
-  async function resolveGridPreview(entry, frame, controller) {
-    try {
-      const variant = previewVariant(frame.getBoundingClientRect().width || 96);
-      const response = await api("/api/v1/previews/resolve", { method: "POST", body: { items: [{ path: entry.path, version: entry.version, variant }] }, signal: controller.signal });
-      const result = response.items[0];
-      if (controller.signal.aborted) return;
-      state.previewStates.set(entry.path, result);
-      let currentFrame = connectedGridFrame(entry.path) || frame;
-      if (currentFrame.isConnected) currentFrame.dataset.previewState = result.state;
-      if (result.state !== "ready" || !result.capability) {
-        if (result.state === "generating") scheduleGridPreviewRetry(entry, currentFrame);
-        else clearGridPreviewRetry(entry.path);
-        if (byID("filter-preview").value) renderFiles();
-        return;
-      }
-      clearGridPreviewRetry(entry.path);
-      const artifactResponse = await fetch(result.capability.url, { method: result.capability.method || "GET", headers: result.capability.headers || {}, signal: controller.signal, credentials: "omit" });
-      const blob = await validatedPreviewBlob(artifactResponse, result.artifact);
-      if (controller.signal.aborted) return;
-      const objectURL = URL.createObjectURL(blob);
-      const previous = state.previewObjectURLs.get(entry.path);
-      if (previous) URL.revokeObjectURL(previous);
-      state.previewObjectURLs.set(entry.path, objectURL);
-      currentFrame = connectedGridFrame(entry.path) || frame;
-      if (currentFrame.isConnected) setPreviewImage(currentFrame, entry, objectURL, result);
-    } catch (error) {
-      if (error.name !== "AbortError") {
-        const result = { state: "unavailable" };
-        state.previewStates.set(entry.path, result);
-        const currentFrame = connectedGridFrame(entry.path) || frame;
-        if (currentFrame.isConnected) currentFrame.dataset.previewState = result.state;
-        clearGridPreviewRetry(entry.path);
-      }
-    }
-  }
+	async function runPreviewDownloadPool(downloads) {
+		let next = 0;
+		const maximum = Math.max(1, Math.min(8, state.config && state.config.previewMaxConcurrency ? state.config.previewMaxConcurrency : 2));
+		const worker = async () => {
+			while (next < downloads.length) {
+				const item = downloads[next];
+				next += 1;
+				await downloadResolvedGridPreview(item);
+			}
+		};
+		await Promise.all(Array.from({ length: Math.min(maximum, downloads.length) }, worker));
+	}
+
+	async function downloadResolvedGridPreview({ entry, frame, result }) {
+		const controller = new AbortController();
+		state.previewControllers.set(entry.path, controller);
+		try {
+			const artifactResponse = await fetch(result.capability.url, { method: result.capability.method || "GET", headers: result.capability.headers || {}, signal: controller.signal, credentials: "omit" });
+			const blob = await validatedPreviewBlob(artifactResponse, result.artifact);
+			if (controller.signal.aborted) return;
+			const objectURL = URL.createObjectURL(blob);
+			const previous = state.previewObjectURLs.get(entry.path);
+			if (previous) URL.revokeObjectURL(previous);
+			state.previewObjectURLs.set(entry.path, objectURL);
+			const currentFrame = connectedGridFrame(entry.path) || frame;
+			if (currentFrame.isConnected) setPreviewImage(currentFrame, entry, objectURL, result);
+		} catch (error) {
+			if (error.name !== "AbortError") {
+				const unavailable = { state: "unavailable" };
+				state.previewStates.set(entry.path, unavailable);
+				const currentFrame = connectedGridFrame(entry.path) || frame;
+				if (currentFrame.isConnected) currentFrame.dataset.previewState = unavailable.state;
+				clearGridPreviewRetry(entry.path);
+			}
+		} finally {
+			if (state.previewControllers.get(entry.path) === controller) state.previewControllers.delete(entry.path);
+		}
+	}
 
   async function validatedPreviewBlob(response, artifact) {
     if (!response.ok || response.headers.get("Content-Type") !== "image/webp" || !artifact || artifact.contentType !== "image/webp" || !Number.isSafeInteger(artifact.size) || artifact.size < 12) throw new Error("Invalid preview artifact response");

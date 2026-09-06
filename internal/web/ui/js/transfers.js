@@ -67,8 +67,18 @@
       relativePath: transfer.relativePath, size: transferFileSize(transfer), mediaType: transferMediaType(transfer),
       lastModified: Number.isSafeInteger(transfer.lastModified) ? transfer.lastModified : 0,
       state: transfer.state, confirmed: Math.max(0, transfer.confirmed || 0), uploadID: transfer.uploadID || "",
+	  batchID: transfer.batchID || "", batchIndex: Number.isSafeInteger(transfer.batchIndex) ? transfer.batchIndex : 0,
+	  batchCount: Number.isSafeInteger(transfer.batchCount) ? transfer.batchCount : 0,
+	  admissionBatchKey: transfer.admissionBatchKey || "",
+	  admissionBatchIndex: Number.isSafeInteger(transfer.admissionBatchIndex) ? transfer.admissionBatchIndex : 0,
+	  admissionBatchCount: Number.isSafeInteger(transfer.admissionBatchCount) ? transfer.admissionBatchCount : 0,
+	  awaitingCompletion: Boolean(transfer.awaitingCompletion), completionBatchKey: transfer.completionBatchKey || "",
       retryCount: Math.max(0, transfer.retryCount || 0), nextRetryAt: Math.max(0, transfer.nextRetryAt || 0),
       errorCode: String(transfer.errorCode || "").slice(0, 80), error: String(transfer.error || "").slice(0, 240),
+      strategy: transfer.strategy || "keep-both", planPhase: transfer.planPhase || "done",
+      md5: transfer.md5 || "", crc32c: transfer.crc32c || "", planOutcome: transfer.planOutcome || "",
+      targetExists: Boolean(transfer.targetExists), targetKind: transfer.targetKind || "",
+      targetVersion: transfer.targetVersion || "", uploadConflict: transfer.uploadConflict || "rename",
       createdAt: transfer.createdAt || Date.now(), updatedAt: Date.now(),
     };
   }
@@ -80,6 +90,7 @@
       baseDirectory: group.baseDirectory, directories: [...(group.directories || [])], transferIDs: [...group.transferIDs],
       totalSize: group.totalSize || 0, state: group.state, error: String(group.error || "").slice(0, 240),
       cancelled: Boolean(group.cancelled), discoveryDone: group.discoveryDone !== false,
+      strategy: group.strategy || "keep-both",
       createdAt: group.createdAt || Date.now(), updatedAt: Date.now(),
     };
   }
@@ -96,6 +107,21 @@
       warnTransferLedger("Transfer history could not be saved on this device.");
     }
   }
+
+	async function persistTransferItems(transfers) {
+	  const durable = transfers.filter((transfer) => !transfer.fixture);
+	  if (!durable.length || !state.transferLedgerOwner) return;
+	  try {
+		const database = await openTransferLedger();
+		if (!database) return;
+		const transaction = database.transaction("items", "readwrite");
+		const store = transaction.objectStore("items");
+		for (const transfer of durable) store.put(transferLedgerItem(transfer));
+		await ledgerTransactionDone(transaction);
+	  } catch {
+		warnTransferLedger("Transfer history could not be saved on this device.");
+	  }
+	}
 
   async function persistTransferGroup(group) {
     if (group.fixture || !state.transferLedgerOwner) return;
@@ -154,42 +180,40 @@
       const file = await source.handle.getFile();
       if (file.size !== transferFileSize(transfer) || (transfer.lastModified && file.lastModified !== transfer.lastModified)) return false;
       transfer.file = file;
+      resetUploadPlanForReconnectedSource(transfer);
       return true;
     } catch {
       return false;
     }
   }
 
+  function resetUploadPlanForReconnectedSource(transfer) {
+    if (transfer.strategy === "keep-both" || transfer.uploadID || ["complete", "cancelled"].includes(transfer.state)) return;
+    // A newly acquired File object is not cryptographically identical merely
+    // because its name, size, and modification time match. Never apply a
+    // fingerprint persisted for a prior local source instance.
+    transfer.planPhase = "size-pending";
+    transfer.planOutcome = "";
+    transfer.md5 = "";
+    transfer.crc32c = "";
+    transfer.targetExists = false;
+    transfer.targetKind = "";
+    transfer.targetVersion = "";
+    transfer.uploadConflict = "rename";
+  }
+
   async function reconcileRestoredTransfer(transfer) {
     if (["complete", "cancelled"].includes(transfer.state)) return;
-    if (transfer.uploadID) {
-      try {
-        const status = await api(`/api/v1/uploads/${encodeURIComponent(transfer.uploadID)}`);
-        transfer.confirmed = Math.max(transfer.confirmed, Number(status.confirmedOffset) || 0);
-        if (status.state === "completed") {
-          transfer.state = "complete";
-          transfer.confirmed = transferFileSize(transfer);
-          transfer.error = "";
-          return;
-        }
-        if (status.state === "aborted" || status.state === "expired") {
-          transfer.state = "failed";
-          transfer.errorCode = status.state;
-          transfer.error = status.state === "expired" ? "Upload expired. Reconnect the source to start again." : "Upload was cancelled.";
-          return;
-        }
-      } catch (error) {
-        if (!(error instanceof APIError) || error.status !== 404) {
-          transfer.state = navigator.onLine ? "retry-wait" : "paused";
-          transfer.error = "Waiting to reconcile upload state.";
-          return;
-        }
-      }
-    }
-    if (!(transfer.file instanceof File)) {
+	if (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c) {
+	  transfer.state = "uploading";
+	  transfer.error = "Finalizing uploaded data.";
+	} else if (!(transfer.file instanceof File)) {
       transfer.state = "needs-source";
       transfer.errorCode = "source_required";
       transfer.error = "Reconnect the source to continue.";
+    } else if (transfer.planPhase && transfer.planPhase !== "done") {
+      transfer.state = navigator.onLine ? "preparing" : "paused";
+      transfer.error = navigator.onLine ? "Resuming duplicate check." : "Waiting for a network connection.";
     } else if (transfer.state === "retry-wait" && transfer.nextRetryAt > Date.now()) {
       state.transferRetryTimers.set(transfer.id, window.setTimeout(() => {
         state.transferRetryTimers.delete(transfer.id);
@@ -205,6 +229,30 @@
       transfer.state = "queued";
       transfer.error = "";
     }
+  }
+
+  async function reconcileUploadAdmissionConflict(transfer, error) {
+    if (!(error instanceof APIError) || error.status !== 409 || !transfer.uploadID) return false;
+    try {
+      const status = await api(`/api/v1/uploads/${encodeURIComponent(transfer.uploadID)}`);
+      transfer.confirmed = Math.max(transfer.confirmed, Number(status.confirmedOffset) || 0);
+      if (status.state === "completed") {
+        recordTransferProgress(transfer, transferFileSize(transfer));
+        transfer.retryCount = 0;
+        transfer.nextRetryAt = 0;
+        transitionTransfer(transfer, "complete");
+        queueUploadDirectoryRefresh(transfer.directory);
+        return true;
+      }
+      if (status.state === "aborted" || status.state === "expired") {
+        transitionTransfer(transfer, "failed", status.state === "expired" ? "Upload expired. Reconnect the source to start again." : "Upload was cancelled.", status.state);
+        return true;
+      }
+    } catch {
+      // The original admission error remains the useful failure when the
+      // narrowly scoped terminal-state recovery lookup is itself unavailable.
+    }
+    return false;
   }
 
   async function restoreTransferLedger() {
@@ -223,7 +271,7 @@
       }));
       state.transferByID = new Map(state.transfers.map((transfer) => [transfer.id, transfer]));
       state.transferGroups = new Map(groupRecords.map((record) => [record.id, {
-        ...record, refreshed: record.state === "complete", failureAnnounced: record.state === "failed",
+        ...record, preparedDirectories: new Set(), refreshed: record.state === "complete", failureAnnounced: record.state === "failed",
       }]));
       let nextIndex = 0;
       const workers = Array.from({ length: Math.min(4, state.transfers.length) }, async () => {
@@ -240,6 +288,7 @@
       if (state.transfers.length) {
         renderTransfers();
         setTransferSheetOpen(false);
+        resumeUploadPlans();
         pumpTransfers();
       }
     } catch {
@@ -290,13 +339,14 @@
     const inputs = Array.from(files).map((value) => value instanceof File ? { file: value, relativePath: value.webkitRelativePath || value.name } : value)
       .filter((value) => value && value.file instanceof File && typeof value.relativePath === "string");
     const groupID = options.groupID || (options.groupName || inputs.length > 1 ? idempotencyKey() : "");
+    const strategy = options.strategy || "keep-both";
     const queued = [];
     let group = groupID ? state.transferGroups.get(groupID) : null;
     if (groupID && !group) {
       group = {
         id: groupID, name: options.groupName || `${inputs.length} files`, baseDirectory, directories: [], transferIDs: [],
         totalSize: 0, state: "queued", error: "", refreshed: false, cancelled: false, failureAnnounced: false,
-        discoveryDone: options.discoveryDone !== false, createdAt: Date.now(),
+        discoveryDone: options.discoveryDone !== false, strategy, createdAt: Date.now(), preparedDirectories: new Set(),
       };
       state.transferGroups.set(groupID, group);
     }
@@ -313,8 +363,10 @@
       const directory = relativeDirectory ? joinPath(baseDirectory, relativeDirectory) : baseDirectory;
       queued.push({
         id: idempotencyKey(), file: input.file, name, directory, baseDirectory, relativeDirectory,
-        relativePath: input.relativePath, groupID, state: "queued", confirmed: 0, error: "", controller: null, uploadID: "",
+        relativePath: input.relativePath, groupID, state: strategy === "keep-both" ? "queued" : "preparing", confirmed: 0, error: "", controller: null, uploadID: "",
         size: input.file.size, mediaType: uploadMediaType(input.file, name), lastModified: input.file.lastModified,
+        strategy, planPhase: strategy === "keep-both" ? "done" : "size-pending", md5: "", crc32c: "", planOutcome: "",
+        targetExists: false, targetKind: "", targetVersion: "", uploadConflict: "rename",
         sourceHandle: input.sourceHandle || null, speedBps: 0, lastProgressAt: 0, lastProgressBytes: 0,
         recoveryFailures: 0, retryCount: 0, nextRetryAt: 0, errorCode: "", createdAt: Date.now(),
       });
@@ -339,18 +391,20 @@
     state.transferFilter = "current";
     if (group) {
       group.discoveryDone = options.discoveryDone !== false;
-      group.state = group.transferIDs.length ? "queued" : "preparing";
+      group.strategy = strategy;
+      group.state = group.transferIDs.length ? (strategy === "keep-both" ? "queued" : "preparing") : "preparing";
       await persistTransferGroup(group);
       if (!group.transferIDs.length && group.discoveryDone) prepareTransferGroup(group);
     }
     setTransferSheetOpen(true);
     rebuildTransferProjection();
     renderTransfers();
+    if (strategy !== "keep-both" && options.discoveryDone !== false) planUploadTransfers(queued, group);
     pumpTransfers();
     return groupID;
   }
 
-  async function queueFolderFiles(files) {
+  async function queueFolderFiles(files, strategy = "keep-both") {
     const groups = new Map();
     const looseFiles = [];
     for (const file of Array.from(files).filter((value) => value instanceof File)) {
@@ -369,8 +423,8 @@
       group.files.push({ file, relativePath });
       for (let length = 1; length < components.length; length += 1) group.directories.add(components.slice(0, length).join("/"));
     }
-    for (const [groupName, group] of groups) await queueFiles(group.files, { groupName, directories: [...group.directories] });
-    if (looseFiles.length) await queueFiles(looseFiles);
+    for (const [groupName, group] of groups) await queueFiles(group.files, { groupName, directories: [...group.directories], strategy });
+    if (looseFiles.length) await queueFiles(looseFiles, { strategy });
   }
 
   function readLegacyFile(entry) {
@@ -408,7 +462,7 @@
     for await (const child of handle.values()) await discoverFileSystemHandle(child, relativePath, onFile, onDirectory);
   }
 
-  async function discoverTransferGroup(name, discover) {
+  async function discoverTransferGroup(name, discover, strategy = "keep-both") {
     const groupID = idempotencyKey();
     const files = [];
     const directories = [];
@@ -416,7 +470,7 @@
       if (!files.length && !directories.length) return;
       const pendingFiles = files.splice(0, files.length);
       const pendingDirectories = directories.splice(0, directories.length);
-      await queueFiles(pendingFiles, { groupID, groupName: name, directories: pendingDirectories, discoveryDone: false });
+      await queueFiles(pendingFiles, { groupID, groupName: name, directories: pendingDirectories, discoveryDone: false, strategy });
     };
     await discover(async (input) => {
       files.push(input);
@@ -430,7 +484,8 @@
     if (group) {
       group.discoveryDone = true;
       if (!group.transferIDs.length) await prepareTransferGroup(group);
-      else updateTransferGroup(groupID, false);
+      else if (strategy === "keep-both") updateTransferGroup(groupID, false);
+      else planUploadTransfers(group.transferIDs.map((id) => state.transferByID.get(id)).filter(Boolean), group);
       await persistTransferGroup(group);
       rebuildTransferProjection();
       renderTransfers();
@@ -438,10 +493,10 @@
     }
   }
 
-  async function queueDroppedItems(dataTransfer) {
+  async function queueDroppedItems(dataTransfer, strategy = "keep-both") {
     const items = Array.from(dataTransfer.items || []).filter((item) => item.kind === "file");
     if (!items.length) {
-      queueFiles(dataTransfer.files || []);
+      queueFiles(dataTransfer.files || [], { strategy });
       return;
     }
     const looseFiles = [];
@@ -452,7 +507,7 @@
       if (handle) {
         usedEntryAPI = true;
         if (handle.kind === "directory") {
-          await discoverTransferGroup(handle.name, (onFile, onDirectory) => discoverFileSystemHandle(handle, "", onFile, onDirectory));
+          await discoverTransferGroup(handle.name, (onFile, onDirectory) => discoverFileSystemHandle(handle, "", onFile, onDirectory), strategy);
         } else {
           await discoverFileSystemHandle(handle, "", async (input) => { looseFiles.push(input); }, async () => {});
         }
@@ -463,7 +518,7 @@
       if (legacyEntry) {
         usedEntryAPI = true;
         if (legacyEntry.isDirectory) {
-          await discoverTransferGroup(legacyEntry.name, (onFile, onDirectory) => discoverLegacyEntry(legacyEntry, "", onFile, onDirectory));
+          await discoverTransferGroup(legacyEntry.name, (onFile, onDirectory) => discoverLegacyEntry(legacyEntry, "", onFile, onDirectory), strategy);
         } else {
           await discoverLegacyEntry(legacyEntry, "", async (input) => { looseFiles.push(input); }, async () => {});
         }
@@ -472,8 +527,8 @@
       const file = typeof item.getAsFile === "function" ? item.getAsFile() : null;
       if (file) looseFiles.push({ file, relativePath: file.name });
     }
-    if (looseFiles.length) await queueFiles(looseFiles);
-    if (!usedEntryAPI && !looseFiles.length) await queueFiles(dataTransfer.files || []);
+    if (looseFiles.length) await queueFiles(looseFiles, { strategy });
+    if (!usedEntryAPI && !looseFiles.length) await queueFiles(dataTransfer.files || [], { strategy });
   }
 
   async function ensureDirectory(path) {
@@ -500,13 +555,21 @@
     finally { if (state.directoryPromises.get(path) === pending) state.directoryPromises.delete(path); }
   }
 
-  async function ensureDirectories(baseDirectory, relativeDirectory) {
+  async function ensureDirectories(baseDirectory, relativeDirectory, preparedDirectories = null) {
     if (!relativeDirectory) return;
     let current = baseDirectory;
     for (const component of relativeDirectory.split("/")) {
       current = joinPath(current, component);
+      if (preparedDirectories && preparedDirectories.has(current)) continue;
       await ensureDirectory(current);
+      if (preparedDirectories) preparedDirectories.add(current);
     }
+  }
+
+  async function ensureTransferDirectories(transfer) {
+    const group = transfer.groupID ? state.transferGroups.get(transfer.groupID) : null;
+    if (group && !(group.preparedDirectories instanceof Set)) group.preparedDirectories = new Set();
+    await ensureDirectories(transfer.baseDirectory, transfer.relativeDirectory, group ? group.preparedDirectories : null);
   }
 
   async function prepareTransferGroup(group) {
@@ -517,11 +580,13 @@
     try {
       const directories = [...group.directories].sort((left, right) => left.split("/").length - right.split("/").length || left.localeCompare(right));
       for (const relativeDirectory of directories) {
-        await ensureDirectories(group.baseDirectory, relativeDirectory);
+        if (!(group.preparedDirectories instanceof Set)) group.preparedDirectories = new Set();
+        await ensureDirectories(group.baseDirectory, relativeDirectory, group.preparedDirectories);
         if (group.cancelled) return;
       }
       if (group.cancelled) return;
       group.state = group.transferIDs.length ? "queued" : "complete";
+      if (group.transferIDs.length) updateTransferGroup(group.id, false);
       if (!group.transferIDs.length && state.currentDirectory === group.baseDirectory) loadDirectory(group.baseDirectory);
       pumpTransfers();
     } catch (error) {
@@ -537,38 +602,80 @@
     renderTransfers();
   }
 
-  function automaticTransferConcurrency() {
-    const configuredMaximum = Number(state.config && state.config.maximumTransferConcurrency);
-    const maximum = Math.max(1, Math.min(8, Number.isFinite(configuredMaximum) ? configuredMaximum : 8));
-    const summary = state.transferSummary || aggregateTransferSummary(state.transfers);
-    const pendingCount = summary.counts.queued + summary.counts.preparing + summary.counts.uploading;
-    if (pendingCount <= 1) return 1;
-
+  function configuredTransferConcurrency(pendingCount) {
     const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
-    let networkCeiling = maximum;
-    if (connection && connection.saveData) networkCeiling = 1;
-    else if (connection && ["slow-2g", "2g"].includes(connection.effectiveType)) networkCeiling = 1;
-    else if (connection && connection.effectiveType === "3g") networkCeiling = Math.min(networkCeiling, 2);
-    else if (connection && Number.isFinite(connection.downlink)) {
-      if (connection.downlink < 1.5) networkCeiling = Math.min(networkCeiling, 1);
-      else if (connection.downlink < 5) networkCeiling = Math.min(networkCeiling, 2);
-      else if (connection.downlink < 20) networkCeiling = Math.min(networkCeiling, 3);
-      else if (connection.downlink < 50) networkCeiling = Math.min(networkCeiling, 4);
+    const pending = Math.max(0, Math.floor(Number(pendingCount) || 0));
+    if (pending <= 1 || Boolean(connection && connection.saveData)) return Math.min(1, pending);
+    const configuredValue = Number(state.config && state.config.maximumTransferConcurrency);
+    const configured = Math.max(1, Number.isFinite(configuredValue) ? Math.floor(configuredValue) : 100);
+    return Math.min(configured, pending);
+  }
+
+  function automaticTransferConcurrency() {
+    const summary = state.transferSummary || aggregateTransferSummary(state.transfers);
+    return configuredTransferConcurrency(summary.counts.queued + summary.counts.preparing + summary.counts.uploading);
+  }
+
+  async function runTransferControlPool(values, operation) {
+    let nextIndex = 0;
+    const workers = Array.from({ length: configuredTransferConcurrency(values.length) }, async () => {
+      while (nextIndex < values.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        await operation(values[index]);
+      }
+    });
+    await Promise.all(workers);
+  }
+
+  function installUploadWorkerPoolTestFixture() {
+    if (!state.config || !state.config.localFixture) return;
+    window.__endlessfsUploadWorkerPoolTest = {
+      concurrency: (pendingCount, saveData) => {
+        const pending = Math.max(0, Math.floor(Number(pendingCount) || 0));
+        if (pending <= 1 || saveData) return Math.min(1, pending);
+        const configuredValue = Number(state.config.maximumTransferConcurrency);
+        const configured = Math.max(1, Number.isFinite(configuredValue) ? Math.floor(configuredValue) : 100);
+        return Math.min(configured, pending);
+      },
+      active: () => state.activeTransfers,
+      discoveryBatchSize: () => transferDiscoveryBatchSize,
+      snapshot: () => ({
+        active: state.activeTransfers,
+        refreshDirectories: state.uploadRefreshDirectories.size,
+        refreshInFlight: state.uploadRefreshInFlight,
+        states: state.transfers.reduce((counts, transfer) => {
+          counts[transfer.state] = (counts[transfer.state] || 0) + 1;
+          return counts;
+        }, {}),
+        groups: [...state.transferGroups.values()].filter((group) => !group.fixture).map((group) => ({
+          name: group.name,
+          state: group.state,
+          files: group.transferIDs.length,
+          complete: group.transferSummary ? group.transferSummary.counts.complete : -1,
+        })),
+        renderedGroups: Array.from(document.querySelectorAll(".transfer-group-row")).map((row) => row.textContent.trim()),
+        renderedFiles: byID("file-rows").textContent.slice(0, 500),
+      }),
+    };
+  }
+
+  function queueUploadDirectoryRefresh(directory) {
+    state.uploadRefreshDirectories.add(directory);
+  }
+
+  async function flushUploadDirectoryRefresh() {
+    if (state.activeTransfers !== 0 || state.uploadRefreshInFlight || state.uploadRefreshDirectories.size === 0) return;
+    const directories = new Set(state.uploadRefreshDirectories);
+    state.uploadRefreshDirectories.clear();
+    if (!directories.has(state.currentDirectory)) return;
+    state.uploadRefreshInFlight = true;
+    try {
+      await loadDirectory(state.currentDirectory);
+    } finally {
+      state.uploadRefreshInFlight = false;
+      if (state.uploadRefreshDirectories.size > 0) flushUploadDirectoryRefresh();
     }
-
-    const hardware = Number(navigator.hardwareConcurrency);
-    const fallback = Number(state.config && state.config.defaultTransferConcurrency) || 4;
-    const hardwareCeiling = Number.isFinite(hardware) && hardware > 0 ? Math.max(2, Math.ceil(hardware / 2)) : fallback;
-    const ceiling = Math.max(1, Math.min(maximum, networkCeiling, hardwareCeiling));
-    const averageSize = summary.remainingBytes / Math.max(1, summary.active + summary.pending);
-    let desired = Math.min(ceiling, 4);
-    if (averageSize <= 256 * 1024) desired = Math.min(ceiling, pendingCount > 500 ? ceiling : 6);
-    else if (averageSize >= 256 * 1024 * 1024) desired = Math.min(ceiling, 2);
-    else if (averageSize >= 64 * 1024 * 1024) desired = Math.min(ceiling, 3);
-
-    const recentFailures = state.transferFailureTimes.filter((value) => Date.now() - value < 10000).length;
-    if (summary.active && recentFailures >= Math.ceil(summary.active / 2)) desired = Math.min(desired, Math.max(1, Math.floor(summary.active / 2)));
-    return Math.max(1, Math.min(desired, pendingCount));
   }
 
   function beginTransferMeasurement(transfer) {
@@ -617,6 +724,18 @@
 
   function pumpTransfers() {
     if (!navigator.onLine) return;
+    if (!state.uploadBatchActive) {
+      const batch = nextUploadAdmissionBatch();
+      if (batch.length > 1) {
+      state.uploadBatchActive = true;
+        admitUploadBatch(batch).finally(() => {
+          state.uploadBatchActive = false;
+          scheduleTransferStructureRender();
+          pumpTransfers();
+        });
+      }
+    }
+	flushUploadCompletions();
     const concurrency = automaticTransferConcurrency();
     while (state.activeTransfers < concurrency) {
       const transfer = nextQueuedTransfer();
@@ -627,6 +746,7 @@
         updateTransferGroup(transfer.groupID);
         scheduleTransferStructureRender();
         pumpTransfers();
+        flushUploadDirectoryRefresh();
       });
     }
   }
@@ -637,9 +757,134 @@
       const index = state.transferQueueCursor % count;
       state.transferQueueCursor = (index + 1) % count;
       const transfer = state.transfers[index];
-      if (transfer.state === "queued" && transfer.file instanceof File && (!transfer.groupID || state.transferGroups.get(transfer.groupID)?.state !== "preparing")) return transfer;
+      const admitted = Boolean(transfer.pendingCapability || transfer.uploadID);
+      if (transfer.state === "queued" && transfer.file instanceof File && (admitted || !state.uploadBatchActive) && (!transfer.groupID || state.transferGroups.get(transfer.groupID)?.state !== "preparing")) return transfer;
     }
     return null;
+  }
+
+  function nextUploadAdmissionBatch() {
+	const replay = state.transfers.find((transfer) => transfer.admissionBatchKey && !transfer.uploadID && !transfer.pendingCapability && !["complete", "failed"].includes(transfer.state));
+	if (replay) {
+	  return state.transfers
+		.filter((transfer) => transfer.admissionBatchKey === replay.admissionBatchKey)
+		.sort((left, right) => left.admissionBatchIndex - right.admissionBatchIndex);
+	}
+    const batch = [];
+	let encodedBytes = 64;
+    for (const transfer of state.transfers) {
+      if (batch.length >= 10000) break;
+      if (transfer.state !== "queued" || !(transfer.file instanceof File) || transfer.uploadID || transfer.pendingCapability) continue;
+      if (transfer.groupID && state.transferGroups.get(transfer.groupID)?.state === "preparing") continue;
+	  if (transfer.admissionBatchKey) continue;
+	  const item = compactUploadInitializationRequest(
+		transfer,
+		batch.length ? transferMediaType(batch[0]) : transferMediaType(transfer),
+		batch.length ? batch[0].directory : transfer.directory,
+	  );
+	  const itemBytes = new TextEncoder().encode(JSON.stringify(item)).byteLength + (batch.length ? 1 : 0);
+	  if (encodedBytes + itemBytes > (1 << 20) - 4096) break;
+	  encodedBytes += itemBytes;
+      batch.push(transfer);
+    }
+    return batch;
+  }
+
+  function uploadInitializationRequest(transfer, includeItemKey = false) {
+    const request = {
+      path: transfer.directory,
+      name: transfer.name,
+      size: transferFileSize(transfer),
+      mediaType: transferMediaType(transfer),
+      conflict: transfer.uploadConflict || "rename",
+      resumable: true,
+    };
+    if (request.conflict === "replace" && transfer.targetVersion) request.expectedVersion = transfer.targetVersion;
+    if (includeItemKey) request.idempotencyKey = transfer.id;
+    return request;
+  }
+
+	function compactUploadInitializationRequest(transfer, defaultMediaType, defaultDirectory) {
+	  const request = { name: transfer.name, size: transferFileSize(transfer) };
+	  if (transfer.directory !== defaultDirectory) request.path = transfer.directory;
+	  const mediaType = transferMediaType(transfer);
+	  if (mediaType !== defaultMediaType) request.mediaType = mediaType;
+	  if ((transfer.uploadConflict || "rename") !== "rename") request.conflict = transfer.uploadConflict;
+	  if (request.conflict === "replace" && transfer.targetVersion) request.expectedVersion = transfer.targetVersion;
+	  return request;
+	}
+
+  function uploadBatchItemError(kind) {
+    const error = new Error("Upload initialization failed.");
+    error.batchErrorKind = kind || "internal";
+    return error;
+  }
+
+  function failUploadPreparation(transfer, error) {
+    if (!["preparing", "queued"].includes(transfer.state) || transfer.cancelRequested) return;
+    if (transferFailureIsRetryable(error)) {
+      scheduleTransferRetry(transfer, error);
+      return;
+    }
+    transitionTransfer(transfer, "failed", friendlyError(error, "Upload could not be initialized."), error instanceof APIError ? error.code : error.batchErrorKind || "terminal");
+    if (!transfer.groupID) announce(`${transfer.name} failed to upload.`, true);
+  }
+
+  async function admitUploadBatch(transfers) {
+	const existingKey = transfers[0]?.admissionBatchKey || "";
+	for (const transfer of transfers) {
+	  if (!existingKey) transfer.cancelRequested = false;
+	  if (!["complete", "cancelled", "failed"].includes(transfer.state)) transitionTransfer(transfer, "preparing");
+	}
+    scheduleTransferStructureRender();
+    try {
+	  if (!existingKey) await Promise.all(transfers.map(ensureTransferDirectories));
+	  const pending = existingKey ? transfers : transfers.filter((transfer) => transfer.state === "preparing" && !transfer.cancelRequested);
+      if (!pending.length) return;
+	  const batchKey = existingKey || idempotencyKey();
+	  if (!existingKey) {
+		for (const [index, transfer] of pending.entries()) {
+		  transfer.admissionBatchKey = batchKey;
+		  transfer.admissionBatchIndex = index;
+		  transfer.admissionBatchCount = pending.length;
+		}
+		await persistTransferItems(pending);
+	  }
+      const response = await api("/api/v1/uploads/batch", {
+        method: "POST",
+		headers: { "Idempotency-Key": batchKey },
+		body: {
+		  defaults: { path: pending[0].directory, mediaType: transferMediaType(pending[0]), conflict: "rename", resumable: true },
+		  uploads: pending.map((transfer) => compactUploadInitializationRequest(transfer, transferMediaType(pending[0]), pending[0].directory)),
+		},
+      });
+      const results = response && Array.isArray(response.uploads) ? response.uploads : [];
+      if (results.length !== pending.length) throw uploadBatchItemError("internal");
+      for (const [offset, transfer] of pending.entries()) {
+        const result = results[offset];
+        if (!result || result.index !== offset || !result.capability) {
+          failUploadPreparation(transfer, uploadBatchItemError(result && result.errorKind));
+          continue;
+        }
+		if (transfer.uploadID && transfer.uploadID !== result.capability.uploadID) throw uploadBatchItemError("conflict");
+        transfer.uploadID = result.capability.uploadID;
+		transfer.admissionBatchKey = "";
+		transfer.admissionBatchIndex = 0;
+		transfer.admissionBatchCount = 0;
+		transfer.batchID = result.capability.batchID || "";
+		transfer.batchIndex = Number.isSafeInteger(result.capability.batchIndex) ? result.capability.batchIndex : 0;
+		transfer.batchCount = Number.isSafeInteger(result.capability.batchCount) ? result.capability.batchCount : 0;
+        if (transfer.cancelRequested || transfer.state === "cancelled") {
+          api(`/api/v1/uploads/${encodeURIComponent(transfer.uploadID)}`, { method: "DELETE", body: {} }).catch(() => {});
+          continue;
+        }
+        transfer.pendingCapability = result.capability;
+        transitionTransfer(transfer, "queued");
+      }
+	  await persistTransferItems(pending);
+    } catch (error) {
+      for (const transfer of transfers) failUploadPreparation(transfer, error);
+    }
   }
 
   function uploadMediaType(file, name) {
@@ -668,6 +913,7 @@
   function transferFailureIsRetryable(error) {
     if (!navigator.onLine) return true;
     if (error instanceof APIError) return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
+    if (error && ["rate_limited", "unavailable", "internal"].includes(error.batchErrorKind)) return true;
     return error instanceof TypeError || (error && error.name === "NetworkError");
   }
 
@@ -714,9 +960,11 @@
     let resumed = 0;
     for (const transfer of state.transfers) {
       if (!['paused', 'retry-wait'].includes(transfer.state) || !(transfer.file instanceof File)) continue;
+      if (transfer.planPhase && transfer.planPhase !== "done") continue;
       transitionTransfer(transfer, "queued");
       resumed += 1;
     }
+    resumeUploadPlans();
     if (resumed) {
       rebuildTransferProjection();
       renderTransfers();
@@ -736,28 +984,42 @@
     updateTransferGroup(transfer.groupID, false);
     scheduleTransferStructureRender();
     try {
-      await ensureDirectories(transfer.baseDirectory, transfer.relativeDirectory);
+      let capability = transfer.pendingCapability || null;
+      transfer.pendingCapability = null;
       const mediaType = transferMediaType(transfer);
       const size = transferFileSize(transfer);
-      const capability = await api("/api/v1/uploads", { method: "POST", headers: { "Idempotency-Key": transfer.id }, body: { path: transfer.directory, name: transfer.name, size, mediaType, conflict: "rename", resumable: true }, signal: transfer.controller.signal });
+      if (!capability) {
+        await ensureTransferDirectories(transfer);
+        capability = await api("/api/v1/uploads", { method: "POST", headers: { "Idempotency-Key": transfer.id }, body: uploadInitializationRequest(transfer), signal: transfer.controller.signal });
+      }
       transfer.uploadID = capability.uploadID;
+	  transfer.batchID = capability.batchID || transfer.batchID || "";
+	  transfer.batchIndex = Number.isSafeInteger(capability.batchIndex) ? capability.batchIndex : (transfer.batchIndex || 0);
+	  transfer.batchCount = Number.isSafeInteger(capability.batchCount) ? capability.batchCount : (transfer.batchCount || 0);
       transitionTransfer(transfer, "uploading");
       beginTransferMeasurement(transfer);
       updateTransferGroup(transfer.groupID, false);
       scheduleTransferStructureRender();
-      await sendFileData(transfer, capability);
-      await api(`/api/v1/uploads/${encodeURIComponent(capability.uploadID)}/complete`, { method: "POST", body: { path: joinPath(transfer.directory, transfer.name), size, mediaType }, signal: transfer.controller.signal });
+	  const fingerprintPromise = transfer.md5 && transfer.crc32c
+		? Promise.resolve({ md5: transfer.md5, crc32c: transfer.crc32c })
+		: fingerprintUploadFile(transfer);
+	  await sendFileData(transfer, capability);
+	  const fingerprint = await fingerprintPromise;
+	  transfer.md5 = fingerprint.md5;
+	  transfer.crc32c = fingerprint.crc32c;
       recordTransferProgress(transfer, size);
       transfer.retryCount = 0;
       transfer.nextRetryAt = 0;
-      transitionTransfer(transfer, "complete");
-      if (!transfer.groupID) announce(`${transfer.name} uploaded.`);
-      if (transfer.directory === state.currentDirectory) await loadDirectory(state.currentDirectory);
+	  transfer.awaitingCompletion = true;
+	  transfer.error = "Finalizing uploaded data.";
+	  queueTransferPersistence(transfer);
     } catch (error) {
       if (error.name === "AbortError" && transfer.suspendedByLogout) {
         return;
       } else if (error.name === "AbortError" && transfer.cancelRequested) {
         transitionTransfer(transfer, "cancelled", "Cancelled", "cancelled");
+      } else if (await reconcileUploadAdmissionConflict(transfer, error)) {
+        return;
       } else if (transferFailureIsRetryable(error)) {
         scheduleTransferRetry(transfer, error);
       } else {
@@ -769,6 +1031,68 @@
       scheduleTransferStructureRender();
     }
   }
+
+	function completionCandidates() {
+	  const ready = state.transfers.filter((transfer) => transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c && !transfer.cancelRequested && transfer.state === "uploading");
+	  const persistedKey = ready.find((transfer) => transfer.completionBatchKey)?.completionBatchKey || "";
+	  return ready.filter((transfer) => !persistedKey || transfer.completionBatchKey === persistedKey).slice(0, 10000);
+	}
+
+	function scheduleUploadCompletionRetry(delay = 1000) {
+	  if (state.uploadCompletionTimer) return;
+	  state.uploadCompletionTimer = window.setTimeout(() => {
+		state.uploadCompletionTimer = 0;
+		flushUploadCompletions();
+	  }, delay);
+	}
+
+	async function flushUploadCompletions() {
+	  if (!navigator.onLine || state.uploadCompletionActive) return;
+	  const readyCount = state.transfers.reduce((count, transfer) => count + (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c && !transfer.cancelRequested ? 1 : 0), 0);
+	  if (state.activeTransfers !== 0 && readyCount < 10000) return;
+	  const transfers = completionCandidates();
+	  if (!transfers.length) return;
+	  state.uploadCompletionActive = true;
+	  const existingKey = transfers.find((transfer) => transfer.completionBatchKey)?.completionBatchKey || "";
+	  const batchKey = existingKey || idempotencyKey();
+	  for (const transfer of transfers) transfer.completionBatchKey = batchKey;
+	  await Promise.all(transfers.map(persistTransferItem));
+	  try {
+		const result = await api("/api/v1/uploads/batch/complete", {
+		  method: "POST", headers: { "Idempotency-Key": batchKey },
+		  body: { uploads: transfers.map((transfer) => ({ uploadID: transfer.uploadID, crc32c: transfer.crc32c })) },
+		});
+		if (!result || !Array.isArray(result.entries) || result.entries.length !== transfers.length) throw new Error("Upload completion returned an invalid response.");
+		for (const transfer of transfers) {
+		  transfer.awaitingCompletion = false;
+		  transfer.completionBatchKey = "";
+		  transfer.retryCount = 0;
+		  transfer.nextRetryAt = 0;
+		  transitionTransfer(transfer, "complete");
+		  queueUploadDirectoryRefresh(transfer.directory);
+		  if (!transfer.groupID) announce(`${transfer.name} uploaded.`);
+		}
+	  } catch (error) {
+		if (transferFailureIsRetryable(error)) {
+		  for (const transfer of transfers) {
+			transfer.retryCount = (transfer.retryCount || 0) + 1;
+			transfer.error = "Finalization will retry automatically.";
+			queueTransferPersistence(transfer);
+		  }
+		  scheduleUploadCompletionRetry(Math.min(60000, 1000 * (2 ** Math.min(6, Math.max(...transfers.map((transfer) => transfer.retryCount))))));
+		} else {
+		  for (const transfer of transfers) transitionTransfer(transfer, "failed", friendlyError(error, "Uploaded data could not be finalized."), error instanceof APIError ? error.code : "terminal");
+		  announce(`${transfers.length} uploaded files could not be finalized.`, true);
+		}
+	  } finally {
+		state.uploadCompletionActive = false;
+		for (const transfer of transfers) updateTransferGroup(transfer.groupID, false);
+		rebuildTransferProjection();
+		renderTransfers();
+		flushUploadDirectoryRefresh();
+		if (!state.uploadCompletionTimer) flushUploadCompletions();
+	  }
+	}
 
   async function sendFileData(transfer, capability) {
     let offset = transfer.confirmed;
@@ -836,9 +1160,15 @@
 
   async function cancelTransfer(transfer) {
     transfer.cancelRequested = true;
+    cancelUploadFingerprint(transfer);
+    if (!transfer.groupID) state.transferPlanControllers.get(transfer.id)?.abort();
+    if (!transfer.groupID) window.clearTimeout(state.uploadPlanRetryTimers.get(transfer.id));
+    if (!transfer.groupID) state.uploadPlanRetryTimers.delete(transfer.id);
     if (transfer.controller) transfer.controller.abort();
     if (transfer.uploadID) {
-      try { await api(`/api/v1/uploads/${encodeURIComponent(transfer.uploadID)}`, { method: "DELETE", body: {} }); } catch { /* already expired or complete */ }
+	  const body = { uploadIDs: [transfer.uploadID] };
+	  if (transfer.batchID && transfer.batchCount === 1) body.batchID = transfer.batchID;
+	  try { await api("/api/v1/uploads/batch", { method: "DELETE", headers: { "Idempotency-Key": `${transfer.id}-cancel` }, body }); } catch { /* already expired or complete */ }
     }
     transitionTransfer(transfer, "cancelled", "Cancelled", "cancelled");
     rebuildTransferProjection();
@@ -850,7 +1180,8 @@
     if (!groupID) return;
     const group = state.transferGroups.get(groupID);
     if (!group || group.state === "preparing") return;
-    const summary = group.transferSummary || aggregateTransferSummary(group.transferIDs.map((id) => state.transferByID.get(id)).filter(Boolean));
+    const groupTransfers = group.transferIDs.map((id) => state.transferByID.get(id)).filter(Boolean);
+    const summary = group.transferSummary || aggregateTransferSummary(groupTransfers);
     group.transferSummary = summary;
     if (group.cancelled) group.state = "cancelled";
     else if (group.discoveryDone !== false && summary.totalCount > 0 && summary.counts.complete === summary.totalCount) group.state = "complete";
@@ -862,33 +1193,51 @@
     persistTransferGroup(group);
     if (group.state === "complete" && !group.refreshed) {
       group.refreshed = true;
-      if (state.currentDirectory === group.baseDirectory) loadDirectory(group.baseDirectory);
-      if (notify) announce(`${group.name} uploaded with ${transfers.length} files.`);
+      queueUploadDirectoryRefresh(group.baseDirectory);
+      if (notify) announce(`${group.name} uploaded with ${summary.totalCount} files.`);
     }
     if (group.state === "failed" && !group.failureAnnounced) {
       group.failureAnnounced = true;
-      if (notify) announce(`${group.name} has ${transfers.filter((transfer) => transfer.state === "failed").length} failed uploads.`, true);
+      if (notify) announce(`${group.name} has ${groupTransfers.filter((transfer) => transfer.state === "failed").length} failed uploads.`, true);
     }
   }
 
   async function cancelTransferGroup(group) {
     group.cancelled = true;
     group.state = "cancelled";
+    state.transferPlanControllers.get(group.id)?.abort();
+    window.clearTimeout(state.uploadPlanRetryTimers.get(group.id));
+    state.uploadPlanRetryTimers.delete(group.id);
     const cancelled = state.transfers.filter((item) => item.groupID === group.id && ["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(item.state));
-    const uploadIDs = [];
+	const cancellableUploads = [];
     for (const transfer of cancelled) {
       transfer.cancelRequested = true;
+      cancelUploadFingerprint(transfer);
       if (transfer.controller) transfer.controller.abort();
-      if (transfer.uploadID) uploadIDs.push(transfer.uploadID);
+	  if (transfer.uploadID) cancellableUploads.push(transfer);
       window.clearTimeout(state.transferRetryTimers.get(transfer.id));
       state.transferRetryTimers.delete(transfer.id);
       transitionTransfer(transfer, "cancelled", "Cancelled", "cancelled");
     }
     await Promise.all(cancelled.map(persistTransferItem));
     await persistTransferGroup(group);
-    if (!group.fixture) await Promise.all(uploadIDs.map(async (uploadID) => {
-      try { await api(`/api/v1/uploads/${encodeURIComponent(uploadID)}`, { method: "DELETE", body: {} }); } catch { /* already terminal */ }
-    }));
+	if (!group.fixture && cancellableUploads.length) {
+	  const grouped = new Map();
+	  for (const transfer of cancellableUploads) {
+		const key = transfer.batchID || "legacy";
+		if (!grouped.has(key)) grouped.set(key, []);
+		grouped.get(key).push(transfer);
+	  }
+	  await Promise.all([...grouped.entries()].map(async ([batchID, transfers], index) => {
+		const body = { uploadIDs: transfers.map((transfer) => transfer.uploadID) };
+		const count = transfers[0]?.batchCount || 0;
+		const indices = new Set(transfers.map((transfer) => transfer.batchIndex));
+		const completeBatch = batchID !== "legacy" && count === transfers.length && indices.size === count
+		  && transfers.every((transfer) => transfer.batchID === batchID && transfer.batchCount === count && transfer.batchIndex >= 0 && transfer.batchIndex < count);
+		if (completeBatch) body.batchID = batchID;
+		try { await api("/api/v1/uploads/batch", { method: "DELETE", headers: { "Idempotency-Key": `${group.id}-cancel-${index}` }, body }); } catch { /* already terminal */ }
+	  }));
+	}
     rebuildTransferProjection();
     renderTransfers();
     byID("transfer-live").textContent = `${cancelled.length} transfers cancelled.`;
@@ -913,12 +1262,21 @@
     group.refreshed = false;
     group.failureAnnounced = false;
     for (const transfer of state.transfers.filter((item) => item.groupID === group.id && ["failed", "cancelled"].includes(item.state))) {
+	  if (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c) {
+		transfer.cancelRequested = false;
+		transfer.state = "uploading";
+		transfer.error = "Finalizing uploaded data.";
+		transfer.errorCode = "";
+		queueTransferPersistence(transfer);
+		continue;
+	  }
       if (transfer.state === "cancelled" || ["expired", "aborted"].includes(transfer.errorCode)) {
         renewTransferIdentity(transfer);
         transfer.confirmed = 0;
         transfer.uploadID = "";
       }
-      transfer.state = "queued";
+      transfer.cancelRequested = false;
+      transfer.state = transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued";
       transfer.error = "";
       transfer.speedBps = 0;
       transfer.lastProgressAt = 0;
@@ -940,20 +1298,33 @@
       renderTransfers();
       return;
     }
-    group.state = "queued";
+    group.state = state.transfers.some((item) => item.groupID === group.id && item.planPhase && item.planPhase !== "done") ? "preparing" : "queued";
     persistTransferGroup(group);
     rebuildTransferProjection();
     renderTransfers();
+    resumeUploadPlans();
     pumpTransfers();
   }
 
   function retryTransfer(transfer) {
+	if (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c) {
+	  transfer.cancelRequested = false;
+	  transfer.state = "uploading";
+	  transfer.error = "Finalizing uploaded data.";
+	  transfer.errorCode = "";
+	  queueTransferPersistence(transfer);
+	  rebuildTransferProjection();
+	  renderTransfers();
+	  flushUploadCompletions();
+	  return;
+	}
     if (transfer.state === "cancelled" || ["expired", "aborted"].includes(transfer.errorCode)) {
       renewTransferIdentity(transfer);
       transfer.confirmed = 0;
       transfer.uploadID = "";
     }
-    transfer.state = transfer.fixture ? "uploading" : "queued";
+    transfer.cancelRequested = false;
+    transfer.state = transfer.fixture ? "uploading" : transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued";
     transfer.error = "";
     transfer.speedBps = transfer.fixture ? 4 * (1 << 20) : 0;
     transfer.lastProgressAt = 0;
@@ -962,7 +1333,10 @@
     transfer.retryCount = 0;
     transfer.nextRetryAt = 0;
     queueTransferPersistence(transfer);
-    if (!transfer.fixture) pumpTransfers();
+    if (!transfer.fixture) {
+      resumeUploadPlans();
+      pumpTransfers();
+    }
     rebuildTransferProjection();
     renderTransfers();
   }
@@ -971,6 +1345,13 @@
     const failed = state.transfers.filter((transfer) => transfer.state === "failed" && transferSourceAvailable(transfer));
     const failedGroupIDs = new Set(failed.map((transfer) => transfer.groupID).filter(Boolean));
     for (const transfer of failed) {
+	  if (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c) {
+		transfer.retryCount = 0;
+		transfer.nextRetryAt = 0;
+		transfer.cancelRequested = false;
+		transitionTransfer(transfer, "uploading", "Finalizing uploaded data.");
+		continue;
+	  }
       if (["expired", "aborted"].includes(transfer.errorCode)) {
         renewTransferIdentity(transfer);
         transfer.confirmed = 0;
@@ -978,19 +1359,21 @@
       }
       transfer.retryCount = 0;
       transfer.nextRetryAt = 0;
-      transitionTransfer(transfer, transfer.fixture ? "uploading" : "queued");
+      transfer.cancelRequested = false;
+      transitionTransfer(transfer, transfer.fixture ? "uploading" : transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued");
       if (transfer.fixture) transfer.speedBps = 4 * (1 << 20);
     }
     for (const group of state.transferGroups.values()) {
       if (failedGroupIDs.has(group.id)) {
         group.cancelled = false;
         group.failureAnnounced = false;
-        group.state = "queued";
+        group.state = failed.some((transfer) => transfer.groupID === group.id && transfer.planPhase && transfer.planPhase !== "done") ? "preparing" : "queued";
         persistTransferGroup(group);
       }
     }
     rebuildTransferProjection();
     renderTransfers();
+    resumeUploadPlans();
     pumpTransfers();
     showToast(failed.length ? `${failed.length} failed transfers returned to the queue.` : "No failed transfers can be retried without reconnecting their source.", failed.length ? "success" : "info");
   }
@@ -1005,11 +1388,13 @@
       const file = supplied.get(transfer.relativePath) || supplied.get(transfer.name);
       if (!file || file.size !== transferFileSize(transfer) || (transfer.lastModified && file.lastModified !== transfer.lastModified)) continue;
       transfer.file = file;
-      transitionTransfer(transfer, "queued");
+      resetUploadPlanForReconnectedSource(transfer);
+      transitionTransfer(transfer, transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued");
       connected += 1;
     }
     rebuildTransferProjection();
     renderTransfers();
+    resumeUploadPlans();
     pumpTransfers();
     showToast(`${connected} of ${candidates.length} transfer sources reconnected.`, connected === candidates.length ? "success" : "warning");
   }
@@ -1025,7 +1410,8 @@
         const file = await handle.getFile();
         if (file.size !== transferFileSize(transfer) || (transfer.lastModified && file.lastModified !== transfer.lastModified)) continue;
         transfer.file = file;
-        transitionTransfer(transfer, "queued");
+        resetUploadPlanForReconnectedSource(transfer);
+        transitionTransfer(transfer, transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued");
         connected += 1;
       } catch {
         // Explicit file selection below remains available when a stored handle
@@ -1035,6 +1421,7 @@
     const remaining = candidates.filter((transfer) => transfer.state === "needs-source");
     if (connected) {
       renderTransfers();
+      resumeUploadPlans();
       pumpTransfers();
     }
     if (!remaining.length) {
@@ -1131,7 +1518,7 @@
     const percent = transferPercent(transfer);
     let eta = "Waiting";
     if (transfer.state === "uploading") eta = transfer.speedBps > 0 ? formatDuration((total - confirmed) / transfer.speedBps) : "Calculating ETA";
-    else if (transfer.state === "preparing") eta = "Preparing";
+    else if (transfer.state === "preparing") eta = transfer.planPhase && transfer.planPhase !== "done" ? "Checking duplicates" : "Preparing";
     else if (transfer.state === "retry-wait") eta = transfer.nextRetryAt > Date.now() ? `Retry in ${formatDuration((transfer.nextRetryAt - Date.now()) / 1000)}` : "Retrying";
     else if (transfer.state === "paused") eta = "Offline";
     else if (transfer.state === "needs-source") eta = "Source needed";
@@ -1204,7 +1591,7 @@
     const tail = document.createElement("div");
     tail.className = "transfer-row-tail";
     if (transfers.some((transfer) => transfer.state === "needs-source")) tail.append(iconButton("folder-up", `Reconnect upload source for ${group.name}`, () => openTransferReconnect(group.id), "transfer-row-actions", "Reconnect source"));
-    if (["preparing", "queued", "uploading"].includes(group.state)) tail.append(iconButton("x", `Cancel folder upload ${group.name}`, () => cancelTransferGroup(group), "transfer-row-actions", "Cancel folder upload"));
+    if (["preparing", "queued", "uploading", "retry-wait", "paused"].includes(group.state)) tail.append(iconButton("x", `Cancel folder upload ${group.name}`, () => cancelTransferGroup(group), "transfer-row-actions", "Cancel folder upload"));
     if (["failed", "cancelled"].includes(group.state)) tail.append(iconButton("refresh", `Retry folder upload ${group.name}`, () => retryTransferGroup(group), "transfer-row-actions", "Retry folder upload"));
     const expanded = state.expandedTransferGroups.has(group.id);
     const disclosure = iconButton(expanded ? "chevron-up" : "chevron-down", `${expanded ? "Collapse" : "Expand"} upload group ${group.name}`, () => {
@@ -1220,7 +1607,10 @@
     header.append(text("strong", group.name, "transfer-row-main"), tail);
     const metrics = document.createElement("div");
     metrics.className = "transfer-row-metrics";
-    const metricText = group.state === "preparing" && !transfers.some((transfer) => transfer.state !== "queued")
+    const duplicatePlanning = transfers.some((transfer) => transfer.planPhase && transfer.planPhase !== "done" && !["cancelled", "failed"].includes(transfer.state));
+    const metricText = duplicatePlanning
+      ? `${summary.percent}% · Checking duplicates · ${formatRate(summary.speedBps)}`
+      : group.state === "preparing" && !transfers.some((transfer) => transfer.state !== "queued")
       ? `${summary.percent}% · Preparing · ${formatRate(summary.speedBps)}`
       : `${summary.percent}% · ${summary.eta} · ${formatRate(summary.speedBps)}`;
     metrics.append(
@@ -1470,7 +1860,10 @@
     const baseDirectory = "/Photography";
     let totalSize = 0;
     for (let index = 0; index < 2000; index += 1) {
-      const size = (1 + (index % 24)) * (1 << 20);
+      // Keep the four animated rows active beyond the longest instrumented E2E
+      // workflow. Small fixture files reached their ceiling before the focus-
+      // preservation assertion could observe a progress-only render.
+      const size = index < 4 ? (8 + index) * (2 ** 30) : (1 + (index % 24)) * (1 << 20);
       let transferState = "queued";
       if (index < 4) transferState = "uploading";
       else if (index < 12) transferState = "failed";
@@ -1522,6 +1915,7 @@
       cancelled: false,
       failureAnnounced: false,
       discoveryDone: true,
+      preparedDirectories: new Set(),
       fixture: true,
     });
     state.transferFilter = "current";

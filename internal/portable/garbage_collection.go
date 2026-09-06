@@ -10,6 +10,8 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
+var errGarbageCollectionContended = errors.New("garbage collection session CAS contended")
+
 const (
 	garbageCollectionSessionSchema = "garbage-collection-session-v1"
 	garbageCollectionMarkSchema    = "garbage-collection-mark-v1"
@@ -27,6 +29,25 @@ type garbageCollectionSessionSnapshot struct {
 }
 
 func (e *Engine) runGarbageCollection(ctx context.Context, checkpointID string, gateEpoch uint64, gateVersion string) error {
+	for range 32 {
+		err := e.runGarbageCollectionAttempt(ctx, checkpointID, gateEpoch, gateVersion)
+		if !errors.Is(err, errGarbageCollectionContended) {
+			return err
+		}
+		// Older binaries removed a completed session. Accept that historical
+		// terminal state, but current writers retain the terminal session and
+		// marks so a lagging sweeper can never mistake cleaned-up marks for
+		// unreachable authority.
+		if _, getErr := e.backend.Get(ctx, storageformat.GarbageCollectionSessionKey(checkpointID)); errors.Is(getErr, domain.ErrNotFound) {
+			return nil
+		} else if getErr != nil {
+			return getErr
+		}
+	}
+	return domain.WrapError(domain.ErrorUnavailable, "garbage collection session remained contended", errGarbageCollectionContended)
+}
+
+func (e *Engine) runGarbageCollectionAttempt(ctx context.Context, checkpointID string, gateEpoch uint64, gateVersion string) error {
 	session, err := e.readOrCreateGarbageCollectionSession(ctx, checkpointID, gateEpoch, gateVersion)
 	if err != nil {
 		return err
@@ -52,17 +73,12 @@ func (e *Engine) runGarbageCollection(ctx context.Context, checkpointID string, 
 	if session.value.Phase != garbageCollectionCleanup {
 		return domain.NewError(domain.ErrorInvalid, "invalid garbage collection phase")
 	}
-	if err := visitObjectPages(ctx, e.backend, storageformat.GarbageCollectionMarkPrefix(checkpointID), func(info objectstore.ObjectInfo) error {
-		if err := e.backend.Delete(ctx, info.Key, objectstore.DeleteCondition{Version: info.Version}); err != nil && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
-			return err
-		}
-		return nil
-	}); err != nil {
-		return err
-	}
-	if err := e.backend.Delete(ctx, session.object.Key, objectstore.DeleteCondition{Version: session.object.Version}); err != nil && !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrPreconditionFailed) {
-		return err
-	}
+	// The terminal marks are deliberately durable migration residue. Deleting
+	// them here races with a lagging replica that already read the sweeping
+	// phase: that replica can otherwise interpret the missing marks as proof
+	// that live objects are garbage. Checkpoints exclude maintenance keys, and
+	// a future epoch may collect these records only after proving no supported
+	// predecessor can still hold a sweeping snapshot.
 	return nil
 }
 
@@ -110,7 +126,7 @@ func (e *Engine) updateGarbageCollectionSession(ctx context.Context, session gar
 	version, err := e.backend.Put(ctx, session.object.Key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: session.object.Version})
 	if err != nil {
 		if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrNotFound) {
-			return garbageCollectionSessionSnapshot{}, domain.NewError(domain.ErrorUnavailable, "garbage collection session changed concurrently")
+			return garbageCollectionSessionSnapshot{}, domain.WrapError(domain.ErrorUnavailable, "garbage collection session changed concurrently", errGarbageCollectionContended)
 		}
 		return garbageCollectionSessionSnapshot{}, err
 	}
@@ -221,11 +237,12 @@ func (e *Engine) markGarbageCollectionRoots(ctx context.Context, session storage
 
 func (s *FileStore) markDirectoryTree(ctx context.Context, session storageformat.GarbageCollectionSession, scope domain.Scope, directoryID string, snapshot directorySnapshot, visiting map[string]struct{}) error {
 	rootKey := storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), directoryID)
-	if _, cycle := visiting[rootKey.String()]; cycle {
+	visitKey := rootKey.String() + "\x00" + snapshot.manifestID
+	if _, cycle := visiting[visitKey]; cycle {
 		return domain.NewError(domain.ErrorInvalid, "directory cycle encountered during garbage collection")
 	}
-	visiting[rootKey.String()] = struct{}{}
-	defer delete(visiting, rootKey.String())
+	visiting[visitKey] = struct{}{}
+	defer delete(visiting, visitKey)
 	if snapshot.manifestID != "" {
 		if snapshot.manifest.EntryCount > 0 {
 			reference, err := s.directoryIndexRoot(ctx, scope, directoryID, snapshot.manifest)
@@ -245,12 +262,17 @@ func (s *FileStore) markDirectoryTree(ctx context.Context, session storageformat
 				}
 			}
 		}
-		if snapshot.manifest.RecursiveFileCount > 0 {
+		if snapshot.manifest.SchemaVersion == 2 && snapshot.manifest.RecursiveFileCount > 0 {
 			contentRoot, err := s.directoryContentIndexRoot(ctx, scope, directoryID, snapshot.manifest)
 			if err != nil {
 				return err
 			}
 			if err := s.markDirectoryContentIndexTree(ctx, session, scope, directoryID, contentRoot, make(map[string]struct{})); err != nil {
+				return err
+			}
+		}
+		if snapshot.manifest.SchemaVersion == 3 {
+			if err := s.markLazyDirectoryContentSources(ctx, session, scope.UserID(), snapshot.manifest, visiting); err != nil {
 				return err
 			}
 		}
@@ -260,6 +282,33 @@ func (s *FileStore) markDirectoryTree(ctx context.Context, session storageformat
 		}
 	}
 	return s.engine.ensureGarbageCollectionMark(ctx, session, garbageCollectionStateRole, rootKey)
+}
+
+func (s *FileStore) markLazyDirectoryContentSources(ctx context.Context, session storageformat.GarbageCollectionSession, userID domain.UserID, manifest storageformat.DirectoryManifest, visiting map[string]struct{}) error {
+	mark := func(area, directoryID, manifestID string) error {
+		scope, err := storedOperationScope(userID, area)
+		if err != nil {
+			return err
+		}
+		value, err := s.readDirectoryManifest(ctx, scope, directoryID, manifestID)
+		if err != nil {
+			return err
+		}
+		return s.markDirectoryTree(ctx, session, scope, directoryID, directorySnapshot{exists: true, manifestID: manifestID, manifest: value, recursiveBytes: value.RecursiveBytes, recursiveFileCount: value.RecursiveFileCount, contentAccumulator: value.ContentAccumulator, contentDigest: value.ContentDigest}, visiting)
+	}
+	if manifest.ContentBase != nil {
+		if err := mark(manifest.ContentBase.Area, manifest.ContentBase.DirectoryID, manifest.ContentBase.ManifestID); err != nil {
+			return err
+		}
+	}
+	for _, delta := range manifest.ContentDeltas {
+		if delta.Entry == nil {
+			if err := mark(delta.Area, delta.DirectoryID, delta.ManifestID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (s *FileStore) markDirectoryContentIndexTree(ctx context.Context, session storageformat.GarbageCollectionSession, scope domain.Scope, directoryID string, reference storageformat.DirectoryContentIndexChild, visiting map[string]struct{}) error {
@@ -336,14 +385,18 @@ func (s *FileStore) markDirectoryIndexTree(ctx context.Context, session storagef
 			}
 			continue
 		}
-		child, err := s.readDirectoryMetadata(ctx, scope, entry.DirectoryID, false)
+		childScope, err := directoryEntryStorageScope(scope, entry)
+		if err != nil {
+			return err
+		}
+		child, err := s.readDirectoryEntryMetadata(ctx, childScope, entry)
 		if err != nil {
 			return err
 		}
 		if child.recursiveBytes != entry.Size || child.recursiveFileCount != entry.FileCount || child.contentDigest != entry.ContentDigest {
 			return domain.NewError(domain.ErrorInvalid, "directory aggregate mismatch during garbage collection")
 		}
-		if err := s.markDirectoryTree(ctx, session, scope, entry.DirectoryID, child, directoryVisiting); err != nil {
+		if err := s.markDirectoryTree(ctx, session, childScope, entry.DirectoryID, child, directoryVisiting); err != nil {
 			return err
 		}
 	}

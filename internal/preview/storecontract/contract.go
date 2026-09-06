@@ -110,6 +110,55 @@ func Run(t *testing.T, factory Factory) {
 		}
 	})
 
+	t.Run("ready projection batches immutable capabilities without weakening bindings", func(t *testing.T) {
+		harness := factory(t)
+		if err := harness.Store.Validate(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		binding := testBinding(t, 0x25)
+		artifact := testArtifact("ready-generation", 256, preview.OnePixelWebP())
+		if err := harness.Store.Commit(context.Background(), binding, claimGeneration(t, harness, binding, artifact.GenerationID), artifact); err != nil {
+			t.Fatal(err)
+		}
+		scope := sha256.Sum256([]byte("ready-directory"))
+		selection := preview.ReadySelection{CacheScope: base64.RawURLEncoding.EncodeToString(scope[:]), Binding: binding}
+		before, err := harness.Store.ResolveReady(context.Background(), []preview.ReadySelection{selection})
+		if err != nil || len(before) != 1 || before[0] != nil {
+			t.Fatalf("ResolveReady before publication = %+v, %v", before, err)
+		}
+		if err := harness.Store.RecordReady(context.Background(), selection, artifact.Metadata()); err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := harness.Store.ResolveReady(context.Background(), []preview.ReadySelection{selection})
+		if err != nil || len(resolved) != 1 || resolved[0] == nil || *resolved[0] != artifact.Metadata() {
+			t.Fatalf("ResolveReady = %+v, %v", resolved, err)
+		}
+		capability, err := harness.Store.CreateKnownDownload(context.Background(), binding, *resolved[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := harness.Client.Get(capability.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, readErr := io.ReadAll(response.Body)
+		closeErr := response.Body.Close()
+		if readErr != nil || closeErr != nil || response.StatusCode != http.StatusOK || !bytes.Equal(body, artifact.Bytes) {
+			t.Fatalf("known immutable capability = status %d body %q read=%v close=%v", response.StatusCode, body, readErr, closeErr)
+		}
+		otherScope := sha256.Sum256([]byte("other-directory"))
+		selection.CacheScope = base64.RawURLEncoding.EncodeToString(otherScope[:])
+		isolated, err := harness.Store.ResolveReady(context.Background(), []preview.ReadySelection{selection})
+		if err != nil || isolated[0] != nil {
+			t.Fatalf("cross-scope ready result = %+v, %v", isolated, err)
+		}
+		wrong := artifact.Metadata()
+		wrong.Variant = 512
+		if err := harness.Store.RecordReady(context.Background(), selection, wrong); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("mismatched ready metadata error = %v", err)
+		}
+	})
+
 	t.Run("corrupt WebP and expired capabilities fail closed", func(t *testing.T) {
 		harness := factory(t)
 		if err := harness.Store.Validate(context.Background()); err != nil {

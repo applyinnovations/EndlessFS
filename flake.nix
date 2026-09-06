@@ -6,7 +6,7 @@
     # The canonical vuln.go.dev hostname rejects GitHub-hosted runner IPs;
     # pin the official bulk object by its immutable GCS generation as well as
     # the Nix content hash recorded in flake.lock.
-    url = "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1787088262759230";
+    url = "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1788377541191635";
     flake = false;
   };
 
@@ -171,6 +171,7 @@
         done
         yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "coverage" and .podTemplate.automountServiceAccountToken == false)' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .taskRef.params[] | select(.name == "name" and .value == "nix-run-v2")' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "nix-checks") | .runAfter | (length == 1 and .[0] == "fast-checks")' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .runAfter[] | select(. == "fast-checks")' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .runAfter[] | select(. == "nix-checks")' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "publish") | .podTemplate.hostUsers == false' .tekton/endlessfs-container.yaml >/dev/null
@@ -223,6 +224,46 @@
         go test ./internal/logging -run '^$' -fuzz '^FuzzStructuredLogRedaction$' -fuzztime "$fuzztime"
         go test ./internal/theme -run '^$' -fuzz '^FuzzThemeBoundaries$' -fuzztime "$fuzztime"
         go test ./internal/preview/imagegen -run '^$' -fuzz '^FuzzGeneratorMalformed$' -fuzztime "$fuzztime"
+      '';
+      raceTestCommand = ''
+        # The migration transport matrix deterministically restarts the entire
+        # schema chain at every provider boundary. The portable package also
+        # contains the remaining migration matrix and every ordinary state
+        # transition test. Give the exhaustive transport matrix exclusive
+        # resources, then run the two disjoint portable remainder sets alongside
+        # all other packages. This avoids both a single serial package schedule
+        # and resource contention between the three expensive portable sets.
+        # Every repository test still runs exactly once and every shard must
+        # succeed.
+        exhaustive_migration_test='^TestMigrationRecoversFromEveryObjectTransportInterruption$'
+        portable_migration_tests='^TestMigration'
+        other_packages=()
+        while IFS= read -r package; do
+          if [[ "$package" != */internal/portable ]]; then
+            other_packages+=("$package")
+          fi
+        done < <(go list ./...)
+
+        # This matrix saturates a local builder by itself. Running it beside the
+        # other portable shards makes every process slower without increasing
+        # test coverage, so complete it before admitting the parallel phase.
+        go test -race -timeout=30m -count=1 ./internal/portable -run "$exhaustive_migration_test"
+
+        race_pids=()
+        go test -race -timeout=30m -count=1 ./internal/portable -run "$portable_migration_tests" -skip "$exhaustive_migration_test" &
+        race_pids+=("$!")
+        go test -race -timeout=30m -count=1 ./internal/portable -skip "$portable_migration_tests" &
+        race_pids+=("$!")
+        go test -race -timeout=30m -count=1 "''${other_packages[@]}" &
+        race_pids+=("$!")
+
+        race_status=0
+        for race_pid in "''${race_pids[@]}"; do
+          if ! wait "$race_pid"; then
+            race_status=1
+          fi
+        done
+        test "$race_status" -eq 0
       '';
     in
     {
@@ -649,7 +690,7 @@
               exit 2
             fi
             export ENDLESSFS_MIGRATION_FIXTURE_PRODUCER_COMMIT="$1"
-            exec go test ./cmd/endlessfs -run '^TestGenerateSchema005MigrationFixtures$' -count=1
+            exec go test ./cmd/endlessfs -run '^TestGenerateSchema011MigrationFixtures$' -count=1
           '';
 
           fmt =
@@ -688,7 +729,7 @@
           '';
 
           test = goTask "endlessfs-test" ''
-            go test ./...
+            go test -timeout=30m ./...
           '';
 
           test-unit = goTask "endlessfs-test-unit" ''
@@ -702,6 +743,11 @@
           test-contract = goTask "endlessfs-test-contract" ''
             go test ./... -run '^TestContract'
           '';
+
+          test-provider-budget = goTask "endlessfs-test-provider-budget" ''
+            go test ./internal/providerbudget ./internal/objectstore/budgettest ./internal/objectstore/gcs -count=1
+            go test ./internal/portable ./internal/drive ./internal/identity ./internal/theme ./internal/httpapi ./internal/preview/... -run 'ProviderBudget' -count=1
+          '';
           test-migration = mkTask "endlessfs-test-migration" (goTools ++ [ pkgs.gawk ]) ''
             export CGO_ENABLED=0
             export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
@@ -712,8 +758,10 @@
             fi
             profile="$(mktemp "''${TMPDIR:-/tmp}/endlessfs-migration-coverage.XXXXXX")"
             trap 'rm -f "$profile"' EXIT
-            go test ./internal/portable ./cmd/endlessfs \
-              -run '(Migrat|StorageSchema|HistoricalRelease)' -count=1 \
+            # Run both owning packages in full. A name regex previously omitted
+            # migration implementations and semantic startup tests while still
+            # reporting a passing percentage over a partial production set.
+            go test -timeout=30m ./internal/portable ./cmd/endlessfs -count=1 \
               -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
             gawk -v only_group=migration -f tools/coverage.awk "$profile"
           '';
@@ -781,7 +829,7 @@
                 cd "$coverage_root/source"
                 export GOFLAGS=-mod=vendor
                 profile="$coverage_root/endlessfs-coverage.out"
-                go test ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
+                go test -timeout=30m ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
                 if [ -n "''${ENDLESSFS_COVERAGE_PROFILE:-}" ]; then
                   install -m 0644 "$profile" "$ENDLESSFS_COVERAGE_PROFILE"
                 fi
@@ -792,7 +840,7 @@
             export CGO_ENABLED=1
             export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
             export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
-            go test -race ./...
+            ${raceTestCommand}
           '';
 
           test-fuzz = goTask "endlessfs-test-fuzz" ''
@@ -1033,14 +1081,17 @@
           goCheck =
             name: command: tools:
             goCheckWithSource name testSource command tools;
-          testSuite = goCheck "tests" "go test ./..." [ ];
+          testSuite = goCheck "tests" "go test -timeout=30m ./..." [ ];
           migrationCheck = goCheck "migration" ''
             profile="$TMPDIR/migration-coverage.out"
-            go test ./internal/portable ./cmd/endlessfs \
-              -run '(Migrat|StorageSchema|HistoricalRelease)' -count=1 \
+            go test -timeout=30m ./internal/portable ./cmd/endlessfs -count=1 \
               -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
             gawk -v only_group=migration -f tools/coverage.awk "$profile"
           '' [ pkgs.gawk ];
+          providerEconomicsCheck = goCheck "provider-economics" ''
+            go test ./internal/providerbudget ./internal/objectstore/budgettest ./internal/objectstore/gcs -count=1
+            go test ./internal/portable ./internal/drive ./internal/preview/... -run 'ProviderBudget' -count=1
+          '' [ ];
           e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
           coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
           publishContainerPolicy =
@@ -1070,6 +1121,40 @@
                   ${self.apps.${system}.test-coverage.program}; do
                   rg --quiet '^export CGO_ENABLED=0$' "$program"
                 done
+                for program in \
+                  ${self.apps.${system}.test.program} \
+                  ${self.apps.${system}.test-migration.program} \
+                  ${self.apps.${system}.test-coverage.program}; do
+                  rg --fixed-strings --quiet 'go test -timeout=30m' "$program" || {
+                    echo "long-running Go test gate must use the explicit 30-minute process deadline: $program" >&2
+                    exit 1
+                  }
+                done
+                race_program=${self.apps.${system}.test-race.program}
+                for required in \
+                  "portable_migration_tests='^TestMigration'" \
+                  'if [[ "$package" != */internal/portable ]]' \
+                  'go test -race -timeout=30m -count=1 ./internal/portable -run "$exhaustive_migration_test"' \
+                  'go test -race -timeout=30m -count=1 ./internal/portable -run "$portable_migration_tests" -skip "$exhaustive_migration_test"' \
+                  'go test -race -timeout=30m -count=1 ./internal/portable -skip "$portable_migration_tests"' \
+                  'go test -race -timeout=30m -count=1 "''${other_packages[@]}"' \
+                  'for race_pid in "''${race_pids[@]}"' \
+                  'test "$race_status" -eq 0'; do
+                  rg --fixed-strings --quiet "$required" "$race_program" || {
+                    echo "race gate must retain the fail-closed portable-package sharding contract: $required" >&2
+                    exit 1
+                  }
+                done
+                test "$(rg --fixed-strings --count 'race_pids+=("$!")' "$race_program")" -eq 3 || {
+                  echo "race gate must wait for exactly three parallel remainder shards" >&2
+                  exit 1
+                }
+                if rg --fixed-strings --quiet \
+                  'go test -race -timeout=30m -count=1 ./internal/portable -run "$exhaustive_migration_test" &' \
+                  "$race_program"; then
+                  echo "race gate must give the exhaustive transport matrix exclusive resources" >&2
+                  exit 1
+                fi
                 rg --fixed-strings --quiet 'FONTCONFIG_FILE' ${headlessBrowser}/bin/chrome-headless-shell
                 touch "$out"
               '';
@@ -1112,7 +1197,10 @@
                 ${pipelinePolicyCommand}
                 touch "$out"
               '';
-          raceCheck = goCheck "race" "CGO_ENABLED=1 go test -race ./..." [ pkgs.stdenv.cc ];
+          raceCheck = goCheck "race" ''
+            export CGO_ENABLED=1
+            ${raceTestCommand}
+          '' [ pkgs.stdenv.cc ];
           fuzzCheck = goCheck "fuzz" ''
             fuzztime=1000x
             ${fuzzSmokeCommand}
@@ -1159,6 +1247,7 @@
           replica = testSuite;
           portability = testSuite;
           provider-verify = testSuite;
+          provider-economics = providerEconomicsCheck;
           preview = testSuite;
           theme = testSuite;
           race = raceCheck;

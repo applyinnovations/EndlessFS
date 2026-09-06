@@ -31,7 +31,16 @@ const (
 	FeaturePagedOperations      = "paged-operation-steps-v1"
 	FeatureStateIndexes         = "persistent-state-indexes-v1"
 	FeatureDirectoryIndexes     = "persistent-directory-indexes-v1"
+	FeatureNamespaceSnapshots   = "persistent-namespace-snapshots-v1"
 	FeatureResumableOperations  = "resumable-operation-preparation-v1"
+	FeatureUserDirectoryCatalog = "user-addressable-duplicate-directories-v1"
+	FeatureConsistencyDomains   = "consistency-domains-v1"
+	FeatureOwnerNamespaceGraph  = "owner-namespace-graph-v1"
+	FeatureDerivedProjections   = "rebuildable-derived-projections-v1"
+	FeatureTransactionalState   = "transactional-state-domains-v1"
+	FeatureStateConservation    = "state-conservation-v1"
+	FeaturePackedDomainPages    = "packed-consistency-domain-pages-v1"
+	FeatureUploadTransactions   = "upload-transactions-v1"
 )
 
 type Envelope struct {
@@ -91,7 +100,7 @@ func DecodeEnvelope(data []byte, key objectstore.Key, schema string, envelope *E
 		return err
 	}
 	if !bytes.Equal(payloadBytes, envelope.Payload) {
-		return domain.NewError(domain.ErrorInvalid, "non-canonical payload encoding")
+		return domain.NewError(domain.ErrorInvalid, "non-canonical payload encoding for "+key.String())
 	}
 	want := logicalVersion(key, envelope.Revision, payloadBytes)
 	if envelope.LogicalVersion != want {
@@ -202,6 +211,7 @@ type MutationIntent struct {
 	PrerequisiteRefs       []MutationObjectReference `json:"prerequisiteRefs,omitempty"`
 	Copies                 []MutationCopy            `json:"copies,omitempty"`
 	AbortUploads           []string                  `json:"abortUploads,omitempty"`
+	CompleteUploads        []string                  `json:"completeUploads,omitempty"`
 	RecoverOperationKey    string                    `json:"recoverOperationKey,omitempty"`
 	RecoverUploadKey       string                    `json:"recoverUploadKey,omitempty"`
 }
@@ -299,12 +309,18 @@ type DirectoryManifest struct {
 	ContentIndexRootID     string                   `json:"contentIndexRootID,omitempty"`
 	ContentIndexRootDigest string                   `json:"contentIndexRootDigest,omitempty"`
 	ContentSketch          []string                 `json:"contentSketch,omitempty"`
-	EntryCount             int                      `json:"entryCount"`
-	RecursiveBytes         int64                    `json:"recursiveBytes"`
-	RecursiveFileCount     int64                    `json:"recursiveFileCount"`
-	ContentAccumulator     string                   `json:"contentAccumulator,omitempty"`
-	ContentDigest          string                   `json:"contentDigest,omitempty"`
-	CreatedAt              time.Time                `json:"createdAt"`
+	// ContentBase and ContentDeltas form a persistent lazy content view. A
+	// namespace mutation can attach or detach an already-indexed subtree by
+	// recording one bounded source reference instead of rewriting every
+	// descendant occurrence. Exact readers merge the immutable base and deltas.
+	ContentBase        *DirectoryContentBase   `json:"contentBase,omitempty"`
+	ContentDeltas      []DirectoryContentDelta `json:"contentDeltas,omitempty"`
+	EntryCount         int                     `json:"entryCount"`
+	RecursiveBytes     int64                   `json:"recursiveBytes"`
+	RecursiveFileCount int64                   `json:"recursiveFileCount"`
+	ContentAccumulator string                  `json:"contentAccumulator,omitempty"`
+	ContentDigest      string                  `json:"contentDigest,omitempty"`
+	CreatedAt          time.Time               `json:"createdAt"`
 }
 
 type DirectorySortIndexRoot struct {
@@ -363,6 +379,21 @@ type DirectoryContentIndexNode struct {
 	Children      []DirectoryContentIndexChild `json:"children,omitempty"`
 }
 
+type DirectoryContentBase struct {
+	Area        string `json:"area"`
+	DirectoryID string `json:"directoryID"`
+	ManifestID  string `json:"manifestID"`
+}
+
+type DirectoryContentDelta struct {
+	Remove      bool                        `json:"remove"`
+	Area        string                      `json:"area,omitempty"`
+	DirectoryID string                      `json:"directoryID,omitempty"`
+	ManifestID  string                      `json:"manifestID,omitempty"`
+	Prefix      string                      `json:"prefix,omitempty"`
+	Entry       *DirectoryContentIndexEntry `json:"entry,omitempty"`
+}
+
 type DirectoryIndexChild struct {
 	NodeID             string `json:"nodeID"`
 	NodeDigest         string `json:"nodeDigest"`
@@ -394,12 +425,18 @@ type DirectoryEntry struct {
 	NameDigest  string           `json:"nameDigest"`
 	Kind        domain.EntryKind `json:"kind"`
 	DirectoryID string           `json:"directoryID,omitempty"`
-	BlobID      string           `json:"blobID,omitempty"`
-	Size        int64            `json:"size"`
-	FileCount   int64            `json:"fileCount,omitempty"`
-	MediaType   string           `json:"mediaType,omitempty"`
-	MD5         string           `json:"md5,omitempty"`
-	CRC32C      string           `json:"crc32c,omitempty"`
+	// ManifestID pins an immutable directory snapshot. Empty is the frozen
+	// schema-005 directory root selected at the schema-006 boundary.
+	ManifestID string `json:"manifestID,omitempty"`
+	// StorageArea records where a moved snapshot's metadata remains stored. It
+	// is independent from the entry's current live/trash namespace placement.
+	StorageArea string `json:"storageArea,omitempty"`
+	BlobID      string `json:"blobID,omitempty"`
+	Size        int64  `json:"size"`
+	FileCount   int64  `json:"fileCount,omitempty"`
+	MediaType   string `json:"mediaType,omitempty"`
+	MD5         string `json:"md5,omitempty"`
+	CRC32C      string `json:"crc32c,omitempty"`
 	// ContentDigest is present only for directories and identifies the exact
 	// relative subtree content independently of the directory's own name.
 	ContentDigest string `json:"contentDigest,omitempty"`
@@ -413,9 +450,10 @@ type DirectoryEntry struct {
 type UploadState string
 
 const (
-	UploadActive    UploadState = "active"
-	UploadCompleted UploadState = "completed"
-	UploadAborted   UploadState = "aborted"
+	UploadInitializing UploadState = "initializing"
+	UploadActive       UploadState = "active"
+	UploadCompleted    UploadState = "completed"
+	UploadAborted      UploadState = "aborted"
 )
 
 type UploadRecord struct {
@@ -484,6 +522,7 @@ type FileOperation struct {
 	IntentFingerprint string                    `json:"intentFingerprint,omitempty"`
 	Roots             []FileOperationRoot       `json:"roots"`
 	Prerequisites     []MutationObject          `json:"prerequisites,omitempty"`
+	PrerequisiteRefs  []MutationObjectReference `json:"prerequisiteRefs,omitempty"`
 	Copies            []MutationCopy            `json:"copies,omitempty"`
 	StepPageCount     uint64                    `json:"stepPageCount,omitempty"`
 	StepSetID         string                    `json:"stepSetID,omitempty"`
@@ -752,6 +791,35 @@ type GarbageCollectionSession struct {
 	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
+// GarbageCollectionPlan is a provider-independent, immutable deletion plan
+// bound to one closed-gate checkpoint. Provider-native versions are
+// deliberately absent: they are used only from the immediately preceding
+// listing in the process performing a conditional delete.
+type GarbageCollectionPlan struct {
+	SchemaVersion   int                      `json:"schemaVersion"`
+	CheckpointID    string                   `json:"checkpointID"`
+	GateEpoch       uint64                   `json:"gateEpoch"`
+	InventoryDigest string                   `json:"inventoryDigest"`
+	PageCount       uint64                   `json:"pageCount"`
+	EntryCount      uint64                   `json:"entryCount"`
+	EntriesDigest   string                   `json:"entriesDigest"`
+	Entries         []GarbageCollectionEntry `json:"entries,omitempty"`
+}
+
+type GarbageCollectionPlanPage struct {
+	SchemaVersion   int                      `json:"schemaVersion"`
+	CheckpointID    string                   `json:"checkpointID"`
+	GateEpoch       uint64                   `json:"gateEpoch"`
+	InventoryDigest string                   `json:"inventoryDigest"`
+	Index           uint64                   `json:"index"`
+	Entries         []GarbageCollectionEntry `json:"entries"`
+}
+
+type GarbageCollectionEntry struct {
+	Role string `json:"role"`
+	Key  string `json:"key"`
+}
+
 type GarbageCollectionMark struct {
 	SchemaVersion int    `json:"schemaVersion"`
 	CheckpointID  string `json:"checkpointID"`
@@ -784,6 +852,10 @@ func Digest(data []byte) string {
 	sum := sha256.Sum256(data)
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
+
+// ValidDigest reports whether value is in the canonical provider-independent
+// digest encoding used by storage-format bindings.
+func ValidDigest(value string) bool { return validDomainDigest(value) }
 
 func ValidateGate(gate WriteGate) error {
 	if gate.SchemaVersion != 1 || gate.Epoch == 0 || (gate.Mode != GateOpen && gate.Mode != GateClosing && gate.Mode != GateClosed) {

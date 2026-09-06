@@ -429,7 +429,7 @@ func TestParseTransferConfiguration(t *testing.T) {
 		t.Fatalf("transfer config = %+v", cfg)
 	}
 	public := cfg.Public()
-	if public.MaximumUploadInitializations != 100 || public.DefaultTransferConcurrency != 4 || public.MaximumTransferConcurrency != 8 {
+	if public.MaximumUploadInitializations != 100 || public.DefaultTransferConcurrency != 100 || public.MaximumTransferConcurrency != 100 {
 		t.Fatalf("public limits = %+v", public)
 	}
 }

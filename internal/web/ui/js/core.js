@@ -16,6 +16,9 @@
     transferGroups: new Map(),
     directoryPromises: new Map(),
     activeTransfers: 0,
+    uploadBatchActive: false,
+    uploadCompletionActive: false,
+    uploadCompletionTimer: 0,
     transferFilter: "current",
     transferSearch: "",
     transferRenderFrame: 0,
@@ -29,6 +32,8 @@
     transferRetryTimers: new Map(),
     transferFailureTimes: [],
     transferCircuitOpenUntil: 0,
+    uploadRefreshDirectories: new Set(),
+    uploadRefreshInFlight: false,
     transferLedger: null,
     transferLedgerOwner: "",
     transferLedgerWarningShown: false,
@@ -37,6 +42,11 @@
     transferReconnectGroup: null,
     transferSheetOpener: null,
     transferFixtureTimer: 0,
+    transferPlanControllers: new Map(),
+    uploadPlanRetryTimers: new Map(),
+    uploadHashWorkers: [],
+    uploadHashQueue: [],
+    uploadHashPending: new Map(),
     themes: [],
     passkeys: [],
     shares: [],
@@ -81,7 +91,9 @@
     previewStates: new Map(),
     previewQueue: [],
     previewQueued: new Set(),
+    previewResolving: new Set(),
     previewActive: 0,
+    previewPumpScheduled: false,
     previewControllers: new Map(),
     previewObjectURLs: new Map(),
     previewRetryAttempts: new Map(),
@@ -115,16 +127,20 @@
   const maximumViewerPreviewCacheEntries = 8;
   const maximumViewerPreviewCacheBytes = 64 << 20;
   const transferLedgerDatabaseName = "endlessfs-transfer-ledger-v1";
-  const transferLedgerVersion = 1;
+  const transferLedgerVersion = 3;
   const transferVirtualWindowSize = 72;
   const transferVirtualWindowStep = 32;
   const transferVirtualRowHeight = 60;
-  const transferDiscoveryBatchSize = 64;
+  const transferDiscoveryBatchSize = 100;
   const transferRetryBaseDelay = 1000;
   const transferRetryMaximumDelay = 60000;
   const transferRetryLimit = 7;
   const transferProgressSampleWeight = 0.35;
   let toastTimer = 0;
+  // One bounded response covers the product-scale 10,000-row projection.
+  // Rendering remains virtualized; a large directory therefore does not
+  // multiply control-plane authentication or provider reads per viewport.
+  const browserPageSize = 10000;
 
   class APIError extends Error {
     constructor(response, problem) {
@@ -423,14 +439,12 @@
     const undo = button("Undo", async () => {
       undo.disabled = true;
       try {
-        for (const item of recoverable) {
-          const operation = await api(`/api/v1/trash/${encodeURIComponent(item.trashID)}/restore`, {
-            method: "POST",
-            headers: { "Idempotency-Key": idempotencyKey() },
-            body: { conflict: "rename" },
-          });
-          await watchOperation(operation.operationID || operation.id);
-        }
+        const operation = await api("/api/v1/trash/restore", {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey() },
+          body: { trashIDs: recoverable.map((item) => item.trashID), conflict: "rename" },
+        });
+        await awaitOperation(operation);
         clearToast();
         announce(`${recoverable.length} item${recoverable.length === 1 ? "" : "s"} restored.`);
         await loadDirectory(state.currentDirectory);
@@ -616,11 +630,16 @@
     const suspendedTransfers = state.transfers.filter((transfer) => !["complete", "cancelled"].includes(transfer.state));
     for (const transfer of suspendedTransfers) {
       transfer.suspendedByLogout = true;
+      cancelUploadFingerprint(transfer);
       if (transfer.controller) transfer.controller.abort();
       window.clearTimeout(state.transferRetryTimers.get(transfer.id));
       state.transferRetryTimers.delete(transfer.id);
       transitionTransfer(transfer, "paused", "Paused on this device.", "signed_out");
     }
+    for (const controller of state.transferPlanControllers.values()) controller.abort();
+    state.transferPlanControllers.clear();
+    for (const timer of state.uploadPlanRetryTimers.values()) window.clearTimeout(timer);
+    state.uploadPlanRetryTimers.clear();
     await Promise.all([
       ...suspendedTransfers.map(persistTransferItem),
       ...[...state.transferGroups.values()].map(persistTransferGroup),

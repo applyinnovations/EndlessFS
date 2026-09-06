@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -278,6 +279,40 @@ func TestTransferLeaseRandomFailureAndSingleResume(t *testing.T) {
 	}
 }
 
+func TestTransferLeaseSealingSerializesInjectedEntropyReader(t *testing.T) {
+	configuration, err := newTransferConfiguration(TransferOptions{
+		LeaseKey: bytes.Repeat([]byte{9}, 32),
+		Random:   bytes.NewReader(bytes.Repeat([]byte{1}, 4096)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &Backend{transfer: configuration}
+	const workers = 64
+	sealed := make([][]byte, workers)
+	errorsFound := make([]error, workers)
+	var wait sync.WaitGroup
+	for index := range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			lease := uploadLease{SchemaVersion: 1, UploadID: fmt.Sprintf("upload-%d", index), Key: fmt.Sprintf("endlessfs/v1/staging/user/op-%d/data", index), Size: 1, MediaType: "text/plain", Protocol: domain.UploadSingle, ExpiresAt: time.Now().Add(time.Hour)}
+			sealed[index], errorsFound[index] = backend.sealLease(lease)
+		}()
+	}
+	wait.Wait()
+	seen := make(map[string]struct{}, workers)
+	for index, err := range errorsFound {
+		if err != nil {
+			t.Fatalf("seal worker %d: %v", index, err)
+		}
+		if _, found := seen[string(sealed[index])]; found {
+			t.Fatalf("seal worker %d reused a nonce", index)
+		}
+		seen[string(sealed[index])] = struct{}{}
+	}
+}
+
 func TestTransferProviderFailureMatrixFailsClosed(t *testing.T) {
 	now := time.Now().UTC()
 	key := objectstore.MustKey("endlessfs/v1/staging/user/failure/data")
@@ -461,6 +496,12 @@ func TestBackendAndTransferReconciliationBranchesFailClosed(t *testing.T) {
 	if err := backend.classifyCopy(context.Background(), key, 1, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}, transportFailure); !errors.Is(err, domain.ErrInternal) {
 		t.Fatalf("classifyCopy(non-precondition) error = %v", err)
 	}
+	verificationFailureBackend, _ := newTransferBoundaryBackend(t, now, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writeBoundaryGCSProblem(writer, http.StatusTeapot)
+	}))
+	if err := verificationFailureBackend.classifyCopy(context.Background(), key, 1, objectstore.PutCondition{Mode: objectstore.PutCreateOnly}, &googleapi.Error{Code: http.StatusPreconditionFailed}); !errors.Is(err, domain.ErrInternal) {
+		t.Fatalf("classifyCopy(source verification failure) error = %v", err)
+	}
 
 	for name, test := range map[string]struct {
 		handler func(http.ResponseWriter, *http.Request, *int)
@@ -529,6 +570,48 @@ func TestBackendAndTransferReconciliationBranchesFailClosed(t *testing.T) {
 				return err
 			},
 			want: domain.ErrNotFound,
+		},
+		"progress-complete-object-appears": {
+			handler: func(writer http.ResponseWriter, request *http.Request, calls *int) {
+				if strings.HasPrefix(request.URL.Path, "/storage/v1/") {
+					*calls++
+					if *calls == 1 {
+						writeBoundaryGCSProblem(writer, http.StatusNotFound)
+						return
+					}
+					writeBoundaryObject(writer, key.String(), 1, 4)
+					return
+				}
+				writer.WriteHeader(http.StatusOK)
+			},
+			lease: boundaryLease(now, key, domain.UploadResumable, "SESSION", 4),
+			invoke: func(backend *Backend, sealed []byte) error {
+				progress, err := backend.UploadProgress(context.Background(), sealed)
+				if err == nil && (!progress.Complete || progress.Offset != 4 || progress.Version == "") {
+					return fmt.Errorf("unexpected completed progress: %+v", progress)
+				}
+				return err
+			},
+		},
+		"progress-complete-object-appears-with-wrong-size": {
+			handler: func(writer http.ResponseWriter, request *http.Request, calls *int) {
+				if strings.HasPrefix(request.URL.Path, "/storage/v1/") {
+					*calls++
+					if *calls == 1 {
+						writeBoundaryGCSProblem(writer, http.StatusNotFound)
+						return
+					}
+					writeBoundaryObject(writer, key.String(), 1, 3)
+					return
+				}
+				writer.WriteHeader(http.StatusOK)
+			},
+			lease: boundaryLease(now, key, domain.UploadResumable, "SESSION", 4),
+			invoke: func(backend *Backend, sealed []byte) error {
+				_, err := backend.UploadProgress(context.Background(), sealed)
+				return err
+			},
+			want: domain.ErrPreconditionFailed,
 		},
 		"abort-head-failure": {
 			handler: func(writer http.ResponseWriter, request *http.Request, _ *int) {

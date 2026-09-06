@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -265,8 +264,9 @@ func TestGCSLostMutationSuccessIsRecoveredByAnotherReplica(t *testing.T) {
 	fake.mu.Lock()
 	fake.failUploadAfterCommitName = storageformat.StateIndexRootKey("accounts").String()
 	fake.mu.Unlock()
-	if _, err := first.Create(context.Background(), key, []byte("durable")); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("Create() lost-success error = %v", err)
+	created, err := first.Create(context.Background(), key, []byte("durable"))
+	if err != nil || created == "" {
+		t.Fatalf("Create() did not reconcile the lost-success response in the originating call: version=%q error=%v", created, err)
 	}
 	clock.Advance(2 * time.Minute)
 	if _, err := second.CreateCheckpoint(context.Background(), "gcs-lost-success"); err != nil {

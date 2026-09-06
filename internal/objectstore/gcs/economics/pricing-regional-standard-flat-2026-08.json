@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "provider": "gcs",
+  "profile": "regional-standard-flat",
+  "currency": "USD",
+  "sourceURL": "https://cloud.google.com/storage/pricing",
+  "effectiveDate": "2026-08-24",
+  "assumptions": [
+    "Regional Standard Storage flat namespace list pricing, excluding free-tier allowances, negotiated discounts, data retrieval, egress, replication, and storage-at-rest charges",
+    "The one Class A charge for a JSON API resumable upload is assigned to upload_begin; resumable data and progress continuations carry zero additional operation price",
+    "For a fail-closed upper bound, other observed wire requests are charged by class even where Google's general failed-response waiver or single-operation billing for a multi-request rewrite could make the actual bill lower"
+  ],
+  "requests": {
+    "object_head": { "billingClass": "class-b", "unitRequests": 1000, "unitPricePicoUSD": 400000000 },
+    "object_verify": { "billingClass": "class-b", "unitRequests": 1000, "unitPricePicoUSD": 400000000 },
+    "object_get": { "billingClass": "class-b", "unitRequests": 1000, "unitPricePicoUSD": 400000000 },
+    "object_open": { "billingClass": "class-b", "unitRequests": 1000, "unitPricePicoUSD": 400000000 },
+    "object_list": { "billingClass": "class-a", "unitRequests": 1000, "unitPricePicoUSD": 5000000000 },
+    "object_put": { "billingClass": "class-a", "unitRequests": 1000, "unitPricePicoUSD": 5000000000 },
+    "object_delete": { "billingClass": "free", "unitRequests": 1, "unitPricePicoUSD": 0 },
+    "object_copy": { "billingClass": "class-a", "unitRequests": 1000, "unitPricePicoUSD": 5000000000 },
+    "upload_begin": { "billingClass": "class-a", "unitRequests": 1000, "unitPricePicoUSD": 5000000000 },
+    "upload_resume": { "billingClass": "local-free", "unitRequests": 1, "unitPricePicoUSD": 0 },
+    "upload_progress": { "billingClass": "resumable-continuation", "unitRequests": 1, "unitPricePicoUSD": 0 },
+    "upload_abort": { "billingClass": "free", "unitRequests": 1, "unitPricePicoUSD": 0 },
+    "download_sign": { "billingClass": "local-free", "unitRequests": 1, "unitPricePicoUSD": 0 },
+    "data_upload": { "billingClass": "resumable-continuation", "unitRequests": 1, "unitPricePicoUSD": 0 },
+    "data_download": { "billingClass": "class-b", "unitRequests": 1000, "unitPricePicoUSD": 400000000 }
+  }
+}

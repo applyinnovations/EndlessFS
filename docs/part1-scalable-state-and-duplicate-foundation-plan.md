@@ -101,11 +101,12 @@ Part 2 consumes these APIs to implement the review-first UI, bulk selection, fol
 - Exact-group ignore policy was too broad for intentionally mirrored or partially overlapping directory pairs. Part 1 now stores a separate revisioned preference keyed by the unordered `(area, stable directory ID)` pair. Candidate pages hide it by default and expose it in the ignored view; paths and manifest versions are deliberately absent from the preference identity.
 - Finalized duplicate occurrence, summary, and similarity removals left nil visibility roots behind indefinitely. Closed-gate maintenance now validates the complete duplicate namespace, rejects unresolved transitions, deletes only CAS-pinned tombstones, and retains explicit group/pair preferences.
 - Descendant-content entries initially pinned file logical versions even though grouping and comparison do not consume them. That made identical-content replacement and copy rewrite derived nodes needlessly. Part 1 removes the version from this index and resolves authoritative versions only for the bounded reconciliation output page.
+- Namespace copy/move/trash/restore still traversed every descendant after the bounded-preparation work landed, and upload completion still promoted staging with a provider rewrite. Schema 006 replaces subtree mutation with immutable snapshot attach/detach plus lazy bounded content deltas, preserves the snapshot's physical metadata area across live/trash placement, uses same-owner blob reflinks, and uploads directly to the final random blob key. Provider-call tests compare one and 128 descendants in both Trash directions and require the same bounded envelope with zero file-backend copies.
 
 ## Pull-request gates
 
 - Focused failing tests precede each behavior change.
 - Provider contract, migration fixture/profile, interrupted predecessor residue, multi-replica convergence, denial, call-count, and no-body-read tests pass.
-- Every epoch/profile fixture, including the schema-005 portable-minimal, preview-disabled, and GCS-preview profiles, is produced by its actual historical writer and pinned to its producer commit plus a hard-coded SHA-256 fixture-file digest.
+- Every epoch/profile fixture, including the schema-005 and schema-006 portable-minimal, preview-disabled, and GCS-preview profiles, is produced by its actual epoch writer and pinned to its producer commit plus a hard-coded SHA-256 fixture-file digest.
 - The specification, operations guide, HTTP API, release evidence, and limitation text match the implemented behavior.
 - `nix run .#lint`, `nix run .#test-migration`, focused race/contract checks, and finally `nix flake check` pass.

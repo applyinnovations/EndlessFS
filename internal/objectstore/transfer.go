@@ -46,8 +46,12 @@ type UploadHandle struct {
 }
 
 type DownloadRequest struct {
-	Key         Key
-	Version     NativeVersion
+	Key     Key
+	Version NativeVersion
+	// Immutable permits capability issuance without a provider-native version
+	// only for an application-owned create-only content address. Callers remain
+	// responsible for binding portable integrity metadata to the response.
+	Immutable   bool
 	Filename    string
 	MediaType   string
 	Disposition domain.Disposition

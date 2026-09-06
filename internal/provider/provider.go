@@ -25,6 +25,64 @@ type Storage interface {
 	GetOperation(context.Context, domain.UserID, domain.OperationID) (domain.Operation, error)
 }
 
+// TrashStorage keeps trash placement and original-location metadata inside the
+// owner namespace authority. Implementations publish each action through one
+// namespace visibility point; no separate application-state transaction is
+// permitted for the trash record.
+type TrashStorage interface {
+	MoveToTrash(context.Context, domain.UserID, domain.TrashRequest) (domain.Operation, error)
+	ListTrash(context.Context, domain.UserID, domain.TrashListRequest) (domain.TrashListPage, error)
+	RestoreFromTrash(context.Context, domain.UserID, string, domain.ConflictMode, string) (domain.Operation, error)
+	DeleteFromTrash(context.Context, domain.UserID, string, string) (domain.Operation, error)
+}
+
+// BatchStorage publishes a bounded selection through one owner-namespace
+// visibility point. Preparation may write immutable pages proportional to the
+// touched page set, but must not run one transaction protocol per item.
+type BatchStorage interface {
+	BatchCopyMove(context.Context, domain.UserID, []domain.CopyRequest, bool, string) (domain.NamespaceBatchResult, error)
+	BatchMoveToTrash(context.Context, domain.UserID, []domain.TrashRequest, string) (domain.NamespaceBatchResult, error)
+	BatchRestoreFromTrash(context.Context, domain.UserID, []string, domain.ConflictMode, string) (domain.NamespaceBatchResult, error)
+	BatchDeleteFromTrash(context.Context, domain.UserID, []string, string) (domain.NamespaceBatchResult, error)
+	GetBatchOperation(context.Context, domain.UserID, domain.OperationID) (domain.Operation, error)
+}
+
+// UploadBatchStorage persists a bounded set of upload intents through one
+// owner-namespace publication before creating provider upload sessions. The
+// unavoidable provider session initiations may run concurrently; an
+// implementation must not execute one complete state transaction per item.
+type UploadBatchStorage interface {
+	CreateUploadBatch(context.Context, domain.Scope, []domain.CreateUploadRequest) ([]domain.UploadCapability, error)
+}
+
+// UploadTransactionStorage completes or revokes a product-scale selection
+// through one control-plane request and one atomic terminal state publication.
+// Distinct provider objects remain unavoidable per-item effects, but state
+// persistence and browser composition must never repeat per item.
+type UploadTransactionStorage interface {
+	CompleteUploadBatch(context.Context, domain.Scope, domain.CompleteUploadBatchRequest) (domain.CompleteUploadBatchResult, error)
+	AbortUploadBatch(context.Context, domain.Scope, domain.AbortUploadBatchRequest) error
+}
+
+// UploadPlanningStorage exposes metadata-only duplicate lookup. Local file
+// bytes stay in the browser and stored object bytes stay on the data plane.
+type UploadPlanningStorage interface {
+	PlanUploadSizes(context.Context, domain.UserID, domain.UploadSizePlanRequest) (domain.UploadSizePlan, error)
+	PlanUploadFingerprints(context.Context, domain.UserID, domain.UploadFingerprintPlanRequest) (domain.UploadFingerprintPlan, error)
+}
+
+// NamespaceStorage is the complete file-control contract required by the
+// application runtime. Trash placement and bounded batches are mandatory
+// atomic namespace mutations, never optional fallbacks to per-item state
+// records or repeated provider transactions.
+type NamespaceStorage interface {
+	Storage
+	TrashStorage
+	BatchStorage
+	UploadBatchStorage
+	UploadTransactionStorage
+}
+
 // DuplicateStorage is the optional provider-neutral duplicate reconciliation
 // control plane introduced by the duplicate-catalog storage epoch. Keeping it
 // separate lets historical fixture providers remain deliberately minimal.
@@ -37,4 +95,5 @@ type DuplicateStorage interface {
 	SetDuplicateDirectoryIgnored(context.Context, domain.UserID, domain.SetDuplicateDirectoryIgnoredRequest) (domain.DuplicateDirectoryIgnore, error)
 	PreviewDuplicateReconciliation(context.Context, domain.UserID, domain.DuplicateReconciliationPreviewRequest) (domain.DuplicateReconciliationPreview, error)
 	ValidateDuplicateReconciliation(context.Context, domain.UserID, string) (domain.DuplicateReconciliationSelection, error)
+	ApplyDuplicateReconciliation(context.Context, domain.UserID, string, string) (domain.NamespaceBatchResult, error)
 }

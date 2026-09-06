@@ -1,0 +1,166 @@
+package providerbudget
+
+import (
+	"errors"
+	"fmt"
+)
+
+type Limits struct {
+	Requests          int64 `json:"requests"`
+	CostPicoUSD       int64 `json:"costPicoUSD"`
+	P50Micros         int64 `json:"p50Micros"`
+	P95Micros         int64 `json:"p95Micros"`
+	P99Micros         int64 `json:"p99Micros"`
+	CriticalP50Micros int64 `json:"criticalP50Micros,omitempty"`
+	CriticalP95Micros int64 `json:"criticalP95Micros,omitempty"`
+	CriticalP99Micros int64 `json:"criticalP99Micros,omitempty"`
+}
+
+type Budget struct {
+	Name     string          `json:"name"`
+	Provider string          `json:"provider"`
+	Profile  string          `json:"profile"`
+	Maximum  Limits          `json:"maximum"`
+	Roles    map[Role]Limits `json:"roles"`
+}
+
+type Report struct {
+	Budget Budget
+	Totals Totals
+}
+
+// Calibrate constructs the exact, zero-headroom budget represented by one
+// deterministic workload. Callers must name every provider role that the
+// workload is allowed to touch; named but unused roles are retained with zero
+// limits so an unexpected cross-backend request fails closed.
+func Calibrate(name string, model Model, roles []Role, events []Event) (Budget, error) {
+	if name == "" || len(roles) == 0 {
+		return Budget{}, errors.New("provider budget calibration identity is invalid")
+	}
+	allowed := make(map[Role]Limits, len(roles))
+	for _, role := range roles {
+		if !role.valid() {
+			return Budget{}, fmt.Errorf("provider budget calibration has invalid role %q", role)
+		}
+		if _, exists := allowed[role]; exists {
+			return Budget{}, fmt.Errorf("provider budget calibration repeats role %q", role)
+		}
+		allowed[role] = Limits{}
+	}
+	for _, event := range events {
+		if _, ok := allowed[event.Role]; !ok {
+			return Budget{}, fmt.Errorf("provider budget calibration observed unapproved role %q", event.Role)
+		}
+	}
+	totals, err := model.Estimate(events)
+	if err != nil {
+		return Budget{}, err
+	}
+	for role := range allowed {
+		allowed[role] = roleTotalsToLimits(totals.ByRole[role])
+	}
+	return Budget{Name: name, Provider: model.Provider(), Profile: model.Profile(), Maximum: totalsToLimits(totals), Roles: allowed}, nil
+}
+
+func (budget Budget) Check(model Model, events []Event) (Report, error) {
+	if budget.Name == "" || budget.Provider == "" || budget.Profile == "" || budget.Provider != model.Provider() || budget.Profile != model.Profile() || len(budget.Roles) == 0 {
+		return Report{}, errors.New("provider budget identity is invalid")
+	}
+	if err := validateLimits(budget.Maximum); err != nil {
+		return Report{}, fmt.Errorf("provider budget %q maximum: %w", budget.Name, err)
+	}
+	for role, limit := range budget.Roles {
+		if !role.valid() {
+			return Report{}, fmt.Errorf("provider budget %q has invalid role %q", budget.Name, role)
+		}
+		if err := validateLimits(limit); err != nil {
+			return Report{}, fmt.Errorf("provider budget %q role %q: %w", budget.Name, role, err)
+		}
+	}
+	for _, event := range events {
+		if _, ok := budget.Roles[event.Role]; !ok {
+			return Report{}, fmt.Errorf("provider budget %q: %s role is not budgeted", budget.Name, event.Role)
+		}
+	}
+	totals, err := model.Estimate(events)
+	if err != nil {
+		return Report{}, err
+	}
+	report := Report{Budget: budget, Totals: totals}
+	if err := checkLimits(budget.Name, "", totalsToLimits(totals), budget.Maximum); err != nil {
+		return report, err
+	}
+	for role, limit := range budget.Roles {
+		if err := checkLimits(budget.Name, string(role)+" ", roleTotalsToLimits(totals.ByRole[role]), limit); err != nil {
+			return report, err
+		}
+	}
+	return report, nil
+}
+
+// CheckRatchet verifies both the upper bound and exact calibration. A cheaper
+// observed pathway deliberately fails until a new append-only ratchet epoch
+// records the tighter ceilings, so improvements cannot leave stale headroom
+// that a later regression could consume unnoticed.
+func (budget Budget) CheckRatchet(model Model, events []Event) (Report, error) {
+	report, err := budget.Check(model, events)
+	if err != nil {
+		return report, err
+	}
+	if observed := totalsToLimits(report.Totals); observed != budget.Maximum {
+		return report, fmt.Errorf("provider budget %q calibration changed: observed %+v, recorded %+v; append a tighter ratchet epoch", budget.Name, observed, budget.Maximum)
+	}
+	for role, limit := range budget.Roles {
+		if observed := roleTotalsToLimits(report.Totals.ByRole[role]); observed != limit {
+			return report, fmt.Errorf("provider budget %q role %q calibration changed: observed %+v, recorded %+v; append a tighter ratchet epoch", budget.Name, role, observed, limit)
+		}
+	}
+	return report, nil
+}
+
+func validateLimits(limits Limits) error {
+	if limits.Requests < 0 || limits.CostPicoUSD < 0 || limits.P50Micros < 0 || limits.P95Micros < limits.P50Micros || limits.P99Micros < limits.P95Micros {
+		return errors.New("limits are invalid")
+	}
+	if limits.CriticalP50Micros < 0 || limits.CriticalP95Micros < 0 || limits.CriticalP99Micros < 0 ||
+		(limits.CriticalP50Micros == 0) != (limits.CriticalP95Micros == 0) ||
+		(limits.CriticalP50Micros == 0) != (limits.CriticalP99Micros == 0) ||
+		limits.CriticalP50Micros > limits.CriticalP95Micros || limits.CriticalP95Micros > limits.CriticalP99Micros {
+		return errors.New("critical-path limits are invalid")
+	}
+	return nil
+}
+
+func checkLimits(name, label string, observed, maximum Limits) error {
+	for _, metric := range []struct {
+		name     string
+		observed int64
+		maximum  int64
+	}{
+		{name: "request count", observed: observed.Requests, maximum: maximum.Requests},
+		{name: "cost", observed: observed.CostPicoUSD, maximum: maximum.CostPicoUSD},
+		{name: "p50 latency", observed: observed.P50Micros, maximum: maximum.P50Micros},
+		{name: "p95 latency", observed: observed.P95Micros, maximum: maximum.P95Micros},
+		{name: "p99 latency", observed: observed.P99Micros, maximum: maximum.P99Micros},
+		{name: "critical-path p50 latency", observed: observed.CriticalP50Micros, maximum: maximum.CriticalP50Micros},
+		{name: "critical-path p95 latency", observed: observed.CriticalP95Micros, maximum: maximum.CriticalP95Micros},
+		{name: "critical-path p99 latency", observed: observed.CriticalP99Micros, maximum: maximum.CriticalP99Micros},
+	} {
+		if metric.maximum != 0 && metric.observed > metric.maximum {
+			return fmt.Errorf("provider budget %q exceeded %s%s: observed %d, maximum %d", name, label, metric.name, metric.observed, metric.maximum)
+		}
+	}
+	return nil
+}
+
+func totalsToLimits(totals Totals) Limits {
+	return Limits{
+		Requests: totals.Requests, CostPicoUSD: totals.CostPicoUSD,
+		P50Micros: totals.P50Micros, P95Micros: totals.P95Micros, P99Micros: totals.P99Micros,
+		CriticalP50Micros: totals.CriticalP50Micros, CriticalP95Micros: totals.CriticalP95Micros, CriticalP99Micros: totals.CriticalP99Micros,
+	}
+}
+
+func roleTotalsToLimits(totals RoleTotals) Limits {
+	return Limits{Requests: totals.Requests, CostPicoUSD: totals.CostPicoUSD, P50Micros: totals.P50Micros, P95Micros: totals.P95Micros, P99Micros: totals.P99Micros}
+}

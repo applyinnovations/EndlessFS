@@ -30,6 +30,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/httpapi"
 	"github.com/applyinnovations/endlessfs/internal/identity"
+	"github.com/applyinnovations/endlessfs/internal/integrity"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/preview"
@@ -96,13 +97,13 @@ func TestE2EDuplicateWorkspaceReviewsIgnoresAndReconcilesWithoutDeletingUniqueFi
 	})()`, nil)); err != nil {
 		t.Fatalf("expand exact duplicate locations: %v", err)
 	}
-	if err := waitFor(client.ctx, `[...document.querySelectorAll("#duplicate-groups .duplicate-occurrence-path")].some((node) => node.textContent === "/Projects/Project Atlas")`, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, `[...document.querySelectorAll("#duplicate-groups .duplicate-occurrence-path")].some((node) => node.textContent === "/Projects")`, 15*time.Second); err != nil {
 		var snapshot string
 		_ = chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector("#duplicate-groups").textContent + " | state=" + document.querySelector("#duplicate-groups-state").textContent + " | alert=" + document.querySelector("#urgent-status").textContent`, &snapshot))
 		t.Fatalf("show exact project locations: %v (%s) duplicate-ui=%q", err, browserStatus(client.ctx), snapshot)
 	}
 	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`(() => {
-		const card = [...document.querySelectorAll("#duplicate-groups .duplicate-card")].find((node) => node.textContent.includes("/Projects/Project Atlas"));
+		const card = [...document.querySelectorAll("#duplicate-groups .duplicate-card")].find((node) => node.textContent.includes("/Projects"));
 		const action = card && card.querySelector(".duplicate-card-footer .danger");
 		if (!action) return false;
 		action.click();
@@ -119,7 +120,7 @@ func TestE2EDuplicateWorkspaceReviewsIgnoresAndReconcilesWithoutDeletingUniqueFi
 	if err := waitFor(client.ctx, `!document.querySelector("#action-dialog").open && document.querySelector("#toast-region").textContent.includes("moved to Trash")`, 15*time.Second); err != nil {
 		t.Fatalf("finish exact folder cleanup: %v (%s)", err, browserStatus(client.ctx))
 	}
-	assertOneDuplicateFolderRemains(t, harness, "/Projects/Project Atlas", "/Backups/Projects/Project Atlas")
+	assertOneDuplicateFolderRemains(t, harness, "/Projects", "/Backups/Projects")
 
 	if err := chromedp.Run(client.ctx,
 		chromedp.SetValue("#duplicate-folder-path", "/Photography/Selects", chromedp.ByQuery),
@@ -175,6 +176,236 @@ func TestE2EDuplicateWorkspaceReviewsIgnoresAndReconcilesWithoutDeletingUniqueFi
 		t.Fatalf("finish partial cleanup: %v (%s) duplicate-ui=%q", err, browserStatus(client.ctx), snapshot)
 	}
 	assertDuplicateReconciliationResult(t, harness)
+	client.assertNoExternalRequests(t, harness)
+}
+
+func TestE2EUploadPlannerHashesMD5AndCRC32CInOneWorkerPass(t *testing.T) {
+	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
+		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
+	}
+	harness := newHarness(t)
+	client := newTestBrowser(t)
+	if err := chromedp.Run(client.ctx, chromedp.Navigate(harness.origin+"/")); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitFor(client.ctx, `typeof window.__endlessfsUploadPlannerTest === "object"`, 5*time.Second); err != nil {
+		t.Fatalf("wait for upload planner fixture: %v (%s)", err, browserStatus(client.ctx))
+	}
+	var result struct {
+		MD5         string `json:"md5"`
+		CRC32C      string `json:"crc32c"`
+		WorkerLimit int    `json:"workerLimit"`
+		BatchSize   int    `json:"batchSize"`
+		LargeMD5    string `json:"largeMD5"`
+		LargeCRC32C string `json:"largeCRC32C"`
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`(async () => {
+		const fixture = window.__endlessfsUploadPlannerTest;
+		const small = await fixture.fingerprint("123456789");
+		const large = await fixture.fingerprintRepeated("a", (4 << 20) + 17);
+		return {...small, largeMD5: large.md5, largeCRC32C: large.crc32c, workerLimit: fixture.workerLimit, batchSize: fixture.batchSize};
+	})()`, &result, func(parameters *runtime.EvaluateParams) *runtime.EvaluateParams {
+		return parameters.WithAwaitPromise(true)
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if result.MD5 != "JfnnlDI7RTiF9RgfG2JNCw" || result.CRC32C != "4waSgw" {
+		t.Fatalf("browser fingerprint = %+v", result)
+	}
+	large := bytes.Repeat([]byte("a"), (4<<20)+17)
+	if result.LargeMD5 != integrity.MD5(large) || result.LargeCRC32C != integrity.CRC32C(large) {
+		t.Fatalf("multi-chunk browser fingerprint = %+v", result)
+	}
+	if result.WorkerLimit != 2 || result.BatchSize != 10000 {
+		t.Fatalf("upload planner bounds = %+v", result)
+	}
+	client.assertNoExternalRequests(t, harness)
+}
+
+func TestE2ERestoringTenThousandTransfersDoesNotBlockWorkspaceOrPollUploads(t *testing.T) {
+	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
+		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
+	}
+	statusGate := newUploadStatusGate()
+	t.Cleanup(statusGate.releaseAll)
+	harness := newProductionLikeHarnessWithControlPlaneWrapper(t, statusGate.wrap)
+	client := newTestBrowser(t)
+	bootstrapBrowser(t, client, harness)
+
+	accounts, err := harness.repository.Accounts(context.Background())
+	if err != nil || len(accounts) != 1 {
+		t.Fatalf("resolve transfer-ledger owner: %v, accounts=%d", err, len(accounts))
+	}
+	seedScript := fmt.Sprintf(`(async () => {
+		const ownerID = %q;
+		const database = await new Promise((resolve, reject) => {
+			const request = indexedDB.open("endlessfs-transfer-ledger-v1");
+			request.onsuccess = () => resolve(request.result);
+			request.onerror = () => reject(request.error);
+		});
+		const transaction = database.transaction("items", "readwrite");
+		const items = transaction.objectStore("items");
+		for (let index = 0; index < 10000; index += 1) {
+			const id = "restored-" + String(index).padStart(5, "0");
+			items.put({
+				key: ownerID + ":" + id, ownerID, id, groupID: "", name: id + ".bin",
+				directory: "/", baseDirectory: "/", relativeDirectory: "", relativePath: id + ".bin",
+				size: 1, mediaType: "application/octet-stream", lastModified: 0,
+				state: "uploading", confirmed: 0, uploadID: id, retryCount: 0, nextRetryAt: 0,
+				errorCode: "", error: "", strategy: "keep-both", planPhase: "done",
+				md5: "", crc32c: "", planOutcome: "", targetExists: false, targetKind: "",
+				targetVersion: "", uploadConflict: "rename", createdAt: index + 1, updatedAt: index + 1,
+			});
+		}
+		await new Promise((resolve, reject) => {
+			transaction.oncomplete = resolve;
+			transaction.onabort = () => reject(transaction.error);
+			transaction.onerror = () => reject(transaction.error);
+		});
+		return true;
+	})()`, accounts[0].UserID.String())
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(seedScript, nil, func(parameters *runtime.EvaluateParams) *runtime.EvaluateParams {
+		return parameters.WithAwaitPromise(true)
+	})); err != nil {
+		t.Fatalf("seed massive transfer ledger: %v", err)
+	}
+
+	requestStart := len(client.requestSnapshot())
+	started := time.Now()
+	if err := chromedp.Run(client.ctx, chromedp.Navigate(harness.origin+"/")); err != nil {
+		t.Fatalf("reload massive transfer ledger: %v", err)
+	}
+	if err := waitFor(client.ctx, `document.querySelector("#loading-view").hidden && !document.querySelector("#authenticated-view").hidden`, 5*time.Second); err != nil {
+		t.Fatalf("workspace remained blocked by transfer restoration: %v (%s), upload-status requests=%d", err, browserStatus(client.ctx), statusGate.count.Load())
+	}
+	interactiveAfter := time.Since(started)
+	if statusGate.count.Load() != 0 {
+		t.Fatalf("transfer restoration issued %d upload-status requests before workspace interaction", statusGate.count.Load())
+	}
+	requests := client.requestSnapshot()[requestStart:]
+	if got := countRequestPath(requests, "/api/v1/uploads/"); got != 0 {
+		t.Fatalf("transfer restoration issued %d upload requests; requests=%v", got, requests)
+	}
+	if err := waitFor(client.ctx, `Number(document.querySelector("#transfer-list").dataset.itemCount || 0) === 10000`, 10*time.Second); err != nil {
+		t.Fatalf("massive local transfer history did not finish restoring: %v (%s)", err, browserStatus(client.ctx))
+	}
+	var rendered int
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelectorAll("#transfer-list .transfer-row").length`, &rendered)); err != nil {
+		t.Fatal(err)
+	}
+	if rendered > 72 {
+		t.Fatalf("massive restored transfer history rendered %d rows, want at most 72", rendered)
+	}
+	t.Logf(`ui-benchmark-v1 {"transferRestore":{"logical":10000,"rendered":%d,"interactiveMillis":%d,"uploadStatusRequests":0}}`, rendered, interactiveAfter.Milliseconds())
+	client.assertNoExternalRequests(t, harness)
+}
+
+func TestE2EUpstreamGCSWorkerPoolUploadsOneHundredFilesAndCoalescesRefresh(t *testing.T) {
+	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
+		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
+	}
+	uploadGate := newUploadConcurrencyGate()
+	harness := newHarnessWithDataPlaneWrapper(t, false, uploadGate.wrap)
+	t.Cleanup(uploadGate.releaseAll)
+	client := newTestBrowser(t)
+	if err := chromedp.Run(client.ctx, chromedp.Navigate(harness.origin+"/")); err != nil {
+		t.Fatalf("open browser shell: %v", err)
+	}
+	if err := waitFor(client.ctx, `typeof window.__endlessfsUploadWorkerPoolTest === "object"`, 5*time.Second); err != nil {
+		t.Fatalf("wait for local upload worker-pool fixture: %v (%s)", err, browserStatus(client.ctx))
+	}
+
+	var proof struct {
+		FullQueue          int `json:"fullQueue"`
+		ShortQueue         int `json:"shortQueue"`
+		SaveData           int `json:"saveData"`
+		DiscoveryBatchSize int `json:"discoveryBatchSize"`
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`(() => {
+		const fixture = window.__endlessfsUploadWorkerPoolTest;
+		return {
+			fullQueue: fixture.concurrency(100, false),
+			shortQueue: fixture.concurrency(2, false),
+			saveData: fixture.concurrency(100, true),
+			discoveryBatchSize: fixture.discoveryBatchSize(),
+		};
+	})()`, &proof)); err != nil {
+		t.Fatalf("exercise upload worker pool: %v", err)
+	}
+	if proof.FullQueue != 100 {
+		t.Errorf("full-queue concurrency = %d, want upstream GCS default 100", proof.FullQueue)
+	}
+	if proof.ShortQueue != 2 {
+		t.Errorf("short-queue concurrency = %d, want 2", proof.ShortQueue)
+	}
+	if proof.SaveData != 1 {
+		t.Errorf("data-saver concurrency = %d, want 1", proof.SaveData)
+	}
+	if proof.DiscoveryBatchSize != 100 {
+		t.Errorf("discovery batch size = %d, want 100", proof.DiscoveryBatchSize)
+	}
+	bootstrapBrowser(t, client, harness)
+	requestStart := len(client.requestSnapshot())
+	uploadDirectory := t.TempDir()
+	uploadPaths := make([]string, 100)
+	for index := range uploadPaths {
+		uploadPaths[index] = filepath.Join(uploadDirectory, fmt.Sprintf("upstream-%03d.bin", index))
+		if err := os.WriteFile(uploadPaths[index], bytes.Repeat([]byte{byte(index + 1)}, 1024), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", uploadPaths, chromedp.ByQuery)); err != nil {
+		t.Fatalf("queue worker-pool uploads: %v", err)
+	}
+	if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.active() === 100`, 15*time.Second); err != nil {
+		t.Fatalf("worker pool did not start 100 upload tasks: %v (%s)", err, browserStatus(client.ctx))
+	}
+	arrivalContext, cancelArrivals := context.WithTimeout(client.ctx, 10*time.Second)
+	defer cancelArrivals()
+	if err := uploadGate.waitForMaximum(arrivalContext, 6); err != nil {
+		t.Fatalf("browser data plane did not fill its HTTP/1.1 connections: %v (maximum=%d, %s requests=%v)", err, uploadGate.maximum.Load(), browserStatus(client.ctx), client.requestSnapshot())
+	}
+	uploadGate.releaseAll()
+	if err := chromedp.Run(client.ctx, chromedp.Click(`[role="tab"][data-tab-value="complete"]`, chromedp.ByQuery)); err != nil {
+		t.Fatalf("show completed worker-pool uploads: %v", err)
+	}
+	if err := waitFor(client.ctx, `Array.from(document.querySelectorAll(".transfer-group-row.complete")).some((row) => row.textContent.includes("100 of 100 files")) && document.querySelector("#file-rows").textContent.includes("upstream-099.bin")`, 30*time.Second); err != nil {
+		var diagnostic string
+		_ = chromedp.Run(client.ctx, chromedp.Evaluate(`JSON.stringify(window.__endlessfsUploadWorkerPoolTest.snapshot())`, &diagnostic))
+		t.Fatalf("wait for worker-pool uploads and coalesced listing refresh: %v (%s scheduler=%s requests=%v)", err, browserStatus(client.ctx), diagnostic, client.requestSnapshot()[requestStart:])
+	}
+	requests := client.requestSnapshot()[requestStart:]
+	if got := countExactRequest(requests, "POST /api/v1/uploads/batch"); got != 1 {
+		t.Errorf("worker-pool upload batch admissions = %d, want 1; requests=%v", got, requests)
+	}
+	if got := countExactRequest(requests, "POST /api/v1/uploads"); got != 0 {
+		t.Errorf("worker-pool upload used %d single-item admissions; requests=%v", got, requests)
+	}
+	dataRequests := 0
+	preflightRequests := 0
+	for _, request := range requests {
+		if strings.HasPrefix(request, http.MethodPut+" /cap/upload/") || strings.HasPrefix(request, http.MethodPatch+" /cap/upload/") {
+			dataRequests += 1
+		}
+		if strings.HasPrefix(request, http.MethodOptions+" /cap/upload/") {
+			preflightRequests += 1
+		}
+	}
+	if dataRequests != len(uploadPaths) {
+		t.Errorf("direct upload requests = %d, want %d; requests=%v", dataRequests, len(uploadPaths), requests)
+	}
+	if preflightRequests != len(uploadPaths) {
+		t.Errorf("direct upload preflight requests = %d, want %d; requests=%v", preflightRequests, len(uploadPaths), requests)
+	}
+	if got := countExactRequest(requests, "POST /api/v1/uploads/batch/complete"); got != 1 {
+		t.Errorf("worker-pool batch completion requests = %d, want 1; requests=%v", got, requests)
+	}
+	if got := countRequestPath(requests, "/api/v1/uploads/") - countExactRequest(requests, "POST /api/v1/uploads/batch") - countExactRequest(requests, "POST /api/v1/uploads/batch/complete"); got != 0 {
+		t.Errorf("worker-pool upload used %d per-item completion requests; requests=%v", got, requests)
+	}
+	if got := countExactRequest(requests, "GET /api/v1/files"); got != 1 {
+		t.Errorf("directory refresh requests = %d, want one coalesced refresh; requests=%v", got, requests)
+	}
 	client.assertNoExternalRequests(t, harness)
 }
 
@@ -487,6 +718,9 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := chromedp.Run(ctx, emulation.SetDeviceMetricsOverride(800, 600, 1, false)); err != nil {
 		t.Fatalf("restore standard browser viewport: %v", err)
 	}
+	mu.Lock()
+	operationPollsBeforeTrashWorkflow := countRequestPath(requestedURLs, "/api/v1/operations/")
+	mu.Unlock()
 
 	if err := chromedp.Run(ctx, chromedp.Focus("#trash-selected", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatalf("move selected file to trash: %v", err)
@@ -565,7 +799,16 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := runStage(ctx, 10*time.Second, chromedp.WaitNotPresent("#file-rows tr", chromedp.ByQuery)); err != nil {
 		t.Fatalf("wait for restored file to leave trash: %v (%s)", err, browserStatus(ctx))
 	}
+	mu.Lock()
+	operationPollsAfterTrashWorkflow := countRequestPath(requestedURLs, "/api/v1/operations/")
+	mu.Unlock()
+	if operationPollsAfterTrashWorkflow != operationPollsBeforeTrashWorkflow {
+		t.Fatalf("terminal trash/restore mutations triggered %d redundant operation polls", operationPollsAfterTrashWorkflow-operationPollsBeforeTrashWorkflow)
+	}
 
+	mu.Lock()
+	folderRequestStart := len(requestedURLs)
+	mu.Unlock()
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(harness.origin+"/"),
 		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
@@ -608,6 +851,21 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 	if err := waitFor(ctx, `document.querySelector("#file-rows").textContent.includes("Dropped Folder")`, 10*time.Second); err != nil {
 		t.Fatalf("wait for dropped folder listing: %v (%s)", err, browserStatus(ctx))
+	}
+	mu.Lock()
+	folderRequests := append([]string(nil), requestedURLs[folderRequestStart:]...)
+	mu.Unlock()
+	if got := countExactRequest(folderRequests, "POST "+harness.origin+"/api/v1/uploads/batch"); got != 1 {
+		t.Fatalf("folder upload batch admissions = %d, want 1; requests=%v", got, folderRequests)
+	}
+	if got := countExactRequest(folderRequests, "POST "+harness.origin+"/api/v1/uploads"); got != 0 {
+		t.Fatalf("folder upload used %d single-item admissions; requests=%v", got, folderRequests)
+	}
+	if got := countExactRequest(folderRequests, "POST "+harness.origin+"/api/v1/directories"); got != 2 {
+		t.Fatalf("folder upload created directories %d times, want once per unique directory; requests=%v", got, folderRequests)
+	}
+	if got := countRequestPath(folderRequests, "/api/v1/files/stat"); got != 2 {
+		t.Fatalf("folder upload checked directories %d times, want once per unique directory; requests=%v", got, folderRequests)
 	}
 	if err := closeTransferSheet(ctx); err != nil {
 		t.Fatalf("close folder transfer sheet: %v (%s)", err, browserStatus(ctx))
@@ -717,7 +975,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.Focus("#file-view-grid", chromedp.ByQuery), chromedp.KeyEvent(" ")); err != nil {
 		t.Fatalf("switch to media grid: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector(".media-frame[data-path='/media-proof.png']").dataset.previewState === "generating"`, 5*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector(".media-frame[data-path='/media-proof.png']").dataset.previewState === "generating"`, 15*time.Second); err != nil {
 		t.Fatalf("wait for contending grid generation: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := harness.previewStore.Commit(context.Background(), gridBinding, gridClaim, gridArtifact); err != nil {
@@ -762,7 +1020,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.Focus("#preview-regenerate", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatalf("regenerate preview: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector("#toast-region .toast.info")?.textContent.includes("Preview generation continues") && document.querySelector("#preview-regenerate").disabled`, 5*time.Second); err != nil {
+	if err := waitFor(ctx, `document.querySelector("#toast-region .toast.info")?.textContent.includes("Preview generation continues") && document.querySelector("#preview-regenerate").disabled`, 15*time.Second); err != nil {
 		t.Fatalf("wait for contending preview operation: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := harness.previewStore.Commit(context.Background(), binding, claim, artifact); err != nil {
@@ -840,6 +1098,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	seedVirtualFiles(t, harness, 10_000)
 	mu.Lock()
 	resolveRequestsBeforeScale := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
+	directoryRequestsBeforeScale := countRequestPath(requestedURLs, "/api/v1/files")
 	mu.Unlock()
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(harness.origin+"/"),
@@ -894,9 +1153,11 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 	mu.Lock()
 	resolveRequestsAfterScale := countRequestPath(requestedURLs, "/api/v1/previews/resolve")
+	directoryRequestsAfterScale := countRequestPath(requestedURLs, "/api/v1/files")
 	mu.Unlock()
-	if loaded != 10_003 || renderedTiles > 64 || resolveRequestsAfterScale-resolveRequestsBeforeScale > 32 {
-		t.Fatalf("virtual grid bounds: logical=%d rendered=%d previewRequests=%d", loaded, renderedTiles, resolveRequestsAfterScale-resolveRequestsBeforeScale)
+	directoryPageRequests := directoryRequestsAfterScale - directoryRequestsBeforeScale
+	if loaded != 10_003 || renderedTiles > 64 || resolveRequestsAfterScale-resolveRequestsBeforeScale > 1 || directoryPageRequests != 2 {
+		t.Fatalf("virtual grid bounds: logical=%d rendered=%d previewRequests=%d directoryPageRequests=%d", loaded, renderedTiles, resolveRequestsAfterScale-resolveRequestsBeforeScale, directoryPageRequests)
 	}
 	var listBenchmark struct {
 		Logical       int     `json:"logical"`
@@ -1040,8 +1301,8 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	})()`, 5*time.Second); err != nil {
 		t.Fatalf("clear filters did not reset metadata state and dismiss the filter dialog: %v (%s)", err, browserStatus(ctx))
 	}
-	t.Logf(`ui-benchmark-v1 {"directory":{"logical":%d,"listRendered":%d,"gridRendered":%d,"filterMillis":%.2f,"storageRendered":%d,"storageRequests":%d},"previewRequests":%d}`,
-		loaded, listBenchmark.Rendered, renderedTiles, listBenchmark.FilterMillis, storageBenchmark.Rendered, storageRequests, resolveRequestsAfterScale-resolveRequestsBeforeScale)
+	t.Logf(`ui-benchmark-v1 {"directory":{"logical":%d,"listRendered":%d,"gridRendered":%d,"filterMillis":%.2f,"pageRequests":%d,"storageRendered":%d,"storageRequests":%d},"previewRequests":%d}`,
+		loaded, listBenchmark.Rendered, renderedTiles, listBenchmark.FilterMillis, directoryPageRequests, storageBenchmark.Rendered, storageRequests, resolveRequestsAfterScale-resolveRequestsBeforeScale)
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`document.querySelector("#file-view-grid").click()`, nil)); err != nil {
 		t.Fatalf("restore grid after list benchmark: %v", err)
 	}
@@ -2207,6 +2468,18 @@ func newDuplicateHarness(t *testing.T) harness {
 }
 
 func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
+	return newHarnessWithDataPlaneWrapper(t, withPreviews, nil)
+}
+
+func newHarnessWithDataPlaneWrapper(t *testing.T, withPreviews bool, wrap func(http.Handler) http.Handler) harness {
+	return newHarnessWithWrappers(t, withPreviews, true, nil, wrap)
+}
+
+func newProductionLikeHarnessWithControlPlaneWrapper(t *testing.T, wrap func(http.Handler) http.Handler) harness {
+	return newHarnessWithWrappers(t, false, false, wrap, nil)
+}
+
+func newHarnessWithWrappers(t *testing.T, withPreviews, localFixture bool, controlWrap, dataWrap func(http.Handler) http.Handler) harness {
 	t.Helper()
 	controlListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -2279,7 +2552,7 @@ func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.Config{BaseURL: origin, AllowedOrigin: origin, Secure: false, AllowRegistration: true, InviteRegistration: true, LocalFixture: true, PreviewProvider: "disabled", PreviewFormats: []string{"image"}, PreviewResolutions: []int{256, 512, 1600}, PreviewMaxConcurrency: 2}
+	cfg := config.Config{BaseURL: origin, AllowedOrigin: origin, Secure: false, AllowRegistration: true, InviteRegistration: true, LocalFixture: localFixture, PreviewProvider: "disabled", PreviewFormats: []string{"image"}, PreviewResolutions: []int{256, 512, 1600}, PreviewMaxConcurrency: 2}
 	var controlHandler http.Handler = httpapi.NewCompleteApplication(cfg, "e2e", identityService, sessions, driveService, themeManager)
 	if withPreviews {
 		cfg.PreviewProvider = "mock"
@@ -2290,8 +2563,15 @@ func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
 		}
 		controlHandler = httpapi.NewCompleteApplicationWithPreview(cfg, "e2e", identityService, sessions, driveService, previewService, themeManager)
 	}
+	if controlWrap != nil {
+		controlHandler = controlWrap(controlHandler)
+	}
 	controlServer := &http.Server{Handler: controlHandler}
-	dataServer := &http.Server{Handler: storage}
+	var dataHandler http.Handler = storage
+	if dataWrap != nil {
+		dataHandler = dataWrap(dataHandler)
+	}
+	dataServer := &http.Server{Handler: dataHandler}
 	previewServer := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		response := httptest.NewRecorder()
 		previewStore.ServeHTTP(response, request)
@@ -2327,6 +2607,80 @@ func newHarnessWithPreviews(t *testing.T, withPreviews bool) harness {
 		origin: origin, dataOrigin: dataOrigin, previewOrigin: previewOrigin, bootstrapToken: bootstrapToken,
 		repository: repository, storage: storage, previewStore: previewStore, corruptPreview: corruptPreview, clock: clock,
 	}
+}
+
+type uploadStatusGate struct {
+	count   atomic.Int64
+	release chan struct{}
+	once    sync.Once
+}
+
+func newUploadStatusGate() *uploadStatusGate {
+	return &uploadStatusGate{release: make(chan struct{})}
+}
+
+func (gate *uploadStatusGate) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && strings.HasPrefix(request.URL.Path, "/api/v1/uploads/") {
+			gate.count.Add(1)
+			<-gate.release
+		}
+		next.ServeHTTP(writer, request)
+	})
+}
+
+func (gate *uploadStatusGate) releaseAll() {
+	gate.once.Do(func() { close(gate.release) })
+}
+
+type uploadConcurrencyGate struct {
+	active  atomic.Int64
+	maximum atomic.Int64
+	arrived chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newUploadConcurrencyGate() *uploadConcurrencyGate {
+	return &uploadConcurrencyGate{arrived: make(chan struct{}, 32), release: make(chan struct{})}
+}
+
+func (gate *uploadConcurrencyGate) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if (request.Method != http.MethodPut && request.Method != http.MethodPatch) || !strings.HasPrefix(request.URL.Path, "/cap/upload/") {
+			next.ServeHTTP(writer, request)
+			return
+		}
+		active := gate.active.Add(1)
+		defer gate.active.Add(-1)
+		for {
+			maximum := gate.maximum.Load()
+			if active <= maximum || gate.maximum.CompareAndSwap(maximum, active) {
+				break
+			}
+		}
+		select {
+		case gate.arrived <- struct{}{}:
+		default:
+		}
+		<-gate.release
+		next.ServeHTTP(writer, request)
+	})
+}
+
+func (gate *uploadConcurrencyGate) waitForMaximum(ctx context.Context, want int64) error {
+	for gate.maximum.Load() < want {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-gate.arrived:
+		}
+	}
+	return nil
+}
+
+func (gate *uploadConcurrencyGate) releaseAll() {
+	gate.once.Do(func() { close(gate.release) })
 }
 
 func seedVirtualFiles(t *testing.T, harness harness, count int) {
@@ -2472,6 +2826,16 @@ func countRequestPath(requests []string, path string) int {
 	count := 0
 	for _, request := range requests {
 		if strings.Contains(request, path) {
+			count++
+		}
+	}
+	return count
+}
+
+func countExactRequest(requests []string, request string) int {
+	count := 0
+	for _, candidate := range requests {
+		if candidate == request {
 			count++
 		}
 	}

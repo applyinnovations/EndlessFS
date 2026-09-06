@@ -151,9 +151,17 @@ func TestResolveBoundsAutomaticGenerationWorkPerBatch(t *testing.T) {
 		items = append(items, preview.ItemRequest{Path: entry.Path, Version: entry.Version, Variant: 256})
 	}
 
+	before := env.source.Instrumentation()
 	result, err := env.service.Resolve(context.Background(), env.owner, preview.ResolveRequest{Items: items})
 	if err != nil {
 		t.Fatal(err)
+	}
+	after := env.source.Instrumentation()
+	if got := after.ProviderCalls[providermemory.OperationLookupChildren] - before.ProviderCalls[providermemory.OperationLookupChildren]; got != 1 {
+		t.Fatalf("visible batch source lookups = %d, want 1", got)
+	}
+	if got := after.ProviderCalls[providermemory.OperationStat] - before.ProviderCalls[providermemory.OperationStat]; got != 0 {
+		t.Fatalf("visible batch source stats = %d, want 0", got)
 	}
 	ready, missing := 0, 0
 	for _, item := range result.Items {
@@ -318,7 +326,7 @@ func TestGenerateDistinctReplicaOperationsConvergeOnSharedClaim(t *testing.T) {
 	}
 }
 
-func TestResolveCopyAndReplacementRequireDistinctArtifacts(t *testing.T) {
+func TestResolveReflinkCopyReusesArtifactAndReplacementDoesNot(t *testing.T) {
 	env := newPreviewEnvironment(t, preview.Options{Automatic: true})
 	original := env.uploadImage(t, "/identity.png", 12, 6)
 	first, err := env.service.Resolve(context.Background(), env.owner, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: original.Path, Version: original.Version, Variant: 256}}})
@@ -334,7 +342,7 @@ func TestResolveCopyAndReplacementRequireDistinctArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	copyResult, err := env.service.Resolve(context.Background(), env.owner, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: copied.Path, Version: copied.Version, Variant: 256}}})
-	if err != nil || copyResult.Items[0].State != preview.StateReady || copyResult.Items[0].Artifact.GenerationID == first.Items[0].Artifact.GenerationID {
+	if err != nil || copyResult.Items[0].State != preview.StateReady || copyResult.Items[0].Artifact.GenerationID != first.Items[0].Artifact.GenerationID {
 		t.Fatalf("copied Resolve() = %+v, %v", copyResult, err)
 	}
 	replacementData := encodePreviewPNG(t, 6, 12)
@@ -343,8 +351,8 @@ func TestResolveCopyAndReplacementRequireDistinctArtifacts(t *testing.T) {
 	if err != nil || replacementResult.Items[0].State != preview.StateReady || replacementResult.Items[0].Artifact.GenerationID == first.Items[0].Artifact.GenerationID {
 		t.Fatalf("replacement Resolve() = %+v, %v", replacementResult, err)
 	}
-	if env.generator.Calls() != 3 {
-		t.Fatalf("copy/replacement generator calls = %d, want 3", env.generator.Calls())
+	if env.generator.Calls() != 2 {
+		t.Fatalf("copy/replacement generator calls = %d, want 2", env.generator.Calls())
 	}
 }
 
@@ -504,7 +512,7 @@ type previewEnvironment struct {
 	generator        *fakeGenerator
 	clock            *domain.FixedClock
 	ids              *domain.IDGenerator
-	applicationState state.Store
+	applicationState state.AtomicStore
 	owner            domain.UserID
 	scope            domain.Scope
 }

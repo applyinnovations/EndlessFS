@@ -26,6 +26,42 @@ type migrationMarkPutFaultBackend struct {
 	err error
 }
 
+type migrationMarkCreateConflictBackend struct {
+	objectstore.Backend
+	publishWinner bool
+	injected      int
+}
+
+func (backend *migrationMarkCreateConflictBackend) Put(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+	if condition.Mode == objectstore.PutCreateOnly && strings.HasPrefix(key.String(), storageformat.MigrationDirectoryMarkPrefix(schemaMigration003To004.checkpointID)) {
+		backend.injected++
+		if backend.publishWinner && backend.injected == 1 {
+			if _, err := backend.Backend.Put(ctx, key, body, condition); err != nil {
+				return "", err
+			}
+		}
+		return "", domain.NewError(domain.ErrorConflict, "injected migration mark creation conflict")
+	}
+	return backend.Backend.Put(ctx, key, body, condition)
+}
+
+type migrationOpenLostSuccessBackend struct {
+	objectstore.Backend
+	injected bool
+}
+
+func (backend *migrationOpenLostSuccessBackend) Put(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+	if key == storageformat.WriteGateKey() && condition.Mode == objectstore.PutMatch && strings.Contains(string(body), `"mode":"open"`) && !backend.injected {
+		version, err := backend.Backend.Put(ctx, key, body, condition)
+		if err != nil {
+			return version, err
+		}
+		backend.injected = true
+		return "", domain.NewError(domain.ErrorUnavailable, "injected lost successful gate-open response")
+	}
+	return backend.Backend.Put(ctx, key, body, condition)
+}
+
 func (backend *migrationMarkPutFaultBackend) Put(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
 	if condition.Mode == objectstore.PutMatch && strings.HasPrefix(key.String(), storageformat.MigrationDirectoryMarkPrefix(schemaMigration003To004.checkpointID)) {
 		return "", backend.err
@@ -198,6 +234,39 @@ func TestMigrationDirectoryMarksFailClosedAndCleanUp(t *testing.T) {
 	}
 }
 
+func TestMigrationDirectoryMarkCreationReconcilesRacesAndBoundsContention(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		publishWinner bool
+		wantErr       error
+		wantAttempts  int
+	}{
+		{name: "lost-winner-response", publishWinner: true, wantAttempts: 1},
+		{name: "persistent-contention", wantErr: domain.ErrUnavailable, wantAttempts: 8},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			backend, engine, scope, root, _ := emptyPhysicalMigrationRoot(t)
+			faults := &migrationMarkCreateConflictBackend{Backend: backend, publishWinner: test.publishWinner}
+			engine.backend = faults
+			walk := &migrationWalk{
+				engine: engine, group: migrationScope{scope: scope}, transition: schemaMigration003To004,
+				plan: aggregateMigrationPlan{writeProviderFingerprints: true}, phase: migrationPhaseTransform,
+			}
+			total := migrationAggregate{
+				bytes: root.recursiveBytes, files: root.recursiveFileCount, directories: 1,
+				accumulator: root.contentAccumulator, digest: root.contentDigest,
+			}
+			err := walk.writeCompletedDirectoryMark(t.Context(), storageformat.RootDirectoryID, "", "", total)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("mark creation error = %v; want %v", err, test.wantErr)
+			}
+			if faults.injected != test.wantAttempts {
+				t.Fatalf("mark creation attempts = %d; want %d", faults.injected, test.wantAttempts)
+			}
+		})
+	}
+}
+
 func TestMigrationManifestValidationRejectsMalformedCanonicalState(t *testing.T) {
 	valid := storageformat.DirectoryManifest{
 		SchemaVersion: 1,
@@ -208,6 +277,18 @@ func TestMigrationManifestValidationRejectsMalformedCanonicalState(t *testing.T)
 	}
 	if err := validateMigrationManifest(valid, "directory", "manifest"); err != nil {
 		t.Fatalf("valid migration manifest rejected: %v", err)
+	}
+	contentAccumulator, contentDigest, err := directoryContentIdentity(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := valid
+	latest.SchemaVersion = 3
+	latest.PageIDs = nil
+	latest.ContentAccumulator = contentAccumulator
+	latest.ContentDigest = contentDigest
+	if err := validateMigrationManifest(latest, "directory", "manifest"); err != nil {
+		t.Fatalf("valid lazy migration manifest rejected: %v", err)
 	}
 	invalid := valid
 	invalid.EntryCount = -1
@@ -409,6 +490,29 @@ func TestMigrationActivationAndCompletionRejectInconsistentControlRecords(t *tes
 		}
 	})
 
+	t.Run("writer-activation-revision-overflow", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema008)
+		key := storageformat.WriterSetKey()
+		object, err := backend.Get(t.Context(), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope storageformat.Envelope
+		var writer storageformat.WriterSet
+		if err := storageformat.DecodeEnvelope(object.Body, key, writerSetSchema, &envelope, &writer); err != nil {
+			t.Fatal(err)
+		}
+		body, err := storageformat.EncodeEnvelope(writerSetSchema, key, math.MaxUint64, writer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replaceMigrationBody(t, backend, key, body)
+		if err := engine.activateMigrationWriterSet(t.Context(), schemaMigration008To009); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("writer activation revision overflow error = %v; want invalid", err)
+		}
+	})
+
 	t.Run("malformed-writer", func(t *testing.T) {
 		backend, engine := currentMigrationEngine(t)
 		replaceMigrationBody(t, backend, storageformat.WriterSetKey(), []byte("{}"))
@@ -446,6 +550,31 @@ func TestMigrationActivationAndCompletionRejectInconsistentControlRecords(t *tes
 		superblock.RequiredFeatures = nil
 		if err := engine.activateMigrationSuperblock(context.Background(), schemaMigration002To003, object, superblock); !errors.Is(err, domain.ErrPreconditionFailed) {
 			t.Fatalf("superblock schema error = %v; want precondition failed", err)
+		}
+	})
+
+	t.Run("stale-predecessor-superblock-snapshot", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		object, err := backend.Get(context.Background(), storageformat.SuperblockKey())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stale storageformat.Superblock
+		if err := decodeCanonicalSuperblock(object.Body, &stale); err != nil {
+			t.Fatal(err)
+		}
+		features, found := schemaFeatures(storageSchema007, engine.writer.RequiredFeatures)
+		if !found {
+			t.Fatal("schema-007 features not found")
+		}
+		stale.RequiredFeatures = append([]string(nil), features...)
+		object.Body, err = storageformat.EncodeCanonical(stale)
+		if err != nil {
+			t.Fatal(err)
+		}
+		object.Version = "stale-superblock-version"
+		if err := engine.activateMigrationSuperblock(context.Background(), schemaMigration008To009, object, stale); err != nil {
+			t.Fatalf("stale predecessor snapshot was not reconciled: %v", err)
 		}
 	})
 
@@ -590,11 +719,18 @@ func (backend *closingGateContentionBackend) Put(ctx context.Context, key object
 
 type migrationGatePutFailureBackend struct {
 	objectstore.Backend
-	err error
+	err         error
+	cancel      context.CancelFunc
+	cancelAfter int
+	attempts    int
 }
 
 func (backend *migrationGatePutFailureBackend) Put(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
 	if key == storageformat.WriteGateKey() {
+		backend.attempts++
+		if backend.cancel != nil && backend.attempts == backend.cancelAfter {
+			backend.cancel()
+		}
 		return "", backend.err
 	}
 	return backend.Backend.Put(ctx, key, body, condition)
@@ -670,6 +806,27 @@ func TestMigrationSchemaChainFailsClosedForEveryControlPlaneDisagreement(t *test
 		}
 	})
 
+	t.Run("current-superblock-with-predecessor-gate-without-checkpoint", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		predecessorFeatures, found := schemaFeatures(storageSchema007, engine.writer.RequiredFeatures)
+		if !found {
+			t.Fatal("schema 007 features are not registered")
+		}
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateOpen
+			gate.CheckpointID = ""
+			gate.WriterFeatures = append([]string(nil), predecessorFeatures...)
+		})
+
+		pending, err := engine.storageMigrationPending(context.Background())
+		if err != nil || !pending {
+			t.Fatalf("predecessor gate pending = %t, %v; want true, nil", pending, err)
+		}
+		if err := engine.migrateStorageSchemaChain(context.Background()); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("marker disagreement error = %v; want precondition failed", err)
+		}
+	})
+
 	t.Run("broken-ledger-path", func(t *testing.T) {
 		backend, engine := currentMigrationEngine(t)
 		rewriteMigrationSuperblock(t, backend, func(superblock *storageformat.Superblock) { superblock.RequiredFeatures = nil })
@@ -705,6 +862,523 @@ func TestMigrationSchemaChainFailsClosedForEveryControlPlaneDisagreement(t *test
 		t.Cleanup(func() { schemaMigration001To002.run = original })
 		if err := engine.migrateStorageSchemaChain(context.Background()); !errors.Is(err, domain.ErrUnavailable) {
 			t.Fatalf("non-convergent ledger error = %v; want unavailable", err)
+		}
+	})
+}
+
+func TestMigrationSchemaChainRestartsSelectionAfterConcurrentGateReconciliation(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name   string
+		mutate func(*storageformat.WriteGate, *Engine)
+	}{
+		{
+			name: "gate-control-changed",
+			mutate: func(gate *storageformat.WriteGate, _ *Engine) {
+				gate.Mode = storageformat.GateClosing
+				gate.CheckpointID = "concurrent-checkpoint"
+			},
+		},
+		{
+			name: "gate-features-changed",
+			mutate: func(gate *storageformat.WriteGate, engine *Engine) {
+				features, found := schemaFeatures(storageSchema008, engine.writer.RequiredFeatures)
+				if !found {
+					t.Fatal("schema-008 features are not registered")
+				}
+				gate.WriterFeatures = append([]string(nil), features...)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			backend, engine := currentMigrationEngine(t)
+			rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+				gate.Mode = storageformat.GateOpen
+				gate.CheckpointID = ""
+				gate.Epoch = 2
+			})
+			if _, err := newDomainCatalog(backend, nil).freeze(ctx, 1); err != nil {
+				t.Fatal(err)
+			}
+
+			gateReads, superblockReads := 0, 0
+			engine.backend = &hookedBackend{Backend: backend, get: func(callCtx context.Context, key objectstore.Key) (objectstore.Object, error) {
+				switch key {
+				case storageformat.SuperblockKey():
+					superblockReads++
+					if superblockReads == 2 {
+						return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "stop after selection restart")
+					}
+				case storageformat.WriteGateKey():
+					gateReads++
+					if gateReads == 2 {
+						rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+							test.mutate(gate, engine)
+						})
+					}
+				}
+				return backend.Get(callCtx, key)
+			}}
+			if err := engine.migrateStorageSchemaChain(ctx); !errors.Is(err, domain.ErrUnavailable) {
+				t.Fatalf("migration after reconciled gate change error = %v; want unavailable", err)
+			}
+			if gateReads < 3 || superblockReads != 2 {
+				t.Fatalf("reconciliation reads gate=%d superblock=%d; want at least 3 and exactly 2", gateReads, superblockReads)
+			}
+		})
+	}
+}
+
+func TestClosedStorageMigrationGateSnapshotCannotBeReboundToAnotherEpoch(t *testing.T) {
+	ctx := context.Background()
+	backend, engine := currentMigrationEngine(t)
+	configureMigrationSourceSchema(t, backend, engine, storageSchema008)
+	path, err := storageMigrationPath(storageSchema008)
+	if err != nil || len(path) == 0 {
+		t.Fatalf("schema-008 migration path = %+v, %v", path, err)
+	}
+	transition := path[0]
+	rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+		gate.Mode = storageformat.GateClosed
+		gate.CheckpointID = transition.checkpointID
+		gate.Epoch = 9
+	})
+	gate, active, err := engine.readClosedStorageMigrationGate(ctx, transition)
+	if err != nil || !active || gate.Epoch != 9 {
+		t.Fatalf("closed migration gate = %+v, active=%v, err=%v", gate, active, err)
+	}
+
+	rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+		gate.Mode = storageformat.GateOpen
+		gate.CheckpointID = ""
+		gate.Epoch++
+	})
+	if _, active, err := engine.readClosedStorageMigrationGate(ctx, transition); !errors.Is(err, domain.ErrPreconditionFailed) || active {
+		t.Fatalf("reopened incomplete migration gate active=%v error=%v", active, err)
+	}
+
+	targetFeatures, found := schemaFeatures(transition.to, engine.writer.RequiredFeatures)
+	if !found {
+		t.Fatal("schema-009 target features not found")
+	}
+	rewriteMigrationWriter(t, backend, targetFeatures)
+	rewriteMigrationSuperblock(t, backend, func(superblock *storageformat.Superblock) {
+		superblock.RequiredFeatures = append([]string(nil), targetFeatures...)
+	})
+	rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+		gate.WriterFeatures = append([]string(nil), targetFeatures...)
+	})
+	if _, active, err := engine.readClosedStorageMigrationGate(ctx, transition); err != nil || active {
+		t.Fatalf("completed migration gate active=%v error=%v", active, err)
+	}
+}
+
+func TestClosedStorageMigrationGateSnapshotPropagatesControlReadFailures(t *testing.T) {
+	ctx := context.Background()
+	t.Run("gate", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		engine.backend = &hookedBackend{Backend: backend, get: func(callCtx context.Context, key objectstore.Key) (objectstore.Object, error) {
+			if key == storageformat.WriteGateKey() {
+				return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "gate read failed")
+			}
+			return backend.Get(callCtx, key)
+		}}
+		if _, _, err := engine.readClosedStorageMigrationGate(ctx, schemaMigration008To009); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("gate read error = %v", err)
+		}
+	})
+	t.Run("completion-marker", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		replaceMigrationBody(t, backend, storageformat.SuperblockKey(), []byte("{}"))
+		if _, _, err := engine.readClosedStorageMigrationGate(ctx, schemaMigration008To009); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("completion marker error = %v", err)
+		}
+	})
+}
+
+func TestMigrationSuperblockActivationFailsClosedAtEveryDurableBoundary(t *testing.T) {
+	ctx := context.Background()
+	readSuperblock := func(t *testing.T, backend objectstore.Backend) (objectstore.Object, storageformat.Superblock) {
+		t.Helper()
+		object, err := backend.Get(ctx, storageformat.SuperblockKey())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var superblock storageformat.Superblock
+		if err := decodeCanonicalSuperblock(object.Body, &superblock); err != nil {
+			t.Fatal(err)
+		}
+		return object, superblock
+	}
+	bind := func(t *testing.T, object objectstore.Object, superblock storageformat.Superblock) objectstore.Object {
+		t.Helper()
+		body, err := storageformat.EncodeCanonical(superblock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		object.Body = body
+		return object
+	}
+	predecessor := func(t *testing.T) (*objectmemory.Backend, *Engine, objectstore.Object, storageformat.Superblock) {
+		t.Helper()
+		backend, engine := currentMigrationEngine(t)
+		configureMigrationSourceSchema(t, backend, engine, storageSchema008)
+		object, superblock := readSuperblock(t, backend)
+		return backend, engine, object, superblock
+	}
+
+	t.Run("bound-invalid-format", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		object, superblock := readSuperblock(t, backend)
+		superblock.FormatID = "unknown"
+		object = bind(t, object, superblock)
+		if err := engine.activateMigrationSuperblock(ctx, schemaMigration008To009, object, superblock); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("invalid bound format error = %v; want precondition failed", err)
+		}
+	})
+
+	t.Run("bound-unregistered-schema", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		object, superblock := readSuperblock(t, backend)
+		superblock.RequiredFeatures = []string{"unknown-feature"}
+		object = bind(t, object, superblock)
+		if err := engine.activateMigrationSuperblock(ctx, schemaMigration008To009, object, superblock); !errors.Is(err, domain.ErrPreconditionFailed) {
+			t.Fatalf("unregistered bound schema error = %v; want precondition failed", err)
+		}
+	})
+
+	t.Run("stale-reread", func(t *testing.T) {
+		for _, test := range []struct {
+			name string
+			get  func(objectstore.Object) (objectstore.Object, error)
+			want error
+		}{
+			{name: "unavailable", get: func(objectstore.Object) (objectstore.Object, error) {
+				return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "injected superblock reread failure")
+			}, want: domain.ErrUnavailable},
+			{name: "corrupt", get: func(object objectstore.Object) (objectstore.Object, error) {
+				object.Body = []byte("{}")
+				return object, nil
+			}, want: domain.ErrInvalid},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				backend, engine := currentMigrationEngine(t)
+				object, stale := readSuperblock(t, backend)
+				features, found := schemaFeatures(storageSchema007, engine.writer.RequiredFeatures)
+				if !found {
+					t.Fatal("schema-007 features not found")
+				}
+				stale.RequiredFeatures = append([]string(nil), features...)
+				object = bind(t, object, stale)
+				engine.backend = &hookedBackend{Backend: backend, get: func(context.Context, objectstore.Key) (objectstore.Object, error) {
+					return test.get(object)
+				}}
+				if err := engine.activateMigrationSuperblock(ctx, schemaMigration008To009, object, stale); !errors.Is(err, test.want) {
+					t.Fatalf("stale reread error = %v; want %v", err, test.want)
+				}
+			})
+		}
+	})
+
+	t.Run("activation-write", func(t *testing.T) {
+		for _, test := range []struct {
+			name string
+			put  error
+			get  func(objectstore.Object) (objectstore.Object, error)
+			want error
+		}{
+			{name: "unavailable", put: domain.NewError(domain.ErrorUnavailable, "injected activation write failure"), want: domain.ErrUnavailable},
+			{name: "conflict-then-reread-unavailable", put: domain.NewError(domain.ErrorConflict, "injected activation conflict"), get: func(objectstore.Object) (objectstore.Object, error) {
+				return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "injected post-conflict reread failure")
+			}, want: domain.ErrUnavailable},
+			{name: "conflict-then-corrupt-reread", put: domain.NewError(domain.ErrorConflict, "injected activation conflict"), get: func(object objectstore.Object) (objectstore.Object, error) {
+				object.Body = []byte("{}")
+				return object, nil
+			}, want: domain.ErrInvalid},
+			{name: "persistent-conflict", put: domain.NewError(domain.ErrorConflict, "injected persistent activation conflict"), want: domain.ErrUnavailable},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				backend, engine, object, superblock := predecessor(t)
+				hooks := &hookedBackend{Backend: backend}
+				hooks.put = func(context.Context, objectstore.Key, []byte, objectstore.PutCondition) (objectstore.NativeVersion, error) {
+					return "", test.put
+				}
+				if test.get != nil {
+					hooks.get = func(context.Context, objectstore.Key) (objectstore.Object, error) {
+						return test.get(object)
+					}
+				}
+				engine.backend = hooks
+				if err := engine.activateMigrationSuperblock(ctx, schemaMigration008To009, object, superblock); !errors.Is(err, test.want) {
+					t.Fatalf("activation error = %v; want %v", err, test.want)
+				}
+			})
+		}
+	})
+}
+
+func TestMigrationAggregatePhaseRejectsUnknownValue(t *testing.T) {
+	_, engine := currentMigrationEngine(t)
+	if err := engine.migrateAllDirectoryAggregatesPhase(context.Background(), schemaMigration008To009, aggregateMigrationPlan{}, "unknown"); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid aggregate migration phase error = %v; want invalid", err)
+	}
+}
+
+func TestMigrationAggregateLegacyTraversalInitializesCycleState(t *testing.T) {
+	_, engine, _, _, _ := emptyPhysicalMigrationRoot(t)
+	if err := engine.migrateAllDirectoryAggregatesPhase(context.Background(), schemaMigration003To004, aggregateMigrationPlan{}, ""); err != nil {
+		t.Fatalf("legacy aggregate traversal = %v", err)
+	}
+}
+
+func TestMigrationAggregateRejectsUnreachableDirectoryRoot(t *testing.T) {
+	backend, engine, scope, _, _ := emptyPhysicalMigrationRoot(t)
+	orphanID := "YmJiYmJiYmJiYmJiYmJiYg"
+	prepared := prepareSchema007DirectoryFixture(t, engine, scope, orphanID, nil, nil)
+	for _, prerequisite := range prepared.prerequisites {
+		migrationPut(t, backend, objectstore.MustKey(prerequisite.Key), prerequisite.Body)
+	}
+	migrationPut(t, backend, storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), orphanID), prepared.rootBody)
+	if err := engine.migrateAllDirectoryAggregatesPhase(context.Background(), schemaMigration003To004, aggregateMigrationPlan{}, ""); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("unreachable directory root error = %v; want invalid", err)
+	}
+}
+
+func TestMigrationAggregateListingFailsClosed(t *testing.T) {
+	t.Run("provider-list", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		engine.backend = &hookedBackend{Backend: backend, list: func(context.Context, objectstore.ListRequest) (objectstore.ListPage, error) {
+			return objectstore.ListPage{}, domain.NewError(domain.ErrorUnavailable, "injected filesystem listing failure")
+		}}
+		if err := engine.migrateAllDirectoryAggregatesPhase(context.Background(), schemaMigration008To009, aggregateMigrationPlan{}, migrationPhaseTransform); !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("filesystem list error = %v; want unavailable", err)
+		}
+	})
+
+	t.Run("malformed-directory-key", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		segments := strings.Split(storageformat.DirectoryRootKey("YWFhYWFhYWFhYWFhYWFhYQ", "live", storageformat.RootDirectoryID).String(), "/")
+		segments[3] = "0"
+		key := objectstore.MustKey(strings.Join(segments, "/"))
+		if _, err := backend.Put(context.Background(), key, []byte("malformed"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+			t.Fatal(err)
+		}
+		if err := engine.migrateAllDirectoryAggregatesPhase(context.Background(), schemaMigration008To009, aggregateMigrationPlan{}, migrationPhaseTransform); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("malformed directory key error = %v; want invalid", err)
+		}
+	})
+}
+
+func TestStorageMigration007To008PropagatesCompletionReadFailure(t *testing.T) {
+	backend, engine := currentMigrationEngine(t)
+	object, err := backend.Get(context.Background(), storageformat.SuperblockKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var superblock storageformat.Superblock
+	if err := decodeCanonicalSuperblock(object.Body, &superblock); err != nil {
+		t.Fatal(err)
+	}
+	replaceMigrationBody(t, backend, storageformat.SuperblockKey(), []byte("{}"))
+	if err := engine.runStorageMigration007To008(context.Background(), schemaMigration007To008, object, superblock); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("schema-008 completion read error = %v; want invalid", err)
+	}
+}
+
+func TestStorageMigrationContentionPropagatesGateReadFailure(t *testing.T) {
+	backend, engine := currentMigrationEngine(t)
+	configureMigrationSourceSchema(t, backend, engine, storageSchema008)
+	gateReads := 0
+	hooks := &hookedBackend{Backend: backend}
+	hooks.get = func(ctx context.Context, key objectstore.Key) (objectstore.Object, error) {
+		if key == storageformat.WriteGateKey() {
+			gateReads++
+			if gateReads > 16 {
+				return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "injected final diagnostic read failure")
+			}
+		}
+		return backend.Get(ctx, key)
+	}
+	hooks.put = func(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+		if key == storageformat.WriteGateKey() {
+			return "", domain.NewError(domain.ErrorConflict, "injected migration gate contention")
+		}
+		return backend.Put(ctx, key, body, condition)
+	}
+	engine.backend = hooks
+	if _, err := engine.closeStorageMigrationGate(context.Background(), schemaMigration008To009, aggregateMigrationPlan{}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("migration gate read error = %v; want unavailable", err)
+	}
+}
+
+func TestSchema008MigrationRejectsIndexedDirectoryCountMismatch(t *testing.T) {
+	backend, engine := currentMigrationEngine(t)
+	user, err := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := domain.NewScope(user, domain.AreaLive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directoryID := storageformat.RootDirectoryID
+	entry := withCurrentTestFingerprint(migrationFileEntry(t, "file.bin", 4))
+	prepared := prepareSchema007DirectoryFixture(t, engine, scope, directoryID, []storageformat.DirectoryEntry{entry}, nil)
+	for _, prerequisite := range prepared.prerequisites {
+		migrationPut(t, backend, objectstore.MustKey(prerequisite.Key), prerequisite.Body)
+	}
+	manifest, err := engine.readMigrationDirectoryManifest(context.Background(), scope, directoryID, prepared.manifestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.manifest.EntryCount++
+	if err := engine.visitSchema007DirectoryEntries(context.Background(), scope, directoryID, manifest.manifest, func(storageformat.DirectoryEntry) error { return nil }); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("indexed directory count error = %v; want invalid", err)
+	}
+}
+
+func TestSchema008MigrationDomainFreezeIsFencedByClosedGate(t *testing.T) {
+	ctx := context.Background()
+	reference := consistencyDomainRef{Kind: storageformat.DomainOwnerControl, ID: "owner:migration-freeze-fence"}
+	seed := func(t *testing.T, backend objectstore.Backend, engine *Engine) {
+		t.Helper()
+		if _, err := engine.stateDomainStore().mutate(ctx, reference, consistencyDomainMutation{ID: "seed", Changes: []consistencyDomainChange{{Key: "value", Require: domainValueAbsent, Value: []byte("value")}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closeGate := func(t *testing.T, backend *objectmemory.Backend, epoch uint64) {
+		t.Helper()
+		rewriteMigrationGate(t, backend, func(gate *storageformat.WriteGate) {
+			gate.Mode = storageformat.GateClosed
+			gate.CheckpointID = schemaMigration007To008.checkpointID
+			gate.Epoch = epoch
+		})
+	}
+
+	t.Run("catalog-conflict", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		if _, err := newDomainCatalog(backend, nil).freeze(ctx, 8); err != nil {
+			t.Fatal(err)
+		}
+		closeGate(t, backend, 9)
+		if err := engine.freezeSchema008MigrationDomains(ctx, schemaMigration007To008, 9); !errors.Is(err, domain.ErrConflict) {
+			t.Fatalf("catalog conflict error = %v", err)
+		}
+	})
+
+	t.Run("domain-conflict", func(t *testing.T) {
+		backend, engine := currentMigrationEngine(t)
+		seed(t, backend, engine)
+		if err := engine.stateDomainStore().freeze(ctx, reference, 8); err != nil {
+			t.Fatal(err)
+		}
+		closeGate(t, backend, 9)
+		if err := engine.freezeSchema008MigrationDomains(ctx, schemaMigration007To008, 9); !errors.Is(err, domain.ErrConflict) {
+			t.Fatalf("domain conflict error = %v", err)
+		}
+	})
+
+	t.Run("reopen-after-domain-freeze", func(t *testing.T) {
+		memory := objectmemory.New()
+		hooks := &hookedBackend{Backend: memory}
+		engine := openNamespaceTestEngine(t, hooks)
+		seed(t, hooks, engine)
+		closeGate(t, memory, 9)
+		domainKey := storageformat.DomainHeadKey(reference.Kind, reference.ID)
+		reopened := false
+		hooks.put = func(callCtx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+			version, err := memory.Put(callCtx, key, body, condition)
+			if err == nil && key == domainKey && strings.Contains(string(body), `"frozen":true`) && !reopened {
+				reopened = true
+				rewriteMigrationGate(t, memory, func(gate *storageformat.WriteGate) {
+					gate.Mode = storageformat.GateOpen
+					gate.CheckpointID = ""
+					gate.Epoch++
+				})
+			}
+			return version, err
+		}
+		if err := engine.freezeSchema008MigrationDomains(ctx, schemaMigration007To008, 9); err != nil || !reopened {
+			t.Fatalf("reopened freeze error = %v, reopened=%v", err, reopened)
+		}
+		snapshot, err := engine.stateDomainStore().loadHead(ctx, reference)
+		if err != nil || snapshot.head.Frozen {
+			t.Fatalf("lagging freeze survived reopen: %+v, %v", snapshot.head, err)
+		}
+		catalog, err := newDomainCatalog(memory, nil).load(ctx)
+		if err != nil || catalog.head.FreezeEpoch != 0 {
+			t.Fatalf("lagging catalog freeze survived reopen: %+v, %v", catalog.head, err)
+		}
+	})
+
+	t.Run("reopen-unfreeze-failure", func(t *testing.T) {
+		memory := objectmemory.New()
+		hooks := &hookedBackend{Backend: memory}
+		engine := openNamespaceTestEngine(t, hooks)
+		seed(t, hooks, engine)
+		closeGate(t, memory, 9)
+		domainKey := storageformat.DomainHeadKey(reference.Kind, reference.ID)
+		reopened := false
+		hooks.put = func(callCtx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+			if key == domainKey && reopened && !strings.Contains(string(body), `"frozen":true`) {
+				return "", domain.NewError(domain.ErrorUnavailable, "injected old-epoch unfreeze failure")
+			}
+			version, err := memory.Put(callCtx, key, body, condition)
+			if err == nil && key == domainKey && strings.Contains(string(body), `"frozen":true`) && !reopened {
+				reopened = true
+				rewriteMigrationGate(t, memory, func(gate *storageformat.WriteGate) {
+					gate.Mode = storageformat.GateOpen
+					gate.CheckpointID = ""
+					gate.Epoch++
+				})
+			}
+			return version, err
+		}
+		if err := engine.freezeSchema008MigrationDomains(ctx, schemaMigration007To008, 9); !errors.Is(err, domain.ErrUnavailable) || !reopened {
+			t.Fatalf("old-epoch unfreeze error = %v, reopened=%v; want unavailable", err, reopened)
+		}
+	})
+
+	t.Run("next-epoch-catalog-does-not-preserve-lagging-domain-freeze", func(t *testing.T) {
+		memory := objectmemory.New()
+		hooks := &hookedBackend{Backend: memory}
+		engine := openNamespaceTestEngine(t, hooks)
+		seed(t, hooks, engine)
+		closeGate(t, memory, 9)
+		domainKey := storageformat.DomainHeadKey(reference.Kind, reference.ID)
+		advanced := false
+		hooks.put = func(callCtx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
+			if key == domainKey && strings.Contains(string(body), `"frozen":true`) && !advanced {
+				advanced = true
+				rewriteMigrationGate(t, memory, func(gate *storageformat.WriteGate) {
+					gate.Mode = storageformat.GateOpen
+					gate.CheckpointID = ""
+					gate.Epoch++
+				})
+				if err := newDomainCatalog(memory, nil).unfreeze(callCtx, 9); err != nil {
+					t.Fatal(err)
+				}
+				rewriteMigrationGate(t, memory, func(gate *storageformat.WriteGate) {
+					gate.Mode = storageformat.GateClosing
+					gate.CheckpointID = schemaMigration008To009.checkpointID
+				})
+				if _, err := newDomainCatalog(memory, nil).freeze(callCtx, 10); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return memory.Put(callCtx, key, body, condition)
+		}
+		if err := engine.freezeSchema008MigrationDomains(ctx, schemaMigration007To008, 9); err != nil || !advanced {
+			t.Fatalf("adjacent epoch freeze error = %v, advanced=%v", err, advanced)
+		}
+		snapshot, err := engine.stateDomainStore().loadHead(ctx, reference)
+		if err != nil || snapshot.head.Frozen {
+			t.Fatalf("lagging domain freeze survived adjacent closure: %+v, %v", snapshot.head, err)
+		}
+		catalog, err := newDomainCatalog(memory, nil).load(ctx)
+		if err != nil || catalog.head.FreezeEpoch != 10 {
+			t.Fatalf("next catalog freeze was disturbed: %+v, %v", catalog.head, err)
 		}
 	})
 }
@@ -1113,47 +1787,49 @@ func TestFeatureOnlyMigrationGateClosureRejectsEveryUnsafeControlState(t *testin
 		}
 	})
 
-	t.Run("gate-contention-exhaustion", func(t *testing.T) {
+	t.Run("gate-contention-cancellation", func(t *testing.T) {
 		backend, engine := currentMigrationEngine(t)
 		configureMigrationSourceSchema(t, backend, engine, storageSchema004)
-		engine.backend = &migrationGatePutFailureBackend{Backend: backend, err: domain.NewError(domain.ErrorConflict, "injected gate contention")}
-		if _, err := engine.closeFeatureOnlyMigrationGate(t.Context(), schemaMigration004To005); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("gate contention error = %v; want unavailable", err)
+		ctx, cancel := context.WithCancel(t.Context())
+		contended := &migrationGatePutFailureBackend{
+			Backend: backend, err: domain.NewError(domain.ErrorConflict, "injected gate contention"),
+			cancel: cancel, cancelAfter: 64,
+		}
+		engine.backend = contended
+		if _, err := engine.closeFeatureOnlyMigrationGate(ctx, schemaMigration004To005); !errors.Is(err, context.Canceled) {
+			t.Fatalf("gate contention error = %v; want context cancellation", err)
+		}
+		if contended.attempts != 64 {
+			t.Fatalf("feature-only gate contention attempts = %d; want 64", contended.attempts)
 		}
 	})
 }
 
-func TestMigrationDirectoryDiscoveryRejectsMalformedAndDisconnectedScopes(t *testing.T) {
-	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
-	orphanID := "AAAAAAAAAAAAAAAAAAAAAA"
+func TestFeatureOnlyMigrationReconcilesLostSuccessfulGateOpen(t *testing.T) {
+	backend, engine := currentMigrationEngine(t)
+	configureMigrationSourceSchema(t, backend, engine, storageSchema004)
+	superblockObject, err := backend.Get(t.Context(), storageformat.SuperblockKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var superblock storageformat.Superblock
+	if err := decodeCanonicalSuperblock(superblockObject.Body, &superblock); err != nil {
+		t.Fatal(err)
+	}
 
-	t.Run("malformed-root-key", func(t *testing.T) {
-		backend := objectmemory.New()
-		segments := strings.Split(storageformat.DirectoryRootKey(user.String(), "live", storageformat.RootDirectoryID).String(), "/")
-		segments[3] = "invalid"
-		migrationPut(t, backend, objectstore.MustKey(strings.Join(segments, "/")), []byte("{}"))
-		engine := &Engine{backend: backend}
-		if err := engine.migrateAllDirectoryAggregates(context.Background(), schemaMigration002To003, aggregateMigrationPlan{writeFileCounts: true}); !errors.Is(err, domain.ErrInvalid) {
-			t.Fatalf("malformed root key error = %v; want invalid", err)
+	faults := &migrationOpenLostSuccessBackend{Backend: backend}
+	engine.scheduler = SchedulerFunc(func(_ context.Context, step string) error {
+		if step == MigrationStepName(string(schemaMigration004To005.id), StepMigrationAfterCheckpoint) {
+			engine.backend = faults
 		}
+		return nil
 	})
-
-	t.Run("missing-canonical-root", func(t *testing.T) {
-		backend := objectmemory.New()
-		migrationPut(t, backend, storageformat.DirectoryRootKey(user.String(), "live", orphanID), []byte("{}"))
-		engine := &Engine{backend: backend}
-		if err := engine.migrateAllDirectoryAggregates(context.Background(), schemaMigration002To003, aggregateMigrationPlan{writeFileCounts: true}); !errors.Is(err, domain.ErrInvalid) {
-			t.Fatalf("missing canonical root error = %v; want invalid", err)
-		}
-	})
-
-	t.Run("unreachable-directory-root", func(t *testing.T) {
-		backend, engine, scope, _, _ := emptyPhysicalMigrationRoot(t)
-		migrationPut(t, backend, storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), orphanID), []byte("{}"))
-		if err := engine.migrateAllDirectoryAggregates(context.Background(), schemaMigration002To003, aggregateMigrationPlan{writeFileCounts: true}); !errors.Is(err, domain.ErrInvalid) {
-			t.Fatalf("unreachable directory root error = %v; want invalid", err)
-		}
-	})
+	if err := engine.runFeatureOnlyStorageMigration(t.Context(), schemaMigration004To005, superblockObject, superblock); err != nil {
+		t.Fatalf("feature-only migration with lost successful gate-open response: %v", err)
+	}
+	if !faults.injected {
+		t.Fatal("feature-only migration did not exercise the lost successful gate-open response")
+	}
 }
 
 func TestMigrationWinnerValidationRejectsEveryInconsistentResult(t *testing.T) {
@@ -1234,10 +1910,7 @@ func TestMigrationWinnerValidationRejectsEveryInconsistentResult(t *testing.T) {
 	t.Run("schema-004-index-read-failure", func(t *testing.T) {
 		backend, engine := currentMigrationEngine(t)
 		entry := withCurrentTestFingerprint(migrationFileEntry(t, "file", 1))
-		prepared, err := engine.Files().prepareDirectory(t.Context(), scope, directoryID, []storageformat.DirectoryEntry{entry}, 1)
-		if err != nil {
-			t.Fatal(err)
-		}
+		prepared := prepareSchema007DirectoryFixture(t, engine, scope, directoryID, []storageformat.DirectoryEntry{entry}, nil)
 		for _, prerequisite := range prepared.prerequisites {
 			migrationPut(t, backend, objectstore.MustKey(prerequisite.Key), prerequisite.Body)
 		}
@@ -1267,10 +1940,7 @@ func TestMigrationWinnerValidationRejectsEveryInconsistentResult(t *testing.T) {
 	t.Run("schema-004-content-index-read-failure", func(t *testing.T) {
 		backend, engine := currentMigrationEngine(t)
 		entry := withCurrentTestFingerprint(migrationFileEntry(t, "file", 1))
-		prepared, err := engine.Files().prepareDirectory(t.Context(), scope, directoryID, []storageformat.DirectoryEntry{entry}, 1)
-		if err != nil {
-			t.Fatal(err)
-		}
+		prepared := prepareSchema007DirectoryFixture(t, engine, scope, directoryID, []storageformat.DirectoryEntry{entry}, nil)
 		for _, prerequisite := range prepared.prerequisites {
 			migrationPut(t, backend, objectstore.MustKey(prerequisite.Key), prerequisite.Body)
 		}
@@ -1512,10 +2182,7 @@ func TestMigrationDirectoryWalkRejectsStaleChildAggregates(t *testing.T) {
 				}
 				contentEntries = []storageformat.DirectoryContentIndexEntry{content}
 			}
-			prepared, err := engine.Files().prepareDirectoryWithContentEntries(scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{entry}, contentEntries, 1)
-			if err != nil {
-				t.Fatal(err)
-			}
+			prepared := prepareSchema007DirectoryFixture(t, engine, scope, storageformat.RootDirectoryID, []storageformat.DirectoryEntry{entry}, contentEntries)
 			for _, prerequisite := range prepared.prerequisites {
 				migrationPut(t, backend, objectstore.MustKey(prerequisite.Key), prerequisite.Body)
 			}
@@ -1689,6 +2356,28 @@ func TestMigrationDirectoryMarkReadWriteDenialAndUpdatePaths(t *testing.T) {
 			t.Fatalf("updated mark = %+v, %t, %v", got, found, err)
 		}
 	})
+	t.Run("update-revision-overflow", func(t *testing.T) {
+		fixture := setup(t)
+		write(t, fixture)
+		object, err := fixture.backend.Get(t.Context(), fixture.key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope storageformat.Envelope
+		var mark storageformat.MigrationDirectoryMark
+		if err := storageformat.DecodeEnvelope(object.Body, fixture.key, migrationDirectoryMarkSchema, &envelope, &mark); err != nil {
+			t.Fatal(err)
+		}
+		body, err := storageformat.EncodeEnvelope(migrationDirectoryMarkSchema, fixture.key, math.MaxUint64, mark)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replaceMigrationBody(t, fixture.backend, fixture.key, body)
+		fixture.total.directories = 2
+		if err := fixture.walk.writeCompletedDirectoryMark(t.Context(), storageformat.RootDirectoryID, "", "", fixture.total); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("mark update revision overflow error = %v; want invalid", err)
+		}
+	})
 	t.Run("write-corrupt-existing", func(t *testing.T) {
 		fixture := setup(t)
 		write(t, fixture)
@@ -1801,6 +2490,9 @@ func TestMigrationFingerprintAndStreamingPreparationDenials(t *testing.T) {
 	if err := engine.migrateAllDirectoryAggregatesPhase(t.Context(), schemaMigration003To004, aggregateMigrationPlan{}, "invalid"); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid migration phase error = %v", err)
 	}
+	if err := (&Engine{backend: objectmemory.New()}).migrateAllDirectoryAggregatesPhase(t.Context(), schemaMigration003To004, aggregateMigrationPlan{}, migrationPhaseTransform); err != nil {
+		t.Fatalf("empty migration traversal failed: %v", err)
+	}
 
 	entry := withCurrentTestFingerprint(migrationFileEntry(t, "file", 1))
 	root := migrationDirectoryRoot{envelope: storageformat.Envelope{Revision: 1, LogicalVersion: "version"}}
@@ -1824,15 +2516,104 @@ func TestMigrationFingerprintAndStreamingPreparationDenials(t *testing.T) {
 	}
 }
 
+// prepareSchema007DirectoryFixture builds predecessor directory objects for
+// migration tests without retaining the retired schema-007 mutation backend in
+// production. Current code may read and transform these bytes, but cannot use
+// this helper from an application request.
+func prepareSchema007DirectoryFixture(t *testing.T, engine *Engine, scope domain.Scope, directoryID string, entries []storageformat.DirectoryEntry, contentEntries []storageformat.DirectoryContentIndexEntry) preparedDirectory {
+	t.Helper()
+	if err := validateDirectoryEntries(entries); err != nil {
+		t.Fatal(err)
+	}
+	recursiveBytes, err := recursiveByteSize(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileCount, err := recursiveFileCount(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accumulator, digest, err := directoryContentIdentity(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentEntries == nil {
+		for _, entry := range entries {
+			if entry.Kind != domain.EntryFile {
+				continue
+			}
+			value, err := directoryContentIndexEntry(domain.MustParseUserPath("/"+entry.Name), entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contentEntries = append(contentEntries, value)
+		}
+	}
+	sort.Slice(contentEntries, func(i, j int) bool {
+		left, leftErr := directoryContentIndexKey(contentEntries[i])
+		right, rightErr := directoryContentIndexKey(contentEntries[j])
+		if leftErr != nil || rightErr != nil {
+			t.Fatalf("invalid content fixture: %v, %v", leftErr, rightErr)
+		}
+		return left < right
+	})
+	indexRoot, indexObjects, err := engine.Files().buildDirectoryIndex(scope, directoryID, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sortRoots, sortObjects, err := engine.Files().buildDirectorySortIndexes(scope, directoryID, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects := append(indexObjects, sortObjects...)
+	nextIndex := 0
+	contentRoot, err := engine.Files().buildDirectoryContentIndexStream(scope, directoryID, func() (storageformat.DirectoryContentIndexEntry, bool, error) {
+		if nextIndex == len(contentEntries) {
+			return storageformat.DirectoryContentIndexEntry{}, false, nil
+		}
+		value := contentEntries[nextIndex]
+		nextIndex++
+		return value, true, nil
+	}, func(object storageformat.MutationObject) error {
+		objects = append(objects, object)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestID := storageformat.Digest([]byte("schema-007-test-directory-v1\x00" + t.Name() + "\x00" + directoryID))
+	createdAt := time.Date(2042, 1, 2, 3, 4, 5, 0, time.UTC)
+	manifestKey := storageformat.DirectoryManifestKey(scope.UserID().String(), areaName(scope.Area()), directoryID, manifestID)
+	manifestBody, err := storageformat.EncodeEnvelope(directoryManifestSchema, manifestKey, 1, storageformat.DirectoryManifest{
+		SchemaVersion: 2, DirectoryID: directoryID, ManifestID: manifestID,
+		IndexRootID: indexRoot.NodeID, IndexRootDigest: indexRoot.NodeDigest, SortIndexes: sortRoots,
+		ContentIndexRootID: contentRoot.NodeID, ContentIndexRootDigest: contentRoot.NodeDigest, ContentSketch: contentRoot.Sketch,
+		EntryCount: len(entries), RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount,
+		ContentAccumulator: accumulator, ContentDigest: digest, CreatedAt: createdAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects = append(objects, storageformat.MutationObject{Key: manifestKey.String(), Body: manifestBody})
+	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
+	rootKey := storageformat.DirectoryRootKey(scope.UserID().String(), areaName(scope.Area()), directoryID)
+	rootBody, err := storageformat.EncodeEnvelope(directoryRootSchema, rootKey, 1, storageformat.DirectoryRoot{
+		SchemaVersion: 1, DirectoryID: directoryID, ManifestID: manifestID,
+		RecursiveBytes: recursiveBytes, RecursiveFileCount: fileCount,
+		ContentAccumulator: accumulator, ContentDigest: digest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return preparedDirectory{manifestID: manifestID, recursiveBytes: recursiveBytes, recursiveFileCount: fileCount, contentAccumulator: accumulator, contentDigest: digest, contentSketch: append([]string(nil), contentRoot.Sketch...), rootBody: rootBody, prerequisites: objects}
+}
+
 func emptyPhysicalMigrationRoot(t *testing.T) (*objectmemory.Backend, *Engine, domain.Scope, migrationDirectoryRoot, migrationDirectoryManifest) {
 	t.Helper()
 	backend, engine := currentMigrationEngine(t)
 	user, _ := domain.ParseUserID("WVhXWVhXWVhXWVhXWVhXWQ")
 	scope, _ := domain.NewScope(user, domain.AreaLive)
-	prepared, err := engine.Files().prepareDirectory(context.Background(), scope, storageformat.RootDirectoryID, nil, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
+	prepared := prepareSchema007DirectoryFixture(t, engine, scope, storageformat.RootDirectoryID, nil, nil)
 	for _, prerequisite := range prepared.prerequisites {
 		migrationPut(t, backend, objectstore.MustKey(prerequisite.Key), prerequisite.Body)
 	}
@@ -1861,7 +2642,7 @@ func migrationFileEntry(t *testing.T, name string, size int64) storageformat.Dir
 
 func migrationDirectoryEntry(t *testing.T, name, directoryID string, size, files int64) storageformat.DirectoryEntry {
 	t.Helper()
-	emptyDigest, err := directoryContentDigest(nil)
+	_, emptyDigest, err := directoryContentIdentity(nil)
 	if err != nil {
 		t.Fatal(err)
 	}

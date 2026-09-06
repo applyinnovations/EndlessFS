@@ -56,25 +56,22 @@ func driveTestUserID(t *testing.T) domain.UserID {
 func TestRepositoryFaultDecodeAndPaginationMatrix(t *testing.T) {
 	owner := driveTestUserID(t)
 	unavailable := domain.NewError(domain.ErrorUnavailable, "fault")
-	repository := newRepository(repositoryFaultStore{list: func(context.Context, state.Prefix, state.PageRequest) (state.Page, error) {
-		return state.Page{}, unavailable
-	}})
-	if _, _, err := repository.trashPage(context.Background(), owner, 1, ""); !errors.Is(err, unavailable) {
-		t.Fatalf("trash page list fault = %v", err)
-	}
+	repository := newRepository(repositoryFaultStore{
+		list: func(context.Context, state.Prefix, state.PageRequest) (state.Page, error) {
+			return state.Page{}, unavailable
+		},
+		get: func(context.Context, state.Key) (state.Value, error) { return state.Value{}, unavailable },
+	})
 	if _, err := repository.shares(context.Background(), owner); !errors.Is(err, unavailable) {
 		t.Fatalf("shares list fault = %v", err)
 	}
 	if _, _, err := repository.shareByID(context.Background(), owner, "missing"); !errors.Is(err, unavailable) {
-		t.Fatalf("share by ID list fault = %v", err)
+		t.Fatalf("share by ID read fault = %v", err)
 	}
 	corrupt := state.Item{Value: state.Value{Data: []byte(`{"corrupt":true}`), Version: "v1"}}
 	repository = newRepository(repositoryFaultStore{list: func(context.Context, state.Prefix, state.PageRequest) (state.Page, error) {
 		return state.Page{Items: []state.Item{corrupt}}, nil
 	}})
-	if _, _, err := repository.trashPage(context.Background(), owner, 1, ""); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("trash page corrupt record = %v", err)
-	}
 	if _, err := listRecords[model.Share](context.Background(), repository.store, state.MustPrefix(state.NamespaceShares)); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("share list corrupt record = %v", err)
 	}

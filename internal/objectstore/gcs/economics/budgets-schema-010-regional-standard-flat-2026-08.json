@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "provider": "gcs",
+  "profile": "regional-standard-flat",
+  "id": "004-schema-010-state-conservation",
+  "budgets": [
+    {
+      "name": "maintenance-migration-008-to-010-minimal-fixture",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 409,
+        "costPicoUSD": 765800000,
+        "p50Micros": 9485760,
+        "p95Micros": 29007760,
+        "p99Micros": 71897760,
+        "criticalP50Micros": 9025760,
+        "criticalP95Micros": 27627760,
+        "criticalP99Micros": 68447760
+      },
+      "roles": {
+        "file": {
+          "requests": 12,
+          "costPicoUSD": 23200000,
+          "p50Micros": 280000,
+          "p95Micros": 880000,
+          "p99Micros": 2200000
+        },
+        "state": {
+          "requests": 397,
+          "costPicoUSD": 742600000,
+          "p50Micros": 9205760,
+          "p95Micros": 28127760,
+          "p99Micros": 69697760
+        }
+      }
+    }
+  ]
+}

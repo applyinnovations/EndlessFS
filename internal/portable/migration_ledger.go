@@ -26,11 +26,23 @@ const (
 	storageSchema003 storageSchemaID = "endlessfs-portable-v1/schema-003"
 	storageSchema004 storageSchemaID = "endlessfs-portable-v1/schema-004"
 	storageSchema005 storageSchemaID = "endlessfs-portable-v1/schema-005"
+	storageSchema006 storageSchemaID = "endlessfs-portable-v1/schema-006"
+	storageSchema007 storageSchemaID = "endlessfs-portable-v1/schema-007"
+	storageSchema008 storageSchemaID = "endlessfs-portable-v1/schema-008"
+	storageSchema009 storageSchemaID = "endlessfs-portable-v1/schema-009"
+	storageSchema010 storageSchemaID = "endlessfs-portable-v1/schema-010"
+	storageSchema011 storageSchemaID = "endlessfs-portable-v1/schema-011"
 
 	storageMigration001To002 storageMigrationID = "schema-001-to-002"
 	storageMigration002To003 storageMigrationID = "schema-002-to-003"
 	storageMigration003To004 storageMigrationID = "schema-003-to-004"
 	storageMigration004To005 storageMigrationID = "schema-004-to-005"
+	storageMigration005To006 storageMigrationID = "schema-005-to-006"
+	storageMigration006To007 storageMigrationID = "schema-006-to-007"
+	storageMigration007To008 storageMigrationID = "schema-007-to-008"
+	storageMigration008To009 storageMigrationID = "schema-008-to-009"
+	storageMigration009To010 storageMigrationID = "schema-009-to-010"
+	storageMigration010To011 storageMigrationID = "schema-010-to-011"
 )
 
 type storageSchemaReleaseBoundary struct {
@@ -66,13 +78,15 @@ type releaseVersion struct {
 }
 
 type storageMigrationRun func(*Engine, context.Context, storageMigration, objectstore.Object, storageformat.Superblock) error
+type storageMigrationAuthorityVerifier func(*Engine, context.Context, storageMigration) error
 
 type storageMigration struct {
-	id           storageMigrationID
-	from         storageSchemaID
-	to           storageSchemaID
-	checkpointID string
-	run          storageMigrationRun
+	id              storageMigrationID
+	from            storageSchemaID
+	to              storageSchemaID
+	checkpointID    string
+	run             storageMigrationRun
+	verifyAuthority storageMigrationAuthorityVerifier
 }
 
 type storageGateBinding string
@@ -107,6 +121,36 @@ var schemaMigration003To004 = storageMigration{
 var schemaMigration004To005 = storageMigration{
 	id: storageMigration004To005, from: storageSchema004, to: storageSchema005,
 	checkpointID: "automatic-storage-schema-004-to-005",
+}
+
+var schemaMigration005To006 = storageMigration{
+	id: storageMigration005To006, from: storageSchema005, to: storageSchema006,
+	checkpointID: "automatic-storage-schema-005-to-006",
+}
+
+var schemaMigration006To007 = storageMigration{
+	id: storageMigration006To007, from: storageSchema006, to: storageSchema007,
+	checkpointID: "automatic-storage-schema-006-to-007",
+}
+
+var schemaMigration007To008 = storageMigration{
+	id: storageMigration007To008, from: storageSchema007, to: storageSchema008,
+	checkpointID: "automatic-storage-schema-007-to-008",
+}
+
+var schemaMigration008To009 = storageMigration{
+	id: storageMigration008To009, from: storageSchema008, to: storageSchema009,
+	checkpointID: "automatic-storage-schema-008-to-009",
+}
+
+var schemaMigration009To010 = storageMigration{
+	id: storageMigration009To010, from: storageSchema009, to: storageSchema010,
+	checkpointID: "automatic-storage-schema-009-to-010",
+}
+
+var schemaMigration010To011 = storageMigration{
+	id: storageMigration010To011, from: storageSchema010, to: storageSchema011,
+	checkpointID: "automatic-storage-schema-010-to-011",
 }
 
 // storageSchemaLedger is append-only. Extend it by adding one definition whose
@@ -157,6 +201,138 @@ var storageSchemaLedger = []storageSchemaDefinition{
 		gateBinding:           storageGateFeatureBound,
 		migrationFromPrevious: &schemaMigration004To005,
 	},
+	{
+		id: storageSchema006,
+		features: []string{
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureNamespaceSnapshots,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+			storageformat.FeatureResumableOperations,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration005To006,
+	},
+	{
+		id: storageSchema007,
+		features: []string{
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureNamespaceSnapshots,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+			storageformat.FeatureResumableOperations,
+			storageformat.FeatureUserDirectoryCatalog,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration006To007,
+	},
+	{
+		id: storageSchema008,
+		features: []string{
+			storageformat.FeatureConsistencyDomains,
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeatureOwnerNamespaceGraph,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureNamespaceSnapshots,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureDerivedProjections,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+			storageformat.FeatureResumableOperations,
+			storageformat.FeatureUserDirectoryCatalog,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration007To008,
+	},
+	{
+		id: storageSchema009,
+		features: []string{
+			storageformat.FeatureConsistencyDomains,
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeatureOwnerNamespaceGraph,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureNamespaceSnapshots,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureDerivedProjections,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+			storageformat.FeatureResumableOperations,
+			storageformat.FeatureTransactionalState,
+			storageformat.FeatureUserDirectoryCatalog,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration008To009,
+	},
+	{
+		id: storageSchema010,
+		features: []string{
+			storageformat.FeatureConsistencyDomains,
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeatureOwnerNamespaceGraph,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureNamespaceSnapshots,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureDerivedProjections,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+			storageformat.FeatureResumableOperations,
+			storageformat.FeatureStateConservation,
+			storageformat.FeatureTransactionalState,
+			storageformat.FeatureUserDirectoryCatalog,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration009To010,
+	},
+	{
+		id: storageSchema011,
+		features: []string{
+			storageformat.FeatureConsistencyDomains,
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeatureOwnerNamespaceGraph,
+			storageformat.FeaturePackedDomainPages,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureNamespaceSnapshots,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureDerivedProjections,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+			storageformat.FeatureResumableOperations,
+			storageformat.FeatureStateConservation,
+			storageformat.FeatureTransactionalState,
+			storageformat.FeatureUploadTransactions,
+			storageformat.FeatureUserDirectoryCatalog,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration010To011,
+	},
 }
 
 // storageSchemaReleaseLedger is also append-only. A boundary is the first
@@ -166,6 +342,10 @@ var storageSchemaReleaseLedger = []storageSchemaReleaseBoundary{
 	{first: "v0.1.0", schema: storageSchema001},
 	{first: "v0.1.5", schema: storageSchema003},
 	{first: "v0.2.0", schema: storageSchema005},
+	{first: "v0.3.0", schema: storageSchema006},
+	{first: "v0.4.0", schema: storageSchema009},
+	{first: "v0.5.0", schema: storageSchema010},
+	{first: "v0.7.0", schema: storageSchema011},
 }
 
 func init() {
@@ -177,6 +357,14 @@ func init() {
 	schemaMigration002To003.run = (*Engine).runStorageMigration002To003
 	schemaMigration003To004.run = (*Engine).runStorageMigration003To004
 	schemaMigration004To005.run = (*Engine).runStorageMigration004To005
+	schemaMigration005To006.run = (*Engine).runStorageMigration005To006
+	schemaMigration006To007.run = (*Engine).runStorageMigration006To007
+	schemaMigration007To008.run = (*Engine).runStorageMigration007To008
+	schemaMigration008To009.run = (*Engine).runStorageMigration008To009
+	schemaMigration009To010.run = (*Engine).runStorageMigration009To010
+	schemaMigration009To010.verifyAuthority = (*Engine).verifySchema010Authority
+	schemaMigration010To011.run = (*Engine).runStorageMigration010To011
+	schemaMigration010To011.verifyAuthority = (*Engine).verifySchema011Authority
 }
 
 func currentStorageSchema() storageSchemaDefinition {
@@ -277,6 +465,7 @@ func MigrationStepName(migrationID, boundary string) string {
 }
 
 func storageMigrationPath(from storageSchemaID) ([]storageMigration, error) {
+	conservationIndex, _ := schemaIndex(storageSchema010)
 	for index, schema := range storageSchemaLedger {
 		if schema.id != from {
 			continue
@@ -289,6 +478,9 @@ func storageMigrationPath(from storageSchemaID) ([]storageMigration, error) {
 			migration := storageSchemaLedger[position].migrationFromPrevious
 			if migration == nil || migration.from != storageSchemaLedger[position-1].id || migration.to != storageSchemaLedger[position].id {
 				return nil, fmt.Errorf("invalid storage schema ledger edge into %q", storageSchemaLedger[position].id)
+			}
+			if position >= conservationIndex && migration.verifyAuthority == nil {
+				return nil, fmt.Errorf("storage schema ledger edge into %q has no pre-activation authority verifier", storageSchemaLedger[position].id)
 			}
 			path = append(path, *migration)
 		}
@@ -451,7 +643,7 @@ func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
 			return err
 		}
 
-		_, _, gate, err := e.readGate(ctx)
+		gateObject, _, gate, err := e.readGate(ctx)
 		if err != nil {
 			return err
 		}
@@ -467,6 +659,23 @@ func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
 		schema, found := detectStorageSchema(superblock.RequiredFeatures, e.writer.RequiredFeatures)
 		if !found {
 			return domain.NewError(domain.ErrorPreconditionFailed, "unregistered portable storage schema")
+		}
+		if gate.Mode == storageformat.GateOpen && schemaAtLeast(superblock.RequiredFeatures, storageSchema008, e.writer.RequiredFeatures) {
+			// Opening a migration checkpoint authorizes the idempotent domain-
+			// unfreeze suffix. Complete that suffix before selecting a following
+			// edge. This is required both after a process restart and when a
+			// concurrent replica observes the opened gate before the winning
+			// replica has finished thawing the catalog.
+			reconciledGate, reconcileErr := e.reconcileGateDomainFreeze(ctx, gateObject, gate)
+			if reconcileErr != nil {
+				return reconcileErr
+			}
+			if reconciledGate.Mode != storageformat.GateOpen || reconciledGate.Epoch != gate.Epoch || reconciledGate.CheckpointID != "" {
+				continue
+			}
+			if !equalStrings(reconciledGate.WriterFeatures, gate.WriterFeatures) {
+				continue
+			}
 		}
 		path, err := storageMigrationPath(schema.id)
 		if err != nil {
@@ -492,16 +701,12 @@ func (e *Engine) migrateStorageSchemaChain(ctx context.Context) error {
 	return domain.NewError(domain.ErrorUnavailable, "storage schema migration chain did not converge")
 }
 
-// A replica can retain a predecessor object reference while another replica
-// completes the remaining schema suffix and collects that now-unreachable
-// immutable object. Only a not-found result is eligible for winner
-// reconciliation, and it is accepted only after all durable schema markers
-// prove that this edge (or a later edge) completed. Other errors and an
-// incomplete marker set remain fail-closed.
+// A replica can retain a predecessor object reference or lose any provider
+// response while another replica completes the remaining schema suffix. An
+// error is superseded only when independent reads of every durable completion
+// marker prove that this edge (or a later edge) completed. An incomplete or
+// unreadable marker set preserves the original error and remains fail-closed.
 func (e *Engine) resolveMigrationRunError(ctx context.Context, migration storageMigration, runErr error) error {
-	if !errors.Is(runErr, domain.ErrNotFound) {
-		return runErr
-	}
 	complete, err := e.storageMigrationComplete(ctx, migration)
 	if err == nil && complete {
 		return nil

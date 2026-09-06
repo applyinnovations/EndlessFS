@@ -9,7 +9,7 @@
       if (clearSelection) state.selected.clear();
       else if (move) for (const entry of entries) state.selected.delete(entrySelectionKey(entry));
       updateSelection();
-      await watchOperation(operation.operationID || operation.id);
+      await awaitOperation(operation);
       await loadDirectory(state.currentDirectory);
     } catch (error) { announce(friendlyError(error), true); }
   }
@@ -26,7 +26,7 @@
       if (clearSelection) state.selected.clear();
       else for (const entry of entries) state.selected.delete(entrySelectionKey(entry));
       updateSelection();
-      if (result.operationID) await watchOperation(result.operationID);
+      await awaitOperation(result);
       await loadDirectory(state.currentDirectory);
       showTrashUndo(result.items || []);
     } catch (error) { announce(friendlyError(error), true); }
@@ -42,6 +42,19 @@
       await new Promise((resolve) => window.setTimeout(resolve, 100 + attempt * 20));
     }
     throw new Error("Operation is still running. Refresh to check again.");
+  }
+
+  async function awaitOperation(result) {
+    if (!result) return;
+    const operation = result.operation || result;
+    if (operation.state === "succeeded") return;
+    if (operation.state === "failed") throw new Error(operation.error || "Operation failed.");
+    if (Array.isArray(result.items)) {
+      if (!result.items.length || result.items.every((item) => item.state === "succeeded")) return;
+      const failed = result.items.find((item) => item.state === "failed");
+      if (failed) throw new Error(failed.error || "Operation failed.");
+    }
+    await watchOperation(result.operationID || operation.id);
   }
 
   async function loadTrash(append = false) {
@@ -65,7 +78,7 @@
     }
     try {
       const cursor = append && state.trashCursor ? `&cursor=${encodeURIComponent(state.trashCursor)}` : "";
-      const page = await api(`/api/v1/trash?limit=100${cursor}`);
+      const page = await api(`/api/v1/trash?limit=${browserPageSize}${cursor}`);
       if (request !== state.trashRequest || state.browserAccess !== "trash") return;
       const entries = (page.items || []).map(trashBrowserEntry);
       state.entries = append ? state.entries.concat(entries) : entries;
@@ -113,7 +126,7 @@
     if (!result) return;
     try {
       const operation = await api(`/api/v1/trash/${encodeURIComponent(item.trashID)}/restore`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: { conflict: result.conflict } });
-      await watchOperation(operation.id || operation.operationID); announce(`${item.originalPath} restored.`); await loadTrash();
+      await awaitOperation(operation); announce(`${item.originalPath} restored.`); await loadTrash();
     } catch (error) { announce(friendlyError(error), true); }
   }
 
@@ -122,36 +135,28 @@
     if (!confirmed) return;
     try {
       const operation = await api(`/api/v1/trash/${encodeURIComponent(item.trashID)}`, { method: "DELETE", headers: { "Idempotency-Key": idempotencyKey() }, body: {} });
-      await watchOperation(operation.id || operation.operationID); announce(`${item.originalPath} permanently deleted.`); await loadTrash();
+      await awaitOperation(operation); announce(`${item.originalPath} permanently deleted.`); await loadTrash();
     } catch (error) { announce(friendlyError(error), true); }
   }
 
-  async function runTrashSelection(entries, operation, completedLabel) {
-    let completed = 0;
-    let failed = 0;
+  async function runTrashSelection(entries, operation, actionLabel, completedLabel) {
     const selectionBar = byID("selection-bar");
     selectionBar.setAttribute("aria-busy", "true");
     selectionBar.inert = true;
     try {
-      for (const entry of entries) {
-        try {
-          await operation(entry.trash);
-          completed += 1;
-        } catch {
-          failed += 1;
-        }
-      }
+      showToast(`${actionLabel} ${entries.length} selected item${entries.length === 1 ? "" : "s"}…`, "info", 30000);
+      const result = await operation(entries.map((entry) => entry.trash.trashID));
+      await awaitOperation(result);
+      state.selected.clear();
+      updateSelection();
+      await loadTrash();
+      showToast(`${entries.length} item${entries.length === 1 ? "" : "s"} ${completedLabel}.`, "success");
+    } catch (error) {
+      showActionErrorToast(actionLabel, error, "The selected items were not changed.");
     } finally {
       selectionBar.removeAttribute("aria-busy");
       selectionBar.inert = false;
     }
-    state.selected.clear();
-    updateSelection();
-    await loadTrash();
-    const completedItems = completed === 1 ? "item" : "items";
-    const failedItems = failed === 1 ? "item" : "items";
-    if (failed) showToast(`${completed} ${completedItems} ${completedLabel}; ${failed} ${failedItems} failed.`, "error", 12000);
-    else showToast(`${completed} ${completedItems} ${completedLabel}.`, "success");
   }
 
   async function restoreSelectedTrash() {
@@ -159,10 +164,9 @@
     if (!entries.length) return;
     const result = await ask({ title: `Restore ${entries.length} selected item${entries.length === 1 ? "" : "s"}?`, description: "Selected items return to their original locations.", confirm: "Restore", conflictField: true });
     if (!result) return;
-    await runTrashSelection(entries, async (item) => {
-      const operation = await api(`/api/v1/trash/${encodeURIComponent(item.trashID)}/restore`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: { conflict: result.conflict } });
-      await watchOperation(operation.id || operation.operationID);
-    }, "restored");
+    await runTrashSelection(entries, (trashIDs) => api("/api/v1/trash/restore", {
+      method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: { trashIDs, conflict: result.conflict },
+    }), "Restore", "restored");
   }
 
   async function deleteSelectedTrash() {
@@ -170,10 +174,9 @@
     if (!entries.length) return;
     const confirmed = await ask({ title: `Permanently delete ${entries.length} selected item${entries.length === 1 ? "" : "s"}?`, description: "The selected items and their file data will be removed. This cannot be undone.", confirm: "Delete Permanently", danger: true });
     if (!confirmed) return;
-    await runTrashSelection(entries, async (item) => {
-      const operation = await api(`/api/v1/trash/${encodeURIComponent(item.trashID)}`, { method: "DELETE", headers: { "Idempotency-Key": idempotencyKey() }, body: {} });
-      await watchOperation(operation.id || operation.operationID);
-    }, "permanently deleted");
+    await runTrashSelection(entries, (trashIDs) => api("/api/v1/trash/delete", {
+      method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: { trashIDs },
+    }), "Permanent delete", "permanently deleted");
   }
 
   async function emptyTrash() {
@@ -181,7 +184,7 @@
     if (!confirmed) return;
     try {
       const result = await api("/api/v1/trash/empty", { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: { confirm: true } });
-      if (result.operationID) await watchOperation(result.operationID);
+      await awaitOperation(result);
       announce("Trash emptied."); await loadTrash();
     } catch (error) { announce(friendlyError(error), true); }
   }

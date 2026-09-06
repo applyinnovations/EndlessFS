@@ -168,7 +168,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	var store state.Store = engine
+	var store state.TransactionalStore = engine
 	storage := engine.Files()
 	repository := identity.NewRepository(store)
 	webAuthn, err := auth.NewGoWebAuthn(cfg.WebAuthnRPID, cfg.WebAuthnRPName, cfg.AllowedOrigin)

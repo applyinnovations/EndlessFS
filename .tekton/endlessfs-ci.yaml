@@ -85,7 +85,7 @@ spec:
               cpu: "8"
               memory: 16Gi
   timeouts:
-    pipeline: 60m0s
+    pipeline: 90m0s
   params:
     - name: repo_url
       value: "{{ repo_url }}"
@@ -188,7 +188,7 @@ spec:
               value: nix-run-v2
             - name: namespace
               value: tekton-buildkit
-        timeout: 45m
+        timeout: 60m
         workspaces:
           - name: source
             workspace: source

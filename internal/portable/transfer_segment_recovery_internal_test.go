@@ -1339,6 +1339,46 @@ func TestSchema011UploadAbortRejectsEveryAuthorityAndProviderGap(t *testing.T) {
 	})
 }
 
+func TestSchema011CompactAbortRevalidatesAfterUnrelatedNamespaceCommit(t *testing.T) {
+	ctx := context.Background()
+	fixture := newSchema011TransferFixture(t)
+	capabilities := fixture.createBatch(t, "/revalidate-a.bin", "/revalidate-b.bin")
+	second := openInternalTestEngine(t, fixture.backend, fixture.clock, strings.NewReader(strings.Repeat("second-revalidation-replica", 1<<14)))
+	request := domain.AbortUploadBatchRequest{
+		UploadIDs: []domain.UploadID{capabilities[0].UploadID, capabilities[1].UploadID},
+		BatchID:   capabilities[0].BatchID, IdempotencyKey: "revalidate-abort",
+	}
+	committed := false
+	fixture.engine.scheduler = SchedulerFunc(func(ctx context.Context, step string) error {
+		if step == StepDomainBeforeHeadCommit && !committed {
+			committed = true
+			_, err := second.Files().CreateDirectory(ctx, fixture.scope, domain.CreateDirectoryRequest{
+				Path: domain.MustParseUserPath("/unrelated"),
+			})
+			return err
+		}
+		return nil
+	})
+	if err := fixture.engine.Files().AbortUploadBatch(ctx, fixture.scope, request); err != nil {
+		t.Fatalf("abort after unrelated commit = %v", err)
+	}
+	if !committed {
+		t.Fatal("unrelated commit did not run at the publication boundary")
+	}
+	for _, capability := range capabilities {
+		status, err := second.Files().UploadStatus(ctx, fixture.scope, capability.UploadID)
+		if err != nil || status.State != domain.UploadStateAborted {
+			t.Fatalf("revalidated abort status = %+v, %v", status, err)
+		}
+	}
+	if _, err := fixture.engine.Files().Stat(ctx, fixture.scope, domain.MustParseUserPath("/unrelated")); err != nil {
+		t.Fatalf("unrelated commit disappeared: %v", err)
+	}
+	if err := second.Files().AbortUploadBatch(ctx, fixture.scope, request); err != nil {
+		t.Fatalf("revalidated abort replay = %v", err)
+	}
+}
+
 func TestSchema011SegmentedTerminalCleanupIsIdempotentAndFailClosed(t *testing.T) {
 	ctx := context.Background()
 	owner := namespaceTestScope(t, domain.AreaLive).UserID()

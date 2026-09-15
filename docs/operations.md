@@ -242,6 +242,13 @@ Per-group reclaimable bytes count all but one occurrence of that exact group. Do
 
 ## Closed-gate retention and collection
 
+Canceling an upload revokes its incomplete provider session. If the provider has
+already finalized the object, cancellation preserves those bytes so it cannot
+damage a concurrent successful completion. An aborted upload remains invisible
+in the file namespace; its unreferenced finalized bytes are reclaimed during the
+verified closed-gate collection described below, rather than immediately by
+the cancellation request.
+
 Fingerprint-bound mutation outcomes and idempotency bindings are retained in
 bounded domain trees and indexed by expiry. Trash is not subject to that
 window. During gate closure EndlessFS freezes the catalog and all domains,

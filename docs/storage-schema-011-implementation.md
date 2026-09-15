@@ -91,6 +91,26 @@ cancellation racing across replicas have exactly one visible winner. Replaying
 the same idempotency key returns the committed result; changing the ordered
 intent conflicts.
 
+Compact cancellation validates every member at one logical owner-head revision.
+Its publication is conditional on that revision as well as the overlay key:
+the overlay key alone cannot detect a competing completion that changed the
+member records. A changed revision returns to batch validation before retry;
+compaction preserves the logical revision and remains transparent. This is a
+transient publication condition, not a new record field or intent fingerprint.
+The deterministic completion/cancellation test releases each winner in turn,
+with cancellation paused both before publication preparation and immediately
+before the head CAS. It verifies terminal states, visible entries, winner
+replay, and continued denial of the losing operation.
+
+Provider cancellation revokes incomplete sessions but preserves finalized
+objects. Deleting a finalized blob during cancellation could race completion
+after its integrity verification and leave the winning namespace entry without
+data. Shared memory/GCS protocol tests prove active-session denial and unchanged
+finalized bytes, native version, and integrity metadata; the two-replica test
+also downloads each winning file. Unreferenced finalized uploads remain eligible
+for the existing verified closed-gate garbage collector. This deliberately
+supersedes the former GCS cleanup test's expectation of immediate object deletion.
+
 The browser persists batch ID, index, count, idempotency keys, planner state,
 and transfer status in IndexedDB. Refresh or connection loss therefore resumes
 the same server-side transaction. It sends the compact batch ID only when the

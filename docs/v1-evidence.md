@@ -316,6 +316,58 @@ The release coverage commands are `nix run .#test-coverage` and the migration-sp
 | MP-014 | Loaded-metadata browser filters, no search API/index, and documentation that preserves search as a future feature. |
 | MP-015 | README, operations guide, threat model, release notes, capability inventory, and release inventory distinguish deterministic memory proof, local GCS source/preview protocol qualification, and absent live/production validation. |
 
+### 2026-09-15 compact upload cancellation race
+
+PR #47 run `endlessfs-ci-tcm94` reached the migration owning-package gate and
+failed `TestConcurrentCompletionAndCompactBatchAbortHaveOneAtomicWinner`:
+both completion and cancellation returned success. The shared domain writer
+retried the compact abort overlay after losing its head CAS, but the overlay's
+key precondition did not include the completed member records. The earlier
+local passes did not exercise that ordering reliably.
+
+The same test now schedules both replicas at explicit publication boundaries.
+Before the fix, both completion-first schedules reproduced the CI failure;
+after the fix, the original one-winner assertions pass for both winners. The
+abort mutation carries a transient expected logical revision, causing a changed
+head to return to full member validation. This corrects the existing AC-083
+and AC-085 guarantees without changing authoritative record bytes, record
+semantics, intent fingerprints, or the storage epoch.
+
+The first focused migration rerun exposed the destructive provider side of the
+same race: cancellation could delete a finalized blob before completion finished
+verification. Scheduling verification first and checking direct downloads then
+proved that even a winning completion could reference missing data. The shared
+`RunUploadAbort` contract reproduced deletion in both memory and GCS protocol
+backends, for single and resumable uploads. Both adapters now revoke incomplete
+sessions while retaining finalized objects for the existing reachability-based
+collector. This deliberately replaces the old finalized-object cleanup/deletion
+expectation with stronger conservation and active-session-denial assertions.
+
+The [GCS resumable-upload documentation](https://docs.cloud.google.com/storage/docs/performing-resumable-uploads#cancel-upload)
+documents cancellation of incomplete sessions. The implementation had added an
+object deletion of its own. Preserving finalized objects is the selected
+EndlessFS invariant; it avoids moving destructive provider work ahead of the
+logical winner or adding a new durable intermediate upload state. The tradeoff
+is retention of abandoned finalized bytes until verified garbage collection.
+
+| Preserved guarantee | Evidence |
+| --- | --- |
+| Exactly one visible completion/cancellation winner | Deterministic two-replica schedules before preparation and before CAS; every member status and file entry checked |
+| Winning file data survives cancellation | Direct download of each winning entry; shared memory/GCS single/resumable contract retains finalized bytes, version, and integrity across abort replay |
+| Incomplete sessions remain revoked | The same shared contract denies attempts to upload after abort and verifies no object was created |
+| Stale decisions cannot publish over changed read authority | `TestConsistencyDomainSnapshotDecisionRejectsChangedReadAuthority`, including compaction and materialized publication |
+| Compaction and committed-result replay remain valid | `TestConsistencyDomainSnapshotDecisionPreservesCompactionAndReplay`; original fingerprint also replays without the transient precondition |
+| Unrelated commits allow progress after revalidation | `TestSchema011CompactAbortRevalidatesAfterUnrelatedNamespaceCommit` preserves both the directory mutation and successful abort |
+| Existing provider economics | The logical success path adds no provider request, record rewrite, or packed-page write; finalized GCS cancellation removes one object delete; the exact provider-budget suite remains required |
+| Freeze, migration, and portability | The complete existing flake and migration gates remain required; no ledger or fixture change |
+
+Rewriting every member was rejected because the compact representation already
+provides the required atomic visibility with bounded state work. Disabling the
+domain writer's unrelated-key retries globally would regress other callers;
+the revision condition is applied where cancellation reads authority outside
+its written key set. Full local gate results and the exact verified commit are
+recorded in PR #47.
+
 ### Release record contract
 
 `nix build .#release` derives every record from the exact Git source revision. `RELEASE-INVENTORY.txt` contains the source revision, `flake.lock` SHA-256, retained vulnerability-database archive SHA-256 and modification timestamp, target, Go version, binary/OCI/theme/dependency/license hashes, thresholds, canonical format/writer protocol, supported local provider modes, and explicit no-live-GCS/no-deployment/no-credentials/no-external-services fields. `VULNERABILITY-DATABASE.json` records the database source, retrieval time, modification time, and archive checksum. `SHA256SUMS` covers every separately published file. The archive also contains this evidence, release notes, README, license, binary, and all inventories. The database retention change and its regression evidence are documented in [security input retention](./security-input-retention.md).

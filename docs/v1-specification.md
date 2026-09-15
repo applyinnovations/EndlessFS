@@ -562,6 +562,11 @@ type ObjectBackend interface {
 - `Put` supports exactly one of unconditional write where explicitly safe, create-only, or match-current-native-version. `Delete` and mutable `Copy` support match-current-native-version conditions.
 - `NativeVersion` is opaque, scoped to one backend object incarnation, and usable only as an immediate conditional-request input. It MUST NOT be serialized into canonical objects, returned through provider/state interfaces, logged, compared across backends, or used as an EndlessFS logical version.
 - Successful single-object create, replace, copy, and delete operations are atomic. After success, `Get` and complete prefix `List` operations are strongly consistent for the affected live object; a backend with eventual object or listing visibility cannot satisfy the v1 contract.
+- `AbortUpload` revokes an incomplete provider session where supported and MUST
+  preserve a finalized object, including when finalization races cancellation.
+  A concurrent owner-head commit may already reference that immutable blob.
+  Physical reclamation requires the closed-gate collector's reachability proof;
+  an upload lease alone is not authority to delete a finalized object.
 - `Head` and `List` return size plus normalized canonical base64url MD5 and CRC32C values when the provider attests both, and return native versions separately. The portable engine normalizes provider encodings, listing order, page sizes, missing metadata, and error forms. ETags, multipart/composite identifiers, and provider encodings never cross this interface.
 - `Verify` accepts a provider-independent expected byte size and checksum and returns an exact native version only when provider integrity metadata for that immutable incarnation matches. Production adapters MUST NOT satisfy an ordinary control-plane assertion by reading the stored body. A provider or object class that cannot attest the required metadata is unsupported for confirmed duplicate identity and metadata-only checkpointing; it fails closed instead of falling back to a download.
 - `Copy` keeps file bytes inside the configured provider data plane. A backend that cannot provide conditionally safe server-side copy/rewrite semantics cannot satisfy the v1 backend contract.
@@ -1306,6 +1311,9 @@ Requirements:
   final namespace publication is one owner-head CAS. Whole-batch cancellation
   publishes one batch-ID/count/bitmap overlay instead of rewriting every
   admission record; a partial or legacy selection remains individually bound.
+  If another mutation advances the owner head, cancellation MUST revalidate
+  every selected member before retrying publication. The continued absence of
+  an abort overlay alone does not prove that the uploads are still active.
 - Resumable upload state tracks the confirmed provider offset, never merely bytes attempted by the browser.
 - Retry uses bounded exponential backoff with jitter and distinguishes retryable from terminal errors.
 - Resume after an interrupted request starts at the provider-confirmed offset.

@@ -239,7 +239,7 @@ func (b *Backend) AbortUpload(ctx context.Context, sealed []byte) error {
 		return err
 	}
 	key := objectstore.MustKey(lease.Key)
-	materialized, err := b.deleteMaterializedUpload(ctx, key, lease.Size)
+	materialized, err := b.materializedUpload(ctx, key, lease.Size)
 	if err != nil || materialized {
 		return err
 	}
@@ -261,7 +261,7 @@ func (b *Backend) AbortUpload(ctx context.Context, sealed []byte) error {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		_ = response.Body.Close()
 		if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotFound && response.StatusCode != http.StatusGone && response.StatusCode != 499 {
-			materialized, err := b.deleteMaterializedUpload(ctx, key, lease.Size)
+			materialized, err := b.materializedUpload(ctx, key, lease.Size)
 			if err != nil || materialized {
 				return err
 			}
@@ -274,7 +274,7 @@ func (b *Backend) AbortUpload(ctx context.Context, sealed []byte) error {
 			}
 		}
 	}
-	_, err = b.deleteMaterializedUpload(ctx, key, lease.Size)
+	_, err = b.materializedUpload(ctx, key, lease.Size)
 	return err
 }
 
@@ -327,7 +327,10 @@ func clientForExplicitZeroLengthDelete(client *http.Client) (*http.Client, func(
 	return &http1Client, http1Transport.CloseIdleConnections
 }
 
-func (b *Backend) deleteMaterializedUpload(ctx context.Context, key objectstore.Key, size int64) (bool, error) {
+// materializedUpload recognizes a finalized session without deleting its
+// immutable object. Abort may race namespace publication after verification;
+// only the portable garbage collector can prove that object is unreachable.
+func (b *Backend) materializedUpload(ctx context.Context, key objectstore.Key, size int64) (bool, error) {
 	info, err := b.Head(ctx, key)
 	if errors.Is(err, domain.ErrNotFound) {
 		return false, nil
@@ -337,9 +340,6 @@ func (b *Backend) deleteMaterializedUpload(ctx context.Context, key objectstore.
 	}
 	if info.Size != size {
 		return true, domain.NewError(domain.ErrorPreconditionFailed, "GCS upload abort target mismatch")
-	}
-	if err := b.Delete(ctx, key, objectstore.DeleteCondition{Version: info.Version}); err != nil && !errors.Is(err, domain.ErrNotFound) {
-		return true, err
 	}
 	return true, nil
 }

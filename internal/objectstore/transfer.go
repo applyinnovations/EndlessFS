@@ -72,6 +72,9 @@ type DirectTransferBackend interface {
 	BeginUpload(context.Context, UploadRequest) (UploadHandle, error)
 	ResumeUpload(context.Context, []byte) (UploadCapability, error)
 	UploadProgress(context.Context, []byte) (UploadProgress, error)
+	// AbortUpload revokes an incomplete upload where supported. It must preserve
+	// finalized objects: namespace completion may concurrently reference them.
+	// Unreachable objects are reclaimed separately through verified collection.
 	AbortUpload(context.Context, []byte) error
 	CreateDownload(context.Context, DownloadRequest) (DownloadCapability, error)
 }

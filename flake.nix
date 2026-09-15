@@ -2,19 +2,10 @@
   description = "EndlessFS — a private, provider-neutral cloud drive";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.vulndb = {
-    # The canonical vuln.go.dev hostname rejects GitHub-hosted runner IPs;
-    # pin the official bulk object by its immutable GCS generation as well as
-    # the Nix content hash recorded in flake.lock.
-    url = "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1787929740610734";
-    flake = false;
-  };
-
   outputs =
     {
       self,
       nixpkgs,
-      vulndb,
     }:
     let
       systems = [
@@ -32,6 +23,16 @@
             hash = "sha256-oHIcVMaIkBRI13rZs+x+p8R0cwdV/4kTgukuy5P/LLE=";
           };
         });
+      vulndbFor =
+        pkgs:
+        pkgs.runCommand "endlessfs-go-vulnerability-database" { nativeBuildInputs = [ (goFor pkgs) ]; } ''
+          export GOCACHE="$TMPDIR/go-cache"
+          export GO111MODULE=off GOPROXY=off GOSUMDB=off CGO_ENABLED=0
+          go run ${./tools/vulndb/main.go} extract ${./security/vulndb} "$out"
+          cp ${./security/vulndb/LICENSE} "$out/LICENSE"
+          cp ${./security/vulndb/README.md} "$out/README.md"
+          cp ${./security/vulndb/snapshot.json} "$out/snapshot.json"
+        '';
       headlessBrowserFor =
         pkgs:
         let
@@ -71,24 +72,7 @@
           }
         '';
       dependencyPolicyCommand = moduleClosure: ''
-        vulndb_locked_url="$(jq -er '.nodes.vulndb.locked.url' flake.lock)"
-        vulndb_original_url="$(jq -er '.nodes.vulndb.original.url' flake.lock)"
-        if [ "$vulndb_locked_url" != "$vulndb_original_url" ]; then
-          echo "vulnerability database lock URL differs from the declared input" >&2
-          exit 1
-        fi
-        vulndb_prefix='https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation='
-        case "$vulndb_locked_url" in
-          "$vulndb_prefix"*) vulndb_generation="''${vulndb_locked_url#"$vulndb_prefix"}" ;;
-          *)
-            echo "vulnerability database must use a generation-pinned official GCS media URL" >&2
-            exit 1
-            ;;
-        esac
-        if ! printf '%s\n' "$vulndb_generation" | grep -Eq '^[0-9]+$'; then
-          echo "vulnerability database generation must be numeric" >&2
-          exit 1
-        fi
+        go run ./tools/vulndb check security/vulndb
 
         dependency_inventory="$(mktemp -t endlessfs-dependencies.XXXXXX)"
         trap 'rm -f "$dependency_inventory"' EXIT
@@ -537,11 +521,14 @@
                 done
                 container_unpacked_bytes="$(du -sb image-root | cut -f 1)"
                 lock_hash="$(sha256sum ${projectSource}/flake.lock | cut -d ' ' -f 1)"
-                vulndb_hash="$(jq -r '.nodes.vulndb.locked.narHash' ${projectSource}/flake.lock)"
+                cp ${vulndbFor pkgs}/snapshot.json staging/VULNERABILITY-DATABASE.json
+                vulndb_hash="$(jq -er '.sha256' staging/VULNERABILITY-DATABASE.json)"
+                vulndb_modified="$(jq -er '.databaseModified' staging/VULNERABILITY-DATABASE.json)"
                 {
                   printf 'source-revision=%s\n' '${version}'
                   printf 'flake-lock-sha256=%s\n' "$lock_hash"
-                  printf 'vulnerability-database-nar-hash=%s\n' "$vulndb_hash"
+                  printf 'vulnerability-database-archive-sha256=%s\n' "$vulndb_hash"
+                  printf 'vulnerability-database-modified=%s\n' "$vulndb_modified"
                   printf 'target-system=%s\n' '${system}'
                   printf 'go-toolchain=%s\n' '1.26.6'
                   printf 'capability-profile=%s\n' 'images'
@@ -580,13 +567,14 @@
                 cp staging/DEPENDENCY-LICENSES.sha256 "$out/"
                 cp staging/THEMES.json "$out/"
                 cp staging/CAPABILITIES.json "$out/"
+                cp staging/VULNERABILITY-DATABASE.json "$out/"
                 (
                   cd "$out"
                   sha256sum \
                     "endlessfs-${version}-${system}.tar.gz" \
                     "endlessfs-container-${version}.tar.gz" \
                     endlessfs-raw-decoder \
-                    CAPABILITIES.json DEPENDENCIES.txt DEPENDENCY-LICENSES.sha256 RELEASE-INVENTORY.txt THEMES.json \
+                    CAPABILITIES.json DEPENDENCIES.txt DEPENDENCY-LICENSES.sha256 RELEASE-INVENTORY.txt THEMES.json VULNERABILITY-DATABASE.json \
                     > SHA256SUMS
                 )
               '';
@@ -858,6 +846,14 @@
             exec go run ./tools/theme preview "$@"
           '';
 
+          vulndb = goTask "endlessfs-vulndb" ''
+            exec go run ./tools/vulndb "$@"
+          '';
+
+          test-vulndb = goTask "endlessfs-test-vulndb" ''
+            exec go test ./tools/vulndb -count=1 "$@"
+          '';
+
           forbidden-check = goTask "endlessfs-forbidden-check" ''
             exec go run ./tools/check-source "$@"
           '';
@@ -880,7 +876,7 @@
                 go vet ./...
                 staticcheck ./...
                 gosec -quiet -nosec-require-justification -nosec-require-rules ./...
-                govulncheck -db=file://${vulndb} ./...
+                govulncheck -db=file://${vulndbFor pkgs} ./...
                 go test ./internal/config -count=1
                 ${dependencyPolicyCommand packages.default.goModules}
                 go run ./tools/check-source .
@@ -888,6 +884,7 @@
               '';
 
           dependency-check = mkTask "endlessfs-dependency-check" [
+            go
             pkgs.findutils
             pkgs.gawk
             pkgs.gnugrep
@@ -1209,7 +1206,7 @@
             goCheckWithSource "security" fullSource
               ''
                 gosec -quiet -nosec-require-justification -nosec-require-rules ./...
-                govulncheck -db=file://${vulndb} ./...
+                govulncheck -db=file://${vulndbFor pkgs} ./...
                 ${dependencyPolicyCommand self.packages.${system}.default.goModules}
                 go run ./tools/check-source .
               ''
@@ -1221,6 +1218,33 @@
                 pkgs.govulncheck
                 pkgs.jq
               ];
+          vulndbCheck =
+            pkgs.runCommand "endlessfs-vulnerability-snapshot-check"
+              {
+                nativeBuildInputs = [
+                  pkgs.govulncheck
+                  pkgs.jq
+                ];
+              }
+              ''
+                # Exercise the scanner's interpretation of the real snapshot:
+                # CVE-2023-29403 affects Go 1.20.0 and was fixed in Go 1.20.5.
+                govulncheck -db=file://${vulndbFor pkgs} -mode=query -json stdlib@v1.20.0 > vulnerable.json
+                jq -se 'any(.[]; .osv.id == "GO-2023-1840")' vulnerable.json >/dev/null
+                govulncheck -db=file://${vulndbFor pkgs} -mode=query -json stdlib@v1.20.5 > fixed.json
+                jq -se 'all(.[]; .osv.id != "GO-2023-1840")' fixed.json >/dev/null
+                touch "$out"
+              '';
+          releaseInputEvidenceCheck =
+            pkgs.runCommand "endlessfs-release-input-evidence" { nativeBuildInputs = [ pkgs.ripgrep ]; }
+              ''
+                release=${self.packages.${system}.release}
+                cmp "$release/VULNERABILITY-DATABASE.json" ${./security/vulndb/snapshot.json}
+                rg --fixed-strings '  VULNERABILITY-DATABASE.json' "$release/SHA256SUMS" >/dev/null
+                cd "$release"
+                sha256sum --check SHA256SUMS
+                touch "$out"
+              '';
           repositoryPolicyCheck =
             goCheckWithSource "repository-policy" policySource "go run ./tools/repository-policy check"
               [ ];
@@ -1257,6 +1281,9 @@
           offline = testSuite;
           security = securityCheck;
           dependencies = securityCheck;
+
+          vulndb = vulndbCheck;
+          release-input-evidence = releaseInputEvidenceCheck;
 
           repository-policy = repositoryPolicyCheck;
         }

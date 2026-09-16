@@ -13,7 +13,28 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	gcstransport "github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
+	"github.com/applyinnovations/endlessfs/internal/objectstore/objectstorecontract"
 )
+
+func TestContractGCSUploadAbort(t *testing.T) {
+	objectstorecontract.RunUploadAbort(t, func(t *testing.T) objectstorecontract.UploadAbortHarness {
+		server, fake := newGCSServerWithFake(t)
+		fake.rejectCompletedDelete = true
+		// The upstream signer bounds expiry against its own wall clock; freeze
+		// the injected backend clock once within that window for the schedule.
+		clock := domain.NewFixedClock(time.Now().UTC().Truncate(time.Second))
+		backend, err := gcstransport.NewWithTransfers(protocolClient(t, server), "endlessfs-test", gcstransport.TransferOptions{
+			HTTPClient: server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
+			SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x5a}, 256), nil },
+			Hostname:  strings.TrimPrefix(server.URL, "http://"), Insecure: true,
+			LeaseKey: bytes.Repeat([]byte{0x42}, 32), Random: bytes.NewReader(bytes.Repeat([]byte{0x27}, 4096)), Clock: clock,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return objectstorecontract.UploadAbortHarness{Backend: backend, Client: server.Client(), Now: clock.Now()}
+	})
+}
 
 func TestGCSResumableCapabilityCanMoveBetweenReplicas(t *testing.T) {
 	server, _ := newGCSServerWithFake(t)
@@ -115,7 +136,7 @@ func TestGCSUploadCleanupDistinguishesFinalizedAndIncompleteSessions(t *testing.
 		deleteAttempts := fake.sessionDeleteAttempts
 		_, objectExists := fake.objects[key.String()]
 		fake.mu.Unlock()
-		if deleteAttempts != 0 || objectExists {
+		if deleteAttempts != 0 || !objectExists {
 			t.Fatalf("finalized cleanup = session deletes %d, object exists %t", deleteAttempts, objectExists)
 		}
 	})

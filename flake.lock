@@ -18,21 +18,7 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs",
-        "vulndb": "vulndb"
-      }
-    },
-    "vulndb": {
-      "flake": false,
-      "locked": {
-        "lastModified": 312732000,
-        "narHash": "sha256-MoMGhRCWvIGlLAr8yKNrVBUTW3JaE75DaJ2o+tsAmTA=",
-        "type": "tarball",
-        "url": "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1787929740610734"
-      },
-      "original": {
-        "type": "tarball",
-        "url": "https://storage.googleapis.com/download/storage/v1/b/go-vulndb/o/vulndb.zip?alt=media&generation=1787929740610734"
+        "nixpkgs": "nixpkgs"
       }
     }
   },

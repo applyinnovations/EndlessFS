@@ -702,9 +702,12 @@ func (s *FileStore) abortUploadBatch011(ctx context.Context, scope domain.Scope,
 				return encodeErr
 			}
 			_, err = s.engine.stateDomainStore().mutatePrepared(ctx, uploadDomainReference(scope.UserID()), consistencyDomainMutation{
-				ID:      transactionID,
-				Changes: []consistencyDomainChange{{Key: uploadBatchAbortKey(request.BatchID), Require: requirement, ExpectedVersion: expectedVersion, Value: body}},
-				Result:  resultBody,
+				ID: transactionID,
+				// The overlay key alone cannot detect completed member records.
+				// A competing mutation must return to load() to revalidate them.
+				ExpectedRevision: &view.head.Revision,
+				Changes:          []consistencyDomainChange{{Key: uploadBatchAbortKey(request.BatchID), Require: requirement, ExpectedVersion: expectedVersion, Value: body}},
+				Result:           resultBody,
 			}, view.headSnapshot, view.session)
 			if err == nil {
 				return s.engine.step(ctx, StepUploadBatchAbortPublished)

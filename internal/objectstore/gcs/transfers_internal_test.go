@@ -629,7 +629,7 @@ func TestBackendAndTransferReconciliationBranchesFailClosed(t *testing.T) {
 			invoke: func(backend *Backend, sealed []byte) error { return backend.AbortUpload(context.Background(), sealed) },
 			want:   domain.ErrPreconditionFailed,
 		},
-		"abort-delete-failure": {
+		"abort-preserves-finalized-object": {
 			handler: func(writer http.ResponseWriter, request *http.Request, _ *int) {
 				if request.Method == http.MethodDelete {
 					writeBoundaryGCSProblem(writer, http.StatusInternalServerError)
@@ -639,7 +639,7 @@ func TestBackendAndTransferReconciliationBranchesFailClosed(t *testing.T) {
 			},
 			lease:  boundaryLease(now, key, domain.UploadSingle, "", 4),
 			invoke: func(backend *Backend, sealed []byte) error { return backend.AbortUpload(context.Background(), sealed) },
-			want:   domain.ErrUnavailable,
+			want:   nil,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

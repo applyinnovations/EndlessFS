@@ -52,6 +52,11 @@ type consistencyDomainMutation struct {
 	RetainUntil  time.Time
 	Changes      []consistencyDomainChange
 	Result       []byte
+	// ExpectedRevision binds decisions that read keys outside Changes to the
+	// validated logical snapshot. It is a transient publication precondition,
+	// excluded from durable intent fingerprints so a revalidated retry and a
+	// retained outcome keep the same identity. Compaction preserves Revision.
+	ExpectedRevision *uint64
 }
 
 type consistencyDomainOutcome struct {
@@ -308,6 +313,9 @@ func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, referen
 			outcome.Replayed = true
 			return outcome, nil
 		}
+		if mutation.ExpectedRevision != nil && snapshot.head.Revision != *mutation.ExpectedRevision {
+			return consistencyDomainOutcome{}, domain.NewError(domain.ErrorConflict, "consistency-domain snapshot changed")
+		}
 		if snapshot.head.Frozen {
 			return consistencyDomainOutcome{}, domain.NewError(domain.ErrorUnavailable, "consistency domain is frozen")
 		}
@@ -428,6 +436,9 @@ func (store *consistencyDomainStore) mutateMaterializedPrepared(ctx context.Cont
 		}
 		outcome.Replayed = true
 		return outcome, nil
+	}
+	if mutation.ExpectedRevision != nil && snapshot.head.Revision != *mutation.ExpectedRevision {
+		return consistencyDomainOutcome{}, domain.NewError(domain.ErrorConflict, "consistency-domain snapshot changed")
 	}
 	if snapshot.head.Frozen {
 		return consistencyDomainOutcome{}, domain.NewError(domain.ErrorUnavailable, "consistency domain is frozen")

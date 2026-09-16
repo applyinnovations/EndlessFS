@@ -566,6 +566,17 @@ func TestPortablePartialBatchAbortRetainsLegacyPerRecordCompatibility(t *testing
 }
 
 func TestConcurrentCompletionAndCompactBatchAbortHaveOneAtomicWinner(t *testing.T) {
+	for _, abortStep := range []string{portable.StepUploadBatchAbortApplied, portable.StepDomainBeforeHeadCommit} {
+		for _, completionWins := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/completion-wins=%t", abortStep, completionWins), func(t *testing.T) {
+				testCompletionAndCompactBatchAbortWinner(t, abortStep, completionWins)
+			})
+		}
+	}
+}
+
+func testCompletionAndCompactBatchAbortWinner(t *testing.T, abortStep string, completionWins bool) {
+	t.Helper()
 	backend := objectmemory.New()
 	server := httptest.NewServer(backend)
 	t.Cleanup(server.Close)
@@ -573,8 +584,32 @@ func TestConcurrentCompletionAndCompactBatchAbortHaveOneAtomicWinner(t *testing.
 	if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(deterministic(157, 1<<20)))); err != nil {
 		t.Fatal(err)
 	}
-	first := openEngine(t, backend, clock, 158, nil)
-	second := openEngine(t, backend, clock, 159, nil)
+	// Both replicas read the active batch before either may publish. Release
+	// each winner explicitly so the stale-view and lost-CAS paths are covered
+	// on every run, independently of the host's goroutine schedule.
+	enabled := false
+	pause := func(target string) (portable.Scheduler, <-chan struct{}, func()) {
+		ready, release := make(chan struct{}), make(chan struct{})
+		var arrived, released sync.Once
+		resume := func() { released.Do(func() { close(release) }) }
+		t.Cleanup(resume)
+		return portable.SchedulerFunc(func(ctx context.Context, step string) error {
+			if enabled && step == target {
+				arrived.Do(func() {
+					close(ready)
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+				})
+			}
+			return ctx.Err()
+		}), ready, resume
+	}
+	completionScheduler, completionReady, resumeCompletion := pause(portable.StepUploadBatchCompletionVerified)
+	abortScheduler, abortReady, resumeAbort := pause(abortStep)
+	first := openEngine(t, backend, clock, 158, completionScheduler)
+	second := openEngine(t, backend, clock, 159, abortScheduler)
 	owner, _ := domain.ParseUserID("V1dXV1dXV1dXV1dXV1dXVw")
 	scope, _ := domain.NewScope(owner, domain.AreaLive)
 	requests := []domain.CreateUploadRequest{
@@ -593,25 +628,44 @@ func TestConcurrentCompletionAndCompactBatchAbortHaveOneAtomicWinner(t *testing.
 		completion.Items[index] = domain.CompleteUploadBatchItem{UploadID: capability.UploadID, CRC32C: objectstore.FingerprintFor(bodies[index]).CRC32C}
 		abort.UploadIDs[index] = capability.UploadID
 	}
-	start := make(chan struct{})
+	enabled = true
 	var completed domain.CompleteUploadBatchResult
 	var completeErr, abortErr error
-	var wait sync.WaitGroup
-	wait.Add(2)
+	completionDone, abortDone := make(chan struct{}), make(chan struct{})
 	go func() {
-		defer wait.Done()
-		<-start
+		defer close(completionDone)
 		completed, completeErr = first.Files().CompleteUploadBatch(context.Background(), scope, completion)
 	}()
+	select {
+	case <-completionReady:
+	case <-completionDone:
+		t.Fatalf("completion returned before publication barrier: %v", completeErr)
+	}
 	go func() {
-		defer wait.Done()
-		<-start
+		defer close(abortDone)
 		abortErr = second.Files().AbortUploadBatch(context.Background(), scope, abort)
 	}()
-	close(start)
-	wait.Wait()
+	select {
+	case <-abortReady:
+	case <-abortDone:
+		t.Fatalf("abort returned before publication barrier: %v", abortErr)
+	}
+	if completionWins {
+		resumeCompletion()
+		<-completionDone
+		resumeAbort()
+		<-abortDone
+	} else {
+		resumeAbort()
+		<-abortDone
+		resumeCompletion()
+		<-completionDone
+	}
 	if (completeErr == nil) == (abortErr == nil) {
 		t.Fatalf("completion/abort winners = complete:%v abort:%v", completeErr, abortErr)
+	}
+	if (completeErr == nil) != completionWins {
+		t.Fatalf("scheduled completion winner=%t; complete:%v abort:%v", completionWins, completeErr, abortErr)
 	}
 	if completeErr == nil {
 		if len(completed.Entries) != len(requests) || !errors.Is(abortErr, domain.ErrConflict) {
@@ -630,8 +684,49 @@ func TestConcurrentCompletionAndCompactBatchAbortHaveOneAtomicWinner(t *testing.
 			if status.State != domain.UploadStateCompleted || statErr != nil || entry.Version != completed.Entries[index].Version {
 				t.Fatalf("completed member %d = status:%+v entry:%+v error:%v", index, status, entry, statErr)
 			}
+			download, err := second.Files().CreateDownload(context.Background(), scope, domain.CreateDownloadRequest{Path: entry.Path, Version: entry.Version})
+			if err != nil {
+				t.Fatalf("winning completion lost member %d blob: %v", index, err)
+			}
+			request, err := http.NewRequest(download.Method, download.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for key, value := range download.Headers {
+				request.Header.Set(key, value)
+			}
+			response, err := server.Client().Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, readErr := io.ReadAll(response.Body)
+			closeErr := response.Body.Close()
+			if response.StatusCode != http.StatusOK || readErr != nil || closeErr != nil || !bytes.Equal(body, bodies[index]) {
+				t.Fatalf("winning member %d data = status:%d body:%q read:%v close:%v", index, response.StatusCode, body, readErr, closeErr)
+			}
 		} else if status.State != domain.UploadStateAborted || !errors.Is(statErr, domain.ErrNotFound) {
 			t.Fatalf("aborted member %d = status:%+v stat error:%v", index, status, statErr)
+		}
+	}
+	if completionWins {
+		replayed, err := second.Files().CompleteUploadBatch(context.Background(), scope, completion)
+		if err != nil || len(replayed.Entries) != len(completed.Entries) {
+			t.Fatalf("completion replay = %+v, %v", replayed, err)
+		}
+		for index := range completed.Entries {
+			if replayed.Entries[index] != completed.Entries[index] {
+				t.Fatalf("completion replay changed entry %d", index)
+			}
+		}
+		if err := first.Files().AbortUploadBatch(context.Background(), scope, abort); !errors.Is(err, domain.ErrConflict) {
+			t.Fatalf("losing abort retry = %v", err)
+		}
+	} else {
+		if err := first.Files().AbortUploadBatch(context.Background(), scope, abort); err != nil {
+			t.Fatalf("abort replay = %v", err)
+		}
+		if _, err := second.Files().CompleteUploadBatch(context.Background(), scope, completion); !errors.Is(err, domain.ErrConflict) {
+			t.Fatalf("losing completion retry = %v", err)
 		}
 	}
 }

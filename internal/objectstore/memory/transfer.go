@@ -223,9 +223,8 @@ func (b *Backend) AbortUpload(ctx context.Context, lease []byte) error {
 	session.aborted = true
 	delete(b.uploadTokens, session.tokenHash)
 	delete(b.uploads, uploadID)
-	if current, exists := b.records[session.key.String()]; exists && current.version == session.version {
-		delete(b.records, session.key.String())
-	}
+	// Finalized objects may already be referenced by a concurrent completion.
+	// Only checkpoint-bound garbage collection can establish their unreachability.
 	return nil
 }
 

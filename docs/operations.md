@@ -242,6 +242,13 @@ Per-group reclaimable bytes count all but one occurrence of that exact group. Do
 
 ## Closed-gate retention and collection
 
+Canceling an upload revokes its incomplete provider session. If the provider has
+already finalized the object, cancellation preserves those bytes so it cannot
+damage a concurrent successful completion. An aborted upload remains invisible
+in the file namespace; its unreferenced finalized bytes are reclaimed during the
+verified closed-gate collection described below, rather than immediately by
+the cancellation request.
+
 Fingerprint-bound mutation outcomes and idempotency bindings are retained in
 bounded domain trees and indexed by expiry. Trash is not subject to that
 window. During gate closure EndlessFS freezes the catalog and all domains,
@@ -306,7 +313,7 @@ nix build .#release-images
 
 No required gate needs GCP credentials or a cloud service. The release inventory distinguishes the ephemeral memory preview store, locally qualified durable GCS preview store, absent live-GCS validation, and absent deployment validation.
 
-The release output includes `SHA256SUMS`, `RELEASE-INVENTORY.txt`, the binary/archive, OCI archive, `CAPABILITIES.json`, dependency and license inventories, installed-theme inventory, release notes, and the acceptance record. Verify `SHA256SUMS` before distribution. The inventory records the source revision, `flake.lock` hash, pinned vulnerability database hash, Go toolchain, artifact hashes, thresholds, provider kind, and explicit no-cloud/no-deployment status.
+The release output includes `SHA256SUMS`, `RELEASE-INVENTORY.txt`, `VULNERABILITY-DATABASE.json`, the binary/archive, OCI archive, `CAPABILITIES.json`, dependency and license inventories, installed-theme inventory, release notes, and the acceptance record. Verify `SHA256SUMS` before distribution. The inventory records the source revision, `flake.lock` hash, retained vulnerability database archive SHA-256 and modification timestamp, Go toolchain, artifact hashes, thresholds, provider kind, and explicit no-cloud/no-deployment status. Refresh and review the retained snapshot before preparing a release as described in [security input retention](./security-input-retention.md).
 
 Tekton publishing on the xlab bare-metal Talos Linux cluster is tag-driven.
 Protected `vMAJOR.MINOR.PATCH` tags cause the PaC release workflow to repeat the

@@ -299,6 +299,38 @@ func (s *FileStore) cleanupPortableUpload(ctx context.Context, owner domain.User
 	if err != nil || !record.CleanupPending {
 		return err
 	}
+	if err := s.cleanupPortableUploadProviderEffects(ctx, record, knownLease); err != nil {
+		return err
+	}
+	record.CleanupPending = false
+	body, err := storageformat.EncodeCanonical(record)
+	if err != nil {
+		return err
+	}
+	result, err := storageformat.EncodeCanonical(storageformat.NamespaceMutationResult{SchemaVersion: 1, RequestFingerprint: namespaceRequestFingerprint("upload-cleanup", record.UploadID, string(record.State)), Upload: &storageformat.NamespaceUploadMutationResult{UploadID: record.UploadID, State: string(record.State)}})
+	if err != nil {
+		return err
+	}
+	_, err = s.engine.stateDomainStore().mutatePrepared(ctx, uploadDomainReference(owner), consistencyDomainMutation{
+		ID:      "upload-cleanup:" + record.UploadID + ":" + string(record.State),
+		Changes: []consistencyDomainChange{{Key: uploadRecordKey(record.UploadID), Require: domainValuePresent, ExpectedVersion: value.LogicalVersion, Value: body}}, Result: result,
+	}, &snapshot, session)
+	if err != nil {
+		current, _, readErr := s.portableUpload(ctx, owner, uploadID)
+		if readErr == nil && current.State == record.State && !current.CleanupPending {
+			return nil
+		}
+	}
+	return err
+}
+
+// cleanupPortableUploadProviderEffects executes only idempotent transient
+// provider work from authenticated terminal authority. Checkpoint drain uses
+// this part while domains are frozen; clearing CleanupPending is an ordinary
+// head mutation and must wait until writes reopen.
+func (s *FileStore) cleanupPortableUploadProviderEffects(ctx context.Context, record storageformat.PortableUploadRecord, knownLease *objectstore.Object) error {
+	var err error
+	uploadID := record.UploadID
 	switch record.State {
 	case storageformat.UploadCompleted:
 		if record.Batch != nil {
@@ -344,25 +376,6 @@ func (s *FileStore) cleanupPortableUpload(ctx context.Context, owner domain.User
 		}
 	default:
 		return domain.NewError(domain.ErrorInvalid, "non-terminal upload requested provider cleanup")
-	}
-	record.CleanupPending = false
-	body, err := storageformat.EncodeCanonical(record)
-	if err != nil {
-		return err
-	}
-	result, err := storageformat.EncodeCanonical(storageformat.NamespaceMutationResult{SchemaVersion: 1, RequestFingerprint: namespaceRequestFingerprint("upload-cleanup", record.UploadID, string(record.State)), Upload: &storageformat.NamespaceUploadMutationResult{UploadID: record.UploadID, State: string(record.State)}})
-	if err != nil {
-		return err
-	}
-	_, err = s.engine.stateDomainStore().mutatePrepared(ctx, uploadDomainReference(owner), consistencyDomainMutation{
-		ID:      "upload-cleanup:" + record.UploadID + ":" + string(record.State),
-		Changes: []consistencyDomainChange{{Key: uploadRecordKey(record.UploadID), Require: domainValuePresent, ExpectedVersion: value.LogicalVersion, Value: body}}, Result: result,
-	}, &snapshot, session)
-	if err != nil {
-		current, _, readErr := s.portableUpload(ctx, owner, uploadID)
-		if readErr == nil && current.State == record.State && !current.CleanupPending {
-			return nil
-		}
 	}
 	return err
 }

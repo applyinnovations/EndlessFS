@@ -125,6 +125,15 @@ versioned GCS schema-009 fixture under `internal/objectstore/gcs/economics`.
 
 ## Schema-011 bounded-state ratchet
 
+The October geometric/boundary delta supersedes executable qualification of
+the repeated 10,000-item samples below. Those measurements remain immutable
+historical evidence. Current namespace samples are 64/256/1,024; upload samples
+are 100/1,001/2,001, with lifecycle assertions at the largest selected size.
+`BudgetSupersessions` explicitly maps retained historical workload names to
+their current executable replacements. The budget catalog still rejects a
+missing replacement, unreferenced current ratchet, or missing historical input.
+`docs/test-portfolio-scaling.md` records the guarantee matrix and measured growth.
+
 The schema-011 sparse delta records 106 exact executable workloads. It replaces
 the schema-010 page-tree amplification with bounded domain packs, one-read
 session authentication, 10,000-item upload transactions, a compact whole-batch

@@ -1,0 +1,5 @@
+//go:build !race
+
+package portable_test
+
+const migrationRacePortfolio = false

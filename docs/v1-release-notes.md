@@ -2,6 +2,14 @@
 
 EndlessFS v1 provides the single-binary passkey identity system, private Drive control plane, direct capability data plane, trash, read-only public sharing, administration and recovery, accessible embedded browser application, and closed data-only theme system described in [the v1 specification](./v1-specification.md).
 
+The pending-cleanup migration repair preserves the schema-011 format. Checkpoint
+drain now performs idempotent transient upload-provider cleanup without attempting
+an authoritative mutation in a frozen domain. This allows schema-010-to-011
+startup to resume from v0.6.0 terminal-cleanup state and exact residue left by a
+failed v0.7.1 upgrade. Existing files, identity authority, logical versions,
+freeze exclusion, and active-upload denial remain preserved. Evidence is in
+`docs/migration-upload-cleanup-recovery.md`.
+
 The v0.7.0 provider-efficiency release appends schema 011. Bounded
 content-addressed domain packs replace per-page request amplification while one
 conditional domain-head CAS remains the visibility point. At 10,000 logical

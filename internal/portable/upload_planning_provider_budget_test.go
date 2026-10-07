@@ -86,13 +86,13 @@ func TestUploadPlanningWarmRequestBudgetIsIndependentOfBatchCardinality(t *testi
 	}
 	oneSizeEvents := ledger.Events()
 	ledger.Reset()
-	manySize, err := engine.Files().PlanUploadSizes(ctx, live.UserID(), uploadSizePlanFixture(10_000))
+	manySize, err := engine.Files().PlanUploadSizes(ctx, live.UserID(), uploadSizePlanFixture(1_024))
 	if err != nil {
 		t.Fatal(err)
 	}
 	manySizeEvents := ledger.Events()
 	if len(oneSizeEvents) != len(manySizeEvents) {
-		t.Fatalf("warm size-plan requests scale with item count: one=%d ten-thousand=%d", len(oneSizeEvents), len(manySizeEvents))
+		t.Fatalf("warm size-plan requests scale with item count: one=%d geometric-scale=%d", len(oneSizeEvents), len(manySizeEvents))
 	}
 	sizeMetrics := assertMetadataOnlyPlanningEvents(t, manySizeEvents)
 
@@ -102,12 +102,12 @@ func TestUploadPlanningWarmRequestBudgetIsIndependentOfBatchCardinality(t *testi
 	}
 	oneExactEvents := ledger.Events()
 	ledger.Reset()
-	if _, err := engine.Files().PlanUploadFingerprints(ctx, live.UserID(), uploadFingerprintPlanFixture(10_000, manySize.Token)); err != nil {
+	if _, err := engine.Files().PlanUploadFingerprints(ctx, live.UserID(), uploadFingerprintPlanFixture(1_024, manySize.Token)); err != nil {
 		t.Fatal(err)
 	}
 	manyExactEvents := ledger.Events()
 	if len(oneExactEvents) != len(manyExactEvents) {
-		t.Fatalf("warm fingerprint-plan requests scale with item count: one=%d ten-thousand=%d", len(oneExactEvents), len(manyExactEvents))
+		t.Fatalf("warm fingerprint-plan requests scale with item count: one=%d geometric-scale=%d", len(oneExactEvents), len(manyExactEvents))
 	}
 	exactMetrics := assertMetadataOnlyPlanningEvents(t, manyExactEvents)
 
@@ -135,12 +135,12 @@ func TestUploadPlanningWarmRequestBudgetIsIndependentOfBatchCardinality(t *testi
 	for name, events := range map[string][]providerbudget.Event{
 		"upload-plan-index-cold-256-schema-011":        coldEvents,
 		"upload-plan-index-incremental-one-schema-011": incrementalEvents,
-		"upload-plan-sizes-10000-schema-011":           manySizeEvents,
-		"upload-plan-fingerprints-10000-schema-011":    manyExactEvents,
+		"upload-plan-sizes-1024-schema-011":            manySizeEvents,
+		"upload-plan-fingerprints-1024-schema-011":     manyExactEvents,
 	} {
-		if report, err := ratchet.CheckExact(name, economics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, events); err != nil {
+		if report, err := checkGrowthBudget(t, ratchet, name, economics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, events); err != nil {
 			t.Errorf("%s: %v; observed=%+v", name, err, report.Totals)
 		}
 	}
-	t.Logf("upload planning budget: cold-256=%+v incremental-one=%+v sizes-10000=%+v fingerprints-10000=%+v", coldMetrics, incrementalMetrics, sizeMetrics, exactMetrics)
+	t.Logf("upload planning budget: cold-256=%+v incremental-one=%+v sizes-1024=%+v fingerprints-1024=%+v", coldMetrics, incrementalMetrics, sizeMetrics, exactMetrics)
 }

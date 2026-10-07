@@ -155,12 +155,20 @@ file body.
 
 ## Executable evidence
 
+Current executable volume qualification uses the geometric and progress-boundary
+portfolio in `docs/test-portfolio-scaling.md`. The 10,000-item tables above are
+retained historical measurements from the selected architecture; current gates
+use measured smaller ratchets plus growth assertions, not repeated execution at
+that arbitrary cardinality. The public maximum remains unchanged.
+
 The principal proofs are:
 
-- `TestNamespaceBatchTrashPublishesTenThousandEdgesThroughOneHead`,
-  `TestNamespaceBatchRestorePublishesTenThousandEdgesThroughOneHead`, and
-  `TestProviderBudgetNamespaceCopyAndMoveTenThousandRoots`;
-- `TestProviderBudgetUploadBatchTenThousandLifecycle`,
+- `TestNamespaceBatchTrashPublishesScaleEdgesThroughOneHead`,
+  `TestNamespaceBatchRestorePublishesScaleEdgesThroughOneHead`,
+  `TestProviderBudgetNamespaceCopyAndMoveScaleRoots`, and
+  `TestNamespaceBatchGeometricWorkGrowth`;
+- `TestProviderBudgetUploadBatchSegmentedScaleLifecycle`,
+  `TestUploadAdmissionWorkGrowthAcrossProgressBoundaries`,
   `TestPortableUploadBatchAbortIsAtomicAndReplayable`,
   `TestConcurrentCompletionAndCompactBatchAbortHaveOneAtomicWinner`, and
   `TestUploadBatchAbortProgressRestartBoundsRepeatedProviderWork`;

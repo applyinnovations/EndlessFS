@@ -40,6 +40,9 @@ type ProductionScaleScenario struct {
 	BrowserRequests int64
 	RequestBasis    string
 	Executions      []BudgetExecution
+	// HistoricalMeasurement distinguishes the retained prior large-sample
+	// economics table from current executable geometric workload evidence.
+	HistoricalMeasurement bool
 }
 
 // ProviderRequestWave is an evidence-backed request shape for a production
@@ -193,7 +196,7 @@ func ProductionScaleTargets() []ProductionScaleTarget {
 // production surface. A zero-execution scenario is intentional proof that
 // dormant client state does not contact the provider.
 func ProductionScaleScenarios() []ProductionScaleScenario {
-	return []ProductionScaleScenario{
+	scenarios := []ProductionScaleScenario{
 		{ID: "restored-transfer-ledger-needs-source", Category: "startup", LogicalItems: 10_000, BrowserRequests: 0, RequestBasis: "Dormant history is local IndexedDB state; provider reconciliation is deferred until a source file is reacquired."},
 		{ID: "browse-live-directory", Category: "namespace-read", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One progressively decoded 10,000-entry response.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("namespace-list-page-10000-schema-011", 1, 1)}},
 		{ID: "browse-trash", Category: "namespace-read", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One progressively decoded 10,000-entry response.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("namespace-list-page-10000-schema-011", 1, 1)}},
@@ -215,10 +218,24 @@ func ProductionScaleScenarios() []ProductionScaleScenario {
 		{ID: "checkpoint-garbage-collection", Category: "maintenance", LogicalItems: 128, BrowserRequests: 0, RequestBasis: "One authenticated checkpoint-bound garbage plan and bounded conditional sweep.", Executions: []BudgetExecution{execution("maintenance-checkpoint-garbage-128-schema-011", 1, 1)}},
 		{ID: "domain-compaction", Category: "maintenance", LogicalItems: 300, BrowserRequests: 0, RequestBasis: "One packed compaction run over the calibrated domain history.", Executions: []BudgetExecution{execution("maintenance-domain-compaction-300-schema-011", 1, 1)}},
 	}
+	for index := range scenarios {
+		for _, measured := range scenarios[index].Executions {
+			if BudgetSupersessions()[measured.Budget] != "" {
+				scenarios[index].HistoricalMeasurement = true
+			}
+		}
+	}
+	return scenarios
 }
 
 func workload(id, category string, budgets ...string) ProductionWorkload {
-	return ProductionWorkload{ID: id, Category: category, Budgets: append([]string(nil), budgets...)}
+	current := append([]string(nil), budgets...)
+	for index, name := range current {
+		if replacement := BudgetSupersessions()[name]; replacement != "" {
+			current[index] = replacement
+		}
+	}
+	return ProductionWorkload{ID: id, Category: category, Budgets: current}
 }
 
 // ProductionWorkloads returns every production behavior that can issue an
@@ -332,7 +349,7 @@ func ProductionWorkloads() []ProductionWorkload {
 		workload("maintenance/compaction", "maintenance", "maintenance-domain-compaction-300-schema-011"),
 		workload("maintenance/recovery", "maintenance", "maintenance-transition-recovery-schema-011"),
 		workload("maintenance/derived-view-rebuild", "maintenance", "maintenance-derived-view-rebuild-schema-011"),
-		workload("maintenance/migration", "maintenance", "maintenance-migration-008-to-011-minimal-fixture"),
+		workload("maintenance/migration", "maintenance", "maintenance-migration-008-to-011-minimal-fixture", "maintenance-migration-application-complete-pending-cleanup-schema-011", "maintenance-migration-application-complete-interrupted-cleanup-schema-011"),
 	}
 	return append([]ProductionWorkload(nil), workloads...)
 }

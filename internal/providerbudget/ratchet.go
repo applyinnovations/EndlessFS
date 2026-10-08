@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // RatchetLedger is append-only review data. Each new epoch must carry every
-// prior operation and may only retain or lower its count, cost, and modeled
-// latency ceilings. Removing a pathway or loosening a ceiling fails closed.
+// active operation and may only retain or lower its count, cost, and modeled
+// latency ceilings. Reviewed qualification retirement preserves prior epochs;
+// silent removal, name reuse, and loosening fail closed.
 type RatchetLedger struct {
 	SchemaVersion int            `json:"schemaVersion"`
 	Provider      string         `json:"provider"`
@@ -18,21 +20,25 @@ type RatchetLedger struct {
 }
 
 type RatchetEpoch struct {
-	ID      string   `json:"id"`
-	Budgets []Budget `json:"budgets"`
+	ID                 string   `json:"id"`
+	Budgets            []Budget `json:"budgets"`
+	RetiredBudgets     []string `json:"retiredBudgets,omitempty"`
+	RetirementEvidence string   `json:"retirementEvidence,omitempty"`
 }
 
 // RatchetDelta is the reviewed on-disk form for one append-only epoch. The
-// full in-memory ledger still carries every prior pathway in every epoch; a
-// delta merely avoids copying unchanged calibration records into source. Any
-// budget omitted by the delta is inherited unchanged. An existing budget may
-// only be tightened, never loosened or removed.
+// full in-memory ledger retains prior epochs. A budget omitted by the delta is
+// inherited unchanged unless explicitly retired with reviewed qualification
+// evidence. Retirement removes it only from the new active snapshot; its name
+// cannot be reused. Active ceilings may only tighten.
 type RatchetDelta struct {
-	SchemaVersion int      `json:"schemaVersion"`
-	Provider      string   `json:"provider"`
-	Profile       string   `json:"profile"`
-	ID            string   `json:"id"`
-	Budgets       []Budget `json:"budgets"`
+	SchemaVersion      int      `json:"schemaVersion"`
+	Provider           string   `json:"provider"`
+	Profile            string   `json:"profile"`
+	ID                 string   `json:"id"`
+	Budgets            []Budget `json:"budgets"`
+	RetiredBudgets     []string `json:"retiredBudgets,omitempty"`
+	RetirementEvidence string   `json:"retirementEvidence,omitempty"`
 }
 
 func ParseRatchetLedger(body []byte) (RatchetLedger, error) {
@@ -45,12 +51,22 @@ func ParseRatchetLedger(body []byte) (RatchetLedger, error) {
 	}
 	var prior map[string]Budget
 	priorID := ""
+	retired := make(map[string]bool)
 	for _, epoch := range ledger.Epochs {
 		if epoch.ID == "" || epoch.ID <= priorID || len(epoch.Budgets) == 0 {
 			return RatchetLedger{}, errors.New("provider budget ratchet epoch order is invalid")
 		}
 		current := make(map[string]Budget, len(epoch.Budgets))
+		if err := validateRetirement(prior, retired, epoch.RetiredBudgets, epoch.RetirementEvidence); err != nil {
+			return RatchetLedger{}, err
+		}
+		for _, name := range epoch.RetiredBudgets {
+			retired[name] = true
+		}
 		for _, budget := range epoch.Budgets {
+			if retired[budget.Name] {
+				return RatchetLedger{}, fmt.Errorf("provider budget ratchet reuses retired name %q", budget.Name)
+			}
 			if budget.Name == "" || budget.Provider != ledger.Provider || budget.Profile != ledger.Profile || len(budget.Roles) == 0 {
 				return RatchetLedger{}, fmt.Errorf("provider budget ratchet epoch %q contains an invalid budget", epoch.ID)
 			}
@@ -71,6 +87,9 @@ func ParseRatchetLedger(body []byte) (RatchetLedger, error) {
 			current[budget.Name] = budget
 		}
 		for name, previous := range prior {
+			if retired[name] {
+				continue
+			}
 			next, exists := current[name]
 			if !exists {
 				return RatchetLedger{}, fmt.Errorf("provider budget ratchet removed pathway %q", name)
@@ -90,6 +109,20 @@ func ParseRatchetLedger(body []byte) (RatchetLedger, error) {
 	return ledger, nil
 }
 
+func validateRetirement(prior map[string]Budget, retired map[string]bool, names []string, evidence string) error {
+	if (len(names) != 0) != (strings.TrimSpace(evidence) != "") {
+		return errors.New("provider budget retirement requires qualification evidence")
+	}
+	seen := make(map[string]bool)
+	for _, name := range names {
+		if _, found := prior[name]; !found || retired[name] || seen[name] {
+			return fmt.Errorf("invalid provider budget retirement %q", name)
+		}
+		seen[name] = true
+	}
+	return nil
+}
+
 func (ledger RatchetLedger) Latest(name string) (Budget, bool) {
 	if len(ledger.Epochs) == 0 {
 		return Budget{}, false
@@ -104,8 +137,7 @@ func (ledger RatchetLedger) Latest(name string) (Budget, bool) {
 
 // AppendRatchetDelta strictly decodes and appends one sparse fixture to an
 // already validated ledger. The returned epoch is materialized as a complete,
-// deterministically ordered snapshot, preserving the original ratchet law for
-// all callers.
+// deterministically ordered active snapshot, preserving every historical epoch.
 func AppendRatchetDelta(ledger RatchetLedger, body []byte) (RatchetLedger, error) {
 	if len(ledger.Epochs) == 0 {
 		return RatchetLedger{}, errors.New("provider budget ratchet delta has no base ledger")
@@ -115,15 +147,31 @@ func AppendRatchetDelta(ledger RatchetLedger, body []byte) (RatchetLedger, error
 		return RatchetLedger{}, fmt.Errorf("decode provider budget ratchet delta: %w", err)
 	}
 	last := ledger.Epochs[len(ledger.Epochs)-1]
-	if delta.SchemaVersion != 1 || delta.Provider != ledger.Provider || delta.Profile != ledger.Profile || delta.ID == "" || delta.ID <= last.ID || len(delta.Budgets) == 0 {
+	if delta.SchemaVersion != 1 || delta.Provider != ledger.Provider || delta.Profile != ledger.Profile || delta.ID == "" || delta.ID <= last.ID || len(delta.Budgets)+len(delta.RetiredBudgets) == 0 {
 		return RatchetLedger{}, errors.New("provider budget ratchet delta identity is invalid")
 	}
 	current := make(map[string]Budget, len(last.Budgets)+len(delta.Budgets))
 	for _, budget := range last.Budgets {
 		current[budget.Name] = budget
 	}
+	retired := make(map[string]bool)
+	for _, epoch := range ledger.Epochs {
+		for _, name := range epoch.RetiredBudgets {
+			retired[name] = true
+		}
+	}
+	if err := validateRetirement(current, retired, delta.RetiredBudgets, delta.RetirementEvidence); err != nil {
+		return RatchetLedger{}, err
+	}
+	for _, name := range delta.RetiredBudgets {
+		delete(current, name)
+		retired[name] = true
+	}
 	changed := make(map[string]struct{}, len(delta.Budgets))
 	for _, budget := range delta.Budgets {
+		if retired[budget.Name] {
+			return RatchetLedger{}, fmt.Errorf("provider budget delta reuses retired name %q", budget.Name)
+		}
 		if _, exists := changed[budget.Name]; exists {
 			return RatchetLedger{}, fmt.Errorf("provider budget ratchet delta %q repeats %q", delta.ID, budget.Name)
 		}
@@ -152,7 +200,10 @@ func AppendRatchetDelta(ledger RatchetLedger, body []byte) (RatchetLedger, error
 	for index, name := range names {
 		budgets[index] = current[name]
 	}
-	ledger.Epochs = append(append([]RatchetEpoch(nil), ledger.Epochs...), RatchetEpoch{ID: delta.ID, Budgets: budgets})
+	if len(budgets) == 0 {
+		return RatchetLedger{}, errors.New("provider budget retirement leaves no active budgets")
+	}
+	ledger.Epochs = append(append([]RatchetEpoch(nil), ledger.Epochs...), RatchetEpoch{ID: delta.ID, Budgets: budgets, RetiredBudgets: append([]string(nil), delta.RetiredBudgets...), RetirementEvidence: delta.RetirementEvidence})
 	return ledger, nil
 }
 

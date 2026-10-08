@@ -28,6 +28,15 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 	if len(predecessors) != 2 {
 		t.Fatal("schema-007 feature-complete predecessor fixture is missing")
 	}
+	for _, candidate := range storageSchemaFixtures {
+		if candidate.profile == "application-complete-pending-cleanup" {
+			predecessors = append(predecessors, candidate)
+			break
+		}
+	}
+	if len(predecessors) != 3 {
+		t.Fatal("schema-010 pending cleanup predecessor fixture is missing")
+	}
 
 	for _, family := range predecessors {
 		fixture := loadStorageSchemaFixture(t, family)
@@ -44,9 +53,17 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 					t.Fatal(err)
 				}
 				baselineClock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
-				baselineFaults := &failNthBackend{}
+				baselineFaults := &failNthBackend{recordTrace: true, phase: "startup"}
 				baselineOptions := schemaSplitMigrationOptions(baselineState, baselineFile, baselineClock, 19, nil)
 				baselineOptions.Writer = writer
+				baselineOptions.Scheduler = portable.SchedulerFunc(func(_ context.Context, step string) error {
+					if strings.HasPrefix(step, "storage-migration:") {
+						baselineFaults.mu.Lock()
+						baselineFaults.phase = step
+						baselineFaults.mu.Unlock()
+					}
+					return nil
+				})
 				if target == "state" {
 					baselineFaults.backend = baselineState
 					baselineOptions.Backend = baselineFaults
@@ -60,8 +77,22 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 				}
 				baselineFaults.mu.Lock()
 				boundaryCalls := baselineFaults.calls
+				trace := append([]migrationFaultTrace(nil), baselineFaults.trace...)
 				baselineFaults.mu.Unlock()
-				results := runMigrationFaultBoundaries(fixture, writer, target, wantGateEpoch, boundaryCalls+3)
+				indices := make([]int, boundaryCalls+3)
+				for index := range indices {
+					indices[index] = index + 1
+				}
+				if migrationRacePortfolio {
+					indices = migrationRaceIndices(trace)
+				}
+				t.Logf("transport portfolio: race=%t selected=%d exhaustive=%d", migrationRacePortfolio, len(indices), boundaryCalls+3)
+				var results []migrationFaultBoundaryResult
+				if migrationRacePortfolio {
+					results = runSelectedMigrationFaultBoundaries(fixture, writer, target, wantGateEpoch, indices)
+				} else {
+					results = runMigrationFaultBoundaries(fixture, writer, target, wantGateEpoch, boundaryCalls+3)
+				}
 				consecutiveCompleted := 0
 				for _, result := range results {
 					if result.err != nil {
@@ -92,10 +123,18 @@ type migrationFaultBoundaryResult struct {
 // pool. Race instrumentation otherwise makes the growing append-only migration
 // suffix exceed the process timeout even though no individual schedule blocks.
 func runMigrationFaultBoundaries(fixture storageSchemaFixture, writer portable.WriterConfiguration, target string, wantGateEpoch uint64, total int) []migrationFaultBoundaryResult {
+	indices := make([]int, total)
+	for index := range indices {
+		indices[index] = index + 1
+	}
+	return runSelectedMigrationFaultBoundaries(fixture, writer, target, wantGateEpoch, indices)
+}
+
+func runSelectedMigrationFaultBoundaries(fixture storageSchemaFixture, writer portable.WriterConfiguration, target string, wantGateEpoch uint64, indices []int) []migrationFaultBoundaryResult {
 	const maximumWorkers = 8
-	workers := min(maximumWorkers, total)
+	workers := min(maximumWorkers, len(indices))
 	jobs := make(chan int)
-	completed := make(chan migrationFaultBoundaryResult, total)
+	completed := make(chan migrationFaultBoundaryResult, len(indices))
 	var wait sync.WaitGroup
 	for range workers {
 		wait.Add(1)
@@ -107,16 +146,24 @@ func runMigrationFaultBoundaries(fixture storageSchemaFixture, writer portable.W
 		}()
 	}
 	go func() {
-		for failAt := 1; failAt <= total; failAt++ {
+		for _, failAt := range indices {
 			jobs <- failAt
 		}
 		close(jobs)
 		wait.Wait()
 		close(completed)
 	}()
-	ordered := make([]migrationFaultBoundaryResult, total)
+	byBoundary := make(map[int]migrationFaultBoundaryResult, len(indices))
 	for result := range completed {
-		ordered[result.failAt-1] = result
+		byBoundary[result.failAt] = result
+	}
+	ordered := make([]migrationFaultBoundaryResult, len(indices))
+	for index, failAt := range indices {
+		result, found := byBoundary[failAt]
+		if !found {
+			result.err = fmt.Errorf("missing transport fault result for boundary %d", failAt)
+		}
+		ordered[index] = result
 	}
 	return ordered
 }

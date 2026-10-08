@@ -1,9 +1,61 @@
 package providerbudget
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestRatchetRetirementPreservesHistoryAndFailsClosed(t *testing.T) {
+	base, err := ParseRatchetLedger([]byte(`{"schemaVersion":1,"provider":"gcs","profile":"regional","epochs":[{"id":"001","budgets":[{"name":"old","provider":"gcs","profile":"regional","maximum":{"requests":1},"roles":{"state":{"requests":1}}},{"name":"current","provider":"gcs","profile":"regional","maximum":{"requests":1},"roles":{"state":{"requests":1}}}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := json.Marshal(base)
+	ledger, err := AppendRatchetDelta(base, []byte(`{"schemaVersion":1,"provider":"gcs","profile":"regional","id":"002","budgets":[],"retiredBudgets":["old"],"retirementEvidence":"docs/qualification.md"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := ledger.Latest("old"); found {
+		t.Fatal("retired budget is still active")
+	}
+	if _, found := ledger.Latest("current"); !found {
+		t.Fatal("unrelated budget disappeared")
+	}
+	after, _ := json.Marshal(base)
+	if string(before) != string(after) {
+		t.Fatal("retirement mutated predecessor ledger")
+	}
+	encoded, _ := json.Marshal(ledger)
+	if _, err := ParseRatchetLedger(encoded); err != nil {
+		t.Fatal(err)
+	}
+	for name, fields := range map[string]string{
+		"missing proof":  `"retiredBudgets":["old"]`,
+		"blank proof":    `"retiredBudgets":["old"],"retirementEvidence":" "`,
+		"all budgets":    `"retiredBudgets":["old","current"],"retirementEvidence":"proof"`,
+		"unknown budget": `"retiredBudgets":["absent"],"retirementEvidence":"proof"`,
+		"duplicate":      `"retiredBudgets":["old","old"],"retirementEvidence":"proof"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := AppendRatchetDelta(base, []byte(`{"schemaVersion":1,"provider":"gcs","profile":"regional","id":"002","budgets":[],`+fields+`}`)); err == nil {
+				t.Fatal("invalid retirement accepted")
+			}
+		})
+	}
+	resurrect := []byte(`{"schemaVersion":1,"provider":"gcs","profile":"regional","id":"003","budgets":[{"name":"old","provider":"gcs","profile":"regional","maximum":{"requests":99},"roles":{"state":{"requests":99}}}]}`)
+	if _, err := AppendRatchetDelta(ledger, resurrect); err == nil {
+		t.Fatal("retired budget name reused to discard its ceiling")
+	}
+	if _, err := AppendRatchetDelta(base, []byte(`{"schemaVersion":1,"provider":"gcs","profile":"regional","id":"002","retiredBudgets":["old"],"retirementEvidence":"proof","budgets":[{"name":"old","provider":"gcs","profile":"regional","maximum":{"requests":1},"roles":{"state":{"requests":1}}}]}`)); err == nil {
+		t.Fatal("same epoch retired and reactivated a name")
+	}
+	ledger.Epochs[1].Budgets = append(ledger.Epochs[1].Budgets, ledger.Epochs[0].Budgets[0])
+	encoded, _ = json.Marshal(ledger)
+	if _, err := ParseRatchetLedger(encoded); err == nil {
+		t.Fatal("retired budget remained active in parsed ledger")
+	}
+}
 
 func TestRatchetLedgerOnlyTightensAndCannotDropPathways(t *testing.T) {
 	valid := []byte(`{"schemaVersion":1,"provider":"gcs","profile":"regional","epochs":[{"id":"001","budgets":[{"name":"move","provider":"gcs","profile":"regional","maximum":{"requests":2,"costPicoUSD":2,"p50Micros":2,"p95Micros":3,"p99Micros":4},"roles":{"state":{"requests":2,"costPicoUSD":2,"p50Micros":2,"p95Micros":3,"p99Micros":4}}}]},{"id":"002","budgets":[{"name":"move","provider":"gcs","profile":"regional","maximum":{"requests":1,"costPicoUSD":2,"p50Micros":2,"p95Micros":3,"p99Micros":4},"roles":{"state":{"requests":1,"costPicoUSD":2,"p50Micros":2,"p95Micros":3,"p99Micros":4}}}]}]}`)

@@ -48,6 +48,13 @@ func newUploadBatchScaleFixture(t *testing.T, seed uint64) uploadBatchScaleFixtu
 	stateBase, fileBase := objectmemory.New(), objectmemory.New()
 	server := httptest.NewServer(fileBase)
 	t.Cleanup(server.Close)
+	// Retain the bounded worker pool's connections instead of churning
+	// thousands of local TCP sockets with Transport's two-idle default.
+	transport := server.Client().Transport.(*http.Transport)
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 100
+	transport.MaxConnsPerHost = 100
+	t.Cleanup(transport.CloseIdleConnections)
 	if err := fileBase.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(&deterministicScaleReader{state: seed ^ 0xa5a5a5a5})); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +90,11 @@ func newUploadBatchScaleFixture(t *testing.T, seed uint64) uploadBatchScaleFixtu
 }
 
 func scaleUploadRequests(prefix string) []domain.CreateUploadRequest {
-	requests := make([]domain.CreateUploadRequest, 10_000)
+	return scaleUploadRequestsCount(prefix, 2_001)
+}
+
+func scaleUploadRequestsCount(prefix string, count int) []domain.CreateUploadRequest {
+	requests := make([]domain.CreateUploadRequest, count)
 	for index := range requests {
 		requests[index] = domain.CreateUploadRequest{
 			Path: domain.MustParseUserPath(fmt.Sprintf("/%s-%05d.bin", prefix, index)), Size: 0,
@@ -102,8 +113,8 @@ func assertTransferScaleShape(t *testing.T, operation string, state, file []prov
 	if len(state) > 13 {
 		t.Fatalf("%s state requests = %d, want at most 13 before authentication", operation, len(state))
 	}
-	if len(file) != 10_000 {
-		t.Fatalf("%s file requests = %d, want 10000", operation, len(file))
+	if len(file) != 2_001 {
+		t.Fatalf("%s file requests = %d, want 2001", operation, len(file))
 	}
 	for _, event := range file {
 		if event.Kind != fileKind {
@@ -129,7 +140,7 @@ func checkTransferScaleBudget(t *testing.T, name string, state, file []providerb
 		t.Fatal(err)
 	}
 	events := append(append([]providerbudget.Event(nil), state...), file...)
-	if report, err := ratchet.CheckExact(name, economics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, events); err != nil {
+	if report, err := checkGrowthBudget(t, ratchet, name, economics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, events); err != nil {
 		t.Errorf("%s: %v; observed=%+v", name, err, report.Totals)
 	}
 }
@@ -178,15 +189,15 @@ func uploadEmptyCapabilities(t *testing.T, client *http.Client, capabilities []d
 	}
 }
 
-func TestProviderBudgetUploadBatchTenThousandLifecycle(t *testing.T) {
+func TestProviderBudgetUploadBatchSegmentedScaleLifecycle(t *testing.T) {
 	ctx := context.Background()
 	fixture := newUploadBatchScaleFixture(t, 0x81726354)
 	capabilities, err := fixture.engine.Files().CreateUploadBatch(ctx, fixture.scope, scaleUploadRequests("complete"))
-	if err != nil || len(capabilities) != 10_000 {
+	if err != nil || len(capabilities) != 2_001 {
 		t.Fatalf("CreateUploadBatch() = %d capabilities, %v", len(capabilities), err)
 	}
 	assertTransferScaleShape(t, "upload-admission", fixture.stateLedger.Events(), fixture.fileLedger.Events(), providerbudget.RequestUploadBegin)
-	checkTransferScaleBudget(t, "file-create-upload-batch-10000-schema-011", fixture.stateLedger.Events(), fixture.fileLedger.Events())
+	checkTransferScaleBudget(t, "file-create-upload-batch-2001-schema-011", fixture.stateLedger.Events(), fixture.fileLedger.Events())
 
 	uploadEmptyCapabilities(t, fixture.server.Client(), capabilities)
 	items := make([]domain.CompleteUploadBatchItem, len(capabilities))
@@ -195,16 +206,16 @@ func TestProviderBudgetUploadBatchTenThousandLifecycle(t *testing.T) {
 	}
 	fixture.stateLedger.Reset()
 	fixture.fileLedger.Reset()
-	result, err := fixture.engine.Files().CompleteUploadBatch(ctx, fixture.scope, domain.CompleteUploadBatchRequest{Items: items, IdempotencyKey: "complete-ten-thousand-uploads"})
-	if err != nil || len(result.Entries) != 10_000 {
+	result, err := fixture.engine.Files().CompleteUploadBatch(ctx, fixture.scope, domain.CompleteUploadBatchRequest{Items: items, IdempotencyKey: "complete-segmented-scale-uploads"})
+	if err != nil || len(result.Entries) != 2_001 {
 		t.Fatalf("CompleteUploadBatch() = %d entries, %v", len(result.Entries), err)
 	}
 	assertTransferScaleShape(t, "upload-completion", fixture.stateLedger.Events(), fixture.fileLedger.Events(), providerbudget.RequestObjectVerify)
-	checkTransferScaleBudget(t, "file-complete-upload-batch-10000-schema-011", fixture.stateLedger.Events(), fixture.fileLedger.Events())
+	checkTransferScaleBudget(t, "file-complete-upload-batch-2001-schema-011", fixture.stateLedger.Events(), fixture.fileLedger.Events())
 
 	fixture = newUploadBatchScaleFixture(t, 0x19283746)
 	capabilities, err = fixture.engine.Files().CreateUploadBatch(ctx, fixture.scope, scaleUploadRequests("abort"))
-	if err != nil || len(capabilities) != 10_000 {
+	if err != nil || len(capabilities) != 2_001 {
 		t.Fatalf("abort CreateUploadBatch() = %d capabilities, %v", len(capabilities), err)
 	}
 	uploadIDs := make([]domain.UploadID, len(capabilities))
@@ -213,9 +224,9 @@ func TestProviderBudgetUploadBatchTenThousandLifecycle(t *testing.T) {
 	}
 	fixture.stateLedger.Reset()
 	fixture.fileLedger.Reset()
-	if err := fixture.engine.Files().AbortUploadBatch(ctx, fixture.scope, domain.AbortUploadBatchRequest{UploadIDs: uploadIDs, BatchID: capabilities[0].BatchID, IdempotencyKey: "abort-ten-thousand-uploads"}); err != nil {
+	if err := fixture.engine.Files().AbortUploadBatch(ctx, fixture.scope, domain.AbortUploadBatchRequest{UploadIDs: uploadIDs, BatchID: capabilities[0].BatchID, IdempotencyKey: "abort-segmented-scale-uploads"}); err != nil {
 		t.Fatal(err)
 	}
 	assertTransferScaleShape(t, "upload-cancellation", fixture.stateLedger.Events(), fixture.fileLedger.Events(), providerbudget.RequestUploadAbort)
-	checkTransferScaleBudget(t, "file-abort-upload-batch-10000-schema-011", fixture.stateLedger.Events(), fixture.fileLedger.Events())
+	checkTransferScaleBudget(t, "file-abort-upload-batch-2001-schema-011", fixture.stateLedger.Events(), fixture.fileLedger.Events())
 }

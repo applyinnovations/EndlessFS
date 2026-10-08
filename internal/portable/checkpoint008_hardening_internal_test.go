@@ -638,6 +638,13 @@ func TestSchema009CheckpointDrainAndTypedNamespaceStateBoundaries(t *testing.T) 
 			t.Fatal(err)
 		}
 		current, _, err := engine.Files().portableUpload(ctx, owner, record.UploadID)
+		if err != nil || !current.CleanupPending {
+			t.Fatalf("drain changed terminal authority = %+v, %v", current, err)
+		}
+		if err := engine.Files().cleanupPortableUpload(ctx, owner, record.UploadID, nil); err != nil {
+			t.Fatal(err)
+		}
+		current, _, err = engine.Files().portableUpload(ctx, owner, record.UploadID)
 		if err != nil || current.CleanupPending {
 			t.Fatalf("drained terminal upload = %+v, %v", current, err)
 		}

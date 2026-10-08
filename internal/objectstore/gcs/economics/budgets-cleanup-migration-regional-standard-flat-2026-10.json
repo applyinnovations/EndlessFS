@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "provider": "gcs",
+  "profile": "regional-standard-flat",
+  "id": "008-frozen-upload-cleanup-migration",
+  "budgets": [
+    {
+      "name": "maintenance-migration-application-complete-pending-cleanup-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {"requests": 145, "costPicoUSD": 189800000, "p50Micros": 3303506, "p95Micros": 9982506, "p99Micros": 24682506, "criticalP50Micros": 3303506, "criticalP95Micros": 9982506, "criticalP99Micros": 24682506},
+      "roles": {
+        "file": {"requests": 7, "costPicoUSD": 11600000, "p50Micros": 160000, "p95Micros": 500000, "p99Micros": 1250000},
+        "state": {"requests": 138, "costPicoUSD": 178200000, "p50Micros": 3143506, "p95Micros": 9482506, "p99Micros": 23432506}
+      }
+    },
+    {
+      "name": "maintenance-migration-application-complete-interrupted-cleanup-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {"requests": 144, "costPicoUSD": 189800000, "p50Micros": 3283505, "p95Micros": 9922505, "p99Micros": 24532505, "criticalP50Micros": 3283505, "criticalP95Micros": 9922505, "criticalP99Micros": 24532505},
+      "roles": {
+        "file": {"requests": 7, "costPicoUSD": 11600000, "p50Micros": 160000, "p95Micros": 500000, "p99Micros": 1250000},
+        "state": {"requests": 137, "costPicoUSD": 178200000, "p50Micros": 3123505, "p95Micros": 9422505, "p99Micros": 23282505}
+      }
+    }
+  ]
+}

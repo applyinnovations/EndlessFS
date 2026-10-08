@@ -116,6 +116,18 @@ feature/configuration drift fails closed. The chain supports both single- and
 split-bucket storage sets. It does not discover or import arbitrary provider
 objects outside the canonical `endlessfs/v1` graph.
 
+The released v0.7.1 migration could fail before its gate-closed progress marker
+with `unavailable: consistency domain is frozen` when a terminal upload retained
+pending provider cleanup. Its drain tried to clear the authoritative cleanup
+flag after freezing that upload's domain. The repaired drain completes only
+transient provider effects under freeze; the terminal authority and its logical
+version remain unchanged until ordinary replay after reopening. See
+`docs/migration-upload-cleanup-recovery.md` for fixture provenance, regression
+evidence, and the deployment recovery sequence. A rollback to v0.6.0 requires
+read-only confirmation that superblock/writer/gate features remain schema 010,
+the gate is open, and the catalog/domains are unfrozen. Never downgrade activated
+schema-011 storage or manually clear frozen canonical records.
+
 ## Local start and stop
 
 Generate independent bootstrap and session secrets, export them only in the process environment, and start through Nix as shown in the README. Remove `ENDLESSFS_BOOTSTRAP_TOKEN` after the first administrator exists. Use HTTPS with a matching base URL and RP ID for any non-loopback listener.

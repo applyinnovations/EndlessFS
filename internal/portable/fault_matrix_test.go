@@ -25,12 +25,16 @@ type failNthBackend struct {
 	failAt           int
 	calls            int
 	failureOperation string
+	trace            []migrationFaultTrace
+	phase            string
+	recordTrace      bool
 }
 
 func (backend *failNthBackend) arm(call int) {
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 	backend.failAt, backend.calls, backend.failureOperation = call, 0, ""
+	backend.trace = nil
 }
 func (backend *failNthBackend) disable() {
 	backend.mu.Lock()
@@ -41,6 +45,9 @@ func (backend *failNthBackend) fault(operation string) error {
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
 	backend.calls++
+	if backend.recordTrace {
+		backend.trace = append(backend.trace, migrationFaultTrace{Phase: backend.phase, Operation: operation})
+	}
 	if backend.failAt > 0 && backend.calls == backend.failAt {
 		backend.failureOperation = operation
 		return domain.NewError(domain.ErrorUnavailable, "injected object transport interruption")

@@ -46,7 +46,10 @@ func (e *Engine) drainExpiredSchema008Uploads(ctx context.Context) error {
 					if parseErr != nil {
 						return domain.NewError(domain.ErrorInvalid, "invalid upload cleanup owner")
 					}
-					if err := files.cleanupPortableUpload(ctx, owner, record.UploadID, nil); err != nil {
+					if _, err := decodePortableUploadRecord(value.Value, owner, record.UploadID); err != nil {
+						return err
+					}
+					if err := files.cleanupPortableUploadProviderEffects(ctx, record, nil); err != nil {
 						return err
 					}
 					continue

@@ -966,6 +966,15 @@ Two conforming storage sets with the same canonical keys, bodies, and role place
 7. Start compatible EndlessFS replicas with the destination state/file backend configuration, the same writer-set identity/configuration fingerprint/keyring identities, and the same provider-independent application secrets. No schema migration, reindex, ID rewrite, path rewrite, logical-version rewrite, or token reissue is permitted or required.
 8. Verify the destination checkpoint, conditionally increment and open the destination gate epoch, idempotently unfreeze every catalogued domain, and continue mutations using newly observed destination-native preconditions while retaining the copied portable logical versions.
 
+Checkpoint upload drain MUST preserve frozen authoritative values. For a
+terminal upload with pending cleanup, it executes only the authenticated,
+idempotent transient provider effects. It MUST NOT clear `cleanupPending`
+through an ordinary domain mutation while frozen. The unchanged terminal record
+may remain pending in the checkpoint; normal completion/cancellation replay can
+clear that flag through the ordinary conditional head commit after reopening.
+Provider cleanup failure remains retryable and cannot authorize a checkpoint or
+bypass active-capability denial.
+
 The source MAY be copied in multiple passes before maintenance mode, but the final verified checkpoint is authoritative. Online dual writes, continuous replication, and reconciling writes made outside EndlessFS remain outside v1. A copied storage set with missing, extra-authoritative, misplaced, corrupt, mixed-version, or unverified objects fails closed; an operator must repair or recopy it rather than ask EndlessFS to guess.
 
 Changing the object-store authentication mechanism, account/project, region, state/file bucket or container names, capability signing identity, or provider CORS configuration is deployment reconfiguration, not state migration. Provider-independent application secrets that protect cookies, encrypted leases, or other canonical values must remain available according to their ordinary rotation procedures.
@@ -2222,6 +2231,35 @@ Seed corpora include all known traversal and encoding cases. CI runs bounded det
 #### Concurrency and race tests
 
 Run `go test -race` through Nix. Explicit tests cover concurrent bootstrap, invite/recovery consumption, credential registration, final-admin changes, upload completion/abort, same-path writes, restore conflicts, idempotency, and state CAS.
+
+The race portfolio focuses on distinct protocol transitions rather than
+repeating every immutable-object offset or an arbitrary large collection.
+The normal migration gate still injects interruption at every transport offset
+from every bound predecessor entry point. Under race instrumentation the
+transport matrix retains mutable publication/gate/lease effects and the first
+and last immutable I/O/read of each record family within each migration phase;
+unknown operation shapes fail closed. No epoch/profile, named durable boundary,
+replica convergence schedule, denial, or semantic oracle is removed.
+
+Volume qualification uses geometric and representation-boundary workloads.
+Namespace samples of 64, 256, and 1,024 items must retain constant provider-call
+shape and bounded metadata-transfer growth across changing tree depth, plus
+bounded per-item allocation growth within the multi-page regime. Compact/single-
+page allocation is reported separately because its fixed and instrumentation
+cost differs. Upload samples of 100, 1,001, and 2,001 items must perform one
+file-provider operation per real object and increase state work only at the
+actual 1,000-item progress boundaries. Lifecycle/replay/denial qualification
+uses the largest selected sample. The 10,000-item application limit remains a
+separate validation contract. Historical 10,000-item economics fixtures remain
+immutable decision evidence. Reviewed qualification retirement MUST append a
+ledger epoch naming the retired budgets and its guarantee evidence; prior
+epochs remain unchanged, silent removal and retired-name reuse fail closed.
+The active workload/scale catalogs MUST directly name executable ratchets and
+compare targets at the same cardinality, without aliases or historical gate
+exceptions. Current qualification uses measured smaller ratchets and growth
+assertions. A finite
+curve is regression evidence supported by the bounded algorithm, not a proof
+of all possible input sizes; timing alone cannot be a correctness gate.
 
 The multi-replica scheduler runs two through eight separately constructed
 engine/server instances against one configured single- or split-backend storage

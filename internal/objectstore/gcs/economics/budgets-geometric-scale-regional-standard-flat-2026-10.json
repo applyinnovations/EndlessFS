@@ -1,0 +1,403 @@
+{
+  "schemaVersion": 1,
+  "provider": "gcs",
+  "profile": "regional-standard-flat",
+  "id": "009-geometric-boundary-scale",
+  "budgets": [
+    {
+      "name": "batch-copy-1024-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 4,
+        "costPicoUSD": 10800000,
+        "p50Micros": 99531,
+        "p95Micros": 295531,
+        "p99Micros": 725531,
+        "criticalP50Micros": 99531,
+        "criticalP95Micros": 295531,
+        "criticalP99Micros": 725531
+      },
+      "roles": {
+        "state": {
+          "requests": 4,
+          "costPicoUSD": 10800000,
+          "p50Micros": 99531,
+          "p95Micros": 295531,
+          "p99Micros": 725531
+        }
+      }
+    },
+    {
+      "name": "batch-move-1024-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 4,
+        "costPicoUSD": 10800000,
+        "p50Micros": 102044,
+        "p95Micros": 298044,
+        "p99Micros": 728044,
+        "criticalP50Micros": 102044,
+        "criticalP95Micros": 298044,
+        "criticalP99Micros": 728044
+      },
+      "roles": {
+        "state": {
+          "requests": 4,
+          "costPicoUSD": 10800000,
+          "p50Micros": 102044,
+          "p95Micros": 298044,
+          "p99Micros": 728044
+        }
+      }
+    },
+    {
+      "name": "empty-trash-1024-replay-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 2,
+        "costPicoUSD": 800000,
+        "p50Micros": 44578,
+        "p95Micros": 130578,
+        "p99Micros": 320578,
+        "criticalP50Micros": 44578,
+        "criticalP95Micros": 130578,
+        "criticalP99Micros": 320578
+      },
+      "roles": {
+        "state": {
+          "requests": 2,
+          "costPicoUSD": 800000,
+          "p50Micros": 44578,
+          "p95Micros": 130578,
+          "p99Micros": 320578
+        }
+      }
+    },
+    {
+      "name": "empty-trash-1024-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 4,
+        "costPicoUSD": 10800000,
+        "p50Micros": 97219,
+        "p95Micros": 293219,
+        "p99Micros": 723219,
+        "criticalP50Micros": 97219,
+        "criticalP95Micros": 293219,
+        "criticalP99Micros": 723219
+      },
+      "roles": {
+        "state": {
+          "requests": 4,
+          "costPicoUSD": 10800000,
+          "p50Micros": 97219,
+          "p95Micros": 293219,
+          "p99Micros": 723219
+        }
+      }
+    },
+    {
+      "name": "file-abort-upload-batch-2001-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 2007,
+        "costPicoUSD": 16200000,
+        "p50Micros": 40170507,
+        "p95Micros": 120504507,
+        "p99Micros": 301239507,
+        "criticalP50Micros": 170507,
+        "criticalP95Micros": 504507,
+        "criticalP99Micros": 1239507
+      },
+      "roles": {
+        "file": {
+          "requests": 2001,
+          "costPicoUSD": 0,
+          "p50Micros": 40020000,
+          "p95Micros": 120060000,
+          "p99Micros": 300150000
+        },
+        "state": {
+          "requests": 6,
+          "costPicoUSD": 16200000,
+          "p50Micros": 150507,
+          "p95Micros": 444507,
+          "p99Micros": 1089507
+        }
+      }
+    },
+    {
+      "name": "file-complete-upload-batch-2001-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 2007,
+        "costPicoUSD": 821200000,
+        "p50Micros": 40180421,
+        "p95Micros": 120526421,
+        "p99Micros": 301286421,
+        "criticalP50Micros": 180421,
+        "criticalP95Micros": 526421,
+        "criticalP99Micros": 1286421
+      },
+      "roles": {
+        "file": {
+          "requests": 2001,
+          "costPicoUSD": 800400000,
+          "p50Micros": 40020000,
+          "p95Micros": 120060000,
+          "p99Micros": 300150000
+        },
+        "state": {
+          "requests": 6,
+          "costPicoUSD": 20800000,
+          "p50Micros": 160421,
+          "p95Micros": 466421,
+          "p99Micros": 1136421
+        }
+      }
+    },
+    {
+      "name": "file-create-upload-batch-2001-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 2007,
+        "costPicoUSD": 10030400000,
+        "p50Micros": 80196994,
+        "p95Micros": 240594994,
+        "p99Micros": 601469994,
+        "criticalP50Micros": 196994,
+        "criticalP95Micros": 594994,
+        "criticalP99Micros": 1469994
+      },
+      "roles": {
+        "file": {
+          "requests": 2001,
+          "costPicoUSD": 10005000000,
+          "p50Micros": 80040000,
+          "p95Micros": 240120000,
+          "p99Micros": 600300000
+        },
+        "state": {
+          "requests": 6,
+          "costPicoUSD": 25400000,
+          "p50Micros": 156994,
+          "p95Micros": 474994,
+          "p99Micros": 1169994
+        }
+      }
+    },
+    {
+      "name": "namespace-list-page-1024-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 2,
+        "costPicoUSD": 800000,
+        "p50Micros": 45531,
+        "p95Micros": 131531,
+        "p99Micros": 321531,
+        "criticalP50Micros": 45531,
+        "criticalP95Micros": 131531,
+        "criticalP99Micros": 321531
+      },
+      "roles": {
+        "state": {
+          "requests": 2,
+          "costPicoUSD": 800000,
+          "p50Micros": 45531,
+          "p95Micros": 131531,
+          "p99Micros": 321531
+        }
+      }
+    },
+    {
+      "name": "restore-batch-1024-replay-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 2,
+        "costPicoUSD": 800000,
+        "p50Micros": 46149,
+        "p95Micros": 132149,
+        "p99Micros": 322149,
+        "criticalP50Micros": 46149,
+        "criticalP95Micros": 132149,
+        "criticalP99Micros": 322149
+      },
+      "roles": {
+        "state": {
+          "requests": 2,
+          "costPicoUSD": 800000,
+          "p50Micros": 46149,
+          "p95Micros": 132149,
+          "p99Micros": 322149
+        }
+      }
+    },
+    {
+      "name": "restore-batch-1024-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 4,
+        "costPicoUSD": 10800000,
+        "p50Micros": 98783,
+        "p95Micros": 294783,
+        "p99Micros": 724783,
+        "criticalP50Micros": 98783,
+        "criticalP95Micros": 294783,
+        "criticalP99Micros": 724783
+      },
+      "roles": {
+        "state": {
+          "requests": 4,
+          "costPicoUSD": 10800000,
+          "p50Micros": 98783,
+          "p95Micros": 294783,
+          "p99Micros": 724783
+        }
+      }
+    },
+    {
+      "name": "trash-batch-1024-denied-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 2,
+        "costPicoUSD": 800000,
+        "p50Micros": 45531,
+        "p95Micros": 131531,
+        "p99Micros": 321531,
+        "criticalP50Micros": 45531,
+        "criticalP95Micros": 131531,
+        "criticalP99Micros": 321531
+      },
+      "roles": {
+        "state": {
+          "requests": 2,
+          "costPicoUSD": 800000,
+          "p50Micros": 45531,
+          "p95Micros": 131531,
+          "p99Micros": 321531
+        }
+      }
+    },
+    {
+      "name": "trash-batch-1024-replay-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 2,
+        "costPicoUSD": 800000,
+        "p50Micros": 46641,
+        "p95Micros": 132641,
+        "p99Micros": 322641,
+        "criticalP50Micros": 46641,
+        "criticalP95Micros": 132641,
+        "criticalP99Micros": 322641
+      },
+      "roles": {
+        "state": {
+          "requests": 2,
+          "costPicoUSD": 800000,
+          "p50Micros": 46641,
+          "p95Micros": 132641,
+          "p99Micros": 322641
+        }
+      }
+    },
+    {
+      "name": "trash-batch-1024-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 4,
+        "costPicoUSD": 10800000,
+        "p50Micros": 98172,
+        "p95Micros": 294172,
+        "p99Micros": 724172,
+        "criticalP50Micros": 98172,
+        "criticalP95Micros": 294172,
+        "criticalP99Micros": 724172
+      },
+      "roles": {
+        "state": {
+          "requests": 4,
+          "costPicoUSD": 10800000,
+          "p50Micros": 98172,
+          "p95Micros": 294172,
+          "p99Micros": 724172
+        }
+      }
+    },
+    {
+      "name": "upload-plan-fingerprints-1024-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 3,
+        "costPicoUSD": 1200000,
+        "p50Micros": 67380,
+        "p95Micros": 196380,
+        "p99Micros": 481380,
+        "criticalP50Micros": 45005,
+        "criticalP95Micros": 131005,
+        "criticalP99Micros": 321005
+      },
+      "roles": {
+        "file": {
+          "requests": 0,
+          "costPicoUSD": 0,
+          "p50Micros": 0,
+          "p95Micros": 0,
+          "p99Micros": 0
+        },
+        "state": {
+          "requests": 3,
+          "costPicoUSD": 1200000,
+          "p50Micros": 67380,
+          "p95Micros": 196380,
+          "p99Micros": 481380
+        }
+      }
+    },
+    {
+      "name": "upload-plan-sizes-1024-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 4,
+        "costPicoUSD": 1600000,
+        "p50Micros": 89387,
+        "p95Micros": 261387,
+        "p99Micros": 641387,
+        "criticalP50Micros": 67012,
+        "criticalP95Micros": 196012,
+        "criticalP99Micros": 481012
+      },
+      "roles": {
+        "file": {
+          "requests": 0,
+          "costPicoUSD": 0,
+          "p50Micros": 0,
+          "p95Micros": 0,
+          "p99Micros": 0
+        },
+        "state": {
+          "requests": 4,
+          "costPicoUSD": 1600000,
+          "p50Micros": 89387,
+          "p95Micros": 261387,
+          "p99Micros": 641387
+        }
+      }
+    }
+  ]
+}

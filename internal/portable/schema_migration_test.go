@@ -286,6 +286,20 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 		producer: "schema-011", commit: "4c5694008e30489e76ad1b7e3c959229d25fa7c1",
 		wantSize: 27, wantFiles: 1,
 	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-010",
+		profile:  "application-complete-pending-cleanup",
+		file:     "schema-010-v0.6.0-pending-cleanup.json", digest: "f47611085c11c1176ff5f85d801972051626e31530573f201607305b28978bff",
+		producer: "v0.6.0", commit: "e7a9a46afede8e4b154e876700ed372e97105aed",
+		wantSize: 31, wantFiles: 2,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-010",
+		profile:  "application-complete-interrupted-cleanup",
+		file:     "schema-010-v0.7.1-interrupted-cleanup.json", digest: "1d369f375028e2471acbefb04f4fc48beb3b0ac353d4f2c06959f5b31410d4ea",
+		producer: "v0.7.1-interrupted", commit: "9650c8a1c8e107f17e71b4272200c77f6ed42eac",
+		wantSize: 31, wantFiles: 2,
+	},
 }
 
 var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.2.0", "v0.2.1", "v0.3.0", "v0.3.1", "v0.3.2", "v0.4.0", "v0.5.0", "v0.5.1", "v0.5.2", "v0.6.0"}

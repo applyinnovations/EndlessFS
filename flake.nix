@@ -311,7 +311,7 @@
               inherit version;
               src = goSource;
               subPackages = [ "cmd/endlessfs" ];
-              vendorHash = "sha256-Rgxyk0aXuICRsQ8rJEhEbx2RbNZ81xcV9khACnVPcEY=";
+              vendorHash = "sha256-1bbsW49KKpbKaAk1mcj4sfXBEjjvg2zrmr2bl7eHW94=";
               # Keep the fixed-output dependency closure address stable when the
               # source revision changes without changing go.mod/go.sum.
               overrideModAttrs = _final: _previous: {

@@ -314,7 +314,9 @@ Public API routes live under `/api/v1` except documented health, asset, and publ
 
 Authenticated mutations require CSRF plus exact-origin validation. Authentication ceremonies require exact-origin and ceremony binding before a session exists. GET and HEAD are side-effect free.
 
-Keep the browser self-contained. Do not add runtime-fetched scripts, fonts, images, analytics, telemetry, service workers, or sensitive local storage. Render untrusted values as text. Maintain the CSP, `nosniff`, no-referrer, permissions, and opener policies. Core workflows target WCAG 2.2 AA, keyboard operation, visible focus, reduced motion, live status, and 320 CSS-pixel layouts.
+Keep the browser self-contained. Do not add runtime-fetched scripts, fonts, images, third-party browser analytics, service workers, or sensitive local storage. Render untrusted values as text. Maintain the CSP, `nosniff`, no-referrer, permissions, and opener policies. Core workflows target WCAG 2.2 AA, keyboard operation, visible focus, reduced motion, live status, and 320 CSS-pixel layouts.
+
+Build backend behavior with operational observability from the outset. Add bounded metrics, structured lifecycle events, trace boundaries, and profiling support where they explain performance, provider work, concurrency, recovery, or resource use. Prefer the deployment operator's configured OpenTelemetry/Grafana stack; a collector must never become a dependency of correct storage behavior or readiness. Follow specification section 16 for closed attribute sets and privacy. Never emit user identity, filenames, virtual/provider paths, bodies, authentication material, or capabilities through observability. Prove useful signals on positive and failure paths, privacy denial, bounded overhead, and collector-outage independence. Observability is encouraged engineering infrastructure, not a prohibited runtime integration.
 
 ## Themes
 

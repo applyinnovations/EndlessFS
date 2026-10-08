@@ -6,6 +6,14 @@
     return transfer.file instanceof File || transfer.fixture === true;
   }
 
+  function transferCanRetry(transfer) {
+    return transferSourceAvailable(transfer) || Boolean(transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c);
+  }
+
+  function transferNeedsSource(transfer) {
+    return transfer.state === "needs-source" || (transfer.state === "failed" && !transferCanRetry(transfer));
+  }
+
   function transferMediaType(transfer) {
     if (transfer.mediaType) return transfer.mediaType;
     if (transfer.file instanceof File) return uploadMediaType(transfer.file, transfer.name);
@@ -58,8 +66,7 @@
     return `${ownerID}:${id}`;
   }
 
-  function transferLedgerItem(transfer) {
-    const ownerID = state.transferLedgerOwner;
+  function transferLedgerItem(transfer, ownerID = state.transferLedgerOwner) {
     return {
       key: transferLedgerKey(ownerID, transfer.id), ownerID, id: transfer.id,
       groupID: transfer.groupID || "", name: transfer.name, directory: transfer.directory,
@@ -83,8 +90,7 @@
     };
   }
 
-  function transferLedgerGroup(group) {
-    const ownerID = state.transferLedgerOwner;
+  function transferLedgerGroup(group, ownerID = state.transferLedgerOwner) {
     return {
       key: transferLedgerKey(ownerID, group.id), ownerID, id: group.id, name: group.name,
       baseDirectory: group.baseDirectory, directories: [...(group.directories || [])], transferIDs: [...group.transferIDs],
@@ -96,12 +102,13 @@
   }
 
   async function persistTransferItem(transfer) {
-    if (transfer.fixture || !state.transferLedgerOwner) return;
+    if (transfer.cleared || transfer.fixture || !state.transferLedgerOwner) return;
+    const ownerID = state.transferLedgerOwner;
     try {
       const database = await openTransferLedger();
-      if (!database) return;
+      if (!database || transfer.cleared || state.transferLedgerOwner !== ownerID) return;
       const transaction = database.transaction("items", "readwrite");
-      transaction.objectStore("items").put(transferLedgerItem(transfer));
+      transaction.objectStore("items").put(transferLedgerItem(transfer, ownerID));
       await ledgerTransactionDone(transaction);
     } catch {
       warnTransferLedger("Transfer history could not be saved on this device.");
@@ -109,14 +116,15 @@
   }
 
 	async function persistTransferItems(transfers) {
-	  const durable = transfers.filter((transfer) => !transfer.fixture);
+	  const durable = transfers.filter((transfer) => !transfer.cleared && !transfer.fixture);
 	  if (!durable.length || !state.transferLedgerOwner) return;
+	  const ownerID = state.transferLedgerOwner;
 	  try {
 		const database = await openTransferLedger();
-		if (!database) return;
+		if (!database || state.transferLedgerOwner !== ownerID) return;
 		const transaction = database.transaction("items", "readwrite");
 		const store = transaction.objectStore("items");
-		for (const transfer of durable) store.put(transferLedgerItem(transfer));
+		for (const transfer of durable) if (!transfer.cleared) store.put(transferLedgerItem(transfer, ownerID));
 		await ledgerTransactionDone(transaction);
 	  } catch {
 		warnTransferLedger("Transfer history could not be saved on this device.");
@@ -124,12 +132,13 @@
 	}
 
   async function persistTransferGroup(group) {
-    if (group.fixture || !state.transferLedgerOwner) return;
+    if (group.cleared || group.fixture || !state.transferLedgerOwner) return;
+    const ownerID = state.transferLedgerOwner;
     try {
       const database = await openTransferLedger();
-      if (!database) return;
+      if (!database || group.cleared || state.transferLedgerOwner !== ownerID) return;
       const transaction = database.transaction("groups", "readwrite");
-      transaction.objectStore("groups").put(transferLedgerGroup(group));
+      transaction.objectStore("groups").put(transferLedgerGroup(group, ownerID));
       await ledgerTransactionDone(transaction);
     } catch {
       warnTransferLedger("Transfer history could not be saved on this device.");
@@ -137,7 +146,7 @@
   }
 
   function queueTransferPersistence(transfer) {
-    if (transfer.fixture || !state.transferLedgerOwner) return;
+    if (transfer.cleared || transfer.fixture || !state.transferLedgerOwner) return;
     state.transferPersistQueue.set(transfer.id, transfer);
     if (state.transferPersistTimer) return;
     state.transferPersistTimer = window.setTimeout(async () => {
@@ -149,12 +158,13 @@
   }
 
   async function persistTransferSource(transfer, handle) {
-    if (!handle || transfer.fixture || !state.transferLedgerOwner) return;
+    if (transfer.cleared || !handle || transfer.fixture || !state.transferLedgerOwner) return;
+    const ownerID = state.transferLedgerOwner;
     try {
       const database = await openTransferLedger();
-      if (!database) return;
+      if (!database || transfer.cleared || state.transferLedgerOwner !== ownerID) return;
       const transaction = database.transaction("sources", "readwrite");
-      transaction.objectStore("sources").put({ key: transferLedgerKey(state.transferLedgerOwner, transfer.id), ownerID: state.transferLedgerOwner, handle });
+      transaction.objectStore("sources").put({ key: transferLedgerKey(ownerID, transfer.id), ownerID, handle });
       await ledgerTransactionDone(transaction);
     } catch {
       // Some browsers expose handles without allowing them to be cloned. The
@@ -203,7 +213,9 @@
   }
 
   async function reconcileRestoredTransfer(transfer) {
-    if (["complete", "cancelled"].includes(transfer.state)) return;
+    // Terminal failures require an explicit retry or clear action, including
+    // failed finalization with an available source or a retained checksum.
+    if (["complete", "cancelled", "failed"].includes(transfer.state)) return;
 	if (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c) {
 	  transfer.state = "uploading";
 	  transfer.error = "Finalizing uploaded data.";
@@ -258,36 +270,43 @@
   async function restoreTransferLedger() {
     if (!state.user || !state.user.userID || (state.config && state.config.localFixture)) return;
     state.transferLedgerOwner = state.user.userID;
+    const ownerID = state.transferLedgerOwner;
     try {
       const [itemRecords, groupRecords, storedSources] = await Promise.all([
         transferLedgerRecords("items", state.transferLedgerOwner),
         transferLedgerRecords("groups", state.transferLedgerOwner),
         transferLedgerRecords("sources", state.transferLedgerOwner),
       ]);
+      if (state.transferLedgerOwner !== ownerID || state.user?.userID !== ownerID) return;
       const sourceRecords = new Map(storedSources.map((source) => [source.key.slice(source.key.indexOf(":") + 1), source]));
-      state.transfers = itemRecords.map((record) => ({
+      // The workspace remains interactive while history loads. Preserve any
+      // sources and live workers queued during the asynchronous ledger read.
+      const restored = itemRecords.filter((record) => !state.transferByID.has(record.id)).map((record) => ({
         ...record, file: null, controller: null, speedBps: 0, lastProgressAt: 0,
         lastProgressBytes: record.confirmed || 0, recoveryFailures: 0,
       }));
+      state.transfers = [...restored, ...state.transfers];
       state.transferByID = new Map(state.transfers.map((transfer) => [transfer.id, transfer]));
-      state.transferGroups = new Map(groupRecords.map((record) => [record.id, {
+      state.transferGroups = new Map([...groupRecords.map((record) => [record.id, {
         ...record, preparedDirectories: new Set(), refreshed: record.state === "complete", failureAnnounced: record.state === "failed",
-      }]));
+      }]), ...state.transferGroups]);
       let nextIndex = 0;
-      const workers = Array.from({ length: Math.min(4, state.transfers.length) }, async () => {
-        while (nextIndex < state.transfers.length) {
-          const transfer = state.transfers[nextIndex];
+      const workers = Array.from({ length: Math.min(4, restored.length) }, async () => {
+        while (nextIndex < restored.length) {
+          const transfer = restored[nextIndex];
           nextIndex += 1;
           await restoreTransferSource(transfer, sourceRecords);
           await reconcileRestoredTransfer(transfer);
+          if (state.transferLedgerOwner !== ownerID) return;
           queueTransferPersistence(transfer);
         }
       });
       await Promise.all(workers);
+      if (state.transferLedgerOwner !== ownerID) return;
       for (const group of state.transferGroups.values()) updateTransferGroup(group.id, false);
       if (state.transfers.length) {
         renderTransfers();
-        setTransferSheetOpen(false);
+        if (restored.length === state.transfers.length) setTransferSheetOpen(false);
         resumeUploadPlans();
         pumpTransfers();
       }
@@ -296,17 +315,17 @@
     }
   }
 
-  async function deleteTransferLedgerEntries(itemIDs, groupIDs) {
-    if (!state.transferLedgerOwner) return;
+  async function deleteTransferLedgerEntries(itemIDs, groupIDs, ownerID = state.transferLedgerOwner) {
+    if (!ownerID) return;
     const database = await openTransferLedger();
     if (!database) return;
     const transaction = database.transaction(["items", "groups", "sources"], "readwrite");
     for (const id of itemIDs) {
-      const key = transferLedgerKey(state.transferLedgerOwner, id);
+      const key = transferLedgerKey(ownerID, id);
       transaction.objectStore("items").delete(key);
       transaction.objectStore("sources").delete(key);
     }
-    for (const id of groupIDs) transaction.objectStore("groups").delete(transferLedgerKey(state.transferLedgerOwner, id));
+    for (const id of groupIDs) transaction.objectStore("groups").delete(transferLedgerKey(ownerID, id));
     await ledgerTransactionDone(transaction);
   }
 
@@ -493,17 +512,34 @@
     }
   }
 
-  async function queueDroppedItems(dataTransfer, strategy = "keep-both") {
+  function captureDroppedItems(dataTransfer) {
     const items = Array.from(dataTransfer.items || []).filter((item) => item.kind === "file");
-    if (!items.length) {
-      queueFiles(dataTransfer.files || [], { strategy });
+    const files = Array.from(dataTransfer.files || []);
+    const captured = items.map((item) => {
+      let handleResult = Promise.resolve({ handle: null });
+      if (typeof item.getAsFileSystemHandle === "function") {
+        try {
+          handleResult = Promise.resolve(item.getAsFileSystemHandle()).then(
+            (handle) => ({ handle }), (error) => ({ handle: null, error }),
+          );
+        } catch (error) { handleResult = Promise.resolve({ handle: null, error }); }
+      }
+      const getEntry = typeof item.getAsEntry === "function" ? item.getAsEntry.bind(item) : typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry.bind(item) : null;
+      return { handleResult, entry: getEntry ? getEntry() : null, file: typeof item.getAsFile === "function" ? item.getAsFile() : null };
+    });
+    return { items: captured, files };
+  }
+
+  async function queueDroppedItems(sources, strategy = "keep-both") {
+    if (!sources.items.length) {
+      if (!sources.files.length) throw new Error("Dropped files could not be read. Choose Upload files or Upload folder.");
+      await queueFiles(sources.files, { strategy });
       return;
     }
     const looseFiles = [];
     let usedEntryAPI = false;
-    const handlePromises = items.map((item) => typeof item.getAsFileSystemHandle === "function" ? item.getAsFileSystemHandle() : Promise.resolve(null));
-    for (const [index, item] of items.entries()) {
-      const handle = await handlePromises[index];
+    for (const item of sources.items) {
+      const { handle, error } = await item.handleResult;
       if (handle) {
         usedEntryAPI = true;
         if (handle.kind === "directory") {
@@ -513,8 +549,7 @@
         }
         continue;
       }
-      const getEntry = typeof item.getAsEntry === "function" ? item.getAsEntry.bind(item) : typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry.bind(item) : null;
-      const legacyEntry = getEntry ? getEntry() : null;
+      const legacyEntry = item.entry;
       if (legacyEntry) {
         usedEntryAPI = true;
         if (legacyEntry.isDirectory) {
@@ -524,11 +559,15 @@
         }
         continue;
       }
-      const file = typeof item.getAsFile === "function" ? item.getAsFile() : null;
+      if (error && !item.file) throw error;
+      const file = item.file;
       if (file) looseFiles.push({ file, relativePath: file.name });
     }
     if (looseFiles.length) await queueFiles(looseFiles, { strategy });
-    if (!usedEntryAPI && !looseFiles.length) await queueFiles(dataTransfer.files || [], { strategy });
+    if (!usedEntryAPI && !looseFiles.length) {
+      if (!sources.files.length) throw new Error("Dropped files could not be read. Choose Upload files or Upload folder.");
+      await queueFiles(sources.files, { strategy });
+    }
   }
 
   async function ensureDirectory(path) {
@@ -1176,6 +1215,114 @@
     announce(`${transfer.name} cancelled.`);
   }
 
+  async function cleanFailedUploadSessions(transfers) {
+    const allocated = transfers.filter((transfer) => !transfer.fixture && transfer.uploadID);
+    const groups = new Map();
+    for (const transfer of allocated) {
+      const key = transfer.batchID || "";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(transfer);
+    }
+    for (const [batchID, members] of groups) {
+      const count = members[0].batchCount;
+      const indices = new Set(members.map((transfer) => transfer.batchIndex));
+      const wholeBatch = batchID && count === members.length && indices.size === count
+        && members.every((transfer) => transfer.batchCount === count && transfer.batchIndex >= 0 && transfer.batchIndex < count);
+      const envelope = wholeBatch ? { batchID } : {};
+      for (const batch of uploadControlBatches(members, (transfer) => transfer.uploadID, "uploadIDs", envelope)) {
+        const body = { uploadIDs: batch.map((transfer) => transfer.uploadID) };
+        if (wholeBatch && batch.length === members.length) body.batchID = batchID;
+        try {
+          await api("/api/v1/uploads/batch", {
+            method: "DELETE", headers: { "Idempotency-Key": `${batch[0].id}-clear-failed` },
+            body,
+          });
+        } catch (error) {
+          // A lost completion/abort response can leave a terminal upload in
+          // failed local history. Verify it; never mistake a permission or
+          // provider failure for successful cleanup.
+          if (!(error instanceof APIError) || ![404, 409].includes(error.status)) throw error;
+          for (const transfer of batch) {
+            let status;
+            try { status = await api(`/api/v1/uploads/${encodeURIComponent(transfer.uploadID)}`); }
+            catch (lookupError) {
+              if (lookupError instanceof APIError && lookupError.status === 404) continue;
+              throw lookupError;
+            }
+            if (["completed", "aborted"].includes(status.state)) continue;
+            await api("/api/v1/uploads/batch", {
+              method: "DELETE", headers: { "Idempotency-Key": `${transfer.id}-clear-failed-single` },
+              body: { uploadIDs: [transfer.uploadID] },
+            });
+          }
+        }
+      }
+    }
+  }
+
+  async function clearFailedTransfers(candidates) {
+    const ownerID = state.transferLedgerOwner;
+    const failed = candidates.filter((transfer) => transfer.state === "failed" && !transfer.clearing && !transfer.cleared);
+    if (!failed.length) return;
+    for (const transfer of failed) transfer.clearing = true;
+    renderTransfers();
+    const removedGroups = [];
+    try {
+      await cleanFailedUploadSessions(failed);
+      if (state.transferLedgerOwner !== ownerID) return;
+      // Tombstone live references before deletion, including delayed ledger
+      // writers. IndexedDB orders prior transactions before this deletion.
+      for (const transfer of failed) {
+        transfer.cleared = true;
+        state.transferPersistQueue.delete(transfer.id);
+        window.clearTimeout(state.transferRetryTimers.get(transfer.id));
+        state.transferRetryTimers.delete(transfer.id);
+        cancelUploadFingerprint(transfer);
+      }
+      const removedIDs = new Set(failed.map((transfer) => transfer.id));
+      for (const groupID of new Set(failed.map((transfer) => transfer.groupID).filter(Boolean))) {
+        const group = state.transferGroups.get(groupID);
+        if (group && group.discoveryDone !== false && group.transferIDs.every((id) => removedIDs.has(id))) {
+          group.cleared = true;
+          removedGroups.push(groupID);
+        }
+      }
+      await deleteTransferLedgerEntries([...removedIDs], removedGroups, ownerID);
+      if (state.transferLedgerOwner !== ownerID) return;
+      state.transfers = state.transfers.filter((transfer) => !removedIDs.has(transfer.id));
+      for (const id of removedIDs) state.transferByID.delete(id);
+      for (const groupID of removedGroups) {
+        state.transferGroups.delete(groupID);
+        state.expandedTransferGroups.delete(groupID);
+        window.clearTimeout(state.uploadPlanRetryTimers.get(groupID));
+        state.uploadPlanRetryTimers.delete(groupID);
+      }
+      for (const group of state.transferGroups.values()) {
+        if (!group.transferIDs.some((id) => removedIDs.has(id))) continue;
+        group.transferIDs = group.transferIDs.filter((id) => !removedIDs.has(id));
+        const remaining = group.transferIDs.map((id) => state.transferByID.get(id)).filter(Boolean);
+        group.totalSize = remaining.reduce((total, transfer) => total + transferFileSize(transfer), 0);
+        group.transferSummary = aggregateTransferSummary(remaining);
+        if (!remaining.some((transfer) => transfer.state === "failed")) group.error = "";
+        updateTransferGroup(group.id, false);
+      }
+      announce(`${failed.length} failed uploads cleared.`);
+    } catch (error) {
+      if (state.transferLedgerOwner !== ownerID) return;
+      for (const transfer of failed) { transfer.cleared = false; queueTransferPersistence(transfer); }
+      for (const groupID of removedGroups) {
+        const group = state.transferGroups.get(groupID);
+        if (group) { group.cleared = false; persistTransferGroup(group); }
+      }
+      showToast(`Failed uploads could not be cleared. ${friendlyError(error, "Try again.")}`, "error");
+    } finally {
+      for (const transfer of failed) transfer.clearing = false;
+      rebuildTransferProjection();
+      renderTransfers();
+      setTransferSheetOpen(!byID("transfer-panel").hidden);
+    }
+  }
+
   function updateTransferGroup(groupID, notify = true) {
     if (!groupID) return;
     const group = state.transferGroups.get(groupID);
@@ -1258,6 +1405,7 @@
   }
 
   function retryTransferGroup(group) {
+    if (group.cleared || group.transferIDs.some((id) => state.transferByID.get(id)?.clearing)) return;
     group.cancelled = false;
     group.refreshed = false;
     group.failureAnnounced = false;
@@ -1307,6 +1455,7 @@
   }
 
   function retryTransfer(transfer) {
+    if (transfer.clearing || transfer.cleared) return;
 	if (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c) {
 	  transfer.cancelRequested = false;
 	  transfer.state = "uploading";
@@ -1342,7 +1491,7 @@
   }
 
   function retryFailedTransfers() {
-    const failed = state.transfers.filter((transfer) => transfer.state === "failed" && transferSourceAvailable(transfer));
+    const failed = state.transfers.filter((transfer) => transfer.state === "failed" && !transfer.clearing && !transfer.cleared && transferCanRetry(transfer));
     const failedGroupIDs = new Set(failed.map((transfer) => transfer.groupID).filter(Boolean));
     for (const transfer of failed) {
 	  if (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c) {
@@ -1381,7 +1530,7 @@
   async function reconnectTransferSources(files) {
     const groupID = state.transferReconnectGroup;
     state.transferReconnectGroup = null;
-    const candidates = state.transfers.filter((transfer) => transfer.groupID === groupID && transfer.state === "needs-source");
+    const candidates = state.transfers.filter((transfer) => transfer.groupID === groupID && !transfer.clearing && transferNeedsSource(transfer));
     const supplied = new Map(Array.from(files).filter((file) => file instanceof File).map((file) => [file.webkitRelativePath || file.name, file]));
     let connected = 0;
     for (const transfer of candidates) {
@@ -1400,7 +1549,7 @@
   }
 
   async function reconnectStoredTransferSources(groupID) {
-    const candidates = state.transfers.filter((transfer) => transfer.groupID === groupID && transfer.state === "needs-source");
+    const candidates = state.transfers.filter((transfer) => transfer.groupID === groupID && !transfer.clearing && transferNeedsSource(transfer));
     let connected = 0;
     for (const transfer of candidates) {
       const handle = transfer.sourceHandle;
@@ -1418,7 +1567,7 @@
         // cannot be reopened or no longer identifies the original source.
       }
     }
-    const remaining = candidates.filter((transfer) => transfer.state === "needs-source");
+    const remaining = candidates.filter(transferNeedsSource);
     if (connected) {
       renderTransfers();
       resumeUploadPlans();
@@ -1446,7 +1595,7 @@
       confirmedBytes += Math.min(transfer.confirmed, size);
       if (["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(transfer.state)) remainingBytes += Math.max(0, size - transfer.confirmed);
       if (transfer.state === "uploading" && Number.isFinite(transfer.speedBps)) speedBps += transfer.speedBps;
-      if (transfer.state === "failed" && transferSourceAvailable(transfer)) retryableFailed += 1;
+      if (transfer.state === "failed" && transferCanRetry(transfer)) retryableFailed += 1;
     }
     return finalizeTransferSummary({ counts, totalCount: transfers.length, totalBytes, confirmedBytes, remainingBytes, speedBps, retryableFailed });
   }
@@ -1501,8 +1650,8 @@
     if (["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(nextState)) summary.remainingBytes += remaining;
     if (priorState === "uploading") summary.speedBps = Math.max(0, summary.speedBps - priorSpeed);
     if (nextState === "uploading") summary.speedBps += transfer.speedBps;
-    if (priorState === "failed" && transferSourceAvailable(transfer)) summary.retryableFailed = Math.max(0, summary.retryableFailed - 1);
-    if (nextState === "failed" && transferSourceAvailable(transfer)) summary.retryableFailed += 1;
+    if (priorState === "failed" && transferCanRetry(transfer)) summary.retryableFailed = Math.max(0, summary.retryableFailed - 1);
+    if (nextState === "failed" && transferCanRetry(transfer)) summary.retryableFailed += 1;
     finalizeTransferSummary(summary);
   }
 
@@ -1533,10 +1682,15 @@
     const label = transfer.groupID ? transfer.relativePath : transfer.name;
     const tail = document.createElement("div");
     tail.className = "transfer-row-tail";
-    if (transfer.state === "needs-source") tail.append(iconButton("upload", `Reconnect upload source for ${label}`, () => openTransferReconnect(transfer.groupID || ""), "transfer-row-actions", "Reconnect source"));
+    if (transferNeedsSource(transfer)) tail.append(iconButton("upload", `Reconnect upload source for ${label}`, () => openTransferReconnect(transfer.groupID || ""), "transfer-row-actions", "Reconnect source"));
     if (["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(transfer.state)) tail.append(iconButton("x", `Cancel upload ${label}`, () => cancelTransfer(transfer), "transfer-row-actions", "Cancel upload"));
-    if ((transfer.state === "failed" || (!transfer.groupID && transfer.state === "cancelled")) && transferSourceAvailable(transfer)) {
+    if ((transfer.state === "failed" || (!transfer.groupID && transfer.state === "cancelled")) && transferCanRetry(transfer)) {
       tail.append(iconButton("refresh", `Retry upload ${label}`, () => retryTransfer(transfer), "transfer-row-actions", "Retry upload"));
+    }
+    if (transfer.state === "failed") {
+      const clear = iconButton("trash", `Clear failed upload ${label}`, () => clearFailedTransfers([transfer]), "transfer-row-actions", "Clear failed upload");
+      clear.disabled = Boolean(transfer.clearing);
+      tail.append(clear);
     }
     const header = document.createElement("div");
     header.className = "transfer-row-header";
@@ -1590,9 +1744,14 @@
     row.className = `transfer-group-row ${displayState}`;
     const tail = document.createElement("div");
     tail.className = "transfer-row-tail";
-    if (transfers.some((transfer) => transfer.state === "needs-source")) tail.append(iconButton("folder-up", `Reconnect upload source for ${group.name}`, () => openTransferReconnect(group.id), "transfer-row-actions", "Reconnect source"));
+    if (transfers.some(transferNeedsSource)) tail.append(iconButton("folder-up", `Reconnect upload source for ${group.name}`, () => openTransferReconnect(group.id), "transfer-row-actions", "Reconnect source"));
     if (["preparing", "queued", "uploading", "retry-wait", "paused"].includes(group.state)) tail.append(iconButton("x", `Cancel folder upload ${group.name}`, () => cancelTransferGroup(group), "transfer-row-actions", "Cancel folder upload"));
     if (["failed", "cancelled"].includes(group.state)) tail.append(iconButton("refresh", `Retry folder upload ${group.name}`, () => retryTransferGroup(group), "transfer-row-actions", "Retry folder upload"));
+    if (summary.counts.failed) {
+      const clear = iconButton("trash", `Clear failed uploads in folder ${group.name}`, () => clearFailedTransfers(transfers), "transfer-row-actions", "Clear failed uploads");
+      clear.disabled = transfers.some((transfer) => transfer.clearing);
+      tail.append(clear);
+    }
     const expanded = state.expandedTransferGroups.has(group.id);
     const disclosure = iconButton(expanded ? "chevron-up" : "chevron-down", `${expanded ? "Collapse" : "Expand"} upload group ${group.name}`, () => {
       if (expanded) state.expandedTransferGroups.delete(group.id);
@@ -1705,6 +1864,7 @@
     byID("open-transfers").dataset.tooltip = launcherLabel;
     byID("clear-transfers").disabled = summary.counts.complete + summary.counts.cancelled === 0;
     byID("retry-failed-transfers").disabled = summary.retryableFailed === 0;
+    byID("clear-failed-transfers").disabled = !state.transfers.some((transfer) => transfer.state === "failed" && !transfer.clearing);
   }
 
   function orderedTransfers(items) {

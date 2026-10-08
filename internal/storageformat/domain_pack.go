@@ -31,6 +31,13 @@ func EncodeDomainPagePack(pack DomainPagePack) ([]byte, error) {
 	if err := ValidateDomainPagePack(pack); err != nil {
 		return nil, err
 	}
+	return encodeValidatedDomainPagePack(pack)
+}
+
+// Both callers have already validated every page, including its digest and
+// ordering. Canonical wire comparison must not validate and allocate all
+// page encodings a second time.
+func encodeValidatedDomainPagePack(pack DomainPagePack) ([]byte, error) {
 	var expanded bytes.Buffer
 	encoder := json.NewEncoder(&expanded)
 	encoder.SetEscapeHTML(false)
@@ -77,7 +84,7 @@ func DecodeDomainPagePack(data []byte, expectedDomainID string, expectedKind Con
 	if err := ValidateDomainPagePack(pack); err != nil {
 		return DomainPagePack{}, err
 	}
-	canonical, err := EncodeDomainPagePack(pack)
+	canonical, err := encodeValidatedDomainPagePack(pack)
 	if err != nil || !bytes.Equal(canonical, data) {
 		return DomainPagePack{}, domain.NewError(domain.ErrorInvalid, "non-canonical consistency-domain page pack encoding")
 	}

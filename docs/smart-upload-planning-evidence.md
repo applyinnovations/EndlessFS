@@ -23,18 +23,20 @@ The UI offers four explicit strategies after file/folder selection or drop:
 
 ## Data flow and persistence
 
-1. One control request carries up to 10,000 transfer IDs, virtual destinations,
+1. Each control request carries up to 10,000 transfer IDs, virtual destinations,
    and sizes. The service queries a derived owner projection plus the pinned
-   namespace snapshot.
+   namespace snapshot. Exact serialized UTF-8 size, including the envelope,
+   must also fit the unchanged 1 MiB body limit.
 2. Unique-size items enter the ordinary direct-upload queue immediately.
 3. At most two dedicated browser workers process ambiguous `File` objects in
    4 MiB chunks. Each chunk updates both MD5 and CRC32C before it is released.
-4. One exact request carries up to 10,000 completed fingerprints. Its opaque token
-   pins the owner, projection, live namespace root, and expiry.
+4. Exact requests carry up to 10,000 completed fingerprints within the UTF-8
+   body bound. Their opaque token pins the owner, projection, live namespace
+   root, and expiry. All reads for a token finish before its reuse mutations.
 5. The response exposes only an action and, for reuse, a virtual source path
    plus portable logical version. It never exposes provider keys, native
    versions, or stored checksums.
-6. Reuse is one existing batch-copy mutation. Uploads that remain necessary use
+6. Reuse uses deterministic byte-bounded existing batch-copy mutations. Uploads that remain necessary use
    the existing browser-to-provider capability and completion path.
 
 The IndexedDB transfer ledger stores strategy, phase, completed fingerprints,

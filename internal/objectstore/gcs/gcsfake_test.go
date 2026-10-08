@@ -36,6 +36,7 @@ type fakeResumableSession struct {
 	size      int64
 	mediaType string
 	body      []byte
+	origin    string
 }
 
 type fakeGCS struct {
@@ -144,6 +145,19 @@ func (f *fakeGCS) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			writer.WriteHeader(http.StatusNoContent)
 			return
 		}
+		// GCS binds a resumable session's CORS responses to its initiation
+		// Origin. A successful bucket preflight alone does not make a session
+		// created without that Origin readable by the browser.
+		if strings.HasPrefix(request.URL.Path, "/resumable/") {
+			f.mu.Lock()
+			session := f.sessions[strings.TrimPrefix(request.URL.Path, "/resumable/")]
+			bound := session != nil && session.origin == origin
+			f.mu.Unlock()
+			if !bound {
+				writer.Header().Del("Access-Control-Allow-Origin")
+				writer.Header().Del("Access-Control-Expose-Headers")
+			}
+		}
 	}
 	f.mu.Lock()
 	status := f.nextStatus
@@ -243,7 +257,7 @@ func (f *fakeGCS) startResumable(writer http.ResponseWriter, request *http.Reque
 	}
 	f.nextSession++
 	id := strconv.FormatInt(f.nextSession, 10)
-	f.sessions[id] = &fakeResumableSession{name: name, size: -1, mediaType: request.Header.Get("Content-Type")}
+	f.sessions[id] = &fakeResumableSession{name: name, size: -1, mediaType: request.Header.Get("Content-Type"), origin: request.Header.Get("Origin")}
 	writer.Header().Set("Location", f.baseURL+"/resumable/"+id)
 	writer.WriteHeader(http.StatusCreated)
 }

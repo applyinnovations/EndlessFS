@@ -51,8 +51,8 @@ func NewWithTransfers(client *storage.Client, bucket string, options TransferOpt
 // EnableWorkloadIdentityTransfers enables V4 signing through the credentials
 // already discovered by the official client. The client library uses IAM
 // signBlob when the workload identity has no local private key.
-func (b *Backend) EnableWorkloadIdentityTransfers(leaseKey []byte, signingAccount string) error {
-	configuration, err := newTransferConfiguration(TransferOptions{LeaseKey: leaseKey, GoogleAccessID: signingAccount})
+func (b *Backend) EnableWorkloadIdentityTransfers(leaseKey []byte, signingAccount, allowedOrigin string) error {
+	configuration, err := newTransferConfiguration(TransferOptions{LeaseKey: leaseKey, GoogleAccessID: signingAccount, AllowedOrigin: allowedOrigin})
 	if err != nil {
 		return err
 	}

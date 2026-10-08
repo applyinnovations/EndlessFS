@@ -51,7 +51,7 @@ Provider portability and multi-replica safety are clarifications of the original
 - Themes are data-only bundles containing a typed manifest and validated static assets. Theme-supplied CSS, HTML, JavaScript, templates, or executable expressions are prohibited.
 - EndlessFS ships immutable, complete light and dark theme bundles. Custom themes inherit from one of them so missing or newly introduced visual assets always have a safe fallback.
 - Node.js, npm, pnpm, Yarn, frontend frameworks, CSS frameworks, Python, Ruby, Java, Make, Taskfile, and language-independent task runners MUST NOT be required.
-- No SQL database, Redis, cache service, queue, persistent volume, external identity provider, OAuth provider, email service, analytics service, CDN, or other external runtime infrastructure is allowed.
+- No SQL database, Redis, cache service, queue, persistent volume, external identity provider, OAuth provider, email service, analytics service, or CDN is allowed. Operator-configured observability infrastructure is encouraged under section 16 and MUST NOT become a storage, authentication, or readiness dependency.
 - Authentication uses WebAuthn/passkeys only. There are no passwords, OAuth flows, or email identities.
 - The user profile contains only `userID` and `displayName`. Email addresses MUST NOT be requested, inferred, transmitted as identity, or stored.
 - `ALLOW_REGISTRATION` and `INVITE_REGISTRATION` are independent v1 controls. Invite links and secure first-admin bootstrap are required in v1.
@@ -173,7 +173,7 @@ The implementation is v1 complete only when:
 - Keyboard navigation and accessible status/error reporting.
 - Upload queue with per-item status and progress.
 - Clear empty, loading, offline/error, conflict, expired-link, and access-denied states.
-- No externally hosted or runtime-fetched third-party scripts, fonts, images, analytics, or telemetry. Validated embedded theme media is allowed.
+- No externally hosted or runtime-fetched third-party scripts, fonts, images, or browser analytics. Validated embedded theme media is allowed. Application-owned operational diagnostics follow section 16 and require no third-party browser code.
 - User-selectable installed themes, including the bundled light and dark themes.
 - A theme preference that follows the user across devices while remaining separate from the two-field identity profile.
 - Safe fallback to an immutable built-in parent if a custom theme or individual override becomes unavailable.
@@ -210,7 +210,7 @@ The following are not part of v1:
 - Favorites, comments, activity feeds, notification delivery, or email.
 - Antivirus scanning, data-loss prevention, media transcoding, generated thumbnails, or archive creation in the v1.0 baseline. The versioned preview specifications explicitly introduce bounded disposable raster generation without adding playable-media transcoding.
 - Anonymous uploads, writeable shares, user-to-user collaboration ACLs, teams, or groups.
-- Billing, quotas, subscriptions, telemetry, or an EndlessFS-hosted control service.
+- Billing, quotas, subscriptions, or an EndlessFS-hosted control service. Operational telemetry is in scope and encouraged by section 16.
 - Automated account recovery without an administrator.
 - Live dual-provider writes, continuous cross-provider replication, zero-downtime online cutover, or reconciliation of mutations made outside EndlessFS. Quiescent raw-copy portability without state transformation is required by v1.
 - A guarantee of unlimited storage or bandwidth. Limits remain those of the browser and selected provider.
@@ -1377,6 +1377,28 @@ Requirements:
   reconnection is required only when the browser no longer holds a safe file
   handle. Cancellation terminates an active hash worker and cannot leave an
   unresolved planning task.
+- Upload control requests MUST satisfy both the 10,000-item bound and the exact
+  1 MiB serialized UTF-8 body bound, including paths, escaping, tokens, and
+  logical-version preconditions. Size, fingerprint, and logical-reuse requests
+  partition deterministically without weakening snapshot or replay guarantees.
+  Every fingerprint read for one pinned token completes before the resulting
+  reuse mutations change its namespace root. Drag sources are captured during
+  the drop event before an asynchronous upload-options dialog can make the
+  browser's drag data store unreadable.
+- Failed upload history offers accessible clear actions for one item, the
+  failed members of a folder, and all failed items. Clear first revokes allocated
+  unfinished sessions through the owner-scoped control plane; a verified
+  completed, aborted, or absent session needs no further revocation. Expired
+  unfinished sessions still require cleanup when their provider lease remains.
+  Permission, provider, and ambiguous cleanup failures retain visible history
+  for another attempt. Clearing removes the owner's durable device-local item,
+  source, and empty-group records, prevents delayed writes or reload from
+  resurrecting them, and preserves completed files, pending siblings, and other
+  owners' history. Persisted terminal failures remain failed after reload until
+  an explicit retry or clear action. Source reconnection remains available, and
+  retrying finalization of already-uploaded bytes requires no source reacquisition.
+  Asynchronous history restoration preserves sources and
+  workers belonging to newly queued uploads.
 - The owner-scoped upload-status response identifies `active`, `completed`, `aborted`, or `expired` state and returns the safe confirmed offset without returning capability or provider-native material. It is a bounded exceptional-recovery lookup, not an account-wide transfer-list API. Application startup reconstructs device-local transfer intent without issuing one status request per ledger item and never blocks the file workspace on transfer recovery. A restored transfer with no reacquired source becomes locally `needs-source` without contacting the control plane. A restored transfer with a source resumes through its stable idempotency key and the ordinary bounded upload queue; the browser consults upload status only after an ambiguous direct-provider response or an idempotent admission conflict where terminal outcome must be distinguished.
 - A completion that loses the owner namespace-head CAS to an unrelated file
   mutation rereads authoritative namespace state and retries the same mutation
@@ -1957,18 +1979,18 @@ Rules:
 
 ---
 
-## 16. Privacy, logging, and runtime behavior
+## 16. Privacy, observability, and runtime behavior
 
 ### 16.1 Privacy
 
 EndlessFS MUST NOT:
 
-- collect telemetry or analytics;
+- collect user-content or behavioral analytics through operational telemetry;
 - contact EndlessFS.com or any central service;
 - load unvalidated or externally hosted third-party assets;
 - fetch themes, fonts, icons, manifests, or other theme media from remote services;
 - store email addresses;
-- expose filenames or metadata to any service other than the configured provider;
+- expose filenames, file content, user identity, or private application metadata to an observability service;
 - require license checks, crash-reporting services, update beacons, or external identity;
 - make undocumented outbound requests.
 
@@ -1990,7 +2012,54 @@ Theme validation logs may include a sanitized embedded theme ID and relative bun
 
 Security events may contain a stable keyed pseudonymous user reference and coarse operation category. Debug logging remains safe by construction; it does not switch secret logging on.
 
-### 16.3 Runtime properties
+### 16.3 Operational observability
+
+EndlessFS adopts an observability-first engineering policy. Backend performance,
+failure, recovery, concurrency, and resource behavior SHOULD be inspectable from
+metrics, structured lifecycle events, distributed traces, and continuous profiles.
+These facilities are encouraged application infrastructure. Their absence MUST
+be recorded as an evidence gap rather than replaced with a guessed diagnosis.
+
+- New or materially changed backend paths MUST define useful success and failure
+  signals and a verification method. Cover upload planning/admission/data-status/
+  completion/cancellation, provider operations by backend role, metadata decoding,
+  conditional commits and retries, migrations, and preview queue/worker phases.
+- Metrics use bounded route templates, operation/phase enums, provider roles,
+  status/result classes, and release identity. They SHOULD expose latency
+  distributions, active/queued work, request/byte counts, allocation and heap/GC
+  pressure, worker resource use, and timeout/retry/failure rates where applicable.
+  Paths, IDs, arbitrary errors, URLs, and user-specific values MUST NOT become
+  metric labels or trace attributes. Trace/request IDs correlate permitted
+  events without becoming metric labels.
+- Traces use a closed allowlist of attributes. Instrumenting a provider SDK MUST
+  NOT export capability URLs, query strings, object keys, tokens, headers, file
+  names, or raw exception text. HTTP instrumentation uses route templates and
+  coarse result classes rather than raw request targets.
+- Profiling captures code locations and aggregate CPU, allocation, live-heap,
+  or contention samples. It MUST NOT export raw heap dumps, file buffers,
+  process environments, command lines, or user-derived profile labels. Diagnostic
+  endpoints MUST be restricted to the operator's observability boundary and
+  excluded from the public Drive/share/data-plane surfaces.
+- The deployment operator configures export destinations. Prefer interoperable
+  OpenTelemetry and the configured Grafana stack; no vendor account, hosted
+  collector, proprietary endpoint, or observability service is mandatory. Local
+  qualification uses deterministic observers and loopback receivers without
+  credentials or a network service.
+- Export is bounded and asynchronous, with explicit buffering, sampling,
+  shutdown, and failure behavior. Collector outages, export errors, and dropped
+  samples MUST NOT block mutations, weaken invariants, or alter readiness.
+  Dropped/export-failed signals remain measurable. Measure overhead against
+  representative concurrency and resource workloads before selecting budgets.
+- Positive/failure-path usefulness, privacy denial, cardinality bounds,
+  collector-outage independence, and overhead require acceptance evidence.
+  Diagnostic settings and measurements are non-authoritative: they introduce
+  no storage-schema epoch or portability-checkpoint dependency.
+
+This decision deliberately supersedes the earlier blanket prohibition on
+telemetry. The implementation and deployment plan is recorded in
+`docs/operational-observability-plan.md`; unimplemented signals remain unchecked.
+
+### 16.4 Runtime properties
 
 - Graceful shutdown stops accepting new requests, but correctness assumes
   abrupt process loss before and after every immutable-page write and domain
@@ -2470,7 +2539,7 @@ Each criterion MUST have an automated test unless marked “inspection”.
 **AC-001** — From a clean checkout, `nix flake check`, `nix build`, and `nix build .#container` succeed without cloud credentials or external services.  
 **AC-002** — Required tests pass with non-loopback outbound network denied.  
 **AC-003** — Inspection finds one Go application binary with embedded frontend assets and no Node/runtime frontend toolchain.  
-**AC-004** — Inspection finds no SQL, Redis, queue, PVC, external IdP, OAuth, email, telemetry, or CDN runtime dependency.  
+**AC-004** — Inspection finds no SQL, Redis, queue, PVC, external IdP, OAuth, email, or CDN runtime dependency. Operator-configured operational observability conforms to section 16 and cannot become a correctness or readiness dependency.
 **AC-005** — Domain/application packages contain no backend SDK types or raw object-key construction; adapter packages contain no filesystem, user-path, state-namespace, or canonical-record mapping logic.
 **AC-006** — The OCI artifact contains no shell, package manager, Node runtime, source credentials, or required writable application volume.  
 **AC-007** — Inspection finds that theme bundles contain only strict manifest JSON and allowlisted static media; no bundle or theme pipeline accepts CSS, HTML, JavaScript, templates, executable expressions, or remote references.  
@@ -2827,7 +2896,15 @@ An implementation agent should keep this checklist current and attach test names
 - [x] Core layouts work at 320 CSS pixels and desktop sizes.
 - [x] Reduced motion is respected.
 - [x] No sensitive token or capability is persisted in browser storage.
-- [x] No unvalidated/external asset, analytics, telemetry, or update request occurs.
+- [x] No unvalidated/external browser asset, browser analytics, or update request occurs.
+
+### 22.11.1 Operational observability
+
+- [ ] Backend metrics identify phase latency, provider work, active/queued operations, and Go/preview-worker resource pressure with bounded labels.
+- [ ] Traces correlate HTTP, metadata, provider, mutation, recovery, and preview phases through a verified closed attribute allowlist.
+- [ ] Restricted continuous CPU/allocation/heap profiles explain resource use without exporting user content or process secrets.
+- [ ] Lifecycle/failure events and deployment dashboards distinguish thumbnail work, control-plane allocation, provider failures, retries, and container OOM termination.
+- [ ] Privacy denial, cardinality bounds, collector-outage independence, and measured overhead pass local qualification.
 
 ### 22.12 Security, tests, and release proof
 

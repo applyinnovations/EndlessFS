@@ -245,10 +245,10 @@ func TestBackendValueAndErrorHelpers(t *testing.T) {
 	if err := backend.Close(); err != nil {
 		t.Fatalf("injected Close() error = %v", err)
 	}
-	if err := backend.EnableWorkloadIdentityTransfers([]byte("short"), "account@example.iam.gserviceaccount.com"); !errors.Is(err, domain.ErrInvalid) {
+	if err := backend.EnableWorkloadIdentityTransfers([]byte("short"), "account@example.iam.gserviceaccount.com", "https://drive.example"); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("invalid transfer enablement error = %v", err)
 	}
-	if err := backend.EnableWorkloadIdentityTransfers(bytes.Repeat([]byte{7}, 32), "account@example.iam.gserviceaccount.com"); err != nil || backend.transfer == nil {
+	if err := backend.EnableWorkloadIdentityTransfers(bytes.Repeat([]byte{7}, 32), "account@example.iam.gserviceaccount.com", "https://drive.example"); err != nil || backend.transfer == nil {
 		t.Fatalf("valid transfer enablement error = %v", err)
 	}
 }
@@ -705,6 +705,21 @@ func TestBackendRejectsInvalidProviderMutationMetadata(t *testing.T) {
 	}
 	if _, err := backend.Copy(context.Background(), key, destination, objectstore.CopyCondition{SourceVersion: encodeVersion(1), Destination: objectstore.PutCondition{Mode: objectstore.PutCreateOnly}}); !errors.Is(err, domain.ErrInternal) {
 		t.Fatalf("Copy(invalid generation) error = %v", err)
+	}
+}
+
+func TestGCSTransferConfigurationRejectsMalformedBrowserOrigins(t *testing.T) {
+	for _, origin := range []string{"*", "https://", "https://user:password@drive.example", "https://drive.example/path", "https://drive.example?scope=all", "https://drive.example#fragment", "https://drive.example\r\nX-Injected: yes"} {
+		t.Run(origin, func(t *testing.T) {
+			if _, err := newTransferConfiguration(TransferOptions{LeaseKey: bytes.Repeat([]byte{7}, 32), AllowedOrigin: origin}); !errors.Is(err, domain.ErrInvalid) {
+				t.Fatalf("origin %q accepted: %v", origin, err)
+			}
+		})
+	}
+	for _, origin := range []string{"https://drive.example", "https://drive.example:8443", "http://127.0.0.1:8080"} {
+		if cfg, err := newTransferConfiguration(TransferOptions{LeaseKey: bytes.Repeat([]byte{7}, 32), AllowedOrigin: origin}); err != nil || cfg.allowedOrigin != origin {
+			t.Fatalf("valid origin %q: %v", origin, err)
+		}
 	}
 }
 

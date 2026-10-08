@@ -96,3 +96,26 @@ The Go toolchain, scanner, modules, and Nixpkgs remain pinned independently.
 The fix applies to new commits. It does not rewrite v0.7.0 or repair the old
 tag's dependency URL. Re-running the original tag still needs its exact old
 input to be recovered, or a new release must be made from a corrected commit.
+
+## October 2026 pre-release review
+
+The pre-v0.7.2 review fetched the unchanged official ZIP modified on
+2026-10-07T14:10:51Z: SHA-256
+`ed8a9636dd6aaa55458d2a97f58b439b523a23f14c499b91088d45babbb01e1a`,
+4,598 reports. The first scan with the merged repair and its existing module
+pins failed with reachable reports for
+[GO-2026-6505](https://pkg.go.dev/vuln/GO-2026-6505) (OpenTelemetry exporter
+configuration logging) and
+[GO-2026-6348](https://pkg.go.dev/vuln/GO-2026-6348) (gRPC HTTP/2 fragmentation
+memory exhaustion). Reachability is the release-gate result; it is not evidence
+that a production exploit occurred. The Go OpenTelemetry report is marked
+unreviewed, and its maintainer advisory remains the source for impact details.
+
+The existing OpenTelemetry core/SDK family advances together from v1.44.0 to
+v1.45.0; gRPC advances from v1.82.1 to v1.83.1, the reported fixed versions.
+Their minimum-version-selected dependency updates remain pinned in `go.mod`,
+`go.sum`, and Nix's module hash. No new direct dependency, application mechanism,
+storage format, or release-ledger boundary is introduced. The updated snapshot
+remains a retained offline verification input. The provider contracts, exact
+economics, application workflows, migration matrix, and complete local push gate
+must pass with these dependencies before the refresh is published for review.

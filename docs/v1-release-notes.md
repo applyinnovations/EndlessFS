@@ -10,6 +10,12 @@ failed v0.7.1 upgrade. Existing files, identity authority, logical versions,
 freeze exclusion, and active-upload denial remain preserved. Evidence is in
 `docs/migration-upload-cleanup-recovery.md`.
 
+The pre-v0.7.2 security review refreshes the retained official Go vulnerability
+database and pins the fixed OpenTelemetry v1.45.0 and gRPC v1.83.1 releases,
+with their required dependency updates. The release continues to scan offline
+against the exact inventoried archive. No application storage-format change is
+introduced; review provenance is in `docs/security-input-retention.md`.
+
 The v0.7.0 provider-efficiency release appends schema 011. Bounded
 content-addressed domain packs replace per-page request amplification while one
 conditional domain-head CAS remains the visibility point. At 10,000 logical

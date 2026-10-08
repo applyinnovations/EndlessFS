@@ -2251,8 +2251,13 @@ file-provider operation per real object and increase state work only at the
 actual 1,000-item progress boundaries. Lifecycle/replay/denial qualification
 uses the largest selected sample. The 10,000-item application limit remains a
 separate validation contract. Historical 10,000-item economics fixtures remain
-immutable decision evidence, explicitly superseded for current executable
-qualification by measured smaller ratchets and growth assertions. A finite
+immutable decision evidence. Reviewed qualification retirement MUST append a
+ledger epoch naming the retired budgets and its guarantee evidence; prior
+epochs remain unchanged, silent removal and retired-name reuse fail closed.
+The active workload/scale catalogs MUST directly name executable ratchets and
+compare targets at the same cardinality, without aliases or historical gate
+exceptions. Current qualification uses measured smaller ratchets and growth
+assertions. A finite
 curve is regression evidence supported by the bounded algorithm, not a proof
 of all possible input sizes; timing alone cannot be a correctness gate.
 

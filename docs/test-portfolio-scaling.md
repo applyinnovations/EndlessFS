@@ -52,7 +52,7 @@ the new selected size. Input-limit tests retain the 10,000-item public contract.
 | Volume does not amplify provider work superlinearly | Geometric namespace requests stay constant; upload requests are exactly linear and state work increases by segment. |
 | Foreground metadata/memory work remains bounded | Geometric byte and allocation growth assertions supplement provider counts. |
 | Atomic complete visibility, replay, and denial | Existing lifecycle assertions are retained at representation-crossing sample sizes. |
-| Historical economics remain auditable | Old fixtures are untouched; explicit supersession maps bind current workload names to a new measured append-only delta. |
+| Historical economics remain auditable | Old fixtures and ledger epochs are untouched; a reviewed retirement epoch removes prior sample names from the active snapshot. Current catalogs directly reference the new measured ratchets. |
 
 Rejected alternatives: raising timeouts preserves avoidable cost; silently
 skipping tests gives no replacement proof; random sampling can miss unique
@@ -61,8 +61,12 @@ The current portfolio uses semantic classes plus a measured curve. Future
 regressions that change tree/pack/segment representation require new boundary
 samples and updated evidence, not a silently increased tolerance.
 
-The largest former-sample economics scenarios are explicitly marked historical.
-They are retained comparative measurements, not claims that the current gate
-executes those cardinalities. Current budget-catalog completeness still requires
-every replacement ratchet to be referenced by an executable test, and every
-superseded fixture to remain present.
+The active scale scenarios and independently derived request waves use the
+current qualification cardinalities: 1,024 namespace/planning items and 2,001
+upload items. Targets cannot compare observations at a different cardinality.
+Historical 10,000-item figures remain in their original append-only fixtures
+and recorded documentation; the gate no longer computes those old scenarios.
+Retirement requires existing active names, unique declarations, and an evidence
+reference, preserves all prior epochs, and permanently forbids name reuse.
+Active catalog completeness and executable-test coverage have no retirement
+exception or name-rewriting layer.

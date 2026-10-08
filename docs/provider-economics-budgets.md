@@ -129,9 +129,12 @@ The October geometric/boundary delta supersedes executable qualification of
 the repeated 10,000-item samples below. Those measurements remain immutable
 historical evidence. Current namespace samples are 64/256/1,024; upload samples
 are 100/1,001/2,001, with lifecycle assertions at the largest selected size.
-`BudgetSupersessions` explicitly maps retained historical workload names to
-their current executable replacements. The budget catalog still rejects a
-missing replacement, unreferenced current ratchet, or missing historical input.
+The active workload and scale catalogs directly name the measured 1,024- and
+2,001-item ratchets and use matching cardinalities in target comparisons.
+The append-only retirement epoch removes prior sample names from its active
+snapshot and binds this change to the reviewed growth evidence. Earlier epochs
+and fixture bytes remain intact; retired names cannot be reused. The budget
+catalog rejects every unreferenced active ratchet without historical exceptions.
 `docs/test-portfolio-scaling.md` records the guarantee matrix and measured growth.
 
 The schema-011 sparse delta records 106 exact executable workloads. It replaces

@@ -87,6 +87,22 @@ func TestProviderBudgetProductionScaleScenarios(t *testing.T) {
 	t.Logf("provider-scale-v1 %s", body)
 }
 
+func TestProviderBudgetScaleScenariosUseCurrentQualification(t *testing.T) {
+	active := make(map[string]bool)
+	for _, workload := range providerbudget.ProductionWorkloads() {
+		for _, budget := range workload.Budgets {
+			active[budget] = true
+		}
+	}
+	for _, scenario := range providerbudget.ProductionScaleScenarios() {
+		for _, execution := range scenario.Executions {
+			if !active[execution.Budget] {
+				t.Errorf("scenario %q uses non-executable budget %q", scenario.ID, execution.Budget)
+			}
+		}
+	}
+}
+
 func TestProviderBudgetProductionScaleScenariosConformToTargets(t *testing.T) {
 	model, err := gcs.RegionalStandardFlatEconomics()
 	if err != nil {
@@ -138,6 +154,9 @@ func TestProviderBudgetProductionScaleScenariosConformToTargets(t *testing.T) {
 				t.Fatalf("target %q has invalid baseline %q", target.ID, target.BaselineScenario)
 			}
 			coveredBaselines[target.BaselineScenario] = true
+			if observed.LogicalItems != target.LogicalItems {
+				t.Fatalf("target %q compares different cardinalities: observed=%d target=%d", target.ID, observed.LogicalItems, target.LogicalItems)
+			}
 			item.BaselineProviderRequests = observed.ProviderRequests
 			if target.ID == "restored-transfer-ledger-needs-source" {
 				if totals.Requests != 0 || observed.ProviderRequests != 0 {

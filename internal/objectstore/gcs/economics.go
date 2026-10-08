@@ -41,6 +41,9 @@ var regionalStandardFlatCleanupMigrationBudgets []byte
 //go:embed economics/budgets-geometric-scale-regional-standard-flat-2026-10.json
 var regionalStandardFlatGeometricBudgets []byte
 
+//go:embed economics/budgets-scale-retirement-regional-standard-flat-2026-10.json
+var regionalStandardFlatScaleRetirement []byte
+
 // RegionalStandardFlatEconomics returns the reviewed provider model used by
 // deterministic request-budget tests. It performs no network access.
 func RegionalStandardFlatEconomics() (providerbudget.Model, error) {
@@ -48,7 +51,8 @@ func RegionalStandardFlatEconomics() (providerbudget.Model, error) {
 }
 
 // RegionalStandardFlatBudgetRatchet returns the append-only operation ceilings
-// for this provider profile. Later epochs may only retain or tighten them.
+// for this provider profile. Active ceilings only tighten; reviewed qualification
+// retirement keeps the original measured budgets in historical epochs.
 func RegionalStandardFlatBudgetRatchet() (providerbudget.RatchetLedger, error) {
 	ledger, err := providerbudget.ParseRatchetLedger(regionalStandardFlatBudgets)
 	if err != nil {
@@ -62,6 +66,7 @@ func RegionalStandardFlatBudgetRatchet() (providerbudget.RatchetLedger, error) {
 		regionalStandardFlatSchema011Budgets,
 		regionalStandardFlatCleanupMigrationBudgets,
 		regionalStandardFlatGeometricBudgets,
+		regionalStandardFlatScaleRetirement,
 	} {
 		ledger, err = providerbudget.AppendRatchetDelta(ledger, delta)
 		if err != nil {

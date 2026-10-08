@@ -48,16 +48,8 @@ func TestProviderBudgetCatalogCoversApplicationContractsAndRatchets(t *testing.T
 	}
 	for _, budget := range ratchet.Epochs[len(ratchet.Epochs)-1].Budgets {
 		current := strings.HasSuffix(budget.Name, "schema-011") || strings.Contains(budget.Name, "008-to-011") || strings.HasPrefix(budget.Name, "preview-") || strings.HasPrefix(budget.Name, "file-data-")
-		if current && !referencedBudgets[budget.Name] && providerbudget.BudgetSupersessions()[budget.Name] == "" {
+		if current && !referencedBudgets[budget.Name] {
 			t.Errorf("current provider ratchet %q is absent from the production workload catalog", budget.Name)
-		}
-	}
-	for historical, replacement := range providerbudget.BudgetSupersessions() {
-		if _, found := ratchet.Latest(historical); !found {
-			t.Errorf("superseded measurement %q is missing", historical)
-		}
-		if !referencedBudgets[replacement] {
-			t.Errorf("replacement %q is not an executable production workload", replacement)
 		}
 	}
 

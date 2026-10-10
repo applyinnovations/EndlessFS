@@ -1,5 +1,40 @@
   const uploadPlanningBatchSize = 10000;
   const uploadHashWorkerLimit = 2;
+  const uploadControlBodyBytes = 1 << 20;
+  const uploadControlEncoder = new TextEncoder();
+
+  // Count the exact serialized UTF-8 envelope and each item once. File count
+  // alone cannot bound long paths, escaping, tokens, or logical versions.
+  function* uploadControlBatches(items, describe, field = "items", envelope = {}) {
+    const emptyBytes = uploadControlEncoder.encode(JSON.stringify({ ...envelope, [field]: [] })).byteLength;
+    let batch = [];
+    let bytes = emptyBytes;
+    for (const item of items) {
+      const itemBytes = uploadControlEncoder.encode(JSON.stringify(describe(item))).byteLength;
+      if (emptyBytes + itemBytes > uploadControlBodyBytes) throw new Error("An upload item exceeds the control request limit.");
+      if (batch.length && (batch.length === uploadPlanningBatchSize || bytes + 1 + itemBytes > uploadControlBodyBytes)) {
+        yield batch;
+        batch = [];
+        bytes = emptyBytes;
+      }
+      bytes += itemBytes + (batch.length ? 1 : 0);
+      batch.push(item);
+    }
+    if (batch.length) yield batch;
+  }
+
+  function uploadSizePlanItem(transfer) {
+    return { id: transfer.id, path: uploadPlanPath(transfer), size: transferFileSize(transfer) };
+  }
+
+  function uploadFingerprintPlanItem(transfer) {
+    return { ...uploadSizePlanItem(transfer), md5: transfer.md5, crc32c: transfer.crc32c };
+  }
+
+  function uploadReuseItem({ transfer, source, sourceVersion, conflict }) {
+    return { source, destination: uploadPlanPath(transfer), conflict, expectedSource: sourceVersion,
+      ...(conflict === "replace" ? { expectedTarget: transfer.targetVersion } : {}) };
+  }
 
   async function chooseUploadStrategy(label = "these items") {
     if (state.config && state.config.localFixture) return "keep-both";
@@ -122,7 +157,7 @@
   async function planUploadSizeBatch(transfers, signal) {
     const response = await api("/api/v1/uploads/plan/sizes", {
       method: "POST", signal,
-      body: { items: transfers.map((transfer) => ({ id: transfer.id, path: uploadPlanPath(transfer), size: transferFileSize(transfer) })) },
+      body: { items: transfers.map(uploadSizePlanItem) },
     });
     if (!response || !response.token || !Array.isArray(response.items) || response.items.length !== transfers.length) throw new Error("Upload size planning returned an invalid response.");
     const byID = new Map(response.items.map((item) => [item.id, item]));
@@ -172,12 +207,30 @@
 
   async function applyUploadFingerprintDecisions(token, transfers, group, signal) {
     const active = transfers.filter((transfer) => !transfer.cancelRequested);
-    if (!active.length) return;
+    const reuse = [];
+    // Complete all reads against the pinned root before publishing copies,
+    // which deliberately change that root and invalidate the planning token.
+    for (const batch of uploadControlBatches(active, uploadFingerprintPlanItem, "items", { token })) {
+      reuse.push(...await applyUploadFingerprintBatch(token, batch, signal));
+    }
+    const activeReuse = reuse.filter(({ transfer }) => !transfer.cancelRequested);
+    if (activeReuse.length) {
+      await Promise.all(activeReuse.map(({ transfer }) => ensureTransferDirectories(transfer)));
+      for (const batch of uploadControlBatches(activeReuse, uploadReuseItem)) {
+        const reuseKey = `${batch[0].transfer.id}-content-reuse`;
+        await api("/api/v1/files/copy", {
+          method: "POST", signal, headers: { "Idempotency-Key": reuseKey }, body: { items: batch.map(uploadReuseItem) },
+        });
+        for (const { transfer } of batch) markPlannedComplete(transfer, "reused-content");
+      }
+    }
+    await Promise.all(active.map(persistTransferItem));
+  }
+
+  async function applyUploadFingerprintBatch(token, active, signal) {
     const response = await api("/api/v1/uploads/plan/fingerprints", {
       method: "POST", signal,
-      body: { token, items: active.map((transfer) => ({
-        id: transfer.id, path: uploadPlanPath(transfer), size: transferFileSize(transfer), md5: transfer.md5, crc32c: transfer.crc32c,
-      })) },
+      body: { token, items: active.map(uploadFingerprintPlanItem) },
     });
     if (!response || !Array.isArray(response.items) || response.items.length !== active.length) throw new Error("Upload fingerprint planning returned an invalid response.");
     const byID = new Map(response.items.map((item) => [item.id, item]));
@@ -199,21 +252,7 @@
         applyUnmatchedUploadDecision(transfer);
       }
     }
-    const activeReuse = reuse.filter(({ transfer }) => !transfer.cancelRequested);
-    if (activeReuse.length) {
-      await Promise.all(activeReuse.map(({ transfer }) => ensureTransferDirectories(transfer)));
-      // The first stable transfer ID makes each 1000-item planning batch
-      // independently replayable even when one folder spans several batches.
-      const reuseKey = `${activeReuse[0].transfer.id}-content-reuse`;
-      await api("/api/v1/files/copy", {
-        method: "POST", signal, headers: { "Idempotency-Key": reuseKey }, body: { items: activeReuse.map(({ transfer, source, sourceVersion, conflict }) => ({
-          source, destination: uploadPlanPath(transfer), conflict, expectedSource: sourceVersion,
-          ...(conflict === "replace" ? { expectedTarget: transfer.targetVersion } : {}),
-        })) },
-      });
-      for (const { transfer } of activeReuse) markPlannedComplete(transfer, "reused-content");
-    }
-    await Promise.all(active.map(persistTransferItem));
+    return reuse;
   }
 
   async function planUploadTransfers(transfers, group = null) {
@@ -227,8 +266,7 @@
     state.transferPlanControllers.set(key, controller);
     if (group) { group.state = "preparing"; group.error = ""; persistTransferGroup(group); }
     try {
-      for (let offset = 0; offset < pending.length; offset += uploadPlanningBatchSize) {
-        const batch = pending.slice(offset, offset + uploadPlanningBatchSize);
+      for (const batch of uploadControlBatches(pending, uploadSizePlanItem)) {
         const planned = await planUploadSizeBatch(batch, controller.signal);
         await hashUploadCandidates(planned.exact);
         await applyUploadFingerprintDecisions(planned.token, planned.exact, group, controller.signal);

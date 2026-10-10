@@ -290,10 +290,10 @@ func TestWorkloadIdentityTransferConstructionRequiresNoPrivateKeyOrNetwork(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.EnableWorkloadIdentityTransfers(bytes.Repeat([]byte{0x43}, 32), "writer@example-project.iam.gserviceaccount.com"); err != nil {
+	if err := backend.EnableWorkloadIdentityTransfers(bytes.Repeat([]byte{0x43}, 32), "writer@example-project.iam.gserviceaccount.com", "https://drive.example"); err != nil {
 		t.Fatalf("EnableWorkloadIdentityTransfers() with explicit IAM signing identity: %v", err)
 	}
-	if err := backend.EnableWorkloadIdentityTransfers(bytes.Repeat([]byte{0x44}, 32), ""); err != nil {
+	if err := backend.EnableWorkloadIdentityTransfers(bytes.Repeat([]byte{0x44}, 32), "", "https://drive.example"); err != nil {
 		t.Fatalf("EnableWorkloadIdentityTransfers() with ADC identity discovery: %v", err)
 	}
 }
@@ -351,14 +351,15 @@ func TestGCSSignedSingleUploadAndDownloadAreGenerationBound(t *testing.T) {
 	}
 }
 
-func TestGCSCORSRequiresExactApplicationOriginAndTransferHeaders(t *testing.T) {
+func TestContractGCSCORSRequiresExactApplicationOriginAndTransferHeaders(t *testing.T) {
 	server, fake := newGCSServerWithFake(t)
 	fake.mu.Lock()
 	fake.allowedOrigin = "https://drive.example"
 	fake.mu.Unlock()
 	client := protocolClient(t, server)
 	backend, err := gcstransport.NewWithTransfers(client, "endlessfs-test", gcstransport.TransferOptions{
-		HTTPClient: server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
+		AllowedOrigin: "https://drive.example",
+		HTTPClient:    server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
 		SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x5a}, 256), nil },
 		Hostname:  strings.TrimPrefix(server.URL, "http://"), Insecure: true,
 		LeaseKey: bytes.Repeat([]byte{0x42}, 32), Random: bytes.NewReader(bytes.Repeat([]byte{0x26}, 4096)),
@@ -395,5 +396,28 @@ func TestGCSCORSRequiresExactApplicationOriginAndTransferHeaders(t *testing.T) {
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusForbidden || response.Header.Get("Access-Control-Allow-Origin") != "" {
 		t.Fatalf("denied preflight = %d headers=%v", response.StatusCode, response.Header)
+	}
+	for index, body := range []string{"ab", "cd"} {
+		chunk, _ := http.NewRequest(http.MethodPut, handle.Capability.URL, strings.NewReader(body))
+		chunk.Header.Set("Origin", "https://drive.example")
+		chunk.Header.Set("Content-Type", "text/plain")
+		if index == 0 {
+			chunk.Header.Set("Content-Range", "bytes 0-1/4")
+		} else {
+			chunk.Header.Set("Content-Range", "bytes 2-3/4")
+		}
+		response, err = server.Client().Do(chunk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		wantStatus := http.StatusPermanentRedirect
+		if index == 1 {
+			wantStatus = http.StatusOK
+		}
+		if response.StatusCode != wantStatus || response.Header.Get("Access-Control-Allow-Origin") != "https://drive.example" || !strings.Contains(response.Header.Get("Access-Control-Expose-Headers"), "Range") {
+			t.Fatalf("browser chunk %d response = %d, CORS origin %q, exposed %q", index, response.StatusCode, response.Header.Get("Access-Control-Allow-Origin"), response.Header.Get("Access-Control-Expose-Headers"))
+		}
 	}
 }

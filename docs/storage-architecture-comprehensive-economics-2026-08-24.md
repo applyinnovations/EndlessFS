@@ -34,7 +34,7 @@ and negotiated discounts are excluded.
 
 No weighted “overall score” is reported. Assigning every pathway the same
 frequency would be arbitrary, while assigning production frequencies requires
-production telemetry that EndlessFS deliberately does not collect. The full
+production telemetry that was not collected under the policy at this experiment's date. Specification section 16 now encourages operational observability. The full
 vector is presented so a workload mix can be applied explicitly later.
 
 ## What was benchmarked

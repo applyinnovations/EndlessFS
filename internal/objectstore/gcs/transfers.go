@@ -37,6 +37,7 @@ type TransferOptions struct {
 	LeaseKey       []byte
 	Random         io.Reader
 	Clock          domain.Clock
+	AllowedOrigin  string
 }
 
 type transferConfiguration struct {
@@ -49,6 +50,7 @@ type transferConfiguration struct {
 	random         io.Reader
 	randomMu       sync.Mutex
 	clock          domain.Clock
+	allowedOrigin  string
 }
 
 type uploadLease struct {
@@ -83,11 +85,17 @@ func newTransferConfiguration(options TransferOptions) (*transferConfiguration, 
 	if options.Clock == nil {
 		options.Clock = domain.SystemClock{}
 	}
+	if options.AllowedOrigin != "" {
+		origin, err := url.Parse(options.AllowedOrigin)
+		if err != nil || (origin.Scheme != "http" && origin.Scheme != "https") || origin.Host == "" || origin.User != nil || origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" || origin.String() != options.AllowedOrigin || strings.ContainsAny(options.AllowedOrigin, "\r\n") {
+			return nil, domain.NewError(domain.ErrorInvalid, "invalid GCS browser origin")
+		}
+	}
 	return &transferConfiguration{
 		httpClient: options.HTTPClient, googleAccessID: options.GoogleAccessID,
 		signBytes: options.SignBytes, hostname: options.Hostname, insecure: options.Insecure,
 		aead: aead, random: options.Random,
-		clock: options.Clock,
+		clock: options.Clock, allowedOrigin: options.AllowedOrigin,
 	}, nil
 }
 
@@ -115,7 +123,11 @@ func (b *Backend) BeginUpload(ctx context.Context, request objectstore.UploadReq
 	// Every browser upload uses a server-initiated session. A one-request upload
 	// is still reported as UploadSingle, but unlike a bare signed PUT its
 	// capability can be revoked when the operation is aborted.
-	initiationURL, err := b.signedURL(request.Key, http.MethodPost, request.ExpiresAt, request.MediaType, []string{"x-goog-resumable:start"}, url.Values{"ifGenerationMatch": {"0"}})
+	initiationHeaders := []string{"x-goog-resumable:start"}
+	if b.transfer.allowedOrigin != "" {
+		initiationHeaders = append(initiationHeaders, "origin:"+b.transfer.allowedOrigin)
+	}
+	initiationURL, err := b.signedURL(request.Key, http.MethodPost, request.ExpiresAt, request.MediaType, initiationHeaders, url.Values{"ifGenerationMatch": {"0"}})
 	if err != nil {
 		return objectstore.UploadHandle{}, err
 	}
@@ -125,6 +137,9 @@ func (b *Backend) BeginUpload(ctx context.Context, request objectstore.UploadReq
 	}
 	httpRequest.Header.Set("Content-Type", request.MediaType)
 	httpRequest.Header.Set("x-goog-resumable", "start")
+	if b.transfer.allowedOrigin != "" {
+		httpRequest.Header.Set("Origin", b.transfer.allowedOrigin)
+	}
 	response, err := b.transfer.httpClient.Do(httpRequest)
 	if err != nil {
 		return objectstore.UploadHandle{}, domain.WrapError(domain.ErrorUnavailable, "GCS resumable initiation failed", err)

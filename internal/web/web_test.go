@@ -262,7 +262,11 @@ func TestSmartUploadPlannerIsBoundedPersistentAndMetadataOnly(t *testing.T) {
 		`/api/v1/uploads/plan/sizes`, `/api/v1/uploads/plan/fingerprints`,
 		`strategy: transfer.strategy`, `planPhase: transfer.planPhase`,
 		`md5: transfer.md5`, `crc32c: transfer.crc32c`,
-		"const reuseKey = `${activeReuse[0].transfer.id}-content-reuse`;",
+		"const reuseKey = `${batch[0].transfer.id}-content-reuse`;",
+		`const uploadControlBodyBytes = 1 << 20;`, `new TextEncoder()`,
+		`uploadControlBatches(pending, uploadSizePlanItem)`,
+		`uploadControlBatches(active, uploadFingerprintPlanItem, "items", { token })`,
+		`uploadControlBatches(activeReuse, uploadReuseItem)`,
 		`resetUploadPlanForReconnectedSource(transfer);`, `transfer.md5 = "";`, `transfer.crc32c = "";`,
 	} {
 		if !strings.Contains(script, required) {

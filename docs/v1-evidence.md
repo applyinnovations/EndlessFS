@@ -223,7 +223,7 @@ The release coverage commands are `nix run .#test-coverage` and the migration-sp
 | AC-001 | `checks.build`, `checks.container`, `checks.release`, and the clean umbrella gate build without credentials/services. |
 | AC-002 | Nix-sandboxed `checks.offline` and all test derivations use the fixed-output module closure and explicit loopback listeners only. |
 | AC-003 | One `cmd/endlessfs` entry point, embedded `internal/web`, `tools/check-source`, and OCI inspection; no Node/runtime frontend toolchain. |
-| AC-004 | `tools/check-source`, dependency inventory, runtime assembly tests, and the implemented threat review prove the prohibited services/identity/telemetry are absent. |
+| AC-004 | `tools/check-source`, dependency inventory, runtime assembly tests, and the implemented threat review prove prohibited services and identity dependencies are absent. The revised section-16 operational observability requirements are tracked separately in checklist 22.11.1; a configured collector must not become a correctness or readiness dependency. |
 | AC-005 | Provider-neutral domain interfaces and source-policy scans; only `internal/objectstore/gcs` imports the GCS SDK and adapter tests run the same portable contracts. |
 | AC-006 | `checks.container-policy` inspects user, entry point, ports, volumes, and every layer path for shells, package managers, source, or credential-shaped material. |
 | AC-007 | Theme schema/archive/media/SVG negative matrices plus source policy reject executable/raw/remote theme inputs. |

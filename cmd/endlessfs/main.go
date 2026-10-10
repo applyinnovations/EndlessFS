@@ -124,7 +124,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 		if openErr != nil {
 			return openErr
 		}
-		if err := gcsBackend.EnableWorkloadIdentityTransfers(leaseKey, cfg.GCSSigningAccount); err != nil {
+		if err := gcsBackend.EnableWorkloadIdentityTransfers(leaseKey, cfg.GCSSigningAccount, cfg.AllowedOrigin); err != nil {
 			_ = gcsBackend.Close()
 			return err
 		}
@@ -218,7 +218,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 				_ = previewBackend.Close()
 				return domain.NewError(domain.ErrorInvalid, "invalid preview key material")
 			}
-			if enableErr := previewBackend.EnableWorkloadIdentityTransfers(deriveKey("endlessfs-preview-transfer-lease-v1", previewKeyBytes), cfg.GCSSigningAccount); enableErr != nil {
+			if enableErr := previewBackend.EnableWorkloadIdentityTransfers(deriveKey("endlessfs-preview-transfer-lease-v1", previewKeyBytes), cfg.GCSSigningAccount, cfg.AllowedOrigin); enableErr != nil {
 				_ = previewBackend.Close()
 				return enableErr
 			}

@@ -61,7 +61,9 @@ func EncodeCanonical(value any) ([]byte, error) {
 	if len(data) == 0 || len(data) > MaxCanonicalBytes {
 		return nil, domain.NewError(domain.ErrorInvalid, "canonical record exceeds size limit")
 	}
-	return append([]byte(nil), data...), nil
+	// The local buffer owns these bytes and is never pooled or reused. Return
+	// that allocation directly instead of copying every canonical page again.
+	return data, nil
 }
 
 func EncodeEnvelope(schema string, key objectstore.Key, revision uint64, payload any) ([]byte, error) {

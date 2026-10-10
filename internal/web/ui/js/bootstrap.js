@@ -120,9 +120,14 @@
       if (state.browserAccess !== "owner") return;
       event.preventDefault();
       drop.classList.remove("dragging");
-      const strategy = await chooseUploadStrategy("the dropped items");
-      if (!strategy) return;
-      try { await queueDroppedItems(event.dataTransfer, strategy); }
+      // The browser protects the drag data store as soon as this event
+      // returns. Capture every handle/entry/file before awaiting the options.
+      try {
+        const sources = captureDroppedItems(event.dataTransfer);
+        const strategy = await chooseUploadStrategy("the dropped items");
+        if (!strategy) return;
+        await queueDroppedItems(sources, strategy);
+      }
       catch (error) { announce(friendlyError(error, "Dropped files could not be read."), true); }
     });
     drop.addEventListener("keydown", (event) => { if (state.browserAccess === "owner" && event.target === drop && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); byID("upload-input").click(); } });
@@ -158,6 +163,7 @@
       setTransferSheetOpen(!byID("transfer-panel").hidden);
     });
     byID("retry-failed-transfers").addEventListener("click", retryFailedTransfers);
+    byID("clear-failed-transfers").addEventListener("click", () => clearFailedTransfers(state.transfers));
     byID("transfer-search").addEventListener("input", (event) => {
       state.transferSearch = event.target.value;
       state.transferVirtualStart = 0;

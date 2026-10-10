@@ -31,9 +31,12 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/httpapi"
 	"github.com/applyinnovations/endlessfs/internal/identity"
 	"github.com/applyinnovations/endlessfs/internal/integrity"
+	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
+	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/preview"
 	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
 	previewmemory "github.com/applyinnovations/endlessfs/internal/preview/memory"
+	"github.com/applyinnovations/endlessfs/internal/provider"
 	providermemory "github.com/applyinnovations/endlessfs/internal/provider/memory"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
@@ -2240,6 +2243,7 @@ type harness struct {
 	bootstrapToken string
 	repository     *identity.Repository
 	storage        *providermemory.Provider
+	files          provider.Storage
 	previewStore   *previewmemory.Store
 	corruptPreview *atomic.Bool
 	clock          domain.Clock
@@ -2262,6 +2266,14 @@ func newProductionLikeHarnessWithControlPlaneWrapper(t *testing.T, wrap func(htt
 }
 
 func newHarnessWithWrappers(t *testing.T, withPreviews, localFixture bool, controlWrap, dataWrap func(http.Handler) http.Handler) harness {
+	return newHarnessWithStorage(t, withPreviews, localFixture, false, controlWrap, dataWrap)
+}
+
+func newPortableHarnessWithControlPlaneWrapper(t *testing.T, wrap func(http.Handler) http.Handler) harness {
+	return newHarnessWithStorage(t, false, false, true, wrap, nil)
+}
+
+func newHarnessWithStorage(t *testing.T, withPreviews, localFixture, portableStorage bool, controlWrap, dataWrap func(http.Handler) http.Handler) harness {
 	t.Helper()
 	controlListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -2288,8 +2300,7 @@ func newHarnessWithWrappers(t *testing.T, withPreviews, localFixture bool, contr
 	origin := "http://localhost:" + controlPort
 	dataOrigin := "http://" + dataListener.Addr().String()
 	previewOrigin := "http://" + previewListener.Addr().String()
-	store := state.NewMemoryStore()
-	repository := identity.NewRepository(store)
+	var store state.AtomicStore = state.NewMemoryStore()
 	ids := domain.SystemIDGenerator()
 	clock := domain.SystemClock{}
 	bootstrapToken := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
@@ -2298,6 +2309,43 @@ func newHarnessWithWrappers(t *testing.T, withPreviews, localFixture bool, contr
 		sessionKeyBytes[index] = byte(index + 1)
 	}
 	sessionKey := secret.Value(base64.RawURLEncoding.EncodeToString(sessionKeyBytes))
+	storage := providermemory.New(providermemory.Options{Clock: clock, IDs: ids, AllowedOrigin: origin})
+	if err := storage.SetDataPlaneBaseURL(dataOrigin); err != nil {
+		t.Fatal(err)
+	}
+	var driveStorage provider.NamespaceStorage = storage
+	var directHandler http.Handler = storage
+	if portableStorage {
+		backend := objectmemory.New()
+		if err := backend.ConfigureDataPlane(dataOrigin, clock, ids); err != nil {
+			t.Fatal(err)
+		}
+		engine, err := portable.Open(context.Background(), portable.Options{
+			Backend: backend, Clock: clock, IDs: ids, CursorKey: sessionKeyBytes, LeaseTTL: time.Minute,
+			Writer: portable.WriterConfiguration{WriterSetID: "browser-test", ConfigurationDigest: "browser-test-v1", KeyringIdentifiers: []string{"session-test"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		store, driveStorage = engine, engine.Files()
+		// The thin memory backend has no browser policy. Its test-only HTTP
+		// boundary models the exact origin and headers used by the real GCS
+		// contract; browser security remains enabled.
+		directHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Origin") == origin {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Methods", "PUT, PATCH, GET, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Upload-Offset")
+				w.Header().Set("Access-Control-Expose-Headers", "Upload-Offset")
+				if r.Method == http.MethodOptions {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+			}
+			backend.ServeHTTP(w, r)
+		})
+	}
+	repository := identity.NewRepository(store)
 	webAuthn, err := auth.NewGoWebAuthn("localhost", "EndlessFS browser test", origin)
 	if err != nil {
 		t.Fatal(err)
@@ -2310,10 +2358,6 @@ func newHarnessWithWrappers(t *testing.T, withPreviews, localFixture bool, contr
 	if err != nil {
 		t.Fatal(err)
 	}
-	storage := providermemory.New(providermemory.Options{Clock: clock, IDs: ids, AllowedOrigin: origin})
-	if err := storage.SetDataPlaneBaseURL(dataOrigin); err != nil {
-		t.Fatal(err)
-	}
 	previewStore, err := previewmemory.New(previewmemory.Options{Clock: clock, IDs: ids, Key: sessionKey, AllowedOrigin: origin})
 	if err != nil {
 		t.Fatal(err)
@@ -2322,7 +2366,7 @@ func newHarnessWithWrappers(t *testing.T, withPreviews, localFixture bool, contr
 		t.Fatal(err)
 	}
 	corruptPreview := &atomic.Bool{}
-	driveService, err := drive.NewService(storage, store, repository, ids, clock, sessionKey, origin, dataOrigin, 1<<20)
+	driveService, err := drive.NewService(driveStorage, store, repository, ids, clock, sessionKey, origin, dataOrigin, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2349,7 +2393,7 @@ func newHarnessWithWrappers(t *testing.T, withPreviews, localFixture bool, contr
 		controlHandler = controlWrap(controlHandler)
 	}
 	controlServer := &http.Server{Handler: controlHandler}
-	var dataHandler http.Handler = storage
+	var dataHandler http.Handler = directHandler
 	if dataWrap != nil {
 		dataHandler = dataWrap(dataHandler)
 	}
@@ -2387,7 +2431,7 @@ func newHarnessWithWrappers(t *testing.T, withPreviews, localFixture bool, contr
 	})
 	return harness{
 		origin: origin, dataOrigin: dataOrigin, previewOrigin: previewOrigin, bootstrapToken: bootstrapToken,
-		repository: repository, storage: storage, previewStore: previewStore, corruptPreview: corruptPreview, clock: clock,
+		repository: repository, storage: storage, files: driveStorage, previewStore: previewStore, corruptPreview: corruptPreview, clock: clock,
 	}
 }
 

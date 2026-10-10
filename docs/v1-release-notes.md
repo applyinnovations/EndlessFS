@@ -2,6 +2,21 @@
 
 EndlessFS v1 provides the single-binary passkey identity system, private Drive control plane, direct capability data plane, trash, read-only public sharing, administration and recovery, accessible embedded browser application, and closed data-only theme system described in [the v1 specification](./v1-specification.md).
 
+The October 8 upload repair adds failed-history clearing, captures native drag
+sources before upload options, partitions Smart merge requests by encoded UTF-8
+bytes, and binds GCS resumable-session initiation to the application Origin.
+Canonical metadata decoding removes redundant copies and validation without
+changing schema 011. Evidence and remaining production-memory uncertainty are
+recorded in `docs/upload-incident-repair-2026-10-08.md`.
+
+The operator deliberately replaces the blanket telemetry prohibition with an
+observability-first backend policy. Metrics, structured lifecycle events,
+distributed traces, and profiles are encouraged under specification section 16.
+Privacy, bounded overhead, restricted diagnostics, and collector independence
+remain guarantees. `docs/operational-observability-plan.md` identifies current
+implementation gaps; this policy change does not claim the new signal set is
+already implemented.
+
 The pending-cleanup migration repair preserves the schema-011 format. Checkpoint
 drain now performs idempotent transient upload-provider cleanup without attempting
 an authoritative mutation in a frozen domain. This allows schema-010-to-011

@@ -48,6 +48,81 @@ type Factory func(t *testing.T) Harness
 
 func Run(t *testing.T, factory Factory) {
 	t.Helper()
+	t.Run("transfer completion and scoped session resume", func(t *testing.T) {
+		harness := factory(t)
+		owner, other := testScope(t, 0x41, domain.AreaLive), testScope(t, 0x42, domain.AreaLive)
+		resumer := harness.Storage
+		for index, body := range [][]byte{nil, []byte("data"), nil, []byte("data")} {
+			path := domain.MustParseUserPath(fmt.Sprintf("/resume-%d.txt", index))
+			var capability domain.UploadCapability
+			var err error
+			if index < 2 {
+				capability, err = harness.Storage.CreateUpload(context.Background(), owner, domain.CreateUploadRequest{Path: path, Size: int64(len(body)), MediaType: "application/octet-stream", Resumable: true})
+			}
+			if index >= 2 {
+				// Exercise the batched initializing representation as well as an
+				// individually activated upload. Both expose real provider progress.
+				batched := harness.Storage.(provider.UploadBatchStorage)
+				capabilities, batchErr := batched.CreateUploadBatch(context.Background(), owner, []domain.CreateUploadRequest{{Path: domain.MustParseUserPath(fmt.Sprintf("/batch-resume-%d.txt", index)), Size: int64(len(body)), MediaType: "application/octet-stream", Resumable: true, IdempotencyKey: fmt.Sprintf("resume-batch-contract-%d", index)}})
+				if batchErr != nil {
+					t.Fatal(batchErr)
+				}
+				capability = capabilities[0]
+				path = domain.MustParseUserPath(fmt.Sprintf("/batch-resume-%d.txt", index))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertComplete := func(want bool) {
+				t.Helper()
+				status, err := harness.Storage.UploadStatus(context.Background(), owner, capability.UploadID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if status.DataComplete != want {
+					t.Fatalf("data-complete status = %v, want %v", status.DataComplete, want)
+				}
+			}
+			assertComplete(false)
+			if _, err := resumer.ResumeUpload(context.Background(), other, capability.UploadID); !errors.Is(err, domain.ErrNotFound) {
+				t.Fatalf("cross-owner resume = %v", err)
+			}
+			if _, err := resumer.ResumeUpload(context.Background(), testScope(t, 0x41, domain.AreaTrash), capability.UploadID); !errors.Is(err, domain.ErrNotFound) {
+				t.Fatalf("cross-area resume = %v", err)
+			}
+			resumed, err := resumer.ResumeUpload(context.Background(), owner, capability.UploadID)
+			if err != nil || resumed.UploadID != capability.UploadID || resumed.URL != capability.URL || !resumed.ExpiresAt.Equal(capability.ExpiresAt) {
+				t.Fatalf("session changed on resume: %v", err)
+			}
+			response := sendUpload(t, harness.Client, resumed, body, 0)
+			_ = response.Body.Close()
+			if !successfulUploadStatus(response.StatusCode) {
+				t.Fatalf("transfer = %d", response.StatusCode)
+			}
+			assertComplete(true)
+			if _, err := harness.Storage.Stat(context.Background(), owner, path); !errors.Is(err, domain.ErrNotFound) {
+				t.Fatalf("transfer prematurely published: %v", err)
+			}
+			if err := harness.Storage.AbortUpload(context.Background(), owner, capability.UploadID); err != nil {
+				t.Fatal(err)
+			}
+			assertComplete(false)
+			if _, err := resumer.ResumeUpload(context.Background(), owner, capability.UploadID); err == nil {
+				t.Fatal("aborted session resumed")
+			}
+		}
+		if _, err := resumer.ResumeUpload(context.Background(), owner, ""); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("empty resume ID = %v", err)
+		}
+		expiring, err := harness.Storage.CreateUpload(context.Background(), owner, domain.CreateUploadRequest{Path: domain.MustParseUserPath("/expired-resume.txt"), Size: 1, MediaType: "application/octet-stream", Resumable: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		harness.Advance(11 * time.Minute)
+		if _, err := resumer.ResumeUpload(context.Background(), owner, expiring.UploadID); err == nil {
+			t.Fatal("expired session resumed")
+		}
+	})
 	t.Run("directories listings and isolation", func(t *testing.T) {
 		harness := factory(t)
 		userA := testScope(t, 0x11, domain.AreaLive)

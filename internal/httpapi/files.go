@@ -32,6 +32,7 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/uploads/plan/sizes", api.planUploadSizes)
 	mux.HandleFunc("POST /api/v1/uploads/plan/fingerprints", api.planUploadFingerprints)
 	mux.HandleFunc("GET /api/v1/uploads/{uploadID}", api.uploadStatus)
+	mux.HandleFunc("POST /api/v1/uploads/{uploadID}/resume", api.resumeUpload)
 	mux.HandleFunc("POST /api/v1/uploads/{uploadID}/complete", api.completeUpload)
 	mux.HandleFunc("DELETE /api/v1/uploads/{uploadID}", api.abortUpload)
 	mux.HandleFunc("POST /api/v1/downloads", api.createDownload)
@@ -619,6 +620,28 @@ func (api *identityAPI) uploadStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (api *identityAPI) resumeUpload(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.mutation(w, r)
+	if !ok {
+		return
+	}
+	var request *struct{}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if request == nil {
+		writeProblem(w, r, domain.NewError(domain.ErrorInvalid, "upload resume requires an empty JSON object"))
+		return
+	}
+	capability, err := api.drive.ResumeUpload(r.Context(), current.Record.UserID, domain.UploadID(r.PathValue("uploadID")))
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, capability)
 }
 
 func (api *identityAPI) completeUpload(w http.ResponseWriter, r *http.Request) {

@@ -778,6 +778,7 @@ func TestServiceBoundaryAndInvalidScopeMatrix(t *testing.T) {
 			return err
 		},
 		func() error { _, err := env.service.UploadStatus(ctx, invalidUser, uploadID); return err },
+		func() error { _, err := env.service.ResumeUpload(ctx, invalidUser, uploadID); return err },
 		func() error {
 			_, err := env.service.CompleteUpload(ctx, invalidUser, domain.CompleteUploadRequest{UploadID: uploadID, Path: path})
 			return err

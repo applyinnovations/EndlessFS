@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -419,5 +420,98 @@ func TestContractGCSCORSRequiresExactApplicationOriginAndTransferHeaders(t *test
 		if response.StatusCode != wantStatus || response.Header.Get("Access-Control-Allow-Origin") != "https://drive.example" || !strings.Contains(response.Header.Get("Access-Control-Expose-Headers"), "Range") {
 			t.Fatalf("browser chunk %d response = %d, CORS origin %q, exposed %q", index, response.StatusCode, response.Header.Get("Access-Control-Allow-Origin"), response.Header.Get("Access-Control-Expose-Headers"))
 		}
+	}
+}
+
+func TestContractGCSEmptyUploadStatusIsReadOnlyBeforeExplicitFinalization(t *testing.T) {
+	server, fake := newGCSServerWithFake(t)
+	backend, err := gcstransport.NewWithTransfers(protocolClient(t, server), "endlessfs-test", gcstransport.TransferOptions{
+		HTTPClient: server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
+		SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x5a}, 256), nil },
+		Hostname:  strings.TrimPrefix(server.URL, "http://"), Insecure: true,
+		LeaseKey: bytes.Repeat([]byte{0x42}, 32), Random: bytes.NewReader(bytes.Repeat([]byte{0x26}, 4096)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := backend.BeginUpload(context.Background(), objectstore.UploadRequest{
+		UploadID: "zero", Key: objectstore.MustKey("endlessfs/v1/staging/user/zero/data"),
+		Size: 0, MediaType: "application/octet-stream", Resumable: true, ExpiresAt: time.Now().UTC().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := backend.ResumeUpload(context.Background(), handle.Lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, capability := range []objectstore.UploadCapability{handle.Capability, resumed} {
+		if capability.Framing != domain.UploadFramingContentRange {
+			t.Fatalf("empty object framing = %s, want content-range", capability.Framing)
+		}
+	}
+	before, err := backend.UploadProgress(context.Background(), handle.Lease)
+	if err != nil || before.Complete {
+		t.Fatalf("untransferred empty object reported complete: %+v, %v", before, err)
+	}
+	fake.mu.Lock()
+	objects, probes := len(fake.objects), fake.sessionStatusAttempts
+	fake.mu.Unlock()
+	if objects != 0 || probes != 0 {
+		t.Fatalf("status performed finalization: objects=%d probes=%d", objects, probes)
+	}
+	request, _ := http.NewRequest(http.MethodPut, resumed.URL, http.NoBody)
+	request.Header.Set("Content-Range", "bytes */0")
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("empty object PUT = %d", response.StatusCode)
+	}
+	progress, err := backend.UploadProgress(context.Background(), handle.Lease)
+	if err != nil || !progress.Complete || progress.Size != 0 {
+		t.Fatalf("empty progress = %+v, %v", progress, err)
+	}
+}
+
+func TestContractGCSRejectsAndRevokesInitiationWithoutCORS(t *testing.T) {
+	_, fake := newGCSServerWithFake(t)
+	fake.allowedOrigin = "https://drive.example"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recorded := httptest.NewRecorder()
+		fake.ServeHTTP(recorded, r)
+		if r.Method == http.MethodPost {
+			recorded.Header().Del("Access-Control-Allow-Origin")
+		}
+		for name, values := range recorded.Header() {
+			w.Header()[name] = values
+		}
+		w.WriteHeader(recorded.Code)
+		_, _ = w.Write(recorded.Body.Bytes())
+	}))
+	t.Cleanup(server.Close)
+	fake.baseURL = server.URL
+	backend, err := gcstransport.NewWithTransfers(protocolClient(t, server), "endlessfs-test", gcstransport.TransferOptions{
+		AllowedOrigin: "https://drive.example", HTTPClient: server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com",
+		SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x5a}, 256), nil },
+		Hostname:  strings.TrimPrefix(server.URL, "http://"), Insecure: true,
+		LeaseKey: bytes.Repeat([]byte{0x42}, 32), Random: bytes.NewReader(bytes.Repeat([]byte{0x26}, 4096)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := backend.BeginUpload(context.Background(), objectstore.UploadRequest{
+		UploadID: "cors-denied", Key: objectstore.MustKey("endlessfs/v1/staging/user/cors-denied/data"),
+		Size: 1, MediaType: "text/plain", Resumable: true, ExpiresAt: time.Now().UTC().Add(time.Minute),
+	})
+	if !errors.Is(err, domain.ErrPreconditionFailed) || handle.Capability.URL != "" {
+		t.Fatalf("unreadable initiation was exposed: %v", err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.sessions) != 0 || len(fake.objects) != 0 {
+		t.Fatal("rejected initiation retained an upload session or object")
 	}
 }

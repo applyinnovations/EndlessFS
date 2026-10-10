@@ -85,6 +85,27 @@ func (s *FileStore) CreateUpload(ctx context.Context, scope domain.Scope, reques
 	return s.createUpload008(ctx, scope, request)
 }
 
+func (s *FileStore) ResumeUpload(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) (domain.UploadCapability, error) {
+	if err := validateFileRequest(ctx, scope); err != nil {
+		return domain.UploadCapability{}, err
+	}
+	if uploadID == "" {
+		return domain.UploadCapability{}, domain.NewError(domain.ErrorInvalid, "upload ID is required")
+	}
+	record, _, err := s.portableUpload(ctx, scope.UserID(), string(uploadID))
+	if err != nil {
+		return domain.UploadCapability{}, err
+	}
+	if record.Area != areaName(scope.Area()) {
+		return domain.UploadCapability{}, domain.NewError(domain.ErrorNotFound, "upload does not exist")
+	}
+	capability, err := s.resumePortableUpload(ctx, record)
+	if err == nil && record.Batch != nil {
+		capability.BatchID, capability.BatchIndex, capability.BatchCount = record.Batch.BatchID, record.Batch.Index, record.Batch.Count
+	}
+	return capability, err
+}
+
 func (s *FileStore) CreateUploadBatch(ctx context.Context, scope domain.Scope, requests []domain.CreateUploadRequest) ([]domain.UploadCapability, error) {
 	if err := validateFileRequest(ctx, scope); err != nil {
 		return nil, err

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -114,6 +115,30 @@ func TestProviderBudgetTrashAndRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("file-upload-status-active-schema-011")
+
+	stateLedger.Reset()
+	fileLedger.Reset()
+	resumed, err := service.ResumeUpload(ctx, user, capability.UploadID)
+	if err != nil || resumed.UploadID != capability.UploadID || resumed.URL != capability.URL {
+		t.Fatalf("resume changed admission: %v", err)
+	}
+	for _, event := range stateLedger.Events() {
+		if event.Kind != providerbudget.RequestObjectGet && event.Kind != providerbudget.RequestObjectHead {
+			t.Fatalf("resume mutated state: %+v", event)
+		}
+	}
+	fileEvents := fileLedger.Events()
+	if len(fileEvents) != 1 || fileEvents[0].Kind != providerbudget.RequestUploadResume {
+		t.Fatalf("resume reallocated or transferred file data: %+v", fileEvents)
+	}
+	resumeEvents := append(stateLedger.Events(), fileEvents...)
+	calibrated, err := providerbudget.Calibrate("file-resume-upload-schema-011", modelEconomics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, resumeEvents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(calibrated)
+	t.Logf("resume calibration: %s", encoded)
+	check("file-resume-upload-schema-011")
 
 	upload, err := http.NewRequestWithContext(ctx, capability.Method, capability.URL, strings.NewReader("payload"))
 	if err != nil {

@@ -511,6 +511,19 @@ type DownloadCapability struct {
 - API responses containing capabilities MUST use `Cache-Control: no-store`.
 - Capability values MUST be redacted from logs, metrics, traces, error messages, and referrers.
 - The browser MUST send only the returned method and allowlisted headers to the returned URL.
+- Upload status distinguishes provider-verified `dataComplete` from completed
+  namespace publication, including zero-byte objects. A lost data-plane response
+  MUST be reconciled against that status before retransmitting or reallocating.
+- `POST /api/v1/uploads/{uploadID}/resume` authenticates the existing owner,
+  requires CSRF and exact origin, and accepts only an empty object. It reuses the
+  original session and expiry; it does not allocate another destination, renew
+  authority, or publish the file. Terminal and foreign sessions are denied.
+- Zero-byte GCS status uses metadata lookup only: `Content-Range: bytes */0`
+  is an explicit zero-byte finalization, not a read-only progress probe.
+  GCS initiation must return the configured origin's
+  CORS header; an unreadable initiation is revoked and rejected before capability
+  disclosure. Operators must allow the initiation POST and subsequent data PUT
+  in the file bucket's CORS rule.
 - A capability MUST NOT grant list, overwrite-other-object, metadata-namespace, or cross-user access.
 
 ### 8.4 Application state store

@@ -1028,13 +1028,25 @@
       const mediaType = transferMediaType(transfer);
       const size = transferFileSize(transfer);
       if (!capability) {
-        await ensureTransferDirectories(transfer);
-        capability = await api("/api/v1/uploads", { method: "POST", headers: { "Idempotency-Key": transfer.id }, body: uploadInitializationRequest(transfer), signal: transfer.controller.signal });
+		if (transfer.uploadID) {
+		  const status = await api(`/api/v1/uploads/${encodeURIComponent(transfer.uploadID)}`);
+		  if (status.state === "completed" || status.dataComplete) {
+			transfer.confirmed = size;
+		  } else {
+			transfer.confirmed = status.confirmedOffset;
+			capability = await api(`/api/v1/uploads/${encodeURIComponent(transfer.uploadID)}/resume`, { method: "POST", body: {}, signal: transfer.controller.signal });
+		  }
+		} else {
+		  await ensureTransferDirectories(transfer);
+		  capability = await api("/api/v1/uploads", { method: "POST", headers: { "Idempotency-Key": transfer.id }, body: uploadInitializationRequest(transfer), signal: transfer.controller.signal });
+		}
       }
-      transfer.uploadID = capability.uploadID;
-	  transfer.batchID = capability.batchID || transfer.batchID || "";
-	  transfer.batchIndex = Number.isSafeInteger(capability.batchIndex) ? capability.batchIndex : (transfer.batchIndex || 0);
-	  transfer.batchCount = Number.isSafeInteger(capability.batchCount) ? capability.batchCount : (transfer.batchCount || 0);
+	  if (capability) {
+		transfer.uploadID = capability.uploadID;
+		transfer.batchID = capability.batchID || transfer.batchID || "";
+		transfer.batchIndex = Number.isSafeInteger(capability.batchIndex) ? capability.batchIndex : (transfer.batchIndex || 0);
+		transfer.batchCount = Number.isSafeInteger(capability.batchCount) ? capability.batchCount : (transfer.batchCount || 0);
+	  }
       transitionTransfer(transfer, "uploading");
       beginTransferMeasurement(transfer);
       updateTransferGroup(transfer.groupID, false);
@@ -1042,7 +1054,7 @@
 	  const fingerprintPromise = transfer.md5 && transfer.crc32c
 		? Promise.resolve({ md5: transfer.md5, crc32c: transfer.crc32c })
 		: fingerprintUploadFile(transfer);
-	  await sendFileData(transfer, capability);
+	  if (capability) await sendFileData(transfer, capability);
 	  const fingerprint = await fingerprintPromise;
 	  transfer.md5 = fingerprint.md5;
 	  transfer.crc32c = fingerprint.crc32c;
@@ -1178,7 +1190,7 @@
         continue;
       }
       const status = await api(`/api/v1/uploads/${encodeURIComponent(capability.uploadID)}`);
-      if (status.state === "completed") {
+      if (status.state === "completed" || status.dataComplete) {
         recordTransferProgress(transfer, size);
         return;
       }
@@ -1187,13 +1199,14 @@
         terminal.name = "TerminalUploadError";
         throw terminal;
       }
+      const priorOffset = offset;
       offset = status.confirmedOffset;
       recordTransferProgress(transfer, offset);
-      failures += 1;
+      failures = offset > priorOffset ? 0 : failures + 1;
       transfer.recoveryFailures = failures;
       scheduleTransferRender();
       if (failures > 3) throw new TypeError("Upload interrupted after three recovery attempts.");
-      await new Promise((resolve) => window.setTimeout(resolve, 250 * (2 ** (failures - 1)) + Math.floor(Math.random() * 100)));
+      if (failures) await new Promise((resolve) => window.setTimeout(resolve, 250 * (2 ** (failures - 1)) + Math.floor(Math.random() * 100)));
     }
   }
 

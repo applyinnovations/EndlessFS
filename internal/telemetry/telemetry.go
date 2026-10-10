@@ -216,6 +216,7 @@ var routes = [...]string{
 	"POST /api/v1/uploads/plan/sizes",
 	"POST /api/v1/uploads/plan/fingerprints",
 	"GET /api/v1/uploads/{uploadID}",
+	"POST /api/v1/uploads/{uploadID}/resume",
 	"POST /api/v1/uploads/{uploadID}/complete",
 	"DELETE /api/v1/uploads/{uploadID}",
 	"POST /api/v1/downloads",

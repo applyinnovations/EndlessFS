@@ -154,6 +154,18 @@ func (b *Backend) BeginUpload(ctx context.Context, request objectstore.UploadReq
 		return objectstore.UploadHandle{}, err
 	}
 	lease.SessionURL = sessionURL
+	if b.transfer.allowedOrigin != "" && response.Header.Get("Access-Control-Allow-Origin") != b.transfer.allowedOrigin {
+		// Initiation itself must be covered by bucket CORS (including POST).
+		// Do not hand the browser an unreadable session or retain its authority.
+		sealed, sealErr := b.sealLease(lease)
+		if sealErr != nil {
+			return objectstore.UploadHandle{}, sealErr
+		}
+		if abortErr := b.AbortUpload(ctx, sealed); abortErr != nil {
+			return objectstore.UploadHandle{}, abortErr
+		}
+		return objectstore.UploadHandle{}, domain.NewError(domain.ErrorPreconditionFailed, "GCS bucket CORS does not allow upload initiation from the application origin")
+	}
 	capability.URL = sessionURL
 	capability.Method = http.MethodPut
 	capability.Framing = domain.UploadFramingContentRange
@@ -191,7 +203,9 @@ func (b *Backend) UploadProgress(ctx context.Context, sealed []byte) (objectstor
 	if !errors.Is(headErr, domain.ErrNotFound) {
 		return objectstore.UploadProgress{}, headErr
 	}
-	if lease.Protocol == domain.UploadSingle {
+	// For an empty resumable session, bytes */0 is finalization. A status
+	// lookup must not send it: only an already materialized object is complete.
+	if lease.Protocol == domain.UploadSingle || lease.Size == 0 {
 		return objectstore.UploadProgress{Size: lease.Size, ExpiresAt: lease.ExpiresAt}, nil
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, lease.SessionURL, http.NoBody)

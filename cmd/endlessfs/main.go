@@ -39,6 +39,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 	"github.com/applyinnovations/endlessfs/internal/theme"
 )
 
@@ -69,6 +70,8 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	if ctx.Err() != nil {
 		return nil
 	}
+	ctx, stopTelemetry := startTelemetry(ctx, logger, cfg.Telemetry)
+	defer stopTelemetry()
 	ids := domain.SystemIDGenerator()
 	clock := domain.SystemClock{}
 	secretBytes, err := base64.RawURLEncoding.DecodeString(cfg.SessionSecret.Reveal())
@@ -83,7 +86,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 		return err
 	}
 	writeTimeout := controlWriteTimeout(previewEnabled, cfg.PreviewOperationTimeout)
-	server, controlListener, startupHandler, controlErrors, err := startControlServer(cfg.ListenAddr, writeTimeout, logger)
+	server, controlListener, startupHandler, controlErrors, err := startControlServer(ctx, cfg.ListenAddr, writeTimeout, logger)
 	if err != nil {
 		return err
 	}
@@ -151,12 +154,27 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 		return domain.NewError(domain.ErrorInvalid, "unsupported storage provider")
 	}
 	defer closeBackend()
-	engine, err := portable.Open(ctx, portable.Options{
+	if fileBackend == nil {
+		backend = objectstore.Observe(backend, telemetry.Shared)
+	} else {
+		backend = objectstore.Observe(backend, telemetry.State)
+		fileBackend = objectstore.Observe(fileBackend, telemetry.Files)
+	}
+	openContext, opening := telemetry.Start(ctx, telemetry.Migration, telemetry.Shared)
+	engine, err := portable.Open(openContext, portable.Options{
 		Backend: backend, FileBackend: fileBackend, Clock: clock, IDs: ids,
 		Writer:   writerConfiguration,
 		LeaseTTL: 2 * time.Minute, UploadTTL: cfg.UploadInitTTL, DownloadTTL: cfg.DownloadCapabilityTTL,
 		CursorKey: deriveKey("endlessfs-state-cursor-key-v1", secretBytes),
 		MigrationObserver: func(progress portable.MigrationProgress) {
+			role := telemetry.Application
+			switch progress.Role {
+			case "state":
+				role = telemetry.State
+			case "file":
+				role = telemetry.Files
+			}
+			telemetry.From(ctx).MigrationProgress(progress.Stage, role, progress.CompletedObjects, progress.TotalObjects, progress.ResumedObjects, progress.CompletedBytes, progress.TotalBytes)
 			logger.Info("storage_migration_progress",
 				"migrationID", progress.MigrationID, "stage", progress.Stage, "role", progress.Role,
 				"completedObjects", progress.CompletedObjects, "totalObjects", progress.TotalObjects,
@@ -165,6 +183,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 			)
 		},
 	})
+	opening.End(err)
 	if err != nil {
 		return err
 	}
@@ -222,8 +241,9 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 				_ = previewBackend.Close()
 				return enableErr
 			}
+			observedPreview := objectstore.Observe(previewBackend, telemetry.Previews)
 			previewStore, err = previewdurable.New(previewdurable.Options{
-				Backend: previewBackend, Transfers: previewBackend, Clock: clock, IDs: ids,
+				Backend: observedPreview, Transfers: observedPreview.(objectstore.DirectTransferBackend), Clock: clock, IDs: ids,
 				Key: cfg.PreviewKeySecret, CapabilityTTL: cfg.DownloadCapabilityTTL,
 				DataOrigin: dataOrigin, AllowedOrigin: cfg.AllowedOrigin, HTTPClient: http.DefaultClient,
 			})
@@ -279,6 +299,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 			return domain.NewError(domain.ErrorUnavailable, "preview generator worker is unavailable")
 		}
 		previewService, err = preview.NewService(preview.Options{
+			Telemetry:        telemetry.From(ctx),
 			Automatic:        cfg.PreviewAutomatic,
 			MaxAge:           cfg.PreviewAutoMaxAge,
 			MaxSourceBytes:   cfg.PreviewAutoMaxSourceBytes,

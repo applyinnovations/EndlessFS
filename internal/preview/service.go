@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 	"io"
 	"net/http"
 	"slices"
@@ -44,6 +45,7 @@ const (
 )
 
 type Options struct {
+	Telemetry          *telemetry.Observer
 	Automatic          bool
 	MaxAge             *time.Duration
 	MaxSourceBytes     *int64
@@ -215,7 +217,7 @@ func NewService(options Options, source provider.Storage, store Store, generator
 		return nil, err
 	}
 	seenCapabilities := make(map[string]bool)
-	startupContext, cancel := context.WithTimeout(context.Background(), options.StartupTimeout)
+	startupContext, cancel := context.WithTimeout(telemetry.Context(context.Background(), options.Telemetry), options.StartupTimeout)
 	defer cancel()
 	for _, generator := range generators {
 		if generator == nil || generator.Capability() == "" || seenCapabilities[generator.Capability()] {
@@ -1189,10 +1191,14 @@ func (s *Service) generateOnce(ctx context.Context, scope domain.Scope, entry do
 	return call.waitingFor, call.err
 }
 
-func (s *Service) generate(ctx context.Context, scope domain.Scope, entry domain.Entry, binding Binding, generator Generator, force bool) (string, error) {
+func (s *Service) generate(ctx context.Context, scope domain.Scope, entry domain.Entry, binding Binding, generator Generator, force bool) (outcome string, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.PreviewGenerate, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
 	operationContext, cancel := context.WithTimeout(ctx, s.options.OperationTimeout)
 	defer cancel()
-	release, err := s.acquire(operationContext, scope.UserID())
+	queueContext, queued := telemetry.Start(operationContext, telemetry.PreviewQueue, telemetry.Application)
+	release, err := s.acquire(queueContext, scope.UserID())
+	queued.End(err)
 	if err != nil {
 		return "", err
 	}
@@ -1223,36 +1229,14 @@ func (s *Service) generate(ctx context.Context, scope domain.Scope, entry domain
 	committed := false
 	defer func() {
 		if !committed {
-			releaseContext, releaseCancel := context.WithTimeout(context.Background(), s.options.StartupTimeout)
+			releaseContext, releaseCancel := context.WithTimeout(context.WithoutCancel(operationContext), s.options.StartupTimeout)
 			defer releaseCancel()
 			_ = s.store.Release(releaseContext, binding, claim)
 		}
 	}()
-	capability, err := s.source.CreateDownload(operationContext, scope, domain.CreateDownloadRequest{Path: entry.Path, Version: entry.Version, Disposition: domain.DispositionInline})
+	sourceBytes, err := s.fetchSource(operationContext, scope, entry)
 	if err != nil {
 		return "", err
-	}
-	request, err := http.NewRequestWithContext(operationContext, capability.Method, capability.URL, nil)
-	if err != nil {
-		return "", domain.WrapError(domain.ErrorInternal, "could not construct preview source request", err)
-	}
-	for name, value := range capability.Headers {
-		request.Header.Set(name, value)
-	}
-	response, err := s.client.Do(request)
-	if err != nil {
-		return "", domain.WrapError(domain.ErrorUnavailable, "preview source unavailable", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return "", domain.NewError(domain.ErrorUnavailable, "preview source unavailable")
-	}
-	sourceBytes, err := io.ReadAll(io.LimitReader(response.Body, s.options.HardMaxSourceBytes+1))
-	if err != nil {
-		return "", domain.WrapError(domain.ErrorUnavailable, "preview source unavailable", err)
-	}
-	if int64(len(sourceBytes)) > s.options.HardMaxSourceBytes || int64(len(sourceBytes)) != entry.Size {
-		return "", domain.NewError(domain.ErrorInvalid, "preview source exceeds hard limits")
 	}
 	generated, err := generator.Generate(operationContext, GenerationRequest{Source: bytes.NewReader(sourceBytes), SourceSize: entry.Size, MediaType: entry.MediaType, Variant: binding.Variant})
 	if err != nil {
@@ -1270,7 +1254,11 @@ func (s *Service) generate(ctx context.Context, scope domain.Scope, entry domain
 	if !artifact.ValidFor(binding) {
 		return "", domain.NewError(domain.ErrorInvalid, "preview generator produced invalid artifact")
 	}
-	if err := s.store.Commit(operationContext, binding, claim, artifact); err != nil {
+	persistContext, persisted := telemetry.Start(operationContext, telemetry.PreviewPersist, telemetry.Previews)
+	commitErr := s.store.Commit(persistContext, binding, claim, artifact)
+	persisted.Bytes(0, artifact.Size)
+	persisted.End(commitErr)
+	if err := commitErr; err != nil {
 		return "", err
 	}
 	committed = true
@@ -1342,4 +1330,38 @@ func stateErrorKind(state State) domain.ErrorKind {
 		return domain.ErrorUnavailable
 	}
 	return domain.ErrorInvalid
+}
+
+func (s *Service) fetchSource(ctx context.Context, scope domain.Scope, entry domain.Entry) (outcome []byte, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.PreviewSource, telemetry.Files)
+	defer telemetry.Finish(activity, &err)
+	capability, err := s.source.CreateDownload(ctx, scope, domain.CreateDownloadRequest{Path: entry.Path, Version: entry.Version, Disposition: domain.DispositionInline})
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, capability.Method, capability.URL, nil)
+	if err != nil {
+		return nil, domain.WrapError(domain.ErrorInternal, "could not construct preview source request", err)
+	}
+	for name, value := range capability.Headers {
+		request.Header.Set(name, value)
+	}
+	response, err := s.client.Do(request)
+	if err != nil {
+		return nil, domain.WrapError(domain.ErrorUnavailable, "preview source unavailable", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, domain.NewError(domain.ErrorUnavailable, "preview source unavailable")
+	}
+	sourceBytes, err := io.ReadAll(io.LimitReader(response.Body, s.options.HardMaxSourceBytes+1))
+	activity.Bytes(int64(len(sourceBytes)), 0)
+	if err != nil {
+		return nil, domain.WrapError(domain.ErrorUnavailable, "preview source unavailable", err)
+	}
+	if int64(len(sourceBytes)) > s.options.HardMaxSourceBytes || int64(len(sourceBytes)) != entry.Size {
+		return nil, domain.NewError(domain.ErrorInvalid, "preview source exceeds hard limits")
+	}
+
+	return sourceBytes, nil
 }

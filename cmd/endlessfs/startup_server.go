@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"net/http"
@@ -42,13 +43,14 @@ func (handler *startupControlHandler) ServeHTTP(response http.ResponseWriter, re
 	_, _ = response.Write([]byte("starting\n"))
 }
 
-func startControlServer(listenAddress string, writeTimeout time.Duration, logger *slog.Logger) (*http.Server, net.Listener, *startupControlHandler, <-chan error, error) {
+func startControlServer(ctx context.Context, listenAddress string, writeTimeout time.Duration, logger *slog.Logger) (*http.Server, net.Listener, *startupControlHandler, <-chan error, error) {
 	listener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
 	handler := &startupControlHandler{}
 	server := &http.Server{
+		BaseContext:       func(net.Listener) context.Context { return context.WithoutCancel(ctx) },
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,

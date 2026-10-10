@@ -19,6 +19,8 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
+	googletransport "google.golang.org/api/transport/http"
 )
 
 const versionPrefix = "gcs-v1."
@@ -68,7 +70,13 @@ func Open(ctx context.Context, bucket string) (*Backend, error) {
 	if err := validateBucket(bucket); err != nil {
 		return nil, err
 	}
-	client, err := storage.NewClient(ctx, storage.WithJSONReads())
+	// Preserve both scopes used by storage.NewClient, including IAM signBlob.
+	httpClient, _, err := googletransport.NewClient(ctx, option.WithScopes(storage.ScopeFullControl, "https://www.googleapis.com/auth/cloud-platform"), option.WithTelemetryDisabled())
+	if err != nil {
+		return nil, domain.WrapError(domain.ErrorUnavailable, "GCS credentials unavailable", err)
+	}
+	httpClient.Transport = observedTransport{base: httpClient.Transport}
+	client, err := storage.NewClient(ctx, storage.WithJSONReads(), storage.WithDisabledClientMetrics(), option.WithHTTPClient(httpClient), option.WithTelemetryDisabled())
 	if err != nil {
 		return nil, domain.WrapError(domain.ErrorUnavailable, "GCS client initialization failed", err)
 	}

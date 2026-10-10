@@ -2,7 +2,39 @@
 
 This guide covers the provider-portable, multi-replica v1 runtime and its locally qualified GCS adapter. Local protocol qualification is not live-service or production-readiness validation.
 
-## Runtime model
+## Operator observability
+
+Backend metric collection is local and bounded. Configure export/listener
+settings separately from storage correctness; replicas may use different
+observability settings without changing their canonical writer identity.
+
+| Environment setting | Behavior |
+| --- | --- |
+| `ENDLESSFS_DIAGNOSTICS_ADDR` | Disabled when empty. Explicit host:port for a separate private listener, e.g. `127.0.0.1:9090` for local access or an operator-restricted pod port. |
+| `ENDLESSFS_DIAGNOSTICS_TOKEN` | Independent canonical 256-bit bearer secret, required whenever diagnostics is enabled. Keep it in encrypted deployment secrets; provide it only in the Authorization header. |
+| `ENDLESSFS_OTLP_TRACES_ENDPOINT` | Disabled when empty. Full HTTP(S) collector URL ending in `/v1/traces`; no embedded credentials, query or fragment. Alloy's private OTLP HTTP receiver can be used. |
+| `ENDLESSFS_TRACE_SAMPLE_RATIO` | Finite 0–1 ratio; default 0.1. Metrics are independent of trace sampling. |
+
+Pull `/metrics` with Prometheus/Alloy. Pull binary `/debug/pprof/profile?seconds=10`,
+`/debug/pprof/heap`, and `/debug/pprof/allocs` with the same header authentication
+for Pyroscope or operator profiling. Do not add a public ingress or reuse the
+session-signing secret. Captures are bounded and serialized; unsupported debug
+paths/query parameters fail closed. Traces export in bounded best-effort batches;
+collector failures and diagnostic bind failures leave application readiness and
+mutations available. Inspect the drop/export-failure counters for missing data.
+
+Provider logical-operation metrics and GCS wire-attempt metrics are distinct;
+do not sum both as billed requests. Byte totals are operation payload counts,
+not network/TLS traffic or provider pricing evidence. Decode output totals mean
+expanded metadata. Completed preview-child RSS/CPU differs from the parent Go
+heap and from total container working set. Retain Kubernetes resource/OOM
+metrics and client network monitoring for direct browser transfers.
+
+See [observability evidence](./operational-observability-evidence.md) for signal
+coverage, privacy proofs, queue/capture bounds, measurements and remaining
+deployment qualification.
+
+## Storage runtime model
 
 EndlessFS runs one Go control-plane binary. Application use cases always use one portable storage engine; only the thin atomic-object backends change. The `mock` backend holds canonical records in memory and starts empty after a restart. The `gcs` backend stores the same canonical keys and bodies in a private state/file storage set. By default both authoritative roles use one bucket. `ENDLESSFS_GCS_STATE_BUCKET` can select a distinct bucket for state, filesystem metadata, operations, leases, and checkpoints; immutable blobs, unpublished direct-final uploads, and decode-only legacy upload staging remain in `ENDLESSFS_GCS_FILE_BUCKET`. Optional generated previews use provider-neutral preview-store semantics over the same thin object-store interface, with a separate disposable GCS bucket rather than duplicating the transport adapter.
 

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 	"sort"
 	"strings"
 	"time"
@@ -245,7 +246,9 @@ func (store *consistencyDomainStore) mutateAtHead(ctx context.Context, reference
 	return store.mutatePrepared(ctx, reference, mutation, initial, nil)
 }
 
-func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, reference consistencyDomainRef, mutation consistencyDomainMutation, initial *consistencyDomainHeadSnapshot, preparedSession *consistencyDomainTreeSession) (consistencyDomainOutcome, error) {
+func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, reference consistencyDomainRef, mutation consistencyDomainMutation, initial *consistencyDomainHeadSnapshot, preparedSession *consistencyDomainTreeSession) (outcome consistencyDomainOutcome, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.DomainCommit, telemetry.State)
+	defer telemetry.Finish(activity, &err)
 	if err := validateConsistencyDomainRef(reference); err != nil {
 		return consistencyDomainOutcome{}, err
 	}
@@ -369,9 +372,11 @@ func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, referen
 			}
 		}
 		if putErr != nil {
+			recoveryContext, recovering := telemetry.Start(ctx, telemetry.DomainRecovery, telemetry.State)
 			// Conditional responses can be lost. The canonical head, rather
 			// than the transport result, decides whether this exact intent won.
-			recovered, loadErr := store.loadHead(ctx, reference)
+			recovered, loadErr := store.loadHead(recoveryContext, reference)
+			recovering.End(loadErr)
 			if loadErr == nil {
 				if outcome, found, outcomeErr := store.lookupOutcomeAtHead(ctx, reference, recovered.head, mutation.ID); outcomeErr != nil {
 					return consistencyDomainOutcome{}, outcomeErr
@@ -396,6 +401,8 @@ func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, referen
 				// revalidation and return their portable semantic error above.
 				advanced := recovered.exists != snapshot.exists || recovered.object.Version != snapshot.object.Version
 				if advanced && !recovered.head.Frozen && (errors.Is(putErr, domain.ErrConflict) || errors.Is(putErr, domain.ErrPreconditionFailed)) {
+					_, retry := telemetry.Start(ctx, telemetry.DomainRetry, telemetry.State)
+					retry.EndResult(telemetry.Conflict)
 					firstSnapshot = &recovered
 					continue
 				}
@@ -411,7 +418,9 @@ func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, referen
 // It is the bounded provider-call path for product-scale transactions: the
 // head carries roots and one compact outcome, never one value per selected
 // item. Callers retry from a fresh authenticated view after a real CAS race.
-func (store *consistencyDomainStore) mutateMaterializedPrepared(ctx context.Context, reference consistencyDomainRef, mutation consistencyDomainMutation, snapshot *consistencyDomainHeadSnapshot, session *consistencyDomainTreeSession) (consistencyDomainOutcome, error) {
+func (store *consistencyDomainStore) mutateMaterializedPrepared(ctx context.Context, reference consistencyDomainRef, mutation consistencyDomainMutation, snapshot *consistencyDomainHeadSnapshot, session *consistencyDomainTreeSession) (outcome consistencyDomainOutcome, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.DomainCommit, telemetry.State)
+	defer telemetry.Finish(activity, &err)
 	if err := validateConsistencyDomainRef(reference); err != nil || snapshot == nil || session == nil || !snapshot.exists || !snapshot.head.Registered || snapshot.head.DomainID != reference.ID || snapshot.head.Kind != reference.Kind {
 		if err != nil {
 			return consistencyDomainOutcome{}, err

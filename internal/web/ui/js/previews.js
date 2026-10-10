@@ -284,7 +284,9 @@
       throw error;
     }
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-    clearToast();
+    // An earlier viewer fetch may finish while regeneration is polling. Its
+    // image must not erase the newer operation's progress notification.
+    if (!byID("preview-regenerate").disabled && !byID("preview-generate").disabled) clearToast();
     byID("preview-content").replaceChildren(image);
   }
 
@@ -312,6 +314,7 @@
       if (operation.state === "succeeded" && operation.result) {
         state.previewGenerationRequests.delete(requestIdentity);
         await displayViewerResult(entry, operation.result, state.viewerController.signal, variant);
+        clearToast();
       } else if (operation.state === "failed") {
         state.previewGenerationRequests.delete(requestIdentity);
         showActionErrorToast(regenerate ? "Regenerate preview" : "Generate preview", null, "Preview generation did not complete. Try again.");

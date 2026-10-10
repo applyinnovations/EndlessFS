@@ -3,6 +3,7 @@ package storageformat
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -97,7 +98,7 @@ func TestDomainPagePackCanonicalRoundTripAndFailClosedEnvelope(t *testing.T) {
 	if err != nil || !bytes.Equal(body, second) {
 		t.Fatalf("deterministic encoding = %v, equal=%v", err, bytes.Equal(body, second))
 	}
-	decoded, err := DecodeDomainPagePack(body, pack.DomainID, pack.Kind, pack.PackID)
+	decoded, err := DecodeDomainPagePack(context.Background(), body, pack.DomainID, pack.Kind, pack.PackID)
 	if err != nil || len(decoded.Pages) != 1 || decoded.Pages[0].Digest != pack.Pages[0].Digest {
 		t.Fatalf("round trip = %+v, %v", decoded, err)
 	}
@@ -119,7 +120,7 @@ func TestDomainPagePackCanonicalRoundTripAndFailClosedEnvelope(t *testing.T) {
 		"expanded-limit": oversized,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := DecodeDomainPagePack(candidate, pack.DomainID, pack.Kind, pack.PackID); !errors.Is(err, domain.ErrInvalid) {
+			if _, err := DecodeDomainPagePack(context.Background(), candidate, pack.DomainID, pack.Kind, pack.PackID); !errors.Is(err, domain.ErrInvalid) {
 				t.Fatalf("error = %v, want invalid", err)
 			}
 		})
@@ -134,7 +135,7 @@ func TestDomainPagePackCanonicalRoundTripAndFailClosedEnvelope(t *testing.T) {
 		"pack":   {domainID: pack.DomainID, kind: pack.Kind, packID: Digest([]byte("pack-b"))},
 	} {
 		t.Run("binding-"+name, func(t *testing.T) {
-			if _, err := DecodeDomainPagePack(body, binding.domainID, binding.kind, binding.packID); !errors.Is(err, domain.ErrInvalid) {
+			if _, err := DecodeDomainPagePack(context.Background(), body, binding.domainID, binding.kind, binding.packID); !errors.Is(err, domain.ErrInvalid) {
 				t.Fatalf("error = %v, want invalid", err)
 			}
 		})
@@ -201,7 +202,7 @@ func TestDomainPagePackRejectsInvalidCompressedAndCanonicalMembers(t *testing.T)
 		"member": encodeDomainPackPayload(t, payload),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := DecodeDomainPagePack(body, pack.DomainID, pack.Kind, pack.PackID); !errors.Is(err, domain.ErrInvalid) {
+			if _, err := DecodeDomainPagePack(context.Background(), body, pack.DomainID, pack.Kind, pack.PackID); !errors.Is(err, domain.ErrInvalid) {
 				t.Fatalf("error = %v", err)
 			}
 		})

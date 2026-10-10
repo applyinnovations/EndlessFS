@@ -3,7 +3,9 @@ package storageformat
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 	"io"
 	"sort"
 
@@ -55,7 +57,10 @@ func encodeValidatedDomainPagePack(pack DomainPagePack) ([]byte, error) {
 	return compressed, nil
 }
 
-func DecodeDomainPagePack(data []byte, expectedDomainID string, expectedKind ConsistencyDomainKind, expectedPackID string) (DomainPagePack, error) {
+func DecodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID string, expectedKind ConsistencyDomainKind, expectedPackID string) (outcome DomainPagePack, err error) {
+	_, activity := telemetry.Start(ctx, telemetry.MetadataPackDecode, telemetry.State)
+	defer telemetry.Finish(activity, &err)
+	activity.Bytes(int64(len(data)), 0)
 	if len(data) <= len(domainPagePackMagic) || len(data) > MaxDomainPagePackBytes || !bytes.Equal(data[:len(domainPagePackMagic)], domainPagePackMagic) {
 		return DomainPagePack{}, domain.NewError(domain.ErrorInvalid, "invalid consistency-domain page pack envelope")
 	}
@@ -64,6 +69,7 @@ func DecodeDomainPagePack(data []byte, expectedDomainID string, expectedKind Con
 		return DomainPagePack{}, domain.WrapError(domain.ErrorInvalid, "open consistency-domain page pack", err)
 	}
 	expanded, readErr := io.ReadAll(io.LimitReader(reader, MaxExpandedDomainPagePackBytes+1))
+	activity.Bytes(0, int64(len(expanded)))
 	closeErr := reader.Close()
 	if readErr != nil || closeErr != nil || len(expanded) == 0 || len(expanded) > MaxExpandedDomainPagePackBytes {
 		if readErr != nil {

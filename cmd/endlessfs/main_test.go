@@ -65,7 +65,7 @@ func TestRunStartsAndGracefullyStopsCompleteApplication(t *testing.T) {
 
 func TestStartupControlServerReportsLivenessWithoutClaimingReadiness(t *testing.T) {
 	logger := endlesslogging.NewJSON(io.Discard, slog.LevelDebug)
-	server, listener, handler, serveErrors, err := startControlServer("127.0.0.1:0", 30*time.Second, logger)
+	server, listener, handler, serveErrors, err := startControlServer(context.Background(), "127.0.0.1:0", 30*time.Second, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

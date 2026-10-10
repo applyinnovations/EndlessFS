@@ -3,6 +3,7 @@ package drive
 import (
 	"context"
 	"errors"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 	"strconv"
 	"strings"
 	"time"
@@ -171,7 +172,9 @@ func validateIdempotencyKey(key string) error {
 	return nil
 }
 
-func (s *Service) CreateUpload(ctx context.Context, userID domain.UserID, request domain.CreateUploadRequest) (domain.UploadCapability, error) {
+func (s *Service) CreateUpload(ctx context.Context, userID domain.UserID, request domain.CreateUploadRequest) (outcome domain.UploadCapability, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.UploadAdmission, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
 	if err := validateIdempotencyKey(request.IdempotencyKey); err != nil {
 		return domain.UploadCapability{}, err
 	}
@@ -182,7 +185,9 @@ func (s *Service) CreateUpload(ctx context.Context, userID domain.UserID, reques
 	return s.storage.CreateUpload(ctx, scope, request)
 }
 
-func (s *Service) CreateUploadBatch(ctx context.Context, userID domain.UserID, requests []domain.CreateUploadRequest) ([]domain.UploadCapability, error) {
+func (s *Service) CreateUploadBatch(ctx context.Context, userID domain.UserID, requests []domain.CreateUploadRequest) (outcome []domain.UploadCapability, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.UploadAdmission, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
 	if len(requests) < 1 || len(requests) > MaxUploadBatchItems {
 		return nil, domain.NewError(domain.ErrorInvalid, "upload batch must contain 1 to 10000 items")
 	}
@@ -198,7 +203,9 @@ func (s *Service) CreateUploadBatch(ctx context.Context, userID domain.UserID, r
 	return s.uploadBatch.CreateUploadBatch(ctx, scope, requests)
 }
 
-func (s *Service) PlanUploadSizes(ctx context.Context, userID domain.UserID, request domain.UploadSizePlanRequest) (domain.UploadSizePlan, error) {
+func (s *Service) PlanUploadSizes(ctx context.Context, userID domain.UserID, request domain.UploadSizePlanRequest) (outcome domain.UploadSizePlan, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.UploadSizes, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
 	planner, ok := s.storage.(provider.UploadPlanningStorage)
 	if !ok {
 		return domain.UploadSizePlan{}, domain.NewError(domain.ErrorUnavailable, "upload planning is not available")
@@ -206,7 +213,9 @@ func (s *Service) PlanUploadSizes(ctx context.Context, userID domain.UserID, req
 	return planner.PlanUploadSizes(ctx, userID, request)
 }
 
-func (s *Service) PlanUploadFingerprints(ctx context.Context, userID domain.UserID, request domain.UploadFingerprintPlanRequest) (domain.UploadFingerprintPlan, error) {
+func (s *Service) PlanUploadFingerprints(ctx context.Context, userID domain.UserID, request domain.UploadFingerprintPlanRequest) (outcome domain.UploadFingerprintPlan, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.UploadFingerprints, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
 	planner, ok := s.storage.(provider.UploadPlanningStorage)
 	if !ok {
 		return domain.UploadFingerprintPlan{}, domain.NewError(domain.ErrorUnavailable, "upload planning is not available")
@@ -214,7 +223,9 @@ func (s *Service) PlanUploadFingerprints(ctx context.Context, userID domain.User
 	return planner.PlanUploadFingerprints(ctx, userID, request)
 }
 
-func (s *Service) UploadStatus(ctx context.Context, userID domain.UserID, uploadID domain.UploadID) (domain.UploadStatus, error) {
+func (s *Service) UploadStatus(ctx context.Context, userID domain.UserID, uploadID domain.UploadID) (outcome domain.UploadStatus, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.UploadStatus, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
 	scope, err := liveScope(userID)
 	if err != nil {
 		return domain.UploadStatus{}, err
@@ -222,7 +233,9 @@ func (s *Service) UploadStatus(ctx context.Context, userID domain.UserID, upload
 	return s.storage.UploadStatus(ctx, scope, uploadID)
 }
 
-func (s *Service) CompleteUpload(ctx context.Context, userID domain.UserID, request domain.CompleteUploadRequest) (domain.Entry, error) {
+func (s *Service) CompleteUpload(ctx context.Context, userID domain.UserID, request domain.CompleteUploadRequest) (outcome domain.Entry, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.UploadCompletion, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
 	scope, err := liveScope(userID)
 	if err != nil {
 		return domain.Entry{}, err
@@ -230,7 +243,9 @@ func (s *Service) CompleteUpload(ctx context.Context, userID domain.UserID, requ
 	return s.storage.CompleteUpload(ctx, scope, request)
 }
 
-func (s *Service) CompleteUploadBatch(ctx context.Context, userID domain.UserID, request domain.CompleteUploadBatchRequest) (domain.CompleteUploadBatchResult, error) {
+func (s *Service) CompleteUploadBatch(ctx context.Context, userID domain.UserID, request domain.CompleteUploadBatchRequest) (outcome domain.CompleteUploadBatchResult, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.UploadCompletion, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
 	if len(request.Items) < 1 || len(request.Items) > MaxUploadBatchItems {
 		return domain.CompleteUploadBatchResult{}, domain.NewError(domain.ErrorInvalid, "upload completion batch must contain 1 to 10000 items")
 	}
@@ -244,7 +259,9 @@ func (s *Service) CompleteUploadBatch(ctx context.Context, userID domain.UserID,
 	return s.uploadTxn.CompleteUploadBatch(ctx, scope, request)
 }
 
-func (s *Service) AbortUpload(ctx context.Context, userID domain.UserID, uploadID domain.UploadID) error {
+func (s *Service) AbortUpload(ctx context.Context, userID domain.UserID, uploadID domain.UploadID) (err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.UploadCancellation, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
 	scope, err := liveScope(userID)
 	if err != nil {
 		return err
@@ -252,7 +269,9 @@ func (s *Service) AbortUpload(ctx context.Context, userID domain.UserID, uploadI
 	return s.storage.AbortUpload(ctx, scope, uploadID)
 }
 
-func (s *Service) AbortUploadBatch(ctx context.Context, userID domain.UserID, request domain.AbortUploadBatchRequest) error {
+func (s *Service) AbortUploadBatch(ctx context.Context, userID domain.UserID, request domain.AbortUploadBatchRequest) (err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.UploadCancellation, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
 	if len(request.UploadIDs) < 1 || len(request.UploadIDs) > MaxUploadBatchItems {
 		return domain.NewError(domain.ErrorInvalid, "upload cancellation batch must contain 1 to 10000 items")
 	}

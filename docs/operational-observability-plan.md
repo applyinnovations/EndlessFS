@@ -11,7 +11,11 @@ The current application emits structured request result/duration and migration
 events. Kubernetes metrics identify replica CPU, working set, readiness, and
 OOM termination. The GCS module closure already contains pinned OpenTelemetry
 v1.45.0 packages, but dependency presence does not prove application trace export.
-There is no complete application metrics/trace/profile implementation yet.
+The backend baseline now implements restricted metrics/aggregate profiles,
+manual application traces and bounded asynchronous lifecycle events. Its
+signal/failure/privacy qualification is recorded in
+`docs/operational-observability-evidence.md`. Live collector wiring, child
+profile streams and production load/profile overhead remain qualification gaps.
 
 The xlab deployment already provides Alloy OTLP receivers on 4317/4318, forwarding
 traces to Tempo, metrics to Mimir, and logs to Loki. Alloy also scrapes annotated
@@ -19,7 +23,12 @@ pods. Pyroscope is deployed, but its service/profile discovery returned no data
 for the October 8 upload incident. Reuse this infrastructure; a new monitoring
 stack is unnecessary.
 
-## First implementation: explain resource use and failures
+## Implementation and remaining diagnosis work
+
+The first baseline is implemented as recorded in the evidence. The following
+program remains the target for extending signal detail and deployment proof;
+source-size/pixel bands, individual codec sub-phases, continuous child profiles
+and live dashboard/collector correlation are not claimed complete.
 
 1. Add an operator-restricted diagnostics listener separate from public HTTP,
    shares, and direct file data. Expose bounded application metrics and only

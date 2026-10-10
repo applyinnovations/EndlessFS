@@ -20,6 +20,7 @@ import (
 
 	"github.com/applyinnovations/endlessfs/internal/preview"
 	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 	"github.com/deepteams/webp"
 )
 
@@ -51,9 +52,15 @@ func TestWorkerGeneratorRunsCodecOutOfProcessAndHonorsCancellation(t *testing.T)
 		t.Fatal(err)
 	}
 	input := encodePNG(t, image.NewNRGBA(image.Rect(0, 0, 32, 16)))
-	generated, err := worker.Generate(context.Background(), preview.GenerationRequest{Source: bytes.NewReader(input), SourceSize: int64(len(input)), MediaType: "image/png", Variant: 64})
+	observer := telemetry.New(nil, nil)
+	generated, err := worker.Generate(telemetry.Context(context.Background(), observer), preview.GenerationRequest{Source: bytes.NewReader(input), SourceSize: int64(len(input)), MediaType: "image/png", Variant: 64})
 	if err != nil || generated.Width != 32 || generated.Height != 16 {
 		t.Fatalf("worker Generate() = %+v, %v", generated, err)
+	}
+	var metrics bytes.Buffer
+	observer.WritePrometheus(&metrics)
+	if !strings.Contains(metrics.String(), `endlessfs_preview_child_exits_total{result="success"} 1`) || !strings.Contains(metrics.String(), `operation="preview.worker"`) {
+		t.Fatal("completed child did not report resource/lifecycle signals")
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()

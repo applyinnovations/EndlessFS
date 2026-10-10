@@ -14,6 +14,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/identity"
 	"github.com/applyinnovations/endlessfs/internal/preview"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 	"github.com/applyinnovations/endlessfs/internal/theme"
 	webassets "github.com/applyinnovations/endlessfs/internal/web"
 )
@@ -107,11 +108,14 @@ func newHandler(cfg config.PublicConfig, version string, secure bool, dataOrigin
 		})
 	}
 	mux.Handle("GET /", application)
+	mux.Handle("GET /debug/pprof/", http.NotFoundHandler())
+	mux.Handle("GET /metrics", http.NotFoundHandler())
 
 	handler := securityHeaders(mux, secure, dataOrigin, previewOrigin)
 	if logger != nil {
 		handler = requestLogMiddleware(handler, logger)
 	}
+	handler = telemetryMiddleware(handler, mux)
 	return requestIDMiddleware(handler)
 }
 
@@ -188,6 +192,7 @@ func requestLogMiddleware(next http.Handler, logger *slog.Logger) http.Handler {
 			route = "unmatched"
 		}
 		logger.InfoContext(r.Context(), "request_completed",
+			"traceID", telemetry.TraceID(r.Context()),
 			"requestID", requestID(r),
 			"route", route,
 			"status", status,

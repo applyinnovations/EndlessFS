@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 	"io"
 	"os"
 	"os/exec"
@@ -85,7 +86,9 @@ func (g *WorkerGenerator) SelfTest(ctx context.Context) error {
 	return nil
 }
 
-func (g *WorkerGenerator) Generate(ctx context.Context, request preview.GenerationRequest) (preview.GeneratedArtifact, error) {
+func (g *WorkerGenerator) Generate(ctx context.Context, request preview.GenerationRequest) (outcome preview.GeneratedArtifact, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.PreviewWorker, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
 	if err := ctx.Err(); err != nil {
 		return preview.GeneratedArtifact{}, err
 	}
@@ -107,7 +110,13 @@ func (g *WorkerGenerator) Generate(ctx context.Context, request preview.Generati
 	output := &boundedBuffer{maximum: maxWorkerOutput + maxWorkerHeader + 4}
 	command.Stdout = output
 	command.Stderr = io.Discard
-	if err := command.Run(); err != nil {
+	runErr := command.Run()
+	if command.ProcessState != nil {
+		if observer := telemetry.From(ctx); observer != nil {
+			observer.Worker(workerResources(command.ProcessState))
+		}
+	}
+	if err := runErr; err != nil {
 		if ctx.Err() != nil {
 			return preview.GeneratedArtifact{}, ctx.Err()
 		}

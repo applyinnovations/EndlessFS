@@ -422,8 +422,10 @@ func ProductionProviderRoutes() []ProductionRoute {
 }
 
 func LocalOnlyRoutes() []string {
+	// Public diagnostics paths are explicit local denials, never provider calls.
 	return []string{
 		"GET /healthz", "GET /readyz", "GET /api/v1/config", "GET /", "GET /s/{token}",
 		"GET /api/v1/themes", "GET /assets/themes/{digest}/{asset}",
+		"GET /metrics", "GET /debug/pprof/",
 	}
 }

@@ -98,7 +98,7 @@ func (session *consistencyDomainTreeSession) loadPack(ctx context.Context, packI
 	var pack map[string]storageformat.DomainPage
 	if err == nil {
 		var decoded storageformat.DomainPagePack
-		decoded, err = storageformat.DecodeDomainPagePack(object.Body, session.reference.ID, session.reference.Kind, packID)
+		decoded, err = storageformat.DecodeDomainPagePack(ctx, object.Body, session.reference.ID, session.reference.Kind, packID)
 		if err == nil {
 			pack = make(map[string]storageformat.DomainPage, len(decoded.Pages))
 			for _, packed := range decoded.Pages {
@@ -207,7 +207,7 @@ func (session *consistencyDomainTreeSession) flushPack(ctx context.Context) erro
 			return domain.NewError(domain.ErrorInvalid, "consistency-domain page pack identity collision")
 		}
 	}
-	decoded, err := storageformat.DecodeDomainPagePack(body, session.reference.ID, session.reference.Kind, packID)
+	decoded, err := storageformat.DecodeDomainPagePack(ctx, body, session.reference.ID, session.reference.Kind, packID)
 	if err != nil {
 		return err
 	}

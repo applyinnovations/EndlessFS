@@ -3,6 +3,7 @@ package storageformat
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -44,25 +45,25 @@ func TestPortableUploadLeaseSegmentCanonicalRoundTripAndBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := DecodePortableUploadLeaseSegment(body, value.BackendKind, value.OwnerID, value.BatchID, value.Segment)
+	decoded, err := DecodePortableUploadLeaseSegment(context.Background(), body, value.BackendKind, value.OwnerID, value.BatchID, value.Segment)
 	if err != nil || !bytes.Equal(decoded.Leases[0].Lease, value.Leases[0].Lease) {
 		t.Fatalf("round trip = %+v, %v", decoded, err)
 	}
 	for name, decode := range map[string]func() error{
 		"truncated": func() error {
-			_, err := DecodePortableUploadLeaseSegment(body[:len(body)-1], value.BackendKind, value.OwnerID, value.BatchID, value.Segment)
+			_, err := DecodePortableUploadLeaseSegment(context.Background(), body[:len(body)-1], value.BackendKind, value.OwnerID, value.BatchID, value.Segment)
 			return err
 		},
 		"owner": func() error {
-			_, err := DecodePortableUploadLeaseSegment(body, value.BackendKind, "other", value.BatchID, value.Segment)
+			_, err := DecodePortableUploadLeaseSegment(context.Background(), body, value.BackendKind, "other", value.BatchID, value.Segment)
 			return err
 		},
 		"batch": func() error {
-			_, err := DecodePortableUploadLeaseSegment(body, value.BackendKind, value.OwnerID, Digest([]byte("other")), value.Segment)
+			_, err := DecodePortableUploadLeaseSegment(context.Background(), body, value.BackendKind, value.OwnerID, Digest([]byte("other")), value.Segment)
 			return err
 		},
 		"segment": func() error {
-			_, err := DecodePortableUploadLeaseSegment(body, value.BackendKind, value.OwnerID, value.BatchID, 2)
+			_, err := DecodePortableUploadLeaseSegment(context.Background(), body, value.BackendKind, value.OwnerID, value.BatchID, 2)
 			return err
 		},
 	} {
@@ -101,7 +102,7 @@ func TestPortableUploadLeaseSegmentDecodeRejectsEveryEnvelopeBoundary(t *testing
 		"truncated":          body[:len(body)-2],
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := DecodePortableUploadLeaseSegment(candidate, value.BackendKind, value.OwnerID, value.BatchID, value.Segment); !errors.Is(err, domain.ErrInvalid) {
+			if _, err := DecodePortableUploadLeaseSegment(context.Background(), candidate, value.BackendKind, value.OwnerID, value.BatchID, value.Segment); !errors.Is(err, domain.ErrInvalid) {
 				t.Fatalf("error = %v, want invalid", err)
 			}
 		})
@@ -160,7 +161,7 @@ func TestPortableUploadLeaseSegmentsUseBoundedProgressAndOneTerminalCancellation
 	if err != nil {
 		t.Fatalf("encode cumulative cancellation segment: %v", err)
 	}
-	decoded, err := DecodePortableUploadLeaseSegment(body, terminal.BackendKind, terminal.OwnerID, terminal.BatchID, terminal.Segment)
+	decoded, err := DecodePortableUploadLeaseSegment(context.Background(), body, terminal.BackendKind, terminal.OwnerID, terminal.BatchID, terminal.Segment)
 	if err != nil || len(decoded.Leases) != count || decoded.Leases[count-1].Index != count-1 {
 		t.Fatalf("terminal cancellation index = %d leases, %v", len(decoded.Leases), err)
 	}

@@ -489,7 +489,7 @@ func (s *FileStore) runtimeUploadLeasesForRange(ctx context.Context, items []por
 			if getErr != nil {
 				return nil, getErr
 			}
-			segment, getErr = storageformat.DecodePortableUploadLeaseSegment(object.Body, transfers.BackendKind(), record.OwnerID, binding.batchID, binding.segment)
+			segment, getErr = storageformat.DecodePortableUploadLeaseSegment(ctx, object.Body, transfers.BackendKind(), record.OwnerID, binding.batchID, binding.segment)
 			if getErr != nil {
 				return nil, getErr
 			}

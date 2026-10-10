@@ -3,7 +3,9 @@ package storageformat
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 	"io"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
@@ -86,7 +88,10 @@ func EncodePortableUploadLeaseSegment(value PortableUploadLeaseSegment) ([]byte,
 	return compressed, nil
 }
 
-func DecodePortableUploadLeaseSegment(data []byte, backendKind, ownerID, batchID string, segment uint64) (PortableUploadLeaseSegment, error) {
+func DecodePortableUploadLeaseSegment(ctx context.Context, data []byte, backendKind, ownerID, batchID string, segment uint64) (outcome PortableUploadLeaseSegment, err error) {
+	_, activity := telemetry.Start(ctx, telemetry.MetadataLeaseDecode, telemetry.State)
+	defer telemetry.Finish(activity, &err)
+	activity.Bytes(int64(len(data)), 0)
 	if len(data) <= len(uploadLeaseSegmentMagic) || len(data) > MaxUploadLeaseSegmentBytes || !bytes.Equal(data[:len(uploadLeaseSegmentMagic)], uploadLeaseSegmentMagic) {
 		return PortableUploadLeaseSegment{}, domain.NewError(domain.ErrorInvalid, "invalid upload lease segment envelope")
 	}
@@ -95,6 +100,7 @@ func DecodePortableUploadLeaseSegment(data []byte, backendKind, ownerID, batchID
 		return PortableUploadLeaseSegment{}, domain.WrapError(domain.ErrorInvalid, "open upload lease segment", err)
 	}
 	expanded, readErr := io.ReadAll(io.LimitReader(reader, MaxExpandedUploadLeaseSegmentBytes+1))
+	activity.Bytes(0, int64(len(expanded)))
 	closeErr := reader.Close()
 	if readErr != nil || closeErr != nil || len(expanded) == 0 || len(expanded) > MaxExpandedUploadLeaseSegmentBytes {
 		return PortableUploadLeaseSegment{}, domain.NewError(domain.ErrorInvalid, "expand upload lease segment")

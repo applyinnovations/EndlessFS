@@ -231,7 +231,7 @@ func (s *FileStore) runtimeUploadLeaseForRecord(ctx context.Context, record stor
 	if err != nil {
 		return nil, objectstore.Object{}, err
 	}
-	segment, err := storageformat.DecodePortableUploadLeaseSegment(object.Body, transfers.BackendKind(), record.OwnerID, record.Batch.BatchID, segmentIndex)
+	segment, err := storageformat.DecodePortableUploadLeaseSegment(ctx, object.Body, transfers.BackendKind(), record.OwnerID, record.Batch.BatchID, segmentIndex)
 	if err != nil {
 		return nil, objectstore.Object{}, err
 	}
@@ -836,7 +836,7 @@ func (s *FileStore) ensurePortableUploadLeaseSegment(ctx context.Context, owner 
 	if !knownAbsent {
 		object, getErr := s.engine.backend.Get(ctx, key)
 		if getErr == nil {
-			stored, decodeErr := storageformat.DecodePortableUploadLeaseSegment(object.Body, transfers.BackendKind(), owner.String(), batchID, segmentIndex)
+			stored, decodeErr := storageformat.DecodePortableUploadLeaseSegment(ctx, object.Body, transfers.BackendKind(), owner.String(), batchID, segmentIndex)
 			if decodeErr != nil || stored.TotalCount != totalCount {
 				if decodeErr != nil {
 					return nil, nil, decodeErr
@@ -927,7 +927,7 @@ func (s *FileStore) ensurePortableUploadLeaseSegment(ctx context.Context, owner 
 		abortUploadHandles(ctx, transfers, handles)
 		return nil, nil, err
 	}
-	winner, err := storageformat.DecodePortableUploadLeaseSegment(winnerObject.Body, transfers.BackendKind(), owner.String(), batchID, segmentIndex)
+	winner, err := storageformat.DecodePortableUploadLeaseSegment(ctx, winnerObject.Body, transfers.BackendKind(), owner.String(), batchID, segmentIndex)
 	if err != nil {
 		abortUploadHandles(ctx, transfers, handles)
 		return nil, nil, err

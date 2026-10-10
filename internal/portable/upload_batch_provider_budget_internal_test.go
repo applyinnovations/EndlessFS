@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/providerbudget"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 )
 
 type deterministicScaleReader struct {
@@ -42,7 +44,7 @@ type uploadBatchScaleFixture struct {
 	scope       domain.Scope
 }
 
-func newUploadBatchScaleFixture(t *testing.T, seed uint64) uploadBatchScaleFixture {
+func newUploadBatchScaleFixture(t *testing.T, seed uint64, observers ...*telemetry.Observer) uploadBatchScaleFixture {
 	t.Helper()
 	clock := domain.NewFixedClock(time.Date(2068, 1, 2, 3, 4, 5, 0, time.UTC))
 	stateBase, fileBase := objectmemory.New(), objectmemory.New()
@@ -61,8 +63,15 @@ func newUploadBatchScaleFixture(t *testing.T, seed uint64) uploadBatchScaleFixtu
 	stateLedger, fileLedger := providerbudget.NewLedger(), providerbudget.NewLedger()
 	stateBackend := budgettest.Wrap(providerbudget.RoleState, stateBase, stateLedger)
 	fileBackend := budgettest.Wrap(providerbudget.RoleFile, fileBase, fileLedger)
-	engine, err := Open(context.Background(), Options{
-		Backend: stateBackend, FileBackend: fileBackend, Clock: clock,
+	ctx := context.Background()
+	var stateObjects, fileObjects objectstore.Backend = stateBackend, fileBackend
+	if len(observers) > 0 {
+		ctx = telemetry.Context(ctx, observers[0])
+		stateObjects = objectstore.Observe(stateBackend, telemetry.State)
+		fileObjects = objectstore.Observe(fileBackend, telemetry.Files)
+	}
+	engine, err := Open(ctx, Options{
+		Backend: stateObjects, FileBackend: fileObjects, Clock: clock,
 		IDs:      domain.NewIDGenerator(&deterministicScaleReader{state: seed}),
 		Writer:   WriterConfiguration{WriterSetID: "upload-scale", ConfigurationDigest: "upload-scale-v1", KeyringIdentifiers: []string{"key"}},
 		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x64}, 32),
@@ -190,8 +199,9 @@ func uploadEmptyCapabilities(t *testing.T, client *http.Client, capabilities []d
 }
 
 func TestProviderBudgetUploadBatchSegmentedScaleLifecycle(t *testing.T) {
-	ctx := context.Background()
-	fixture := newUploadBatchScaleFixture(t, 0x81726354)
+	observer := telemetry.New(nil, nil)
+	ctx := telemetry.Context(context.Background(), observer)
+	fixture := newUploadBatchScaleFixture(t, 0x81726354, observer)
 	capabilities, err := fixture.engine.Files().CreateUploadBatch(ctx, fixture.scope, scaleUploadRequests("complete"))
 	if err != nil || len(capabilities) != 2_001 {
 		t.Fatalf("CreateUploadBatch() = %d capabilities, %v", len(capabilities), err)
@@ -213,7 +223,7 @@ func TestProviderBudgetUploadBatchSegmentedScaleLifecycle(t *testing.T) {
 	assertTransferScaleShape(t, "upload-completion", fixture.stateLedger.Events(), fixture.fileLedger.Events(), providerbudget.RequestObjectVerify)
 	checkTransferScaleBudget(t, "file-complete-upload-batch-2001-schema-011", fixture.stateLedger.Events(), fixture.fileLedger.Events())
 
-	fixture = newUploadBatchScaleFixture(t, 0x19283746)
+	fixture = newUploadBatchScaleFixture(t, 0x19283746, observer)
 	capabilities, err = fixture.engine.Files().CreateUploadBatch(ctx, fixture.scope, scaleUploadRequests("abort"))
 	if err != nil || len(capabilities) != 2_001 {
 		t.Fatalf("abort CreateUploadBatch() = %d capabilities, %v", len(capabilities), err)

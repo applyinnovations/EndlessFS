@@ -2,6 +2,7 @@ package storageformat
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"testing"
 )
@@ -39,7 +40,7 @@ func BenchmarkDomainPagePackDecodeMetadataAmplification(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		decoded, err := DecodeDomainPagePack(wire, pack.DomainID, pack.Kind, pack.PackID)
+		decoded, err := DecodeDomainPagePack(context.Background(), wire, pack.DomainID, pack.Kind, pack.PackID)
 		if err != nil || len(decoded.Pages) != len(pack.Pages) {
 			b.Fatalf("decode metadata fixture: %v", err)
 		}
@@ -55,7 +56,7 @@ func TestDomainPagePackDecodeRetainsMeasuredAllocationImprovement(t *testing.T) 
 	result := testing.Benchmark(func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			decoded, err := DecodeDomainPagePack(wire, pack.DomainID, pack.Kind, pack.PackID)
+			decoded, err := DecodeDomainPagePack(context.Background(), wire, pack.DomainID, pack.Kind, pack.PackID)
 			if err != nil || len(decoded.Pages) != len(pack.Pages) {
 				b.Fatalf("decode: %v", err)
 			}

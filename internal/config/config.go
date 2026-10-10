@@ -33,6 +33,7 @@ const (
 // Config is the validated process configuration. Secret fields use a redacting
 // value type and are never included in PublicConfig.
 type Config struct {
+	Telemetry                 Telemetry
 	ListenAddr                string
 	BaseURL                   string
 	AllowedOrigin             string
@@ -319,7 +320,12 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, fmt.Errorf("ENDLESSFS_PREVIEW_KEY_SECRET: required for GCS previews")
 	}
 
+	telemetry, err := parseTelemetry(lookup)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
+		Telemetry:                 telemetry,
 		ListenAddr:                listenAddr,
 		BaseURL:                   strings.TrimSuffix(baseURL.String(), "/"),
 		AllowedOrigin:             strings.TrimSuffix(baseURL.String(), "/"),

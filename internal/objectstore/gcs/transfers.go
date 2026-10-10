@@ -77,7 +77,7 @@ func newTransferConfiguration(options TransferOptions) (*transferConfiguration, 
 		return nil, domain.WrapError(domain.ErrorInternal, "initialize GCS transfer lease protection", err)
 	}
 	if options.HTTPClient == nil {
-		options.HTTPClient = http.DefaultClient
+		options.HTTPClient = &http.Client{Transport: observedTransport{base: http.DefaultTransport}}
 	}
 	if options.Random == nil {
 		options.Random = rand.Reader

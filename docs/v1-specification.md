@@ -2900,8 +2900,8 @@ An implementation agent should keep this checklist current and attach test names
 
 ### 22.11.1 Operational observability
 
-- [ ] Backend metrics identify phase latency, provider work, active/queued operations, and Go/preview-worker resource pressure with bounded labels.
-- [ ] Traces correlate HTTP, metadata, provider, mutation, recovery, and preview phases through a verified closed attribute allowlist.
+- [x] Backend metrics identify phase latency, provider work, active/queued operations, and Go/preview-worker resource pressure with bounded labels. Local implementation evidence is in `docs/operational-observability-evidence.md`.
+- [x] Traces correlate HTTP, metadata, provider, mutation, recovery, and preview phases through a verified closed attribute allowlist.
 - [ ] Restricted continuous CPU/allocation/heap profiles explain resource use without exporting user content or process secrets.
 - [ ] Lifecycle/failure events and deployment dashboards distinguish thumbnail work, control-plane allocation, provider failures, retries, and container OOM termination.
 - [ ] Privacy denial, cardinality bounds, collector-outage independence, and measured overhead pass local qualification.

@@ -6,11 +6,13 @@ import (
 	"testing"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 )
 
 func uploadSizePlanFixture(count int) domain.UploadSizePlanRequest {
@@ -66,9 +68,9 @@ func assertDerivedPlanningEvents(t *testing.T, events []providerbudget.Event) pr
 }
 
 func TestUploadPlanningWarmRequestBudgetIsIndependentOfBatchCardinality(t *testing.T) {
-	ctx := context.Background()
+	ctx := telemetry.Context(context.Background(), telemetry.New(nil, nil))
 	ledger := providerbudget.NewLedger()
-	backend := budgettest.Wrap(providerbudget.RoleState, objectmemory.New(), ledger)
+	backend := objectstore.Observe(budgettest.Wrap(providerbudget.RoleState, objectmemory.New(), ledger), telemetry.State)
 	engine := openNamespaceTestEngine(t, backend)
 	live := namespaceTestScope(t, domain.AreaLive)
 	seedNamespaceBatchFiles(t, newNamespaceStore(engine), live, 256)

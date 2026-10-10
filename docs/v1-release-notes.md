@@ -1,5 +1,15 @@
 # EndlessFS v1 release notes
 
+The backend observability baseline adds restricted metrics and aggregate
+CPU/allocation/heap profiles, manual OpenTelemetry traces with bounded OTLP HTTP
+export, and asynchronous safe lifecycle events. It covers HTTP routes, provider
+operations/wire retries, uploads, metadata decoding, publication/recovery,
+migration progress and previews. Configuration is independent of persisted
+writer identity and schema 011. `docs/operational-observability-evidence.md`
+records qualified signal/privacy/failure boundaries and measured overhead;
+collector wiring, live profiling delivery and high-volume production OOM
+diagnosis remain separate evidence.
+
 EndlessFS v1 provides the single-binary passkey identity system, private Drive control plane, direct capability data plane, trash, read-only public sharing, administration and recovery, accessible embedded browser application, and closed data-only theme system described in [the v1 specification](./v1-specification.md).
 
 The October 8 upload repair adds failed-history clearing, captures native drag
@@ -14,8 +24,8 @@ observability-first backend policy. Metrics, structured lifecycle events,
 distributed traces, and profiles are encouraged under specification section 16.
 Privacy, bounded overhead, restricted diagnostics, and collector independence
 remain guarantees. `docs/operational-observability-plan.md` identifies current
-implementation gaps; this policy change does not claim the new signal set is
-already implemented.
+implementation and deployment gaps; the separate backend baseline above records
+the signals that are now locally qualified.
 
 The pending-cleanup migration repair preserves the schema-011 format. Checkpoint
 drain now performs idempotent transient upload-provider cleanup without attempting

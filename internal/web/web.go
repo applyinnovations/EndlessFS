@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-//go:embed ui/index.html ui/css/*.css ui/js/*.js ui/brand/endlessfs-mark.svg ui/fonts/*.woff2
+//go:embed ui/index.html ui/css/*.css ui/js/*.js ui/brand/endlessfs-mark.svg ui/brand/favicon.ico ui/fonts/*.woff2
 var assets embed.FS
 
 const themeLink = `<link id="theme-stylesheet" rel="stylesheet" disabled>`
@@ -51,6 +51,7 @@ func Handler(themeCSSResolvers ...func(*http.Request) string) http.Handler {
 		cache       string
 		isolated    bool
 	}{
+		"/favicon.ico":                       {data: mustRead("ui/brand/favicon.ico"), contentType: "image/vnd.microsoft.icon", cache: "public, max-age=3600"},
 		"/assets/ui.css":                     {data: applicationStylesheet, contentType: "text/css; charset=utf-8", cache: "public, max-age=3600"},
 		"/assets/ui.js":                      {data: applicationScript, contentType: "text/javascript; charset=utf-8", cache: "public, max-age=3600"},
 		"/assets/upload-hash-worker.js":      {data: mustRead("ui/js/upload-hash-worker.js"), contentType: "text/javascript; charset=utf-8", cache: "public, max-age=3600"},

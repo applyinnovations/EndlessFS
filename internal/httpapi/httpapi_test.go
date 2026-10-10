@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"image/png"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +14,41 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/config"
 	endlesslogging "github.com/applyinnovations/endlessfs/internal/logging"
 )
+
+func TestIntegrationFaviconServesEmbeddedMultiSizeICO(t *testing.T) {
+	handler := New(config.PublicConfig{}, "test-version")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/vnd.microsoft.icon" {
+		t.Fatalf("favicon response = %d %q", response.Code, response.Header().Get("Content-Type"))
+	}
+	assertSecurityHeaders(t, response.Header())
+	data := response.Body.Bytes()
+	if len(data) < 54 || binary.LittleEndian.Uint16(data[:2]) != 0 || binary.LittleEndian.Uint16(data[2:4]) != 1 || binary.LittleEndian.Uint16(data[4:6]) != 3 {
+		t.Fatal("favicon is not a three-image ICO")
+	}
+	for index, size := range []int{16, 32, 48} {
+		entry := data[6+index*16 : 22+index*16]
+		length, offset := int(binary.LittleEndian.Uint32(entry[8:12])), int(binary.LittleEndian.Uint32(entry[12:16]))
+		if offset < 54 || length < 1 || offset > len(data)-length {
+			t.Fatal("invalid ICO image extent")
+		}
+		image, err := png.Decode(bytes.NewReader(data[offset : offset+length]))
+		if err != nil || image.Bounds().Dx() != size || image.Bounds().Dy() != size {
+			t.Fatalf("favicon size %d did not decode: %v", size, err)
+		}
+		visible := false
+		for y := 0; y < size; y++ {
+			for x := 0; x < size; x++ {
+				_, _, _, alpha := image.At(x, y).RGBA()
+				visible = visible || alpha > 0
+			}
+		}
+		if !visible {
+			t.Fatalf("favicon size %d is blank", size)
+		}
+	}
+}
 
 func TestIntegrationPublicEndpoints(t *testing.T) {
 	t.Parallel()

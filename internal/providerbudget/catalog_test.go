@@ -68,7 +68,7 @@ func TestProviderBudgetCatalogCoversApplicationContractsAndRatchets(t *testing.T
 		}},
 		{name: "provider.Storage", typeOf: reflect.TypeOf((*provider.Storage)(nil)).Elem(), methods: map[string]string{
 			"List": "namespace/list", "LookupChildren": "namespace/lookup-children", "Stat": "namespace/stat", "CreateDirectory": "namespace/create-directory",
-			"CreateUpload": "transfer/create-upload", "UploadStatus": "transfer/upload-status", "CompleteUpload": "transfer/complete-upload", "AbortUpload": "transfer/abort-upload", "CreateDownload": "transfer/create-download",
+			"CreateUpload": "transfer/create-upload", "UploadStatus": "transfer/upload-status", "ResumeUpload": "transfer/resume-upload", "CompleteUpload": "transfer/complete-upload", "AbortUpload": "transfer/abort-upload", "CreateDownload": "transfer/create-download",
 			"Copy": "namespace/copy", "Move": "namespace/move", "Delete": "namespace/delete", "GetOperation": "namespace/get-operation",
 		}, local: map[string]bool{"Ready": true, "DataOrigin": true, "BackendKind": true}},
 		{name: "provider.TrashStorage", typeOf: reflect.TypeOf((*provider.TrashStorage)(nil)).Elem(), methods: map[string]string{

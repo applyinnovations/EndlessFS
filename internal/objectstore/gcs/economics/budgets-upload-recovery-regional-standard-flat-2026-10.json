@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "provider": "gcs",
+  "profile": "regional-standard-flat",
+  "id": "011-direct-upload-recovery",
+  "budgets": [
+    {
+      "name": "file-resume-upload-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 3,
+        "costPicoUSD": 800000,
+        "p50Micros": 44028,
+        "p95Micros": 130028,
+        "p99Micros": 320028,
+        "criticalP50Micros": 44028,
+        "criticalP95Micros": 130028,
+        "criticalP99Micros": 320028
+      },
+      "roles": {
+        "file": {
+          "requests": 1,
+          "costPicoUSD": 0,
+          "p50Micros": 0,
+          "p95Micros": 0,
+          "p99Micros": 0
+        },
+        "state": {
+          "requests": 2,
+          "costPicoUSD": 800000,
+          "p50Micros": 44028,
+          "p95Micros": 130028,
+          "p99Micros": 320028
+        }
+      }
+    }
+  ]
+}

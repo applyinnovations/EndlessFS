@@ -91,6 +91,8 @@ type upload struct {
 	offset          int64
 	data            []byte
 	materialized    bool
+	dataReceived    bool
+	capability      domain.UploadCapability
 	state           domain.UploadState
 	capabilityHash  [sha256.Size]byte
 	batchID         string

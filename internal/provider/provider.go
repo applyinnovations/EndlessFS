@@ -15,6 +15,8 @@ type Storage interface {
 
 	CreateUpload(context.Context, domain.Scope, domain.CreateUploadRequest) (domain.UploadCapability, error)
 	UploadStatus(context.Context, domain.Scope, domain.UploadID) (domain.UploadStatus, error)
+	// ResumeUpload reuses the scoped session and expiry without allocating or publishing.
+	ResumeUpload(context.Context, domain.Scope, domain.UploadID) (domain.UploadCapability, error)
 	CompleteUpload(context.Context, domain.Scope, domain.CompleteUploadRequest) (domain.Entry, error)
 	AbortUpload(context.Context, domain.Scope, domain.UploadID) error
 	CreateDownload(context.Context, domain.Scope, domain.CreateDownloadRequest) (domain.DownloadCapability, error)

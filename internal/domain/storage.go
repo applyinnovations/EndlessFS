@@ -167,8 +167,10 @@ type UploadStatus struct {
 	Path            UserPath       `json:"path"`
 	Protocol        UploadProtocol `json:"protocol"`
 	ConfirmedOffset int64          `json:"confirmedOffset"`
-	DeclaredSize    int64          `json:"declaredSize"`
-	ExpiresAt       time.Time      `json:"expiresAt"`
+	// DataComplete reports a verified transfer, independently of namespace publication.
+	DataComplete bool      `json:"dataComplete"`
+	DeclaredSize int64     `json:"declaredSize"`
+	ExpiresAt    time.Time `json:"expiresAt"`
 }
 
 type DownloadCapability struct {

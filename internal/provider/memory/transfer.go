@@ -122,6 +122,7 @@ func (p *Provider) createUpload(ctx context.Context, scope domain.Scope, request
 		UploadID: uploadID, Protocol: protocol, URL: p.baseURL + "/cap/upload/" + token,
 		Method: method, Headers: headers, ExpiresAt: expiresAt, ChunkRules: chunkRules, Framing: framing, DeclaredSize: request.Size,
 	}
+	p.uploads[uploadID].capability = capability
 	if request.IdempotencyKey != "" {
 		p.uploadIdempotency[idempotencyKey(scope.UserID(), OperationCreateUpload, request.IdempotencyKey)] = idempotentUpload{fingerprint: fingerprint, capability: capability}
 	}
@@ -213,8 +214,34 @@ func (p *Provider) UploadStatus(ctx context.Context, scope domain.Scope, uploadI
 	}
 	return domain.UploadStatus{
 		UploadID: uploadID, State: state, Path: session.requestedPath, Protocol: session.protocol,
+		DataComplete:    (state == domain.UploadStateActive || state == domain.UploadStateCompleted) && session.offset == session.size && (session.size > 0 || session.dataReceived || state == domain.UploadStateCompleted),
 		ConfirmedOffset: session.offset, DeclaredSize: session.size, ExpiresAt: session.expiresAt,
 	}, nil
+}
+
+func (p *Provider) ResumeUpload(ctx context.Context, scope domain.Scope, uploadID domain.UploadID) (domain.UploadCapability, error) {
+	if err := validateContextScope(ctx, scope); err != nil {
+		return domain.UploadCapability{}, err
+	}
+	if uploadID == "" {
+		return domain.UploadCapability{}, domain.NewError(domain.ErrorInvalid, "upload ID is required")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	session, found := p.uploads[uploadID]
+	if !found || session.scope != scope {
+		return domain.UploadCapability{}, domain.NewError(domain.ErrorNotFound, "upload not found")
+	}
+	if session.state != domain.UploadStateActive || !p.clock.Now().Before(session.expiresAt) {
+		return domain.UploadCapability{}, domain.NewError(domain.ErrorConflict, "upload is no longer active")
+	}
+	capability := session.capability
+	capability.BatchID, capability.BatchIndex, capability.BatchCount = session.batchID, session.batchIndex, session.batchCount
+	capability.Headers = make(map[string]string, len(session.capability.Headers))
+	for name, value := range session.capability.Headers {
+		capability.Headers[name] = value
+	}
+	return capability, nil
 }
 
 func (p *Provider) CompleteUpload(ctx context.Context, scope domain.Scope, request domain.CompleteUploadRequest) (domain.Entry, error) {
@@ -682,6 +709,7 @@ func (p *Provider) serveUpload(writer http.ResponseWriter, request *http.Request
 		session.materialized = false
 	}
 	session.offset += int64(accepted)
+	session.dataReceived = true
 	writer.Header().Set("Upload-Offset", strconv.FormatInt(session.offset, 10))
 	if interrupted {
 		http.Error(writer, "upload interrupted", http.StatusServiceUnavailable)

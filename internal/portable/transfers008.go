@@ -398,10 +398,10 @@ func (s *FileStore) resumePortableUpload(ctx context.Context, record storageform
 	if !s.engine.clock.Now().Before(record.ExpiresAt) {
 		return domain.UploadCapability{}, domain.NewError(domain.ErrorConflict, "upload is no longer active")
 	}
-	if record.State == storageformat.UploadInitializing {
+	if record.State == storageformat.UploadInitializing && record.Batch == nil {
 		return s.initializePortableUpload(ctx, record, false)
 	}
-	if record.State != storageformat.UploadActive {
+	if record.State != storageformat.UploadActive && record.State != storageformat.UploadInitializing {
 		return domain.UploadCapability{}, domain.NewError(domain.ErrorConflict, "upload is no longer active")
 	}
 	lease, _, err := s.runtimeUploadLeaseForRecord(ctx, record)
@@ -1014,9 +1014,8 @@ func (s *FileStore) uploadStatus008(ctx context.Context, scope domain.Scope, upl
 	switch record.State {
 	case storageformat.UploadInitializing:
 		status.State = domain.UploadStateActive
-		return status, nil
 	case storageformat.UploadCompleted:
-		status.State, status.ConfirmedOffset = domain.UploadStateCompleted, record.Size
+		status.State, status.ConfirmedOffset, status.DataComplete = domain.UploadStateCompleted, record.Size, true
 		return status, nil
 	case storageformat.UploadAborted:
 		status.State = domain.UploadStateAborted
@@ -1027,6 +1026,9 @@ func (s *FileStore) uploadStatus008(ctx context.Context, scope domain.Scope, upl
 		return status, nil
 	}
 	lease, _, err := s.runtimeUploadLeaseForRecord(ctx, record)
+	if errors.Is(err, domain.ErrNotFound) && record.State == storageformat.UploadInitializing {
+		return status, nil
+	}
 	if err != nil {
 		return domain.UploadStatus{}, err
 	}
@@ -1039,6 +1041,7 @@ func (s *FileStore) uploadStatus008(ctx context.Context, scope domain.Scope, upl
 		return domain.UploadStatus{}, err
 	}
 	status.State, status.ConfirmedOffset = domain.UploadStateActive, progress.Offset
+	status.DataComplete = progress.Complete
 	return status, nil
 }
 

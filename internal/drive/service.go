@@ -233,6 +233,16 @@ func (s *Service) UploadStatus(ctx context.Context, userID domain.UserID, upload
 	return s.storage.UploadStatus(ctx, scope, uploadID)
 }
 
+func (s *Service) ResumeUpload(ctx context.Context, userID domain.UserID, uploadID domain.UploadID) (outcome domain.UploadCapability, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.UploadAdmission, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
+	scope, err := liveScope(userID)
+	if err != nil {
+		return domain.UploadCapability{}, err
+	}
+	return s.storage.ResumeUpload(ctx, scope, uploadID)
+}
+
 func (s *Service) CompleteUpload(ctx context.Context, userID domain.UserID, request domain.CompleteUploadRequest) (outcome domain.Entry, err error) {
 	ctx, activity := telemetry.Start(ctx, telemetry.UploadCompletion, telemetry.Application)
 	defer telemetry.Finish(activity, &err)

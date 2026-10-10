@@ -184,12 +184,12 @@ func (b *Backend) UploadProgress(ctx context.Context, lease []byte) (objectstore
 	if b.consumeTransferFault(TransferUploadData, TransferFaultNoFingerprint) {
 		return objectstore.UploadProgress{
 			Offset: session.offset, Size: session.size, ExpiresAt: session.expiresAt,
-			Complete: session.offset == session.size, Version: session.version, Materialized: session.materialized,
+			Complete: session.offset == session.size && session.version != "", Version: session.version, Materialized: session.materialized,
 		}, nil
 	}
 	return objectstore.UploadProgress{
 		Offset: session.offset, Size: session.size, ExpiresAt: session.expiresAt,
-		Complete: session.offset == session.size, Version: session.version,
+		Complete: session.offset == session.size && session.version != "", Version: session.version,
 		Fingerprint: sessionFingerprint(session), Materialized: session.materialized,
 	}, nil
 }

@@ -213,6 +213,33 @@ func TestIntegrationFileHTTPDirectDataPathTrashAndShare(t *testing.T) {
 	}
 	var uploadCapability domain.UploadCapability
 	decodeResponse(t, createdUpload, &uploadCapability)
+	resumeRoute := "/api/v1/uploads/" + string(uploadCapability.UploadID) + "/resume"
+	for _, denied := range []struct {
+		origin, body string
+		cookies      []*http.Cookie
+		headers      map[string]string
+	}{
+		{origin, `{}`, nil, driveMutationHeaders(env.csrf.Value, "")},
+		{"https://evil.example", `{}`, cookies, driveMutationHeaders(env.csrf.Value, "")},
+		{origin, `{}`, cookies, nil},
+		{origin, `{"owner":"untrusted"}`, cookies, driveMutationHeaders(env.csrf.Value, "")},
+		{origin, `null`, cookies, driveMutationHeaders(env.csrf.Value, "")},
+		{origin, `[]`, cookies, driveMutationHeaders(env.csrf.Value, "")},
+	} {
+		result := performRequest(t, env.handler, http.MethodPost, resumeRoute, denied.origin, denied.body, denied.cookies, denied.headers)
+		if result.Code < 400 {
+			t.Fatalf("invalid resume accepted: %d", result.Code)
+		}
+	}
+	resumed := performRequest(t, env.handler, http.MethodPost, resumeRoute, origin, `{}`, cookies, driveMutationHeaders(env.csrf.Value, ""))
+	if resumed.Code != http.StatusOK || resumed.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("resume = %d", resumed.Code)
+	}
+	var resumedCapability domain.UploadCapability
+	decodeResponse(t, resumed, &resumedCapability)
+	if resumedCapability.UploadID != uploadCapability.UploadID || resumedCapability.URL != uploadCapability.URL || !resumedCapability.ExpiresAt.Equal(uploadCapability.ExpiresAt) {
+		t.Fatal("resume changed the original session")
+	}
 	uploadRequest, _ := http.NewRequest(uploadCapability.Method, uploadCapability.URL, bytes.NewBufferString("hello"))
 	for name, value := range uploadCapability.Headers {
 		uploadRequest.Header.Set(name, value)

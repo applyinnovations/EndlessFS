@@ -17,10 +17,10 @@
       goFor =
         pkgs:
         pkgs.go_1_26.overrideAttrs (_old: {
-          version = "1.26.6";
+          version = "1.26.9";
           src = pkgs.fetchurl {
-            url = "https://go.dev/dl/go1.26.6.src.tar.gz";
-            hash = "sha256-oHIcVMaIkBRI13rZs+x+p8R0cwdV/4kTgukuy5P/LLE=";
+            url = "https://go.dev/dl/go1.26.9.src.tar.gz";
+            hash = "sha256-lzXX3Ntls10/pXfwQGRzfAO4nPGitx5uaf4vPG+f1Mo=";
           };
         });
       vulndbFor =
@@ -143,6 +143,13 @@
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-event" == "[push]"' .tekton/endlessfs-release.yaml >/dev/null
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[refs/tags/v*.*.*]"' .tekton/endlessfs-release.yaml >/dev/null
         yq -e '.spec.params[] | select(.name == "release_tag") | .value == "{{ git_tag }}"' .tekton/endlessfs-release.yaml >/dev/null
+        for pipeline in $active_pipelines; do
+          advisory_script="$(yq -r '.spec.pipelineSpec.tasks[].params[] | select(.name == "SCRIPT") | .value' "$pipeline")"
+          if ! printf '%s\n' "$advisory_script" | rg -Fx 'nix run .#security-freshness' >/dev/null; then
+            echo "$pipeline must run the upstream-advisory freshness check" >&2
+            exit 1
+          fi
+        done
         release_verify_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "verify") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
         printf '%s\n' "$release_verify_script" | rg -F 'nix run .#test-migration -- "$release_tag"' >/dev/null
         release_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "release") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
@@ -306,18 +313,17 @@
             {
               themeBundles ? [ ],
             }:
-            pkgs.buildGoModule {
+            (pkgs.buildGoModule.override { inherit go; }) {
               pname = "endlessfs";
               inherit version;
               src = goSource;
               subPackages = [ "cmd/endlessfs" ];
-              vendorHash = "sha256-kXA8UBPNuD2H/1sOJQ8Gz9lrXsyZaHmbQTGeE/5GUts=";
+              vendorHash = "sha256-EpjQXk31oxpLeUtjcXowDwkrG7ElWRNd7akS4NxbAw8=";
               # Keep the fixed-output dependency closure address stable when the
               # source revision changes without changing go.mod/go.sum.
               overrideModAttrs = _final: _previous: {
                 name = "endlessfs-go-modules";
               };
-              inherit go;
               doCheck = false;
               env.CGO_ENABLED = 0;
               preBuild = (themePreBuild themeBundles) + dependencyDigestBuildHook;
@@ -530,7 +536,7 @@
                   printf 'vulnerability-database-archive-sha256=%s\n' "$vulndb_hash"
                   printf 'vulnerability-database-modified=%s\n' "$vulndb_modified"
                   printf 'target-system=%s\n' '${system}'
-                  printf 'go-toolchain=%s\n' '1.26.6'
+                  printf 'go-toolchain=%s\n' '${go.version}'
                   printf 'capability-profile=%s\n' 'images'
                   printf 'packaged-preview-capabilities=%s\n' 'image'
                   printf 'packaged-image-decoders=%s\n' 'go-standard-library,deepteams-webp-1.2.6,libraw-0.22.1'
@@ -881,6 +887,25 @@
                 ${dependencyPolicyCommand packages.default.goModules}
                 go run ./tools/check-source .
                 nix build '.#checks.${system}.container-policy' --no-link --print-build-logs
+              '';
+
+          security-freshness =
+            mkTask "endlessfs-security-freshness"
+              (
+                goTools
+                ++ [
+                  pkgs.coreutils
+                  pkgs.govulncheck
+                ]
+              )
+              ''
+                export CGO_ENABLED=0
+                export GOFLAGS=-mod=readonly GOTOOLCHAIN=local
+                review_directory="$(mktemp -d "''${TMPDIR:-/tmp}/endlessfs-security-freshness.XXXXXX")"
+                trap 'rm -rf "$review_directory"' EXIT
+                go run ./tools/vulndb update "$review_directory"
+                go run ./tools/vulndb extract "$review_directory" "$review_directory/database"
+                govulncheck -db="file://$review_directory/database" ./...
               '';
 
           dependency-check = mkTask "endlessfs-dependency-check" [
@@ -1284,6 +1309,16 @@
 
           vulndb = vulndbCheck;
           release-input-evidence = releaseInputEvidenceCheck;
+
+          compiler-identity = pkgs.runCommand "endlessfs-compiler-identity" { nativeBuildInputs = [ go ]; } ''
+            actual="$(go version ${self.packages.${system}.default}/bin/endlessfs)"
+            expected="${self.packages.${system}.default}/bin/endlessfs: go${go.version}"
+            if [ "$actual" != "$expected" ]; then
+              echo "application compiler identity differs from the pinned toolchain: $actual" >&2
+              exit 1
+            fi
+            touch "$out"
+          '';
 
           repository-policy = repositoryPolicyCheck;
         }

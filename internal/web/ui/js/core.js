@@ -31,6 +31,7 @@
     transferVirtualStart: 0,
     transferVirtualFrame: 0,
     expandedTransferGroups: new Set(),
+    expandedTransferFailures: new Map(),
     transferRetryTimers: new Map(),
     transferFailureTimes: [],
     transferCircuitOpenUntil: 0,
@@ -640,6 +641,7 @@
     state.transferByID.clear();
     state.transferGroups.clear();
     state.transferProjection = [];
+    state.expandedTransferFailures.clear();
     state.transferQueueCursor = 0;
     state.transferLedgerOwner = "";
     state.transferPersistQueue.clear();

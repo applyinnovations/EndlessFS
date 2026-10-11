@@ -1302,6 +1302,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 		const row = document.querySelector("#transfer-list .transfer-group-row");
 		row.dataset.focusProbe = "true";
 		row.dataset.focusProbeProgress = String(row.querySelector("progress").value);
+		row.dataset.focusProbeGeometry = JSON.stringify([...document.querySelector('#transfer-list').children].map(item => { const rect = item.getBoundingClientRect(); return [rect.top, rect.height]; }));
 		row.querySelector("button[aria-expanded]").focus();
 	})()`, nil)); err != nil {
 		t.Fatalf("prepare transfer progress stability measurement: %v", err)
@@ -1315,7 +1316,8 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	var progressPreservesFocus bool
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`(() => {
 		const row = document.querySelector("#transfer-list .transfer-group-row[data-focus-probe='true']");
-		return Boolean(row && document.activeElement === row.querySelector("button[aria-expanded]"));
+		const geometry = row && JSON.stringify([...document.querySelector('#transfer-list').children].map(item => { const rect = item.getBoundingClientRect(); return [rect.top, rect.height]; }));
+		return Boolean(row && document.activeElement === row.querySelector("button[aria-expanded]") && geometry === row.dataset.focusProbeGeometry);
 	})()`, &progressPreservesFocus)); err != nil {
 		t.Fatalf("measure transfer progress stability: %v", err)
 	}

@@ -1655,8 +1655,17 @@ The embedded UI MUST include:
 - Progress uses confirmed uploaded bytes; indeterminate states are labeled accurately.
 - File columns size to their complete content, including numeric size units,
   and remain reachable through the table's own horizontal scroll area at
-  narrow widths. Transfer errors wrap completely and determine their row
-  height. The virtual transfer window remains bounded and preserves visible
+  narrow widths. Identical folder failures (exact code and message, including
+  request reference) appear once with an affected count. Distinct failures
+  remain separate. Shared summaries participate in the same bounded virtual
+  window as file rows; aggregation must not create an unbounded summary DOM.
+  Affected files use compact stable rows with a textual failed state, retry,
+  reconnect and clear actions. Keyboard-operable failure disclosure retains
+  the complete message, code and confirmed byte count; diagnostic expansion
+  changes geometry only through explicit user action. Unique failures are
+  disclosed initially. Visible errors wrap completely and determine their row
+  height. Progress-only updates preserve row identity, focus and disclosure.
+  The virtual transfer window remains bounded and preserves visible
   item position across shifts with unequal row heights. Scrollbars have a
   separate gutter and MUST NOT cover transfer action buttons.
 - The transfer overview reports all members of ongoing uploads, including their

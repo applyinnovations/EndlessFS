@@ -130,3 +130,50 @@ earlier fixed-height/optical-offset source assertions are deliberately replaced
 by minimum-height density, measured-anchor and gutter assertions plus these
 browser geometry proofs; none of the rendering or accessibility guarantees is
 removed.
+
+## Shared-failure presentation and deterministic geometry
+
+The brand guide and UI rebuild plan require dense unboxed rows, summary-plus-
+exception presentation, reserved control geometry, keyboard access, and no
+unexpected movement during progress updates. Repeating a full diagnostic and
+zero-progress track for every member of a failed folder conflicts with those
+requirements even when the text is no longer cropped.
+
+Failures now aggregate by the exact code and message, including any request
+reference. Each shared failure has one count-bearing summary; unique failures
+remain initially disclosed. Shared summaries are ordinary members of the
+72-item virtual projection, rather than an unbounded collection inside one
+group row. Search and history filters restrict the aggregation to matching
+files. Summaries order deterministically by affected count and exact key.
+Affected files use 36-pixel closed rows with a textual Failed state, existing
+reconnect/retry/clear actions, and native keyboard-operable disclosure. Full
+message, code, and confirmed bytes remain available. Disclosure state survives
+virtualization and group toggles; explicit expansion is the only source of
+diagnostic row growth. Progress updates retain DOM identity and geometry;
+structural renders preserve surviving keyed scroll anchors and focused
+controls. Browser automatic scroll anchoring is disabled only inside the
+transfer list so it cannot apply a second correction after the measured
+application anchor. The three-control transfer toolbar reserves three columns, and its
+icons retain their canonical geometry without optical translation.
+At narrow widths, history-tab labels and counts occupy reserved separate
+lines, and folder progress and totals occupy two fixed metric lines. This
+prevents clipped counts without allowing digit changes to choose a new layout.
+
+| Guarantee | Acceptance evidence |
+|---|---|
+| Exact failures and references retained | 120-item fixture: 116 shared, two with another reference, two distinct by message or code; shared counts and unique diagnostics asserted |
+| Compact presentation without hidden diagnostics | Closed rows measure 36 px; no per-file zero-progress track; keyboard disclosure verifies full reference, error code and confirmed bytes |
+| Stable progress and interaction | Existing animated 2,000-item workflow additionally compares every rendered item's top and height across a confirmed progress update; focus and DOM identity assertions retained |
+| Scroll continuity and bounded rendering | Forward/reverse unequal-height anchoring and 72-item maximum retained; summaries count toward that maximum |
+| Accessible themes and narrow layouts | Both built-in themes; error wrapping at 1440/1000/320 px; keyboard group toggles restore focus and retain closed disclosure; desktop and reduced-motion 320 px screenshots |
+| Owner isolation, cleanup and provider traffic | Existing owner-scoped retry/clear and recovery paths are unchanged; no new API call, provider request or durable server record |
+
+The shared-failure and toolbar tests both failed against their preceding
+implementations before repair. Message-prefix grouping was rejected because
+it would merge separate references; removing diagnostics was rejected because
+it would hide useful recovery evidence; placing every shared summary in one
+group DOM was rejected because it would bypass bounded rendering. The header-
+copy source assertion now inspects its owning overview function rather than
+mistaking an affected-file count elsewhere in the UI for header copy. The
+fixed error-track assertions are replaced deliberately by disclosure and
+compact-row assertions plus the browser acceptance evidence above.

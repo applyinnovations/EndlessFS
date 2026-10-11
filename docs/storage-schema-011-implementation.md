@@ -112,7 +112,10 @@ for the existing verified closed-gate garbage collector. This deliberately
 supersedes the former GCS cleanup test's expectation of immediate object deletion.
 
 The browser persists batch ID, index, count, idempotency keys, planner state,
-and transfer status in IndexedDB. Refresh or connection loss therefore resumes
+transfer status, and the exact completion ordinal in IndexedDB before sending
+the completion request. Restored key order cannot change the bound completion
+intent. Pending single-folder ledgers predating the ordinal recover their order
+from the already-persisted folder member list. Refresh or connection loss resumes
 the same server-side transaction. It sends the compact batch ID only when the
 selected active records are proven to be the complete admitted batch.
 

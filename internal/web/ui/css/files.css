@@ -187,16 +187,22 @@ th:last-child,
 td:last-child { width: 150px; }
 td:last-child { overflow: visible; }
 .table-icon-action-cell { padding-inline-end: 0; }
+#file-table { table-layout: auto; }
+#file-table th:not(:first-child),
+#file-table td:not(:first-child) { width: auto; overflow: visible; text-overflow: clip; }
+#file-table th:nth-child(2),
+#file-table td:nth-child(2) { width: 100%; }
+#file-table .file-name { overflow: visible; text-overflow: clip; }
 #file-table th:last-child,
-#file-table td:last-child { width: 168px; }
+#file-table td:last-child { width: 1%; }
 #file-table th:nth-child(3),
-#file-table td:nth-child(3) { width: 80px; }
+#file-table td:nth-child(3) { width: 1%; }
 #file-table th:nth-child(4),
-#file-table td:nth-child(4) { width: 140px; text-align: left; font-variant-numeric: normal; }
+#file-table td:nth-child(4) { width: 1%; text-align: left; font-variant-numeric: normal; }
 #file-table th:nth-child(5),
-#file-table td:nth-child(5) { width: 150px; text-align: left; font-variant-numeric: tabular-nums; }
+#file-table td:nth-child(5) { width: 1%; text-align: left; font-variant-numeric: tabular-nums; }
 #file-browser-surface[data-access="trash"] #file-table th:last-child,
-#file-browser-surface[data-access="trash"] #file-table td:last-child { width: 72px; }
+#file-browser-surface[data-access="trash"] #file-table td:last-child { width: 1%; }
 tbody tr:hover { background: var(--efs-color-surface); }
 tbody tr.selected { background: var(--efs-color-primary-tint); }
 .list-spacer,

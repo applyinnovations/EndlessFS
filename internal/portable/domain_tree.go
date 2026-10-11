@@ -673,14 +673,10 @@ func (session *consistencyDomainTreeSession) writeLeafGroups(ctx context.Context
 func (session *consistencyDomainTreeSession) leafGroups(entries []storageformat.DomainEntry) ([][]storageformat.DomainEntry, error) {
 	var groups [][]storageformat.DomainEntry
 	for offset := 0; offset < len(entries); {
-		end := offset
-		for end < len(entries) && end-offset < domainPageMaximumItems {
-			candidate := storageformat.DomainPage{SchemaVersion: 1, DomainID: session.reference.ID, Kind: session.reference.Kind, Level: 0, Entries: entries[offset : end+1]}
-			if _, err := storageformat.EncodeCanonical(candidate); err != nil {
-				break
-			}
-			end++
-		}
+		count := canonicalDomainPagePrefix(entries[offset:min(len(entries), offset+domainPageMaximumItems)], func(count int) storageformat.DomainPage {
+			return storageformat.DomainPage{SchemaVersion: 1, DomainID: session.reference.ID, Kind: session.reference.Kind, Level: 0, Entries: entries[offset : offset+count]}
+		})
+		end := offset + count
 		if end == offset {
 			return nil, domain.NewError(domain.ErrorInvalid, "consistency-domain entry cannot fit in a canonical page")
 		}
@@ -688,6 +684,28 @@ func (session *consistencyDomainTreeSession) leafGroups(entries []storageformat.
 		offset = end
 	}
 	return groups, nil
+}
+
+// The closed page format contains one compact JSON array. Encode its first
+// member with the real page header, then each additional member independently:
+// adding a member adds its canonical bytes and one comma, with no change to
+// the surrounding page. This preserves the exact maximal prefix without
+// re-encoding growing prefixes or materializing an oversized whole candidate.
+// The canonical encoder owns escaping, base64 and field-layout decisions.
+func canonicalDomainPagePrefix[T storageformat.DomainEntry | storageformat.DomainPageChild](items []T, page func(int) storageformat.DomainPage) int {
+	body, err := storageformat.EncodeCanonical(page(1))
+	if err != nil {
+		return 0
+	}
+	encodedSize := len(body)
+	for index := 1; index < len(items); index++ {
+		member, err := storageformat.EncodeCanonical(items[index])
+		if err != nil || encodedSize+1+len(member) > storageformat.MaxCanonicalBytes {
+			return index
+		}
+		encodedSize += 1 + len(member)
+	}
+	return len(items)
 }
 
 func (session *consistencyDomainTreeSession) writeBranchGroups(ctx context.Context, level int, children []domainPageRef) ([]domainPageRef, error) {
@@ -778,18 +796,15 @@ func (session *consistencyDomainTreeSession) writePages(ctx context.Context, pag
 func (session *consistencyDomainTreeSession) branchGroups(level int, children []domainPageRef) ([][]domainPageRef, error) {
 	var groups [][]domainPageRef
 	for offset := 0; offset < len(children); {
-		end := offset
-		for end < len(children) && end-offset < domainPageMaximumItems {
-			pageChildren := make([]storageformat.DomainPageChild, end-offset+1)
-			for index, child := range children[offset : end+1] {
-				pageChildren[index] = storageformat.DomainPageChild{FirstKey: child.firstKey, LastKey: child.lastKey, Digest: child.root.Digest, PackID: child.root.PackID, LeafKeyFilter: child.leafKeyFilter, Level: child.root.Level, EntryCount: child.root.EntryCount, ByteCount: child.root.ByteCount}
-			}
-			candidate := storageformat.DomainPage{SchemaVersion: 1, DomainID: session.reference.ID, Kind: session.reference.Kind, Level: level, Children: pageChildren}
-			if _, err := storageformat.EncodeCanonical(candidate); err != nil {
-				break
-			}
-			end++
+		limit := min(len(children)-offset, domainPageMaximumItems)
+		pageChildren := make([]storageformat.DomainPageChild, limit)
+		for index, child := range children[offset : offset+limit] {
+			pageChildren[index] = storageformat.DomainPageChild{FirstKey: child.firstKey, LastKey: child.lastKey, Digest: child.root.Digest, PackID: child.root.PackID, LeafKeyFilter: child.leafKeyFilter, Level: child.root.Level, EntryCount: child.root.EntryCount, ByteCount: child.root.ByteCount}
 		}
+		count := canonicalDomainPagePrefix(pageChildren, func(count int) storageformat.DomainPage {
+			return storageformat.DomainPage{SchemaVersion: 1, DomainID: session.reference.ID, Kind: session.reference.Kind, Level: level, Children: pageChildren[:count]}
+		})
+		end := offset + count
 		if end == offset {
 			return nil, domain.NewError(domain.ErrorInvalid, "consistency-domain child cannot fit in a canonical page")
 		}

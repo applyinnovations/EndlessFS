@@ -104,8 +104,12 @@ func TestTransferMonitorUsesScalableSideSheet(t *testing.T) {
 			t.Errorf("deterministic transfer header summary is missing %q", required)
 		}
 	}
+	overviewStart, overviewEnd := strings.Index(script, "function renderTransferOverview("), strings.Index(script, "function orderedTransfers(")
+	if overviewStart < 0 || overviewEnd <= overviewStart {
+		t.Fatal("transfer overview function boundary is missing")
+	}
 	for _, forbidden := range []string{`headerSummary.hidden`, `active / ${summary.totalCount`, `.toLocaleString()} files`} {
-		if strings.Contains(script, forbidden) {
+		if strings.Contains(script[overviewStart:overviewEnd], forbidden) {
 			t.Errorf("transfer header summary retains verbose or state-dependent presentation %q", forbidden)
 		}
 	}
@@ -318,9 +322,9 @@ func TestFailedTransfersPrioritizeErrorsAndGroupsActuallyCollapse(t *testing.T) 
 	script := string(applicationScript)
 	for _, required := range []string{
 		`if (transfer.state === "failed") {`,
-		"text(\"span\", `${transferPercent(transfer)}%`, \"transfer-row-failure-percent\"),",
-		`progress.className = "transfer-row-progress transfer-row-progress-error";`,
-		`row.append(header, failure, progress);`,
+		`details.className = "transfer-failure-details";`,
+		`function sharedTransferFailures(transfers) {`,
+		`return JSON.stringify([transfer.errorCode || "", transfer.error || "Upload failed."]);`,
 		`const error = row.querySelector(".transfer-row-error");`,
 		`if (!state.expandedTransferGroups.has(group.id)) continue;`,
 	} {
@@ -339,10 +343,9 @@ func TestFailedTransfersPrioritizeErrorsAndGroupsActuallyCollapse(t *testing.T) 
 
 	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
-		`.transfer-row-progress-error::-webkit-progress-value { background: var(--efs-color-error); }`,
-		`.transfer-row-progress-error::-moz-progress-bar { background: var(--efs-color-error); }`,
-		`.transfer-row-failure-percent { color: var(--efs-color-error) !important;`,
-		`.transfer-row.failed .transfer-row-error {`,
+		`.transfer-row.failed { min-height: 36px;`,
+		`.transfer-failure-state { flex: 0 0 auto; color: var(--efs-color-error) !important;`,
+		`.transfer-row-error {`,
 		`white-space: normal;`,
 		`overflow-wrap: anywhere;`,
 	} {
@@ -360,10 +363,12 @@ func TestTransferRowsUseDenseAlignedHeaders(t *testing.T) {
 
 	script := string(applicationScript)
 	for _, required := range []string{
-		`const transferVirtualRowHeight = 60;`,
+		`const transferVirtualScrollThreshold = 60;`,
+		`const anchorPosition = Math.max(priorStart, state.transferVirtualStart) + 1;`,
+		`nextAnchor.getBoundingClientRect().top - priorTop`,
 		`header.className = "transfer-row-header";`,
 		`header.append(text("strong", label, "transfer-row-main"), tail);`,
-		`row.append(header, failure, progress);`,
+		`row.append(details, tail);`,
 		`row.append(header, metrics, progress);`,
 	} {
 		if !strings.Contains(script, required) {
@@ -376,11 +381,12 @@ func TestTransferRowsUseDenseAlignedHeaders(t *testing.T) {
 
 	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
-		`.transfer-item { height: 60px;`,
+		`.transfer-item { min-height: 60px;`,
+		`scrollbar-gutter: stable;`,
+		`padding: 0 16px 0 0;`,
 		`.transfer-row-header {`,
 		`align-items: center;`,
-		`.transfer-row-tail .icon-button:last-child .app-icon { transform: translateX(6px); }`,
-		`.transfer-tools > .icon-button:last-child .app-icon { transform: translateX(8px); }`,
+		`grid-template-columns: minmax(0, 1fr) auto auto;`,
 	} {
 		if !strings.Contains(stylesheet, required) {
 			t.Errorf("transfer row density or alignment is missing %q", required)

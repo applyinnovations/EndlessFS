@@ -171,8 +171,8 @@
     });
     byID("transfer-list").addEventListener("scroll", () => {
       const list = byID("transfer-list");
-      if (list.scrollTop <= transferVirtualRowHeight && state.transferVirtualStart > 0) scheduleTransferWindow(-1);
-      else if (list.scrollTop + list.clientHeight >= list.scrollHeight - transferVirtualRowHeight && state.transferVirtualStart + transferVirtualWindowSize < state.transferProjection.length) scheduleTransferWindow(1);
+      if (list.scrollTop <= transferVirtualScrollThreshold && state.transferVirtualStart > 0) scheduleTransferWindow(-1);
+      else if (list.scrollTop + list.clientHeight >= list.scrollHeight - transferVirtualScrollThreshold && state.transferVirtualStart + transferVirtualWindowSize < state.transferProjection.length) scheduleTransferWindow(1);
     });
     byID("open-transfers").addEventListener("click", () => { setMobileNavigationOpen(false); setTransferSheetOpen(byID("transfer-panel").hidden, true); });
     byID("transfer-scrim").addEventListener("click", () => setTransferSheetOpen(false, true));
@@ -184,7 +184,7 @@
         return;
       }
       if (event.key !== "Tab" || !matchMedia("(max-width: 760px)").matches) return;
-      const controls = Array.from(byID("transfer-panel").querySelectorAll("button:not(:disabled), input:not(:disabled), [role=tab][tabindex='0']"));
+      const controls = Array.from(byID("transfer-panel").querySelectorAll("button:not(:disabled), input:not(:disabled), summary, [role=tab][tabindex='0']"));
       if (!controls.length) return;
       const first = controls[0];
       const last = controls[controls.length - 1];

@@ -373,6 +373,14 @@ separate explicit administrator operation through
 `nix run .#repository-policy -- apply`; the ordinary CI token cannot administer
 repository policy.
 
+Pipeline policy also executes the rendered main-image publishing script with
+a Go recording stub in place of Nix. It requires the freshness command followed
+by exactly the source-SHA and edge image destinations. No image is published by
+this check. Valid multiline wrapping is allowed; missing separators, literal
+backslashes, omitted freshness and extra destinations are denied. This checks
+actual shell arguments rather than accepting a script solely because it names
+the publishing command.
+
 ## Failure handling
 
 Use stable problem kinds and durable operation states rather than provider error text. Retriable provider faults, ambiguous successes, and resumable offsets are reconciled by rereading canonical/provider state. An idempotency key is safe only for the same authenticated owner, operation kind, and request fingerprint.

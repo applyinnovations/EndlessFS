@@ -58,9 +58,9 @@ signature.
 
 Updates are explicit reviewed source changes. Review them regularly and before
 a release, with the security check and complete local commit/push gate. An
-optional future scheduled freshness scan would run through Tekton and remain
-distinct from the pinned acceptance gate. This change does not install a
-scheduled freshness job.
+live freshness scan runs through Tekton for PRs, merge-queue candidates and
+publishing, separately from the pinned acceptance gate. This change does not
+install a scheduled freshness job.
 
 The normal Nix derivation validates and extracts the retained archive inside
 the sandbox, without an upstream fetch or a pre-existing database cache.
@@ -119,3 +119,65 @@ storage format, or release-ledger boundary is introduced. The updated snapshot
 remains a retained offline verification input. The provider contracts, exact
 economics, application workflows, migration matrix, and complete local push gate
 must pass with these dependencies before the refresh is published for review.
+
+## October 8 advisory review before v0.7.4
+
+The pre-release review of merged commit
+`4e602c96aa76411c398f8a826886ddf27b5f8b26` fetched the unchanged official ZIP
+modified on 2026-10-08T22:31:09Z, with 4,613 reports and SHA-256
+`931855e697c9adf12b79d205c7f7f1f8e1e080f936647757c4ea246546438073`.
+The standalone scan and the retained-data `nix run .#security` regression both
+exited 3 with twelve reachable advisories affecting the pinned Go 1.26.6
+standard library; several also affect the pinned `golang.org/x/net` v0.57.0.
+The interrupted release qualification was not counted as a passing gate, and
+the local candidate tag was removed before publication.
+
+The repair pins [Go 1.26.9](https://go.dev/doc/devel/release#go1.26.9), preserving
+the existing Go major/minor line. Its source archive is bound to the official
+download SHA-256
+`9735d7dcdb65b35d3fa577f04064737c03b89cf1a2b71e6e69fe2f3c6f9fd4ca`.
+It advances x/net to v0.60.0, the reported fixed version for
+[GO-2026-6617](https://pkg.go.dev/vuln/GO-2026-6617) and
+[GO-2026-6603](https://pkg.go.dev/vuln/GO-2026-6603), and retains the official
+snapshot so the normal offline gate evaluates these reports reproducibly.
+The required minimum-version dependency changes are x/crypto v0.57.0,
+x/sync v0.23.0, x/sys v0.48.0 and x/text v0.42.0. All remain existing
+dependencies, locked by go.mod, go.sum and the recomputed Nix module hash.
+The release inventory derives its compiler version from the same explicit pin.
+
+The binary-metadata regression also first failed with an actual Go 1.26.5
+application binary despite the declared Go pin. Passing `go` as a package
+attribute did not override buildGoModule's captured compiler. The application
+builder now overrides that function's compiler argument explicitly; the new
+compiler-identity flake check reads the built binary's actual Go metadata and
+requires the declared pin. This covers the base production builder used by
+release CI and prevents an inventory-only toolchain update from passing.
+
+No application path, storage epoch, writer identity, provider budget, telemetry
+boundary or deployment configuration changes. Qualification must include the
+passing retained-data security gate, provider economics, valid HTTP/provider
+paths and denial tests, browser workflows, complete migration/race coverage,
+and the complete ordered local commit/push gate on the exact candidate tree.
+The security scanner's reachability analysis does not establish a production
+exploit. Application repair rollout remains pending a qualified release image.
+
+The Go 1.26.9 candidate's first complete migration gate reported 97.995%
+statement coverage; a diagnostic rerun of the same source reported 98.067%.
+The aggregate was relying on incidental execution of some guard branches.
+Deterministic schema-011 authority-verifier qualification now covers each
+incorrect adjacent-edge field, open/closing/wrong-checkpoint gates, a closed
+marker without frozen authority, an unavailable gate read, and valid frozen
+typed state. Verification must issue no writes and conserve the state's bytes
+and logical version on both valid and denial paths. The 98% migration threshold,
+immutable predecessor fixtures and exhaustive interruption portfolio remain
+unchanged.
+
+`nix run .#security-freshness` now performs the separate live review using the
+existing bounded updater and validated extraction logic, a temporary
+database and the pinned compiler/scanner. It reports the corpus checksum and
+modification time and fails on retrieval, integrity or reachable-advisory
+failure. It does not edit the retained snapshot or the candidate tree. PR and
+merge-queue CI run it after pr-check; main-image and release publishing run it
+before distribution. Offline pipeline-policy checks require the invocation in
+all active PaC workflows. Local qualification includes the same live command
+before push. Normal flake/security tests still require no live service.

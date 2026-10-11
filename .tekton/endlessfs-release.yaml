@@ -142,6 +142,7 @@ spec:
                 exit 2
               }
               nix run .#test-migration -- "$release_tag"
+              nix run .#security-freshness
               nix flake check --print-build-logs --max-jobs 6 --cores 2
 
       - name: release

@@ -175,7 +175,9 @@ spec:
             workspace: nix-store
         params:
           - name: SCRIPT
-            value: nix run .#pr-check
+            value: |
+              nix run .#pr-check
+              nix run .#security-freshness
 
       - name: nix-checks
         runAfter: [fast-checks]

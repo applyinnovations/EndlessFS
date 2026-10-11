@@ -106,16 +106,25 @@ CI confirms an already-verified candidate; it is never the first place the compl
 
    ```text
    nix run .#pr-check
+   nix run .#security-freshness
    nix flake check --print-build-logs
    nix run .#test-coverage
    ```
 
 3. Require every command to exit successfully. A failed, interrupted, timed-out, skipped, or incomplete command is a failed local gate and MUST block the push. A successful run against an earlier source tree does not count.
 4. Commit only the exact tree that passed. Before pushing, confirm `git status --short` contains no uncommitted source change that affects the candidate. Isolate unrelated user-owned changes in a different worktree rather than excluding them from verification.
-5. If the candidate tree or its merge context changes after a check—including formatter or generator output, an amend, rebase, merge, or conflict resolution—rerun the affected focused checks and the complete three-command gate before pushing.
+5. If the candidate tree or its merge context changes after a check—including formatter or generator output, an amend, rebase, merge, or conflict resolution—rerun the affected focused checks and the complete ordered gate before pushing.
 6. Push only after the local gate is green, and record the commands and results in the pull-request evidence. Never push a known failing candidate merely to use CI as a test runner.
 
 Before pushing a release tag, also run the release-specific gate with the exact candidate tag (`nix run .#test-migration -- "$release_tag"`) and require it and `nix flake check --print-build-logs` to pass on the tagged commit.
+
+`security-freshness` is a separate online advisory review, required locally
+before PR/tag push and in PaC PR, merge-queue and publishing jobs. It fetches
+and validates the official Go vulnerability corpus into a temporary directory,
+scans the candidate with the pinned compiler, and fails closed on retrieval,
+validation or reachable-advisory failure. It never updates retained source
+inputs. Ordinary flake/test/security gates continue to use reviewed retained
+data offline; the live review does not replace their reproducibility evidence.
 
 ## Storage schema and migration law
 
@@ -180,6 +189,7 @@ nix run .#test-theme
 nix run .#theme-check -- PATH
 nix run .#theme-preview -- PATH
 nix run .#security
+nix run .#security-freshness
 nix run .#dependency-check
 nix run .#container
 nix run .#provider-verify -- check CONFIG

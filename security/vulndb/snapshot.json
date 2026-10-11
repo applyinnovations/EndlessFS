@@ -1,6 +1,6 @@
 {
   "source": "https://vuln.go.dev/vulndb.zip",
-  "sha256": "ed8a9636dd6aaa55458d2a97f58b439b523a23f14c499b91088d45babbb01e1a",
-  "retrievedAt": "2026-10-08T03:23:21Z",
-  "databaseModified": "2026-10-07T14:10:51Z"
+  "sha256": "931855e697c9adf12b79d205c7f7f1f8e1e080f936647757c4ea246546438073",
+  "retrievedAt": "2026-10-10T23:11:15Z",
+  "databaseModified": "2026-10-08T22:31:09Z"
 }

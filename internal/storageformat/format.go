@@ -41,6 +41,7 @@ const (
 	FeatureStateConservation    = "state-conservation-v1"
 	FeaturePackedDomainPages    = "packed-consistency-domain-pages-v1"
 	FeatureUploadTransactions   = "upload-transactions-v1"
+	FeatureUploadIntentIdentity = "upload-intent-identities-v1"
 )
 
 type Envelope struct {

@@ -1,5 +1,14 @@
 # EndlessFS v1 release notes
 
+The v0.8.0 candidate appends schema 012 to repair independent batch-upload
+identity. A fresh attempt after cancellation or expiry no longer aliases the
+same upload/blob keys solely because file properties match. Historical IDs
+remain authoritative on replay; changed membership and expired intent
+reactivation fail closed. The adjacent migration preserves existing objects
+and fences incompatible writers. Qualification and remaining source-read scope
+are recorded in `docs/storage-schema-012-implementation.md`; this candidate
+is not released until its complete local and release gates pass.
+
 The backend observability baseline adds restricted metrics and aggregate
 CPU/allocation/heap profiles, manual OpenTelemetry traces with bounded OTLP HTTP
 export, and asynchronous safe lifecycle events. It covers HTTP routes, provider

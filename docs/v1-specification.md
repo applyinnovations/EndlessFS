@@ -1325,6 +1325,17 @@ Requirements:
   upload concurrency. Concurrency is not a user-controlled input. Pinned
   upstream source, license, selection, and rejection evidence is normative in
   `docs/upload-worker-pool-upstream-evidence.md`.
+- Schema 012 gives each independent batch admission an owner-bound identity
+  derived from its ordered idempotency keys. Equal destinations, sizes and
+  media types MUST NOT alias independent attempts, including attempts after
+  cancellation or expiry. A replay resolves the stored batch ID, member IDs,
+  order and count from canonical authority; it never regenerates published
+  identifiers. Changed content under the same keys, reordered membership,
+  subsets and mixtures of batches fail closed. Older writers are fenced by
+  the `upload-intent-identities-v1` required feature before this behavior is
+  activated. The adjacent 011-to-012 migration preserves all existing upload,
+  file and outcome identifiers and verifies complete frozen authority before
+  activation. `docs/storage-schema-012-implementation.md` records the scope.
 - Completion publication MUST accumulate affected directories and refresh a
   visible directory once after the active upload burst drains. Per-file and
   competing group-level directory refreshes are forbidden.

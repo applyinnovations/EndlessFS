@@ -673,7 +673,13 @@ func (s *FileStore) createUploadBatch008(ctx context.Context, scope domain.Scope
 		seenKeys[request.IdempotencyKey] = struct{}{}
 	}
 	batchFingerprint := namespaceRequestFingerprint("upload-batch", strings.Join(fingerprints, "\x00"))
-	batchID := storageformat.Digest([]byte("endlessfs-upload-batch-v1\x00" + scope.UserID().String() + "\x00" + batchFingerprint))
+	// The ordered idempotency keys identify an attempt. Equal file properties
+	// are equal intent content, not authority to reuse a cancelled batch.
+	keyDigests := make([]string, len(normalized))
+	for index, request := range normalized {
+		keyDigests[index] = storageformat.Digest([]byte(request.IdempotencyKey))
+	}
+	batchID := storageformat.Digest([]byte("endlessfs-upload-batch-intent-v1\x00" + scope.UserID().String() + "\x00" + strings.Join(keyDigests, "\x00")))
 	items := make([]portableUploadBatchItem, len(requests))
 	created := false
 	intentsReady := false
@@ -704,8 +710,14 @@ func (s *FileStore) createUploadBatch008(ctx context.Context, scope domain.Scope
 			}
 		}
 		if existing == len(items) {
+			// Published membership is authoritative on replay, including batches
+			// created by earlier binaries. Never regenerate an existing opaque ID.
+			if items[0].record.Batch == nil {
+				return nil, domain.NewError(domain.ErrorInvalid, "upload batch replay has invalid membership")
+			}
+			storedBatchID := items[0].record.Batch.BatchID
 			for index := range items {
-				if items[index].record.Batch == nil || items[index].record.Batch.BatchID != batchID || items[index].record.Batch.Index != uint64(index) {
+				if items[index].record.Batch == nil || items[index].record.Batch.BatchID != storedBatchID || items[index].record.Batch.Index != uint64(index) || items[index].record.Batch.Count != uint64(len(items)) {
 					return nil, domain.NewError(domain.ErrorInvalid, "upload batch replay has invalid membership")
 				}
 			}
@@ -753,7 +765,7 @@ func (s *FileStore) createUploadBatch008(ctx context.Context, scope domain.Scope
 		if err != nil {
 			return nil, err
 		}
-		mutationID := "upload-batch-create:" + storageformat.Digest([]byte(strings.Join(fingerprints, "\x00")))
+		mutationID := "upload-batch-create:" + batchID
 		if err := view.bindMutation(mutationID, batchFingerprint); err != nil {
 			return nil, err
 		}
@@ -783,6 +795,12 @@ func (s *FileStore) createUploadBatch008(ctx context.Context, scope domain.Scope
 func (s *FileStore) activatePortableUploadBatch(ctx context.Context, owner domain.UserID, items []portableUploadBatchItem, batchFingerprint string, leasesKnownAbsent bool) ([]domain.UploadCapability, error) {
 	if len(items) == 0 || items[0].record.Batch == nil {
 		return nil, domain.NewError(domain.ErrorInvalid, "upload batch membership is missing")
+	}
+	now := s.engine.clock.Now()
+	for _, item := range items {
+		if (item.record.State == storageformat.UploadInitializing || item.record.State == storageformat.UploadActive) && !now.Before(item.record.ExpiresAt) {
+			return nil, domain.NewError(domain.ErrorConflict, "upload intent has expired")
+		}
 	}
 	batchID := items[0].record.Batch.BatchID
 	capabilities := make([]domain.UploadCapability, len(items))

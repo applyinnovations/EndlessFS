@@ -150,6 +150,8 @@
             exit 1
           fi
         done
+        publisher_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "publish") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-container.yaml)"
+        go run ./tools/check-pipeline-publish "$publisher_script"
         release_verify_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "verify") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
         printf '%s\n' "$release_verify_script" | rg -F 'nix run .#test-migration -- "$release_tag"' >/dev/null
         release_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "release") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
@@ -624,6 +626,7 @@
             pkgs.libraw
           ];
           qualityTools = goTools ++ [
+            pkgs.bash
             pkgs.go-tools
             pkgs.gosec
             pkgs.nixfmt
@@ -936,6 +939,8 @@
           '';
 
           pipeline-policy = mkTask "endlessfs-pipeline-policy" [
+            go
+            pkgs.bash
             pkgs.ripgrep
             pkgs.yq-go
           ] pipelinePolicyCommand;
@@ -1014,7 +1019,12 @@
               || relative == ".github"
               || relative == ".github/workflows"
               || lib.hasPrefix ".github/workflows/" relative
-              || relative == ".github/dependabot.yml";
+              || relative == ".github/dependabot.yml"
+              || relative == "go.mod"
+              || relative == "go.sum"
+              || relative == "tools"
+              || relative == "tools/check-pipeline-publish"
+              || lib.hasPrefix "tools/check-pipeline-publish/" relative;
           };
           policySource = lib.cleanSourceWith {
             src = ./.;
@@ -1208,6 +1218,8 @@
             pkgs.runCommand "endlessfs-pipeline-policy"
               {
                 nativeBuildInputs = [
+                  go
+                  pkgs.bash
                   pkgs.ripgrep
                   pkgs.yq-go
                 ];
@@ -1216,6 +1228,7 @@
                 cp -R ${pipelineSource} source
                 chmod -R u+w source
                 cd source
+                export GOCACHE="$TMPDIR/go-cache" GOPROXY=off GOSUMDB=off GOFLAGS=-mod=readonly
                 ${pipelinePolicyCommand}
                 touch "$out"
               '';

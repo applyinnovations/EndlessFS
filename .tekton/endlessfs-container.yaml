@@ -122,9 +122,7 @@ spec:
           - name: SCRIPT
             value: |
               nix run .#security-freshness
-              nix run .#publish-container --
-              "ghcr.io/applyinnovations/endlessfs:sha-$(tasks.clone.results.COMMIT_SHA)" \
-              "ghcr.io/applyinnovations/endlessfs:edge"
+              nix run .#publish-container -- "ghcr.io/applyinnovations/endlessfs:sha-$(tasks.clone.results.COMMIT_SHA)" "ghcr.io/applyinnovations/endlessfs:edge"
   workspaces:
     - name: source
       volumeClaimTemplate:

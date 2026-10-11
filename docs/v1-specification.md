@@ -1383,6 +1383,8 @@ Requirements:
 - Duplicate strategy, planning phase, completed local fingerprints, target
   preconditions, and outcome are part of the owner-partitioned IndexedDB
   transfer ledger. They contain no file bytes or provider capability material.
+  Completion membership and order MUST be persisted before its first request
+  and preserved on replay; IndexedDB key order is not completion intent order.
   Connection loss retains completed fingerprints while the same in-memory
   `File` remains bound. Reload restarts the cheap size phase and, after any
   source reacquisition, recomputes ambiguous fingerprints because matching
@@ -1651,6 +1653,17 @@ The embedded UI MUST include:
 - Permanent deletion is visually distinct from trash.
 - Conflicts provide fail, replace, and non-conflicting-name choices where allowed.
 - Progress uses confirmed uploaded bytes; indeterminate states are labeled accurately.
+- File columns size to their complete content, including numeric size units,
+  and remain reachable through the table's own horizontal scroll area at
+  narrow widths. Transfer errors wrap completely and determine their row
+  height. The virtual transfer window remains bounded and preserves visible
+  item position across shifts with unequal row heights. Scrollbars have a
+  separate gutter and MUST NOT cover transfer action buttons.
+- The transfer overview reports all members of ongoing uploads, including their
+  completed or failed members. Unrelated terminal history MUST NOT dilute that
+  progress. When no uploads remain ongoing, it shows the latest upload's result,
+  including after reload. History tabs retain complete account-scoped counts,
+  failures and their retry, reconnect and clear actions.
 - The UI never displays or asks the user to manipulate bucket names, object keys, signed headers, or provider credentials.
 
 ### 13.3 Accessibility and responsive behavior

@@ -342,7 +342,7 @@ func TestFailedTransfersPrioritizeErrorsAndGroupsActuallyCollapse(t *testing.T) 
 		`.transfer-row-progress-error::-webkit-progress-value { background: var(--efs-color-error); }`,
 		`.transfer-row-progress-error::-moz-progress-bar { background: var(--efs-color-error); }`,
 		`.transfer-row-failure-percent { color: var(--efs-color-error) !important;`,
-		`.transfer-row.failed .transfer-row-error {`,
+		`.transfer-row-error {`,
 		`white-space: normal;`,
 		`overflow-wrap: anywhere;`,
 	} {
@@ -360,7 +360,9 @@ func TestTransferRowsUseDenseAlignedHeaders(t *testing.T) {
 
 	script := string(applicationScript)
 	for _, required := range []string{
-		`const transferVirtualRowHeight = 60;`,
+		`const transferVirtualScrollThreshold = 60;`,
+		`const anchorPosition = Math.max(priorStart, state.transferVirtualStart) + 1;`,
+		`nextAnchor.getBoundingClientRect().top - priorTop`,
 		`header.className = "transfer-row-header";`,
 		`header.append(text("strong", label, "transfer-row-main"), tail);`,
 		`row.append(header, failure, progress);`,
@@ -376,10 +378,11 @@ func TestTransferRowsUseDenseAlignedHeaders(t *testing.T) {
 
 	stylesheet := string(applicationStylesheet)
 	for _, required := range []string{
-		`.transfer-item { height: 60px;`,
+		`.transfer-item { min-height: 60px;`,
+		`scrollbar-gutter: stable;`,
+		`padding: 0 16px 0 0;`,
 		`.transfer-row-header {`,
 		`align-items: center;`,
-		`.transfer-row-tail .icon-button:last-child .app-icon { transform: translateX(6px); }`,
 		`.transfer-tools > .icon-button:last-child .app-icon { transform: translateX(8px); }`,
 	} {
 		if !strings.Contains(stylesheet, required) {

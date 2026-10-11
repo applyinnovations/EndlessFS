@@ -68,11 +68,6 @@
   .search-field { min-width: 0; flex-basis: calc(100% - 156px); }
   .compact-field[for="file-sort"] span { display: none; }
   .metadata-filters { position: fixed; inset: auto 8px 8px; width: auto; max-height: 60vh; overflow: auto; }
-  #file-table th:nth-child(3), #file-table td:nth-child(3),
-  #file-table th:nth-child(4), #file-table td:nth-child(4),
-  #file-table th:nth-child(5), #file-table td:nth-child(5) { display: none; }
-  #file-table { table-layout: auto; }
-  #file-table th:last-child, #file-table td:last-child { width: 168px; }
   .row-actions { gap: 2px; }
   .row-actions button { max-width: 58px; overflow: hidden; padding-inline: 4px; text-overflow: ellipsis; }
   .selection-bar { max-width: calc(100vw - 16px); }

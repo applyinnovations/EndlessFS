@@ -26,6 +26,8 @@
     transferProjection: [],
     transferQueueCursor: 0,
     transferSummary: null,
+    transferOverview: null,
+    transferOverviewIDs: new Set(),
     transferVirtualStart: 0,
     transferVirtualFrame: 0,
     expandedTransferGroups: new Set(),
@@ -117,7 +119,7 @@
   const transferLedgerVersion = 3;
   const transferVirtualWindowSize = 72;
   const transferVirtualWindowStep = 32;
-  const transferVirtualRowHeight = 60;
+  const transferVirtualScrollThreshold = 60;
   const transferDiscoveryBatchSize = 100;
   const transferRetryBaseDelay = 1000;
   const transferRetryMaximumDelay = 60000;

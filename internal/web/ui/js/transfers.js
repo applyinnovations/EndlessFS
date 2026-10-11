@@ -80,6 +80,7 @@
 	  admissionBatchIndex: Number.isSafeInteger(transfer.admissionBatchIndex) ? transfer.admissionBatchIndex : 0,
 	  admissionBatchCount: Number.isSafeInteger(transfer.admissionBatchCount) ? transfer.admissionBatchCount : 0,
 	  awaitingCompletion: Boolean(transfer.awaitingCompletion), completionBatchKey: transfer.completionBatchKey || "",
+	  completionBatchIndex: Number.isSafeInteger(transfer.completionBatchIndex) ? transfer.completionBatchIndex : -1,
       retryCount: Math.max(0, transfer.retryCount || 0), nextRetryAt: Math.max(0, transfer.nextRetryAt || 0),
       errorCode: String(transfer.errorCode || "").slice(0, 80), error: String(transfer.error || "").slice(0, 240),
       strategy: transfer.strategy || "keep-both", planPhase: transfer.planPhase || "done",
@@ -741,6 +742,7 @@
     transfer.lastProgressBytes = next;
     transfer.lastProgressAt = now;
     updateAggregateProgress(state.transferSummary, transfer, priorConfirmed, priorSpeed);
+    if (state.transferOverviewIDs.has(transfer.id)) updateAggregateProgress(state.transferOverview, transfer, priorConfirmed, priorSpeed);
     updateAggregateProgress(state.transferGroups.get(transfer.groupID)?.transferSummary, transfer, priorConfirmed, priorSpeed);
     queueTransferPersistence(transfer);
   }
@@ -944,6 +946,7 @@
     transfer.errorCode = String(errorCode || "").slice(0, 80);
     if (nextState !== "uploading") transfer.speedBps = 0;
     updateAggregateState(state.transferSummary, transfer, priorState, nextState, priorSpeed);
+    if (state.transferOverviewIDs.has(transfer.id)) updateAggregateState(state.transferOverview, transfer, priorState, nextState, priorSpeed);
     updateAggregateState(state.transferGroups.get(transfer.groupID)?.transferSummary, transfer, priorState, nextState, priorSpeed);
     queueTransferPersistence(transfer);
     updateTransferGroup(transfer.groupID, false);
@@ -1086,7 +1089,22 @@
 	function completionCandidates() {
 	  const ready = state.transfers.filter((transfer) => transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c && !transfer.cancelRequested && transfer.state === "uploading");
 	  const persistedKey = ready.find((transfer) => transfer.completionBatchKey)?.completionBatchKey || "";
-	  return ready.filter((transfer) => !persistedKey || transfer.completionBatchKey === persistedKey).slice(0, 10000);
+	  const candidates = ready.filter((transfer) => !persistedKey || transfer.completionBatchKey === persistedKey).slice(0, 10000);
+	  if (persistedKey) {
+		if (candidates.every((transfer) => Number.isSafeInteger(transfer.completionBatchIndex) && transfer.completionBatchIndex >= 0)) {
+		  candidates.sort((left, right) => left.completionBatchIndex - right.completionBatchIndex);
+		} else {
+		  // Existing ledgers already retain folder discovery order. Recover
+		  // that order for pending single-folder batches written before the
+		  // explicit completion ordinal was recorded.
+		  const group = state.transferGroups.get(candidates[0]?.groupID);
+		  if (group && candidates.every((transfer) => transfer.groupID === group.id)) {
+			const order = new Map(group.transferIDs.map((id, index) => [id, index]));
+			candidates.sort((left, right) => order.get(left.id) - order.get(right.id));
+		  }
+		}
+	  }
+	  return candidates;
 	}
 
 	function scheduleUploadCompletionRetry(delay = 1000) {
@@ -1106,7 +1124,10 @@
 	  state.uploadCompletionActive = true;
 	  const existingKey = transfers.find((transfer) => transfer.completionBatchKey)?.completionBatchKey || "";
 	  const batchKey = existingKey || idempotencyKey();
-	  for (const transfer of transfers) transfer.completionBatchKey = batchKey;
+	  for (const [index, transfer] of transfers.entries()) {
+		transfer.completionBatchKey = batchKey;
+		transfer.completionBatchIndex = index;
+	  }
 	  await Promise.all(transfers.map(persistTransferItem));
 	  try {
 		const result = await api("/api/v1/uploads/batch/complete", {
@@ -1117,6 +1138,7 @@
 		for (const transfer of transfers) {
 		  transfer.awaitingCompletion = false;
 		  transfer.completionBatchKey = "";
+		  transfer.completionBatchIndex = -1;
 		  transfer.retryCount = 0;
 		  transfer.nextRetryAt = 0;
 		  transitionTransfer(transfer, "complete");
@@ -1641,6 +1663,22 @@
       transfersByGroup.get(transfer.groupID).push(transfer);
     }
     for (const group of state.transferGroups.values()) group.transferSummary = aggregateTransferSummary(transfersByGroup.get(group.id) || []);
+    // Include complete and failed members of each ongoing upload, but keep
+    // unrelated terminal history out of its progress denominator. With no
+    // ongoing work, retain the latest upload's result across ledger reloads.
+    const ongoing = new Set();
+    let latest = "";
+    let latestCreated = -1;
+    for (const transfer of state.transfers) {
+      const cohort = transfer.groupID || transfer.id;
+      const created = state.transferGroups.get(transfer.groupID)?.createdAt || transfer.createdAt || 0;
+      if (created > latestCreated || (created === latestCreated && cohort > latest)) { latest = cohort; latestCreated = created; }
+      if (!["complete", "failed", "cancelled"].includes(transfer.state)) ongoing.add(cohort);
+    }
+    if (!ongoing.size && latest) ongoing.add(latest);
+    const current = state.transfers.filter((transfer) => ongoing.has(transfer.groupID || transfer.id));
+    state.transferOverviewIDs = new Set(current.map((transfer) => transfer.id));
+    state.transferOverview = aggregateTransferSummary(current);
   }
 
   function updateAggregateProgress(summary, transfer, priorConfirmed, priorSpeed) {
@@ -1847,6 +1885,8 @@
   }
 
   function renderTransferOverview(summary) {
+    const history = summary;
+    summary = state.transferOverview || summary;
     const progress = byID("transfer-progress");
     progress.max = summary.totalBytes > 0 ? summary.totalBytes : Math.max(1, summary.totalCount);
     progress.value = summary.totalBytes > 0 ? summary.confirmedBytes : summary.counts.complete;
@@ -1858,10 +1898,10 @@
     byID("transfer-volume").textContent = `${formatBytes(summary.confirmedBytes)} / ${formatBytes(summary.totalBytes)}`;
     byID("transfer-active").textContent = `${summary.active.toLocaleString()} active`;
     const filterCounts = {
-      current: summary.active + summary.pending + summary.counts.failed,
-      failed: summary.counts.failed,
-      complete: summary.counts.complete,
-      all: summary.totalCount,
+      current: history.active + history.pending + history.counts.failed,
+      failed: history.counts.failed,
+      complete: history.counts.complete,
+      all: history.totalCount,
     };
     const transferTabs = byID("transfer-filter");
     setTabSelection(transferTabs, state.transferFilter);
@@ -1872,11 +1912,12 @@
     byID("header-transfer-speed").textContent = formatRate(summary.speedBps);
     byID("header-transfer-eta").textContent = summary.eta.replace(" remaining", "").replace("Calculating ETA", "ETA…").replace("Needs attention", "Attention");
     byID("header-transfer-count").textContent = `${summary.active.toLocaleString()}/${summary.totalCount.toLocaleString()}`;
-    const launcherLabel = `View transfers, ${summary.percent}% complete, ${formatRate(summary.speedBps)}, ${summary.eta}, ${summary.active} active of ${summary.totalCount} files`;
+    const earlierFailures = Math.max(0, history.counts.failed - summary.counts.failed);
+    const launcherLabel = `View transfers, ${summary.percent}% complete, ${formatRate(summary.speedBps)}, ${summary.eta}, ${summary.active} active of ${summary.totalCount} files${earlierFailures ? `, ${earlierFailures} earlier failed uploads` : ""}`;
     byID("open-transfers").setAttribute("aria-label", launcherLabel);
     byID("open-transfers").dataset.tooltip = launcherLabel;
-    byID("clear-transfers").disabled = summary.counts.complete + summary.counts.cancelled === 0;
-    byID("retry-failed-transfers").disabled = summary.retryableFailed === 0;
+    byID("clear-transfers").disabled = history.counts.complete + history.counts.cancelled === 0;
+    byID("retry-failed-transfers").disabled = history.retryableFailed === 0;
     byID("clear-failed-transfers").disabled = !state.transfers.some((transfer) => transfer.state === "failed" && !transfer.clearing);
   }
 
@@ -1963,9 +2004,16 @@
     state.transferVirtualStart = Math.max(0, Math.min(maximumStart, priorStart + direction * transferVirtualWindowStep));
     const moved = state.transferVirtualStart - priorStart;
     if (!moved) return;
-    const priorScroll = list.scrollTop;
+    // The overlapping item anchors both windows. Error text can change row
+    // heights, so preserve its measured viewport position rather than assuming
+    // a fixed height for every removed or inserted row.
+    const anchorPosition = Math.max(priorStart, state.transferVirtualStart) + 1;
+    const anchorSelector = `[aria-posinset="${anchorPosition}"]`;
+    const priorAnchor = list.querySelector(anchorSelector);
+    const priorTop = priorAnchor?.getBoundingClientRect().top;
     renderTransferWindow();
-    list.scrollTop = Math.max(1, priorScroll - moved * transferVirtualRowHeight);
+    const nextAnchor = list.querySelector(anchorSelector);
+    if (priorTop !== undefined && nextAnchor) list.scrollTop = Math.max(1, list.scrollTop + nextAnchor.getBoundingClientRect().top - priorTop);
   }
 
   function scheduleTransferWindow(direction) {

@@ -30,3 +30,16 @@ func TestContractMemoryUploadAbort(t *testing.T) {
 		return objectstorecontract.UploadAbortHarness{Backend: backend, Client: server.Client(), Now: clock.Now()}
 	})
 }
+
+func TestContractMemoryUploadLifetime(t *testing.T) {
+	objectstorecontract.RunUploadLifetime(t, func(t *testing.T) objectstorecontract.UploadLifetimeHarness {
+		backend := memory.New()
+		server := httptest.NewServer(backend)
+		t.Cleanup(server.Close)
+		clock := domain.NewFixedClock(time.Date(2072, 1, 2, 3, 4, 5, 0, time.UTC))
+		if err := backend.ConfigureDataPlane(server.URL, clock, domain.NewIDGenerator(bytes.NewReader(bytes.Repeat([]byte{0x65}, 4096)))); err != nil {
+			t.Fatal(err)
+		}
+		return objectstorecontract.UploadLifetimeHarness{Backend: backend, Clock: clock}
+	})
+}

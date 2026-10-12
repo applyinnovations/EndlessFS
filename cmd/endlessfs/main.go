@@ -164,7 +164,7 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 	engine, err := portable.Open(openContext, portable.Options{
 		Backend: backend, FileBackend: fileBackend, Clock: clock, IDs: ids,
 		Writer:   writerConfiguration,
-		LeaseTTL: 2 * time.Minute, UploadTTL: cfg.UploadInitTTL, DownloadTTL: cfg.DownloadCapabilityTTL,
+		LeaseTTL: 2 * time.Minute, UploadTTL: cfg.UploadInitTTL, UploadSessionTTL: cfg.UploadSessionTTL, DownloadTTL: cfg.DownloadCapabilityTTL,
 		CursorKey: deriveKey("endlessfs-state-cursor-key-v1", secretBytes),
 		MigrationObserver: func(progress portable.MigrationProgress) {
 			role := telemetry.Application

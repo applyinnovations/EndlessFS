@@ -127,7 +127,14 @@ func (b *Backend) BeginUpload(ctx context.Context, request objectstore.UploadReq
 	if b.transfer.allowedOrigin != "" {
 		initiationHeaders = append(initiationHeaders, "origin:"+b.transfer.allowedOrigin)
 	}
-	initiationURL, err := b.signedURL(request.Key, http.MethodPost, request.ExpiresAt, request.MediaType, initiationHeaders, url.Values{"ifGenerationMatch": {"0"}})
+	initiationExpiry := request.InitiationExpiresAt
+	if initiationExpiry.IsZero() {
+		initiationExpiry = request.ExpiresAt
+	}
+	if !initiationExpiry.After(b.transfer.clock.Now()) || initiationExpiry.After(request.ExpiresAt) {
+		return objectstore.UploadHandle{}, domain.NewError(domain.ErrorInvalid, "invalid GCS upload initiation lifetime")
+	}
+	initiationURL, err := b.signedURL(request.Key, http.MethodPost, initiationExpiry, request.MediaType, initiationHeaders, url.Values{"ifGenerationMatch": {"0"}})
 	if err != nil {
 		return objectstore.UploadHandle{}, err
 	}

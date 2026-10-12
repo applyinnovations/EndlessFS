@@ -23,6 +23,8 @@ const (
 	maximumDownloadTTL               = 10 * time.Minute
 	defaultUploadTTL                 = 5 * time.Minute
 	maximumUploadTTL                 = time.Hour
+	defaultUploadSessionTTL          = 24 * time.Hour
+	maximumUploadSessionTTL          = 7 * 24 * time.Hour
 	defaultTextPreviewMax      int64 = 1 << 20
 	defaultPreviewOperationTTL       = 45 * time.Second
 	maximumPreviewOperationTTL       = 5 * time.Minute
@@ -55,6 +57,7 @@ type Config struct {
 	SessionTTL                time.Duration
 	DownloadCapabilityTTL     time.Duration
 	UploadInitTTL             time.Duration
+	UploadSessionTTL          time.Duration
 	TextPreviewMaxBytes       int64
 	DefaultLightTheme         string
 	DefaultDarkTheme          string
@@ -234,6 +237,13 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	uploadSessionTTL, err := parseDuration(lookup, "ENDLESSFS_UPLOAD_SESSION_TTL", defaultUploadSessionTTL, maximumUploadSessionTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	if uploadSessionTTL < uploadTTL {
+		return Config{}, fmt.Errorf("ENDLESSFS_UPLOAD_SESSION_TTL: must cover the initiation lifetime")
+	}
 	textPreviewMax, err := parsePositiveInt64(lookup, "ENDLESSFS_TEXT_PREVIEW_MAX_BYTES", defaultTextPreviewMax, 16<<20)
 	if err != nil {
 		return Config{}, err
@@ -347,6 +357,7 @@ func Parse(lookup func(string) (string, bool)) (Config, error) {
 		SessionTTL:                sessionTTL,
 		DownloadCapabilityTTL:     downloadTTL,
 		UploadInitTTL:             uploadTTL,
+		UploadSessionTTL:          uploadSessionTTL,
 		TextPreviewMaxBytes:       textPreviewMax,
 		DefaultLightTheme:         defaultLightTheme,
 		DefaultDarkTheme:          defaultDarkTheme,

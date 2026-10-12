@@ -65,6 +65,15 @@ Full local gates, schema-012 epoch/profile fixtures, aggregate migration
 coverage and release qualification are required before this change is ready
 for review or publication. Focused regressions alone are not release proof.
 
+The immutable schema-012 application fixtures were written by commit
+`2397a5c21f967cc62db9f4c9d9f34687884ca784`. Their configuration digest and
+records remain intact. Admission lifetime defaults do not change writer
+identity: every replica resolves an existing transfer's absolute deadline
+from canonical authority, not from its own defaults. A different local
+default cannot renew a persisted session or change capability drain. The
+application startup matrix uses the real configured lifetimes and preserves
+the producer's records.
+
 ## Rejected alternatives and remaining scope
 
 Increasing retry limits cannot repair a deterministic identity collision.
@@ -75,5 +84,37 @@ schema boundary would allow incompatible writer rules in one storage set.
 The external-drive stall is a separate client source-read problem. Controlled
 tests completed with 64 external photos and 100 SSD copies, while 100 external
 photos in a fresh destination stopped transmitting with the drive still busy.
-This identity change does not claim to repair that stall or qualify a new
-source-read scheduler.
+The accompanying source scheduler retains the 100 logical tasks but separates
+them from a cancellable, serial disk reader and a bounded chunk window. The
+client qualification and hardware comparison are recorded separately; they do
+not substitute for migration or provider-economics proof.
+
+New resumable intent deadlines use the configured session lifetime, default
+24 hours and capped at the provider-supported seven days. Signed initiation
+remains short lived. Existing canonical record bytes, semantics and expiries
+remain unchanged; this is configuration of the existing absolute deadline,
+not a renewal protocol or migration rewrite. Operators must cancel unfinished sessions before
+an urgent checkpoint/upgrade rather than expecting a five-minute drain of a
+newly admitted day-long session.
+
+## Current provider vectors
+
+The current executable catalog references explicit schema-012 workloads.
+Prior schema-011 measurements remain immutable in historical epochs; their
+replaced names are retired with this reviewed qualification record. There is
+no runtime budget-name translation or exemption for unreferenced workloads.
+The append-only delta is
+`budgets-schema-012-regional-standard-flat-2026-10.json`.
+
+100-file admission remains 105 provider calls (100 file, five state).
+2,001-file admission, completion and cancellation each remain 2,007 calls
+(2,001 file, six state), with unchanged modeled request cost. The changed ID
+and required-feature metadata alter modeled byte-transfer latency by single
+microseconds; completion improves by 11 microseconds. The full composed
+migration from schema 008 adds the separately qualified 011-to-012 freeze,
+checkpoint and conservation edge: 639 calls versus the predecessor suffix's
+513. Pending/interrupted cleanup predecessor fixtures add the same 126 calls
+(271/270 versus 145/144). These are one-time migration vectors, never charged
+to ordinary uploads. The complete role-separated costs and critical paths are
+recorded in the exact delta. All new names still fail closed until their
+measured vectors exist and match; ceilings have not been loosened in place.

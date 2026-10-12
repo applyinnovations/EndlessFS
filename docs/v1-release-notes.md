@@ -5,8 +5,14 @@ identity. A fresh attempt after cancellation or expiry no longer aliases the
 same upload/blob keys solely because file properties match. Historical IDs
 remain authoritative on replay; changed membership and expired intent
 reactivation fail closed. The adjacent migration preserves existing objects
-and fences incompatible writers. Qualification and remaining source-read scope
-are recorded in `docs/storage-schema-012-implementation.md`; this candidate
+and fences incompatible writers. Large-file tasks share a serial upload-data
+reader and a 32 MiB chunk window, so slow source reads apply backpressure before
+occupying network streams. Verified files publish after a source stalls,
+speed/ETA ages from acknowledgements, and finalization uses a normal status.
+Resumable sessions have a separate configurable 24-hour absolute lifetime;
+initiation remains short lived and resume never renews authority. Qualification
+is recorded in `docs/storage-schema-012-implementation.md` and
+`docs/upload-source-backpressure-evidence.md`; this candidate
 is not released until its complete local and release gates pass.
 
 The backend observability baseline adds restricted metrics and aggregate

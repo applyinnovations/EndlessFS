@@ -207,7 +207,7 @@ func TestProviderBudgetUploadBatchSegmentedScaleLifecycle(t *testing.T) {
 		t.Fatalf("CreateUploadBatch() = %d capabilities, %v", len(capabilities), err)
 	}
 	assertTransferScaleShape(t, "upload-admission", fixture.stateLedger.Events(), fixture.fileLedger.Events(), providerbudget.RequestUploadBegin)
-	checkTransferScaleBudget(t, "file-create-upload-batch-2001-schema-011", fixture.stateLedger.Events(), fixture.fileLedger.Events())
+	checkTransferScaleBudget(t, "file-create-upload-batch-2001-schema-012", fixture.stateLedger.Events(), fixture.fileLedger.Events())
 
 	uploadEmptyCapabilities(t, fixture.server.Client(), capabilities)
 	items := make([]domain.CompleteUploadBatchItem, len(capabilities))
@@ -221,7 +221,7 @@ func TestProviderBudgetUploadBatchSegmentedScaleLifecycle(t *testing.T) {
 		t.Fatalf("CompleteUploadBatch() = %d entries, %v", len(result.Entries), err)
 	}
 	assertTransferScaleShape(t, "upload-completion", fixture.stateLedger.Events(), fixture.fileLedger.Events(), providerbudget.RequestObjectVerify)
-	checkTransferScaleBudget(t, "file-complete-upload-batch-2001-schema-011", fixture.stateLedger.Events(), fixture.fileLedger.Events())
+	checkTransferScaleBudget(t, "file-complete-upload-batch-2001-schema-012", fixture.stateLedger.Events(), fixture.fileLedger.Events())
 
 	fixture = newUploadBatchScaleFixture(t, 0x19283746, observer)
 	capabilities, err = fixture.engine.Files().CreateUploadBatch(ctx, fixture.scope, scaleUploadRequests("abort"))
@@ -238,5 +238,5 @@ func TestProviderBudgetUploadBatchSegmentedScaleLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertTransferScaleShape(t, "upload-cancellation", fixture.stateLedger.Events(), fixture.fileLedger.Events(), providerbudget.RequestUploadAbort)
-	checkTransferScaleBudget(t, "file-abort-upload-batch-2001-schema-011", fixture.stateLedger.Events(), fixture.fileLedger.Events())
+	checkTransferScaleBudget(t, "file-abort-upload-batch-2001-schema-012", fixture.stateLedger.Events(), fixture.fileLedger.Events())
 }

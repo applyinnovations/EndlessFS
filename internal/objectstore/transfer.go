@@ -14,6 +14,10 @@ type UploadRequest struct {
 	MediaType string
 	Resumable bool
 	ExpiresAt time.Time
+	// InitiationExpiresAt bounds the short-lived authority that starts a
+	// provider session. ExpiresAt independently bounds the admitted transfer.
+	// Zero retains the caller's legacy single-deadline behavior.
+	InitiationExpiresAt time.Time
 }
 
 type UploadCapability struct {

@@ -245,6 +245,25 @@ func (e *Engine) validateKnownControlDomainValuesForSchema(ctx context.Context, 
 					if _, err := decodePortableUploadRecord(upload.Data, namespaceOwner, record.UploadID); err != nil {
 						return domain.NewError(domain.ErrorInvalid, "portable upload idempotency target is invalid")
 					}
+				case strings.HasPrefix(value.Key, "upload-batch-abort/"):
+					var abort storageformat.PortableUploadBatchAbort
+					if err := decodeCanonicalValue(value.Value, &abort); err != nil || storageformat.ValidatePortableUploadBatchAbort(abort) != nil || abort.OwnerID != namespaceOwner.String() || value.Key != uploadBatchAbortKey(abort.BatchID) {
+						return domain.NewError(domain.ErrorInvalid, "invalid upload batch abort in checkpoint closure")
+					}
+					for index := uint64(0); index < abort.Count; index++ {
+						uploadID := uploadBatchMemberID(abort.BatchID, index)
+						upload, found, err := e.stateDomainStore().lookupAtHeadWithSession(ctx, reference, head, uploadRecordKey(uploadID), session)
+						if err != nil {
+							return err
+						}
+						if !found {
+							return domain.NewError(domain.ErrorInvalid, "upload batch abort member is missing")
+						}
+						record, err := decodePortableUploadRecord(upload.Data, namespaceOwner, uploadID)
+						if err != nil || record.Batch == nil || record.Batch.BatchID != abort.BatchID || record.Batch.Count != abort.Count || record.Batch.Index != index || abort.Aborts(index) && record.State == storageformat.UploadCompleted {
+							return domain.NewError(domain.ErrorInvalid, "upload batch abort member is misbound")
+						}
+					}
 				default:
 					if !schema009 {
 						return domain.NewError(domain.ErrorInvalid, "unknown namespace authority value")

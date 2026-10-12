@@ -96,7 +96,7 @@ func TestProviderBudgetTrashAndRestore(t *testing.T) {
 	check := func(name string) {
 		t.Helper()
 		events := append(stateLedger.Events(), fileLedger.Events()...)
-		if report, err := ratchet.CheckExact(name, modelEconomics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, events); err != nil {
+		if report, err := budgettest.CheckExact(t, ratchet, name, modelEconomics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, events); err != nil {
 			t.Errorf("%s: %v; observed=%+v; events=%+v", name, err, report.Totals, events)
 		}
 	}
@@ -340,5 +340,5 @@ func TestProviderBudgetTrashAndRestore(t *testing.T) {
 	if capabilities, err := service.CreateUploadBatch(ctx, user, batchRequests); err != nil || len(capabilities) != calibratedBatchItems {
 		t.Fatalf("CreateUploadBatch() = %d capabilities, %v", len(capabilities), err)
 	}
-	check("file-create-upload-batch-100-schema-011")
+	check("file-create-upload-batch-100-schema-012")
 }

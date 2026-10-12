@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -12,6 +13,27 @@ import (
 )
 
 var testSecret = base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+
+func TestParseUploadSessionLifetimeRejectsUnsafeBounds(t *testing.T) {
+	for _, value := range []string{"0s", "-1s", "169h", "invalid"} {
+		if _, err := Parse(mapLookup(map[string]string{"ENDLESSFS_UPLOAD_SESSION_TTL": value})); err == nil {
+			t.Errorf("accepted invalid resumable session lifetime %q", value)
+		}
+	}
+	if _, err := Parse(mapLookup(map[string]string{"ENDLESSFS_UPLOAD_SESSION_TTL": "1m"})); err == nil {
+		t.Error("session lifetime shorter than initiation accepted")
+	}
+	for _, hours := range []int{24, 48, 168} {
+		cfg, err := Parse(mapLookup(map[string]string{"ENDLESSFS_UPLOAD_SESSION_TTL": fmt.Sprintf("%dh", hours)}))
+		if err != nil || cfg.UploadSessionTTL != time.Duration(hours)*time.Hour || cfg.UploadInitTTL != 5*time.Minute {
+			t.Errorf("independent lifetime %dh: %v, %+v", hours, err, cfg)
+		}
+	}
+	cfg, err := Parse(mapLookup(nil))
+	if err != nil || cfg.UploadSessionTTL != 24*time.Hour {
+		t.Fatalf("slow-transfer default: %v, %+v", err, cfg)
+	}
+}
 
 func TestPublicConfigHasNoOptionalMediaBrowserSwitch(t *testing.T) {
 	t.Parallel()

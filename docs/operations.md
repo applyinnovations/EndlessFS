@@ -77,6 +77,17 @@ schema-012 state performs no migration. No operator
 migration command or bucket edit is required. Unknown or contradictory epoch
 markers fail closed.
 
+Upload initiation and resumable-session lifetimes are separate. The process
+defaults to `ENDLESSFS_UPLOAD_INIT_TTL=5m` and
+`ENDLESSFS_UPLOAD_SESSION_TTL=24h` (maximum `168h`). Existing records always
+retain their admitted absolute deadline; changing defaults or resuming cannot
+extend them. A slow source is read through a cancellable, bounded browser
+window before its data request starts. Confirmed bytes and an ageing speed/ETA
+describe provider acknowledgements, not disk activity. Source-read failure
+requests reconnection, and verified files can publish while another source is
+stalled. Cancel unfinished sessions before an urgent checkpoint or upgrade:
+a newly admitted day-long session must not be assumed to drain in five minutes.
+
 Each edge owns a stable checkpoint and CAS-closes the durable write gate before
 changing state. Schemas 001 through 007 and their operation/preparation records
 are migration input only; their edge-specific recovery rules remain implemented

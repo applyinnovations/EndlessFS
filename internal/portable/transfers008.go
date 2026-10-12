@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
@@ -23,6 +24,10 @@ func uploadDomainReference(owner domain.UserID) consistencyDomainRef {
 func uploadRecordKey(uploadID string) string { return "upload/" + uploadID }
 
 func uploadBatchAbortKey(batchID string) string { return "upload-batch-abort/" + batchID }
+
+func uploadBatchMemberID(batchID string, index uint64) string {
+	return storageformat.Digest([]byte(fmt.Sprintf("endlessfs-upload-batch-member-v1\x00%s\x00%016x", batchID, index)))
+}
 
 func uploadIdempotencyKey(value string) string {
 	return "upload-idempotency/" + storageformat.Digest([]byte(value))
@@ -419,6 +424,21 @@ func (s *FileStore) resumePortableUpload(ctx context.Context, record storageform
 	return domainUploadCapability(record.UploadID, capability), nil
 }
 
+func (e *Engine) uploadLifetime(resumable bool) time.Duration {
+	if resumable {
+		return e.uploadSessionTTL
+	}
+	return e.uploadTTL
+}
+
+func (e *Engine) uploadInitiationExpiry(expiresAt time.Time) time.Time {
+	deadline := e.clock.Now().UTC().Add(e.uploadTTL)
+	if expiresAt.Before(deadline) {
+		return expiresAt
+	}
+	return deadline
+}
+
 // ensurePortableUploadLease performs the only unavoidable per-object provider
 // work in upload initialization. The canonical intent must already be
 // committed before this function is called. A retained lease makes the step
@@ -440,7 +460,7 @@ func (s *FileStore) ensurePortableUploadLease(ctx context.Context, intent storag
 	if errors.Is(leaseErr, domain.ErrNotFound) {
 		handle, beginErr := transfers.BeginUpload(ctx, objectstore.UploadRequest{
 			UploadID: intent.UploadID, Key: storageformat.BlobKey(intent.OwnerID, intent.BlobID), Size: intent.Size,
-			MediaType: intent.MediaType, Resumable: intent.Resumable, ExpiresAt: intent.ExpiresAt,
+			MediaType: intent.MediaType, Resumable: intent.Resumable, ExpiresAt: intent.ExpiresAt, InitiationExpiresAt: s.engine.uploadInitiationExpiry(intent.ExpiresAt),
 		})
 		if beginErr != nil {
 			return objectstore.UploadCapability{}, objectstore.Object{}, beginErr
@@ -589,7 +609,7 @@ func (s *FileStore) createUpload008(ctx context.Context, scope domain.Scope, req
 	record := storageformat.PortableUploadRecord{
 		SchemaVersion: 1, UploadID: uploadID, OwnerID: scope.UserID().String(), Area: areaName(scope.Area()), RequestedPath: request.Path.String(), ResolvedPath: resolved.String(), BlobID: uploadID,
 		Size: request.Size, MediaType: mediaType, Conflict: conflict, ExpectedVersion: request.ExpectedVersion, TargetExisted: targetExisted, Resumable: request.Resumable, State: storageformat.UploadInitializing,
-		CreatedAt: now, ExpiresAt: now.Add(s.engine.uploadTTL),
+		CreatedAt: now, ExpiresAt: now.Add(s.engine.uploadLifetime(request.Resumable)),
 	}
 	recordBody, err := storageformat.EncodeCanonical(record)
 	if err != nil {
@@ -739,11 +759,11 @@ func (s *FileStore) createUploadBatch008(ctx context.Context, scope domain.Scope
 				return nil, domain.NewError(domain.ErrorConflict, "upload batch resolves more than one item to the same destination")
 			}
 			seenDestinations[resolved.String()] = struct{}{}
-			uploadID := storageformat.Digest([]byte(fmt.Sprintf("endlessfs-upload-batch-member-v1\x00%s\x00%016x", batchID, index)))
+			uploadID := uploadBatchMemberID(batchID, uint64(index))
 			record := storageformat.PortableUploadRecord{
 				SchemaVersion: 1, UploadID: uploadID, OwnerID: scope.UserID().String(), Area: areaName(scope.Area()), RequestedPath: request.Path.String(), ResolvedPath: resolved.String(), BlobID: uploadID,
 				Size: request.Size, MediaType: request.MediaType, Conflict: request.Conflict, ExpectedVersion: request.ExpectedVersion, TargetExisted: targetExisted, Resumable: request.Resumable,
-				State: storageformat.UploadInitializing, CreatedAt: now, ExpiresAt: now.Add(s.engine.uploadTTL),
+				State: storageformat.UploadInitializing, CreatedAt: now, ExpiresAt: now.Add(s.engine.uploadLifetime(request.Resumable)),
 				Batch: &storageformat.PortableUploadBatchMember{BatchID: batchID, Index: uint64(index), Count: uint64(len(requests))},
 			}
 			recordBody, encodeErr := storageformat.EncodeCanonical(record)
@@ -890,7 +910,7 @@ func (s *FileStore) ensurePortableUploadLeaseSegment(ctx context.Context, owner 
 				traced := providerbudget.WithTrace(ctx, providerbudget.Trace{Operation: "create-upload-batch", Subsystem: "upload-session", ParallelGroup: "upload-session-batch"})
 				handle, beginErr := transfers.BeginUpload(traced, objectstore.UploadRequest{
 					UploadID: record.UploadID, Key: storageformat.BlobKey(record.OwnerID, record.BlobID), Size: record.Size,
-					MediaType: record.MediaType, Resumable: record.Resumable, ExpiresAt: record.ExpiresAt,
+					MediaType: record.MediaType, Resumable: record.Resumable, ExpiresAt: record.ExpiresAt, InitiationExpiresAt: s.engine.uploadInitiationExpiry(record.ExpiresAt),
 				})
 				if beginErr == nil && (len(handle.Lease) < 1 || len(handle.Lease) > storageformat.MaxSealedUploadLeaseBytes) {
 					beginErr = domain.NewError(domain.ErrorInvalid, "provider upload lease exceeds the bounded segment envelope")

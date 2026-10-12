@@ -1,11 +1,14 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,8 +28,24 @@ func TestE2EUploadLayoutKeepsColumnsErrorsAndActionsReadable(t *testing.T) {
 
 func testUploadLayout(t *testing.T, themeName string) {
 	t.Helper()
+	// Settings becomes visible before its asynchronous catalog has arrived.
+	// Hold that response explicitly so the theme setup cannot depend on timing.
+	var holdCatalog atomic.Bool
+	catalogRequested := make(chan struct{})
+	catalogRelease := make(chan struct{})
+	var catalogOnce, releaseOnce sync.Once
+	releaseCatalog := func() { releaseOnce.Do(func() { close(catalogRelease) }) }
+	t.Cleanup(releaseCatalog)
 	harness := newProductionLikeHarnessWithControlPlaneWrapper(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/themes" && holdCatalog.Load() {
+				catalogOnce.Do(func() { close(catalogRequested) })
+				select {
+				case <-catalogRelease:
+				case <-r.Context().Done():
+					return
+				}
+			}
 			if r.URL.Path != "/api/v1/files" || r.Method != http.MethodGet {
 				next.ServeHTTP(w, r)
 				return
@@ -57,23 +76,51 @@ func testUploadLayout(t *testing.T, themeName string) {
 		})
 	})
 	client := newTestBrowser(t)
+	if err := chromedp.Run(client.ctx, emulation.SetEmulatedMedia().WithFeatures([]*emulation.MediaFeature{{Name: "prefers-color-scheme", Value: "light"}})); err != nil {
+		t.Fatal(err)
+	}
 	bootstrapBrowser(t, client, harness)
+	if err := waitFor(client.ctx, `document.documentElement.dataset.theme === 'endlessfs-light'`, 5*time.Second); err != nil {
+		t.Fatal("initial light theme: ", err)
+	}
 	if themeName == "endlessfs-dark" {
+		holdCatalog.Store(true)
 		if err := chromedp.Run(client.ctx, chromedp.Click(`a[href="/settings"]`, chromedp.ByQuery)); err != nil {
 			t.Fatal(err)
 		}
 		if err := waitVisible(client.ctx, "#theme-select", 5*time.Second); err != nil {
 			t.Fatal(err)
 		}
+		requestContext, cancelRequest := context.WithTimeout(client.ctx, 5*time.Second)
+		defer cancelRequest()
+		select {
+		case <-catalogRequested:
+		case <-requestContext.Done():
+			t.Fatal("settings did not request its theme catalog")
+		}
+		var catalogPending bool
+		if err := chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector('#theme-select').options.length === 0`, &catalogPending)); err != nil {
+			t.Fatal(err)
+		}
+		if !catalogPending {
+			t.Fatal("catalog delay did not exercise a visible, unpopulated theme selector")
+		}
+		releaseCatalog()
+		if err := waitFor(client.ctx, `document.querySelector('#theme-select option[value="endlessfs-dark"]') !== null`, 5*time.Second); err != nil {
+			t.Fatal("theme catalog readiness: ", err)
+		}
 		if err := chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector('#theme-select').value = 'endlessfs-dark'; document.querySelector('#theme-form').requestSubmit()`, nil)); err != nil {
 			t.Fatal(err)
 		}
 		if err := waitFor(client.ctx, `document.documentElement.dataset.theme === 'endlessfs-dark'`, 5*time.Second); err != nil {
-			t.Fatal(err)
+			t.Fatal("apply dark theme: ", err)
 		}
 		if err := chromedp.Run(client.ctx, chromedp.Click(`a[href="/"]`, chromedp.ByQuery)); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := waitFor(client.ctx, fmt.Sprintf(`document.documentElement.dataset.theme === %q && (() => { const link = document.querySelector('#theme-stylesheet'); return link.sheet !== null && link.sheet.href === link.href; })()`, themeName), 5*time.Second); err != nil {
+		t.Fatal("selected theme stylesheet readiness: ", err)
 	}
 	if err := waitFor(client.ctx, `document.querySelectorAll('#file-rows .file-name').length === 2`, 10*time.Second); err != nil {
 		t.Fatal(err)

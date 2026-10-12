@@ -108,3 +108,20 @@ The exact final source tree must pass pr-check, online security freshness,
 flake checks and browser-enabled coverage before push. Post-merge release and
 deployment digest verification, followed by the authorized live photo upload,
 remain separate stages.
+
+## Browser qualification readiness
+
+The first Linux PR coverage run passed the Nix checks but timed out while the
+layout test selected the dark theme, before any layout assertion. Settings
+visibility was incorrectly used as catalog readiness: assigning a theme to the
+still-empty select produces an empty value. A held catalog response reproduced
+that invalid selection deterministically. On a dark host, the system fallback
+could also make the old dark-theme wait pass without selecting that theme.
+
+The layout qualification now fixes the emulated system preference to light,
+holds the settings catalog until the test observes the visible empty selector,
+releases it, and waits for the requested option before submission. It verifies
+the selected theme and its loaded stylesheet before measuring geometry. Both
+theme cases retain all existing column, disclosure, focus, scroll-anchor and
+scrollbar assertions and their existing deadlines. No production behavior,
+provider budget or gate is changed by this test setup repair.

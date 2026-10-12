@@ -64,16 +64,29 @@ immutable pages and unrelated domains continue immediately.
 
 Startup detects one exact epoch in the append-only storage-schema ledger and
 executes every remaining adjacent transformation in order. The current ledger
-contains schemas 001 through 011. Schema 010 adds a verified authority-
+contains schemas 001 through 012. Schema 010 adds a verified authority-
 conservation boundary to the schema-009 typed transactional-state runtime;
-schema 011 adds bounded packed-domain publication and upload transactions. A
+schema 011 adds bounded packed-domain publication and upload transactions;
+schema 012 separates independent upload-admission identities. A
 schema-001 bucket therefore runs
-`001 -> 002 -> 003 -> 004 -> 005 -> 006 -> 007 -> 008 -> 009 -> 010 -> 011`;
+`001 -> 002 -> 003 -> 004 -> 005 -> 006 -> 007 -> 008 -> 009 -> 010 -> 011 -> 012`;
 schema 003 runs the suffix beginning `003 -> 004`; schema 008 runs
-`008 -> 009 -> 010 -> 011`; schema 009 runs `009 -> 010 -> 011`; schema 010 runs
-`010 -> 011`; and current schema-011 state performs no migration. No operator
+`008 -> 009 -> 010 -> 011 -> 012`; schema 009 runs `009 -> 010 -> 011 -> 012`;
+schema 010 runs `010 -> 011 -> 012`; schema 011 runs `011 -> 012`; and current
+schema-012 state performs no migration. No operator
 migration command or bucket edit is required. Unknown or contradictory epoch
 markers fail closed.
+
+Upload initiation and resumable-session lifetimes are separate. The process
+defaults to `ENDLESSFS_UPLOAD_INIT_TTL=5m` and
+`ENDLESSFS_UPLOAD_SESSION_TTL=24h` (maximum `168h`). Existing records always
+retain their admitted absolute deadline; changing defaults or resuming cannot
+extend them. A slow source is read through a cancellable, bounded browser
+window before its data request starts. Confirmed bytes and an ageing speed/ETA
+describe provider acknowledgements, not disk activity. Source-read failure
+requests reconnection, and verified files can publish while another source is
+stalled. Cancel unfinished sessions before an urgent checkpoint or upgrade:
+a newly admitted day-long session must not be assumed to drain in five minutes.
 
 Each edge owns a stable checkpoint and CAS-closes the durable write gate before
 changing state. Schemas 001 through 007 and their operation/preparation records
@@ -139,6 +152,16 @@ inspect the migration error. Exact fixture provenance and the incident analysis
 are in `docs/storage-schema-010-implementation.md`; schema-011 format,
 economics, and recovery evidence are in
 `docs/storage-schema-011-implementation.md`.
+
+The `011 -> 012` edge preserves existing upload/blob/outcome IDs and adds a
+required feature that fences predecessor writers. New independent upload
+attempts obtain distinct authority even when their file properties match a
+cancelled attempt. Active capabilities still prevent checkpoint closure until
+the existing drain protocol permits quiescence; expired intents cannot be
+reactivated. Upload again with a fresh attempt after clearing failed local
+history. Do not roll back to a schema-011 binary after cutover. Identity,
+predecessor-residue and compatibility evidence is recorded in
+`docs/storage-schema-012-implementation.md`.
 
 A live upload capability can temporarily prevent checkpoint closure; allow it
 to finish or expire and retry. Missing roots, cycles, multiple parents,

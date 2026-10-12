@@ -29,7 +29,7 @@ func checkMaintenanceProviderBudget(t *testing.T, name string, roles []providerb
 	for _, ledger := range ledgers {
 		events = append(events, ledger.Events()...)
 	}
-	if report, err := ratchet.CheckExact(name, economics, roles, events); err != nil {
+	if report, err := budgettest.CheckExact(t, ratchet, name, economics, roles, events); err != nil {
 		t.Errorf("%s: %v; observed=%+v; events=%+v", name, err, report.Totals, events)
 	}
 }
@@ -65,14 +65,14 @@ func TestProviderBudgetCurrentSchemaMaintenanceWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkMaintenanceProviderBudget(t, "maintenance-checkpoint-minimal-schema-011", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
+	checkMaintenanceProviderBudget(t, "maintenance-checkpoint-minimal-schema-012", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
 
 	stateLedger.Reset()
 	fileLedger.Reset()
 	if err := engine.VerifyCheckpoint(ctx, checkpoint.CheckpointID); err != nil {
 		t.Fatal(err)
 	}
-	checkMaintenanceProviderBudget(t, "maintenance-verify-checkpoint-minimal-schema-011", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
+	checkMaintenanceProviderBudget(t, "maintenance-verify-checkpoint-minimal-schema-012", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
 
 	stateLedger.Reset()
 	fileLedger.Reset()
@@ -90,7 +90,7 @@ func TestProviderBudgetCurrentSchemaMaintenanceWorkflows(t *testing.T) {
 	if err := engine.OpenWrites(ctx, checkpoint.CheckpointID); err != nil {
 		t.Fatal(err)
 	}
-	checkMaintenanceProviderBudget(t, "maintenance-open-writes-schema-011", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
+	checkMaintenanceProviderBudget(t, "maintenance-open-writes-schema-012", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
 }
 
 func TestProviderBudgetTransitionRecoveryWorkflow(t *testing.T) {
@@ -137,7 +137,7 @@ func TestProviderBudgetTransitionRecoveryWorkflow(t *testing.T) {
 	checkMaintenanceProviderBudget(t, "maintenance-transition-recovery-schema-011", []providerbudget.Role{providerbudget.RoleState}, ledger)
 }
 
-func TestProviderBudgetMigration008To010MinimalFixture(t *testing.T) {
+func TestProviderBudgetMigration008ToCurrentMinimalFixture(t *testing.T) {
 	ctx := context.Background()
 	var family storageSchemaFixtureEntry
 	for _, candidate := range storageSchemaFixtures {
@@ -167,5 +167,5 @@ func TestProviderBudgetMigration008To010MinimalFixture(t *testing.T) {
 	if _, err := portable.Open(ctx, options); err != nil {
 		t.Fatal(err)
 	}
-	checkMaintenanceProviderBudget(t, "maintenance-migration-008-to-011-minimal-fixture", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
+	checkMaintenanceProviderBudget(t, "maintenance-migration-008-to-012-minimal-fixture", []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, stateLedger, fileLedger)
 }

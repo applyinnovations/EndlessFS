@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -52,6 +53,47 @@ func TestTransferHelpersRejectMalformedProviderValues(t *testing.T) {
 	}
 	if value, err := validateSessionURL("https://storage.example/session", "https://storage.example/init"); err != nil || value != "https://storage.example/session" {
 		t.Fatalf("valid session URL = %q, %v", value, err)
+	}
+}
+
+func TestUploadInitiationLifetimeIsIndependentFromResumableSession(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	var calls int
+	backend, _ := newTransferBoundaryBackend(t, now, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		got, err := strconv.Atoi(r.URL.Query().Get("X-Goog-Expires"))
+		if err != nil || got < 1 || got > 300 {
+			t.Errorf("initiation bearer lifetime = %d, want at most 300 seconds", got)
+		}
+		w.Header().Set("Location", "http://"+r.Host+"/session")
+		w.WriteHeader(http.StatusCreated)
+	}))
+	request := objectstore.UploadRequest{UploadID: "slow-source", Key: objectstore.MustKey("endlessfs/v1/staging/user/slow/data"), Size: 8 << 20, MediaType: "application/octet-stream", Resumable: true, ExpiresAt: now.Add(24 * time.Hour), InitiationExpiresAt: now.Add(5 * time.Minute)}
+	handle, err := backend.BeginUpload(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !handle.Capability.ExpiresAt.Equal(request.ExpiresAt) {
+		t.Fatal("session inherited the short initiation deadline")
+	}
+	backend.transfer.clock.(*domain.FixedClock).Advance(6 * time.Hour)
+	resumed, err := backend.ResumeUpload(t.Context(), handle.Lease)
+	if err != nil || resumed.URL != handle.Capability.URL || !resumed.ExpiresAt.Equal(request.ExpiresAt) {
+		t.Fatalf("slow source resume changed session or authority: %v, %+v", err, resumed)
+	}
+	backend.transfer.clock.(*domain.FixedClock).Advance(18 * time.Hour)
+	if _, err := backend.ResumeUpload(t.Context(), handle.Lease); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("expired session resumed: %v", err)
+	}
+	for _, expiry := range []time.Time{now, request.ExpiresAt.Add(time.Second)} {
+		backend.transfer.clock.(*domain.FixedClock).Advance(now.Sub(backend.transfer.clock.Now()))
+		request.InitiationExpiresAt = expiry
+		if _, err := backend.BeginUpload(t.Context(), request); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid initiation deadline accepted: %v", err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("invalid lifetimes contacted provider: %d requests", calls)
 	}
 }
 

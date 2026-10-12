@@ -41,6 +41,7 @@ type Options struct {
 	Writer            WriterConfiguration
 	LeaseTTL          time.Duration
 	UploadTTL         time.Duration
+	UploadSessionTTL  time.Duration
 	DownloadTTL       time.Duration
 	CursorKey         []byte
 	CursorTTL         time.Duration
@@ -102,6 +103,7 @@ type Engine struct {
 	writer              storageformat.WriterSet
 	leaseTTL            time.Duration
 	uploadTTL           time.Duration
+	uploadSessionTTL    time.Duration
 	downloadTTL         time.Duration
 	cursorAEAD          cipher.AEAD
 	cursorTTL           time.Duration
@@ -120,13 +122,16 @@ func Open(ctx context.Context, options Options) (*Engine, error) {
 	if options.UploadTTL == 0 {
 		options.UploadTTL = 10 * time.Minute
 	}
+	if options.UploadSessionTTL == 0 {
+		options.UploadSessionTTL = options.UploadTTL
+	}
 	if options.DownloadTTL == 0 {
 		options.DownloadTTL = 10 * time.Minute
 	}
 	if options.CursorTTL == 0 {
 		options.CursorTTL = 10 * time.Minute
 	}
-	if options.UploadTTL <= 0 || options.DownloadTTL <= 0 || options.DownloadTTL > 10*time.Minute || options.CursorTTL <= 0 || options.CursorTTL > time.Hour {
+	if options.UploadTTL <= 0 || options.UploadSessionTTL < options.UploadTTL || options.UploadSessionTTL > 7*24*time.Hour || options.DownloadTTL <= 0 || options.DownloadTTL > 10*time.Minute || options.CursorTTL <= 0 || options.CursorTTL > time.Hour {
 		return nil, domain.NewError(domain.ErrorInvalid, "invalid portable transfer TTL")
 	}
 	block, err := aes.NewCipher(options.CursorKey)
@@ -142,7 +147,7 @@ func Open(ctx context.Context, options Options) (*Engine, error) {
 	if fileBackend == nil {
 		fileBackend = options.Backend
 	}
-	engine := &Engine{backend: options.Backend, fileBackend: fileBackend, separateFileBackend: separateFileBackend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, uploadTTL: options.UploadTTL, downloadTTL: options.DownloadTTL, cursorAEAD: cursorAEAD, cursorTTL: options.CursorTTL, scheduler: options.Scheduler, migrationObserver: options.MigrationObserver}
+	engine := &Engine{backend: options.Backend, fileBackend: fileBackend, separateFileBackend: separateFileBackend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, uploadTTL: options.UploadTTL, uploadSessionTTL: options.UploadSessionTTL, downloadTTL: options.DownloadTTL, cursorAEAD: cursorAEAD, cursorTTL: options.CursorTTL, scheduler: options.Scheduler, migrationObserver: options.MigrationObserver}
 	if err := engine.initialize(ctx); err != nil {
 		return nil, err
 	}

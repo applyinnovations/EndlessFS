@@ -237,6 +237,26 @@ func TestWriterCompatibilityIncludesDurablePreviewConfiguration(t *testing.T) {
 	}
 }
 
+func TestWriterCompatibilityUsesPersistedUploadDeadlineNotAdmissionDefaults(t *testing.T) {
+	base := runtimeTestConfig(t)
+	initial, err := buildWriterConfiguration(base, "session-keyring-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func(*config.Config){
+		func(cfg *config.Config) { cfg.UploadSessionTTL = 48 * time.Hour },
+		func(cfg *config.Config) { cfg.UploadInitTTL = 10 * time.Minute },
+		func(cfg *config.Config) { cfg.UploadSessionTTL = 0 },
+	} {
+		variation := base
+		change(&variation)
+		writer, err := buildWriterConfiguration(variation, "session-keyring-v1")
+		if err != nil || writer.ConfigurationDigest != initial.ConfigurationDigest {
+			t.Fatalf("per-record admission default changed durable writer identity: %v", err)
+		}
+	}
+}
+
 type applicationMigrationFixture struct {
 	SchemaVersion  int               `json:"schemaVersion"`
 	SourceRelease  string            `json:"sourceRelease"`
@@ -401,6 +421,21 @@ func TestApplicationWriterProfilesOpenSchema011Fixtures(t *testing.T) {
 	}
 }
 
+func TestApplicationWriterProfilesOpenSchema012Fixtures(t *testing.T) {
+	for _, profile := range []struct {
+		name      string
+		fixture   string
+		configure func(*config.Config)
+	}{
+		{name: "preview-disabled", fixture: "schema-012-application-disabled.json", configure: func(*config.Config) {}},
+		{name: "preview-gcs", fixture: "schema-012-application-gcs.json", configure: configureSchema005PreviewProfile},
+	} {
+		t.Run(profile.name, func(t *testing.T) {
+			testApplicationWriterProfileMigration(t, profile.fixture, "schema-012", "2397a5c21f967cc62db9f4c9d9f34687884ca784", 18, profile.configure)
+		})
+	}
+}
+
 func testApplicationWriterProfileMigration(t *testing.T, fixtureName, sourceRelease, sourceCommit string, wantSize int64, configure func(*config.Config)) {
 	t.Helper()
 	body, err := os.ReadFile("../../internal/portable/testdata/migrations/" + fixtureName)
@@ -437,7 +472,7 @@ func testApplicationWriterProfileMigration(t *testing.T, fixtureName, sourceRele
 		Backend: stateBackend, FileBackend: fileBackend,
 		Clock: domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour)),
 		IDs:   domain.NewIDGenerator(bytes.NewReader(applicationMigrationBytes(0x61, 1<<20))), Writer: writer,
-		LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32),
+		LeaseTTL: time.Minute, UploadTTL: cfg.UploadInitTTL, UploadSessionTTL: cfg.UploadSessionTTL, DownloadTTL: cfg.DownloadCapabilityTTL, CursorKey: bytes.Repeat([]byte{0x63}, 32),
 	})
 	if err != nil {
 		t.Fatalf("application startup migration from deployed v0.1.4 profile: %v", err)
@@ -449,7 +484,7 @@ func testApplicationWriterProfileMigration(t *testing.T, fixtureName, sourceRele
 	live, _ := domain.NewScope(user, domain.AreaLive)
 	root, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
 	wantFiles := int64(2)
-	if sourceRelease == "schema-004" || sourceRelease == "v0.2.0" || sourceRelease == "v0.3.0" || sourceRelease == "schema-007" || sourceRelease == "schema-008" || sourceRelease == "schema-009" || sourceRelease == "schema-010" || sourceRelease == "schema-011" {
+	if sourceRelease == "schema-004" || sourceRelease == "v0.2.0" || sourceRelease == "v0.3.0" || sourceRelease == "schema-007" || sourceRelease == "schema-008" || sourceRelease == "schema-009" || sourceRelease == "schema-010" || sourceRelease == "schema-011" || sourceRelease == "schema-012" {
 		wantFiles = 3
 	}
 	if err != nil || root.Size != wantSize || root.FileCount != wantFiles {

@@ -300,6 +300,26 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 		producer: "v0.7.1-interrupted", commit: "9650c8a1c8e107f17e71b4272200c77f6ed42eac",
 		wantSize: 31, wantFiles: 2,
 	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-012", profile: "portable-minimal",
+		file: "schema-012-portable-minimal.json", digest: "d883a67ce94b5192186b61a477ec109a1421cb950603bcbdb97289fbdb7735dc",
+		producer: "schema-012", commit: "2397a5c21f967cc62db9f4c9d9f34687884ca784", wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-012", profile: "writer-profile-preview-disabled",
+		file: "schema-012-application-disabled.json", digest: "e300278bd4d24726a6add0a34e6f3fef496a942ebaa2ce28f04952af2564c254",
+		producer: "schema-012", commit: "2397a5c21f967cc62db9f4c9d9f34687884ca784", wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-012", profile: "writer-profile-preview-gcs",
+		file: "schema-012-application-gcs.json", digest: "a84055153ec5575fbca8f495e20301eee5e24fb8055c1e6b41eadd6e9a21a0bc",
+		producer: "schema-012", commit: "2397a5c21f967cc62db9f4c9d9f34687884ca784", wantSize: 18, wantFiles: 3,
+	},
+	{
+		schemaID: "endlessfs-portable-v1/schema-012", profile: "application-complete",
+		file: "schema-012-application-complete.json", digest: "c481b6933f532b43c8830bd47b41f6dcfc99a514c7959240f7bce3b5d3f2f97f",
+		producer: "schema-012", commit: "2397a5c21f967cc62db9f4c9d9f34687884ca784", wantSize: 27, wantFiles: 1,
+	},
 }
 
 var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.2.0", "v0.2.1", "v0.3.0", "v0.3.1", "v0.3.2", "v0.4.0", "v0.5.0", "v0.5.1", "v0.5.2", "v0.6.0"}
@@ -683,8 +703,11 @@ func TestMigrationCheckpointInventoryResumesFromBoundedPagesWithoutReadingFileBo
 	if got := interrupted.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads across interrupted migration = %d; want 0", got)
 	}
-	if got := interrupted.totalAttempts(); got != 24 {
-		t.Fatalf("file metadata list calls across interrupted schema-002-to-011 migration = %d; want measured restart ratchet 24", got)
+	// The separately qualified 011-to-012 conservation edge adds two metadata
+	// listings to the prior 24-call suffix; completed checkpoint pages are still
+	// reused and the file-body assertion above remains zero.
+	if got := interrupted.totalAttempts(); got != 26 {
+		t.Fatalf("file metadata list calls across interrupted schema-002-to-012 migration = %d; want measured restart ratchet 26", got)
 	}
 	progressRecords := 0
 	inventoryPages := 0
@@ -845,8 +868,8 @@ func TestMigrationDoesNotReadFileBodiesAgainImmediatelyBeforeOpeningWrites(t *te
 	if got := counting.totalBodyReads(); got != 0 {
 		t.Fatalf("file body reads during migration = %d; want 0", got)
 	}
-	if got := counting.totalAttempts(); got != 13 {
-		t.Fatalf("file metadata listing calls across schema-002-to-011 checkpoint suffix = %d; want measured ratchet 13", got)
+	if got := counting.totalAttempts(); got != 15 {
+		t.Fatalf("file metadata listing calls across schema-002-to-012 checkpoint suffix = %d; want measured ratchet 15 (13 prior plus the adjacent edge's two)", got)
 	}
 }
 
@@ -963,7 +986,7 @@ func TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary(t *testing.T) 
 	for edgeIndex, entry := range history[:len(history)-1] {
 		families := storageSchemaFixturesFor(entry.ID)
 		edgeBoundaries := boundaries
-		if entry.MigrationID == "schema-004-to-005" || entry.MigrationID == "schema-005-to-006" || entry.MigrationID == "schema-006-to-007" || entry.MigrationID == "schema-007-to-008" || entry.MigrationID == "schema-010-to-011" {
+		if entry.MigrationID == "schema-004-to-005" || entry.MigrationID == "schema-005-to-006" || entry.MigrationID == "schema-006-to-007" || entry.MigrationID == "schema-007-to-008" || entry.MigrationID == "schema-010-to-011" || entry.MigrationID == "schema-011-to-012" {
 			edgeBoundaries = []string{
 				portable.StepMigrationAfterDetection,
 				portable.StepMigrationAfterGateClosed,

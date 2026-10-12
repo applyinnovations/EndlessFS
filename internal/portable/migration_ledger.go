@@ -32,6 +32,7 @@ const (
 	storageSchema009 storageSchemaID = "endlessfs-portable-v1/schema-009"
 	storageSchema010 storageSchemaID = "endlessfs-portable-v1/schema-010"
 	storageSchema011 storageSchemaID = "endlessfs-portable-v1/schema-011"
+	storageSchema012 storageSchemaID = "endlessfs-portable-v1/schema-012"
 
 	storageMigration001To002 storageMigrationID = "schema-001-to-002"
 	storageMigration002To003 storageMigrationID = "schema-002-to-003"
@@ -43,6 +44,7 @@ const (
 	storageMigration008To009 storageMigrationID = "schema-008-to-009"
 	storageMigration009To010 storageMigrationID = "schema-009-to-010"
 	storageMigration010To011 storageMigrationID = "schema-010-to-011"
+	storageMigration011To012 storageMigrationID = "schema-011-to-012"
 )
 
 type storageSchemaReleaseBoundary struct {
@@ -151,6 +153,11 @@ var schemaMigration009To010 = storageMigration{
 var schemaMigration010To011 = storageMigration{
 	id: storageMigration010To011, from: storageSchema010, to: storageSchema011,
 	checkpointID: "automatic-storage-schema-010-to-011",
+}
+
+var schemaMigration011To012 = storageMigration{
+	id: storageMigration011To012, from: storageSchema011, to: storageSchema012,
+	checkpointID: "automatic-storage-schema-011-to-012",
 }
 
 // storageSchemaLedger is append-only. Extend it by adding one definition whose
@@ -333,6 +340,33 @@ var storageSchemaLedger = []storageSchemaDefinition{
 		gateBinding:           storageGateFeatureBound,
 		migrationFromPrevious: &schemaMigration010To011,
 	},
+	{
+		id: storageSchema012,
+		features: []string{
+			storageformat.FeatureConsistencyDomains,
+			storageformat.FeatureDirectoryDigests,
+			storageformat.FeatureDuplicateCatalog,
+			storageformat.FeatureMetadataCheckpoints,
+			storageformat.FeatureOwnerNamespaceGraph,
+			storageformat.FeaturePackedDomainPages,
+			storageformat.FeaturePagedOperations,
+			storageformat.FeatureDirectoryIndexes,
+			storageformat.FeatureNamespaceSnapshots,
+			storageformat.FeatureStateIndexes,
+			storageformat.FeatureProviderFingerprints,
+			storageformat.FeatureDerivedProjections,
+			storageformat.FeatureRecursiveBytes,
+			storageformat.FeatureRecursiveFileCounts,
+			storageformat.FeatureResumableOperations,
+			storageformat.FeatureStateConservation,
+			storageformat.FeatureTransactionalState,
+			storageformat.FeatureUploadIntentIdentity,
+			storageformat.FeatureUploadTransactions,
+			storageformat.FeatureUserDirectoryCatalog,
+		},
+		gateBinding:           storageGateFeatureBound,
+		migrationFromPrevious: &schemaMigration011To012,
+	},
 }
 
 // storageSchemaReleaseLedger is also append-only. A boundary is the first
@@ -346,6 +380,7 @@ var storageSchemaReleaseLedger = []storageSchemaReleaseBoundary{
 	{first: "v0.4.0", schema: storageSchema009},
 	{first: "v0.5.0", schema: storageSchema010},
 	{first: "v0.7.0", schema: storageSchema011},
+	{first: "v0.8.0", schema: storageSchema012},
 }
 
 func init() {
@@ -365,6 +400,8 @@ func init() {
 	schemaMigration009To010.verifyAuthority = (*Engine).verifySchema010Authority
 	schemaMigration010To011.run = (*Engine).runStorageMigration010To011
 	schemaMigration010To011.verifyAuthority = (*Engine).verifySchema011Authority
+	schemaMigration011To012.run = (*Engine).runStorageMigration011To012
+	schemaMigration011To012.verifyAuthority = (*Engine).verifySchema012Authority
 }
 
 func currentStorageSchema() storageSchemaDefinition {

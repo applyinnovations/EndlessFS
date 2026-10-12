@@ -208,11 +208,11 @@ func ProductionScaleScenarios() []ProductionScaleScenario {
 		{ID: "trash-selection-denied", Category: "denial", LogicalItems: 1_024, BrowserRequests: 1, RequestBasis: "A mismatched signed revision denies before publication.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("trash-batch-1024-denied-schema-011", 1, 1)}},
 		{ID: "smart-upload-size-planning", Category: "transfer-planning", LogicalItems: 1_024, BrowserRequests: 1, RequestBasis: "One packed metadata-only query covers 1,024 local sizes.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("upload-plan-sizes-1024-schema-011", 1, 1)}},
 		{ID: "smart-upload-all-size-candidates", Category: "transfer-planning", LogicalItems: 1_024, BrowserRequests: 2, RequestBasis: "One size request followed by one fingerprint request only for candidates.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 2, 2), execution("upload-plan-sizes-1024-schema-011", 1, 1), execution("upload-plan-fingerprints-1024-schema-011", 1, 1)}},
-		{ID: "upload-admission", Category: "transfer-active", LogicalItems: 2_001, BrowserRequests: 1, RequestBasis: "One progressive batch response; each real object necessarily creates one provider upload session.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("file-create-upload-batch-2001-schema-011", 1, 1)}},
-		{ID: "upload-completion", Category: "transfer-active", LogicalItems: 2_001, BrowserRequests: 1, RequestBasis: "One progressive completion request records bounded durable progress.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("file-complete-upload-batch-2001-schema-011", 1, 1)}},
-		{ID: "upload-cancellation", Category: "transfer-active", LogicalItems: 2_001, BrowserRequests: 1, RequestBasis: "One progressive cancellation request records bounded durable progress.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("file-abort-upload-batch-2001-schema-011", 1, 1)}},
+		{ID: "upload-admission", Category: "transfer-active", LogicalItems: 2_001, BrowserRequests: 1, RequestBasis: "One progressive batch response; each real object necessarily creates one provider upload session.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("file-create-upload-batch-2001-schema-012", 1, 1)}},
+		{ID: "upload-completion", Category: "transfer-active", LogicalItems: 2_001, BrowserRequests: 1, RequestBasis: "One progressive completion request records bounded durable progress.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("file-complete-upload-batch-2001-schema-012", 1, 1)}},
+		{ID: "upload-cancellation", Category: "transfer-active", LogicalItems: 2_001, BrowserRequests: 1, RequestBasis: "One progressive cancellation request records bounded durable progress.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("file-abort-upload-batch-2001-schema-012", 1, 1)}},
 		{ID: "visible-grid-preview-resolution", Category: "preview", LogicalItems: 10_000, BrowserRequests: 1, RequestBasis: "One control-plane resolution plus 32 direct visible-window thumbnail reads.", Executions: []BudgetExecution{execution("session-authenticate-schema-011", 1, 1), execution("namespace-stat-schema-011", 1, 1), execution("preview-ready-window-32-schema-011", 1, 1)}},
-		{ID: "checkpoint-garbage-collection", Category: "maintenance", LogicalItems: 128, BrowserRequests: 0, RequestBasis: "One authenticated checkpoint-bound garbage plan and bounded conditional sweep.", Executions: []BudgetExecution{execution("maintenance-checkpoint-garbage-128-schema-011", 1, 1)}},
+		{ID: "checkpoint-garbage-collection", Category: "maintenance", LogicalItems: 128, BrowserRequests: 0, RequestBasis: "One authenticated checkpoint-bound garbage plan and bounded conditional sweep.", Executions: []BudgetExecution{execution("maintenance-checkpoint-garbage-128-schema-012", 1, 1)}},
 		{ID: "domain-compaction", Category: "maintenance", LogicalItems: 300, BrowserRequests: 0, RequestBasis: "One packed compaction run over the calibrated domain history.", Executions: []BudgetExecution{execution("maintenance-domain-compaction-300-schema-011", 1, 1)}},
 	}
 	return scenarios
@@ -249,9 +249,9 @@ func ProductionWorkloads() []ProductionWorkload {
 		workload("namespace/get-operation", "namespace-read", "namespace-get-operation-schema-011"),
 
 		workload("transfer/create-upload", "transfer", "file-create-upload-cold-schema-011", "file-create-upload-warm-schema-011"),
-		workload("transfer/create-upload-batch", "transfer", "file-create-upload-batch-100-schema-011", "file-create-upload-batch-2001-schema-011"),
-		workload("transfer/complete-upload-batch", "transfer", "file-complete-upload-batch-2001-schema-011"),
-		workload("transfer/abort-upload-batch", "transfer", "file-abort-upload-batch-2001-schema-011"),
+		workload("transfer/create-upload-batch", "transfer", "file-create-upload-batch-100-schema-012", "file-create-upload-batch-2001-schema-012"),
+		workload("transfer/complete-upload-batch", "transfer", "file-complete-upload-batch-2001-schema-012"),
+		workload("transfer/abort-upload-batch", "transfer", "file-abort-upload-batch-2001-schema-012"),
 		workload("transfer/plan-upload-sizes", "derived-read", "upload-plan-index-cold-256-schema-011", "upload-plan-index-incremental-one-schema-011", "upload-plan-sizes-1024-schema-011"),
 		workload("transfer/plan-upload-fingerprints", "derived-read", "upload-plan-fingerprints-1024-schema-011"),
 		workload("transfer/upload-status", "transfer", "file-upload-status-active-schema-011"),
@@ -327,14 +327,14 @@ func ProductionWorkloads() []ProductionWorkload {
 
 		workload("maintenance/startup", "maintenance", "maintenance-startup-warm-schema-011"),
 		workload("maintenance/gate-status", "maintenance", "maintenance-gate-status-schema-011"),
-		workload("maintenance/checkpoint", "maintenance", "maintenance-checkpoint-minimal-schema-011", "maintenance-checkpoint-garbage-128-schema-011"),
-		workload("maintenance/verify-checkpoint", "maintenance", "maintenance-verify-checkpoint-minimal-schema-011"),
+		workload("maintenance/checkpoint", "maintenance", "maintenance-checkpoint-minimal-schema-012", "maintenance-checkpoint-garbage-128-schema-012"),
+		workload("maintenance/verify-checkpoint", "maintenance", "maintenance-verify-checkpoint-minimal-schema-012"),
 		workload("maintenance/visit-checkpoint", "maintenance", "maintenance-visit-checkpoint-minimal-schema-011"),
-		workload("maintenance/open-writes", "maintenance", "maintenance-open-writes-schema-011"),
+		workload("maintenance/open-writes", "maintenance", "maintenance-open-writes-schema-012"),
 		workload("maintenance/compaction", "maintenance", "maintenance-domain-compaction-300-schema-011"),
 		workload("maintenance/recovery", "maintenance", "maintenance-transition-recovery-schema-011"),
 		workload("maintenance/derived-view-rebuild", "maintenance", "maintenance-derived-view-rebuild-schema-011"),
-		workload("maintenance/migration", "maintenance", "maintenance-migration-008-to-011-minimal-fixture", "maintenance-migration-application-complete-pending-cleanup-schema-011", "maintenance-migration-application-complete-interrupted-cleanup-schema-011"),
+		workload("maintenance/migration", "maintenance", "maintenance-migration-008-to-012-minimal-fixture", "maintenance-migration-application-complete-pending-cleanup-schema-012", "maintenance-migration-application-complete-interrupted-cleanup-schema-012"),
 	}
 	return append([]ProductionWorkload(nil), workloads...)
 }

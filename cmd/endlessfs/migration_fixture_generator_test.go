@@ -25,10 +25,10 @@ import (
 
 const migrationFixtureProducerCommitEnvironment = "ENDLESSFS_MIGRATION_FIXTURE_PRODUCER_COMMIT"
 
-// TestGenerateSchema011MigrationFixtures is invoked only through the Nix
+// TestGenerateCurrentMigrationFixtures is invoked only through the Nix
 // fixture-generation app after the epoch writer has been committed. Ordinary
 // tests skip it and never mutate the checkout.
-func TestGenerateSchema011MigrationFixtures(t *testing.T) {
+func TestGenerateCurrentMigrationFixtures(t *testing.T) {
 	commit := os.Getenv(migrationFixtureProducerCommitEnvironment)
 	if commit == "" {
 		t.Skip("schema fixture generation was not requested")
@@ -36,6 +36,12 @@ func TestGenerateSchema011MigrationFixtures(t *testing.T) {
 	if len(commit) != 40 {
 		t.Fatal("fixture producer commit must be a full Git object ID")
 	}
+	history := portable.StorageSchemaHistory()
+	if len(history) < 2 {
+		t.Fatal("fixture generation requires a recorded predecessor")
+	}
+	schema := strings.TrimPrefix(history[len(history)-1].ID, "endlessfs-portable-v1/")
+	previous := strings.TrimPrefix(history[len(history)-2].ID, "endlessfs-portable-v1/")
 	profiles := []struct {
 		name   string
 		writer func(*testing.T) portable.WriterConfiguration
@@ -62,27 +68,27 @@ func TestGenerateSchema011MigrationFixtures(t *testing.T) {
 	}
 	for index, profile := range profiles {
 		t.Run(profile.name, func(t *testing.T) {
-			fixture := buildSchema011MigrationFixture(t, commit, byte(0x91+index*17), profile.writer(t))
+			fixture := buildCurrentSchemaMigrationFixture(t, commit, schema, byte(0x91+index*17), profile.writer(t))
 			body, err := json.Marshal(fixture)
 			if err != nil {
 				t.Fatal(err)
 			}
-			path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-011-"+profile.name+".json")
+			path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", schema+"-"+profile.name+".json")
 			if err := os.WriteFile(path, body, 0o600); err != nil {
 				t.Fatal(err)
 			}
 		})
 	}
-	generateSchema011CompleteMigrationFixture(t, commit)
+	generateCurrentSchemaCompleteMigrationFixture(t, commit, schema, previous)
 }
 
-// generateSchema011CompleteMigrationFixture migrates the immutable
+// generateCurrentSchemaCompleteMigrationFixture migrates the immutable
 // predecessor-produced production residue through the real current writer. It
 // deliberately preserves the independent semantic oracle instead of
 // reconstructing application records with current code.
-func generateSchema011CompleteMigrationFixture(t *testing.T, commit string) {
+func generateCurrentSchemaCompleteMigrationFixture(t *testing.T, commit, schema, previous string) {
 	t.Helper()
-	path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-010-application-complete.json")
+	path := filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", previous+"-application-complete.json")
 	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -119,17 +125,17 @@ func generateSchema011CompleteMigrationFixture(t *testing.T, commit string) {
 		CursorKey: bytes.Repeat([]byte{0x63}, 32),
 	})
 	if err != nil {
-		t.Fatalf("migrate complete schema-010 fixture: %v", err)
+		t.Fatalf("migrate complete %s fixture: %v", previous, err)
 	}
-	marker, err := state.NewKey(state.NamespacePreferences, "schema-011-writer-proof")
+	marker, err := state.NewKey(state.NamespacePreferences, schema+"-writer-proof")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := engine.Create(context.Background(), marker, []byte("packed")); err != nil {
-		t.Fatalf("write complete schema-011 fixture marker: %v", err)
+		t.Fatalf("write complete %s fixture marker: %v", schema, err)
 	}
 	fixture := applicationMigrationFixture{
-		SchemaVersion: 1, SourceRelease: "schema-011", SourceCommit: commit,
+		SchemaVersion: 1, SourceRelease: schema, SourceCommit: commit,
 		CreatedAt: predecessor.CreatedAt, UserID: predecessor.UserID,
 		StateObjects: stateBackend.Export(), FileObjects: fileBackend.Export(),
 		SemanticOracle: predecessor.SemanticOracle,
@@ -138,7 +144,7 @@ func generateSchema011CompleteMigrationFixture(t *testing.T, commit string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path = filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", "schema-011-application-complete.json")
+	path = filepath.Join("..", "..", "internal", "portable", "testdata", "migrations", schema+"-application-complete.json")
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +158,7 @@ func configureSchema005PreviewProfile(cfg *config.Config) {
 	cfg.PreviewKeySecret = secret.Value(base64.RawURLEncoding.EncodeToString([]byte(strings.Repeat("p", 32))))
 }
 
-func buildSchema011MigrationFixture(t *testing.T, commit string, seed byte, writer portable.WriterConfiguration) applicationMigrationFixture {
+func buildCurrentSchemaMigrationFixture(t *testing.T, commit, schema string, seed byte, writer portable.WriterConfiguration) applicationMigrationFixture {
 	t.Helper()
 	ctx := context.Background()
 	createdAt := time.Date(2046, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -213,7 +219,7 @@ func buildSchema011MigrationFixture(t *testing.T, commit string, seed byte, writ
 		{Path: domain.MustParseUserPath("/batch-aborted-b.bin"), Size: 1, MediaType: "application/octet-stream", Conflict: domain.ConflictFail, IdempotencyKey: "fixture-batch-aborted-b"},
 	})
 	if err != nil || len(batch) != 2 {
-		t.Fatalf("create schema-011 batch fixture = %+v, %v", batch, err)
+		t.Fatalf("create %s batch fixture = %+v, %v", schema, batch, err)
 	}
 	if err := engine.Files().AbortUploadBatch(ctx, live, domain.AbortUploadBatchRequest{
 		UploadIDs: []domain.UploadID{batch[0].UploadID, batch[1].UploadID}, BatchID: batch[0].BatchID,
@@ -226,7 +232,7 @@ func buildSchema011MigrationFixture(t *testing.T, commit string, seed byte, writ
 		t.Fatal(err)
 	}
 	return applicationMigrationFixture{
-		SchemaVersion: 1, SourceRelease: "schema-011", SourceCommit: commit, CreatedAt: createdAt,
+		SchemaVersion: 1, SourceRelease: schema, SourceCommit: commit, CreatedAt: createdAt,
 		UserID: user.String(), StateObjects: stateBackend.Export(), FileObjects: fileBackend.Export(),
 	}
 }

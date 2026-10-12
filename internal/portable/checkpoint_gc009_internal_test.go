@@ -181,7 +181,7 @@ func TestProviderBudgetCheckpointGarbageCollection128Objects(t *testing.T) {
 			garbageEvents = append(garbageEvents, event)
 		}
 	}
-	if report, err := ratchet.CheckExact("maintenance-checkpoint-garbage-128-schema-011", economics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, garbageEvents); err != nil {
+	if report, err := budgettest.CheckExact(t, ratchet, "maintenance-checkpoint-garbage-128-schema-012", economics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, garbageEvents); err != nil {
 		t.Errorf("128-object checkpoint garbage provider budget: %v; observed=%+v", err, report.Totals)
 	}
 	deletes := 0

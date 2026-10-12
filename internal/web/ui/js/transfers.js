@@ -2,6 +2,116 @@
     return Number.isSafeInteger(transfer.size) ? transfer.size : transfer.file instanceof File ? transfer.file.size : 0;
   }
 
+  // File tasks are cheap; concurrent native file streams are not. Materialize
+  // bounded chunks through one reader and retain each reservation until its
+  // provider request settles. Slow sources then apply backpressure to reads,
+  // without occupying a browser network stream or loading a whole file.
+  const uploadSourceChunkBytes = 8 << 20;
+  let uploadSourceBudget = 4 * uploadSourceChunkBytes;
+  const uploadSource = { usedBytes: 0, peakBytes: 0, readers: 0, peakReaders: 0, queue: [], reading: false };
+  const uploadRates = new Map();
+  let uploadProgressTimer = 0;
+  let uploadMeasurementOffset = 0;
+  let lastUploadAcknowledgementAt = 0;
+  function uploadMeasurementNow() { return performance.now() + uploadMeasurementOffset; }
+
+  function uploadCohort(transfer) { return transfer.groupID || transfer.id; }
+
+  function measuredUploadRate(cohorts, now = uploadMeasurementNow()) {
+    let rate = 0;
+    for (const cohort of cohorts) {
+      const measure = uploadRates.get(cohort);
+      if (!measure) continue;
+      const start = Math.max(measure.startedAt, now - 15000);
+      measure.samples = measure.samples.filter((sample) => sample.at > start);
+      const bytes = measure.samples.reduce((sum, sample) => sum + sample.bytes, 0);
+      if (now > start) rate += bytes * 1000 / (now - start);
+    }
+    return rate;
+  }
+
+  function refreshUploadRates() {
+    const active = state.transfers.filter((transfer) => transfer.state === "uploading" && !transfer.fixture);
+    if (!active.length) return;
+    const now = uploadMeasurementNow();
+    const summaryRate = (summary, transfers) => {
+      if (!summary) return;
+      summary.speedBps = measuredUploadRate(new Set(transfers.map(uploadCohort)), now);
+      finalizeTransferSummary(summary);
+    };
+    summaryRate(state.transferSummary, active);
+    summaryRate(state.transferOverview, active.filter((transfer) => state.transferOverviewIDs.has(transfer.id)));
+    for (const group of state.transferGroups.values()) if (group.transferSummary?.counts.uploading) summaryRate(group.transferSummary, active.filter((transfer) => transfer.groupID === group.id));
+  }
+
+  function drainUploadSource() {
+    if (uploadSource.reading) return;
+    const next = uploadSource.queue[0];
+    if (!next || uploadSource.paused || uploadSource.usedBytes + next.bytes > uploadSourceBudget && uploadSource.usedBytes !== 0) return;
+    uploadSource.queue.shift();
+    next.signal.removeEventListener("abort", next.abort);
+    if (next.signal.aborted) { next.reject(new DOMException("Upload cancelled", "AbortError")); drainUploadSource(); return; }
+    const reservation = Math.min(next.bytes, uploadSourceBudget);
+    uploadSource.usedBytes += reservation;
+    uploadSource.peakBytes = Math.max(uploadSource.peakBytes, uploadSource.usedBytes);
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      uploadSource.usedBytes -= reservation;
+      drainUploadSource();
+    };
+    // A provider's whole-object framing can exceed the chunk budget. Preserve
+    // its native streaming contract exclusively instead of buffering the file.
+    if (next.bytes > uploadSourceBudget) { next.transfer.sourcePhase = ""; next.resolve({ body: next.blob, release }); drainUploadSource(); return; }
+    uploadSource.reading = true;
+    uploadSource.readers++;
+    uploadSource.peakReaders = Math.max(uploadSource.peakReaders, uploadSource.readers);
+    const reader = new FileReader();
+    const abort = () => reader.abort();
+    next.signal.addEventListener("abort", abort, { once: true });
+    const finish = (error) => {
+      next.signal.removeEventListener("abort", abort);
+      uploadSource.reading = false;
+      uploadSource.readers--;
+      next.transfer.sourcePhase = "";
+      if (error) { release(); next.reject(error); }
+      else next.resolve({ body: reader.result, release });
+      drainUploadSource();
+      scheduleTransferRender();
+    };
+    next.transfer.sourcePhase = "reading";
+    scheduleTransferRender();
+    reader.onload = () => finish(null);
+    reader.onabort = () => finish(new DOMException("Upload cancelled", "AbortError"));
+    reader.onerror = () => {
+      const error = new Error("The source could not be read. Reconnect the drive or select the file again.");
+      error.name = "SourceReadError";
+      finish(error);
+    };
+    try { reader.readAsArrayBuffer(next.blob); }
+    catch { reader.onerror(); }
+  }
+
+  function readUploadSource(transfer, start, end) {
+    const signal = transfer.controller.signal;
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) { reject(new DOMException("Upload cancelled", "AbortError")); return; }
+      const item = { transfer, signal, blob: transfer.file.slice(start, end), bytes: end - start, resolve, reject };
+      item.abort = () => {
+        const index = uploadSource.queue.indexOf(item);
+        if (index >= 0) uploadSource.queue.splice(index, 1);
+        transfer.sourcePhase = "";
+        reject(new DOMException("Upload cancelled", "AbortError"));
+        drainUploadSource();
+      };
+      signal.addEventListener("abort", item.abort, { once: true });
+      transfer.sourcePhase = "waiting-source";
+      uploadSource.queue.push(item);
+      drainUploadSource();
+    });
+  }
+
   function transferSourceAvailable(transfer) {
     return transfer.file instanceof File || transfer.fixture === true;
   }
@@ -219,7 +329,7 @@
     if (["complete", "cancelled", "failed"].includes(transfer.state)) return;
 	if (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c) {
 	  transfer.state = "uploading";
-	  transfer.error = "Finalizing uploaded data.";
+	  transfer.error = "";
 	} else if (!(transfer.file instanceof File)) {
       transfer.state = "needs-source";
       transfer.errorCode = "source_required";
@@ -670,6 +780,29 @@
 
   function installUploadWorkerPoolTestFixture() {
     if (!state.config || !state.config.localFixture) return;
+    window.__endlessfsUploadSourceTest = {
+      advanceMeasurement: (milliseconds) => {
+        if (!Number.isFinite(milliseconds) || milliseconds < 0) throw new Error("Invalid measurement clock advance");
+        uploadMeasurementOffset += milliseconds;
+        refreshUploadRates();
+        scheduleTransferRender();
+        flushUploadCompletions();
+      },
+      qualify: async (files, url) => {
+        const started = performance.now();
+        await Promise.all(files.map(async (file, index) => {
+          const transfer = { id: `source-qualification-${index}`, file, name: "source qualification", state: "uploading", confirmed: 0, speedBps: 0, lastProgressBytes: 0, lastProgressAt: started, controller: new AbortController() };
+          await sendFileData(transfer, { url: `${url}/${index}`, uploadID: transfer.id, method: "PATCH", framing: "offset-header", declaredSize: file.size, chunkRules: { maximumSize: uploadSourceChunkBytes } });
+        }));
+        return { files: files.length, bytes: files.reduce((sum, file) => sum + file.size, 0), milliseconds: performance.now() - started, peakBytes: uploadSource.peakBytes };
+      },
+      pauseReads: (paused) => { uploadSource.paused = Boolean(paused); drainUploadSource(); },
+      setBufferChunks: (chunks) => {
+        if (![1, 2, 4].includes(chunks) || state.activeTransfers || uploadSource.usedBytes || uploadSource.queue.length) throw new Error("Invalid source prototype window");
+        uploadSourceBudget = chunks * uploadSourceChunkBytes;
+      },
+      snapshot: () => ({ usedBytes: uploadSource.usedBytes, peakBytes: uploadSource.peakBytes, readers: uploadSource.readers, peakReaders: uploadSource.peakReaders, waiting: uploadSource.queue.length, finalizing: state.transfers.filter(transfer => !transfer.fixture && transfer.awaitingCompletion).length }),
+    };
     window.__endlessfsUploadWorkerPoolTest = {
       concurrency: (pendingCount, saveData) => {
         const pending = Math.max(0, Math.floor(Number(pendingCount) || 0));
@@ -705,7 +838,7 @@
   }
 
   async function flushUploadDirectoryRefresh() {
-    if (state.activeTransfers !== 0 || state.uploadRefreshInFlight || state.uploadRefreshDirectories.size === 0) return;
+    if (state.activeTransfers !== 0 && uploadMeasurementNow() - lastUploadAcknowledgementAt < 15000 || state.uploadRefreshInFlight || state.uploadRefreshDirectories.size === 0) return;
     const directories = new Set(state.uploadRefreshDirectories);
     state.uploadRefreshDirectories.clear();
     if (!directories.has(state.currentDirectory)) return;
@@ -721,15 +854,29 @@
   function beginTransferMeasurement(transfer) {
     transfer.speedBps = 0;
     transfer.lastProgressBytes = Math.min(transfer.confirmed, transferFileSize(transfer));
-    transfer.lastProgressAt = performance.now();
+    transfer.lastProgressAt = uploadMeasurementNow();
     transfer.recoveryFailures = 0;
+    if (!transfer.fixture && !uploadRates.has(uploadCohort(transfer))) uploadRates.set(uploadCohort(transfer), { startedAt: uploadMeasurementNow(), samples: [] });
+    if (!lastUploadAcknowledgementAt) lastUploadAcknowledgementAt = uploadMeasurementNow();
+    if (!uploadProgressTimer) uploadProgressTimer = window.setInterval(() => {
+      if (!state.transfers.some((item) => item.state === "uploading" && !item.fixture)) {
+        window.clearInterval(uploadProgressTimer);
+        uploadProgressTimer = 0;
+        uploadRates.clear();
+        lastUploadAcknowledgementAt = 0;
+        return;
+      }
+      refreshUploadRates();
+      scheduleTransferRender();
+      flushUploadCompletions();
+    }, 1000);
   }
 
   function recordTransferProgress(transfer, confirmed) {
     const priorConfirmed = transfer.confirmed;
     const priorSpeed = transfer.speedBps;
     const next = Math.max(transfer.confirmed, Math.min(confirmed, transferFileSize(transfer)));
-    const now = performance.now();
+    const now = uploadMeasurementNow();
     const elapsed = now - transfer.lastProgressAt;
     const transferred = next - transfer.lastProgressBytes;
     if (transferred > 0 && elapsed > 0) {
@@ -741,6 +888,9 @@
     transfer.confirmed = next;
     transfer.lastProgressBytes = next;
     transfer.lastProgressAt = now;
+    const measure = uploadRates.get(uploadCohort(transfer));
+    if (measure && next > priorConfirmed) measure.samples.push({ at: now, bytes: next - priorConfirmed });
+    if (!transfer.fixture && next > priorConfirmed) lastUploadAcknowledgementAt = now;
     updateAggregateProgress(state.transferSummary, transfer, priorConfirmed, priorSpeed);
     if (state.transferOverviewIDs.has(transfer.id)) updateAggregateProgress(state.transferOverview, transfer, priorConfirmed, priorSpeed);
     updateAggregateProgress(state.transferGroups.get(transfer.groupID)?.transferSummary, transfer, priorConfirmed, priorSpeed);
@@ -1057,6 +1207,9 @@
 	  const fingerprintPromise = transfer.md5 && transfer.crc32c
 		? Promise.resolve({ md5: transfer.md5, crc32c: transfer.crc32c })
 		: fingerprintUploadFile(transfer);
+	  // Consume worker failure immediately, even while a slow source read is
+	  // pending. The original promise is still awaited for integrity below.
+	  fingerprintPromise.catch(() => {});
 	  if (capability) await sendFileData(transfer, capability);
 	  const fingerprint = await fingerprintPromise;
 	  transfer.md5 = fingerprint.md5;
@@ -1065,13 +1218,17 @@
       transfer.retryCount = 0;
       transfer.nextRetryAt = 0;
 	  transfer.awaitingCompletion = true;
-	  transfer.error = "Finalizing uploaded data.";
+	  transfer.error = "";
+	  transfer.speedBps = 0;
 	  queueTransferPersistence(transfer);
     } catch (error) {
+      cancelUploadFingerprint(transfer);
       if (error.name === "AbortError" && transfer.suspendedByLogout) {
         return;
       } else if (error.name === "AbortError" && transfer.cancelRequested) {
         transitionTransfer(transfer, "cancelled", "Cancelled", "cancelled");
+      } else if (error.name === "SourceReadError") {
+        transitionTransfer(transfer, "needs-source", error.message, "source_read");
       } else if (await reconcileUploadAdmissionConflict(transfer, error)) {
         return;
       } else if (transferFailureIsRetryable(error)) {
@@ -1116,9 +1273,11 @@
 	}
 
 	async function flushUploadCompletions() {
-	  if (!navigator.onLine || state.uploadCompletionActive) return;
+	  if (!navigator.onLine || state.uploadCompletionActive || state.uploadCompletionTimer) return;
 	  const readyCount = state.transfers.reduce((count, transfer) => count + (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c && !transfer.cancelRequested ? 1 : 0), 0);
-	  if (state.activeTransfers !== 0 && readyCount < 10000) return;
+	  // Healthy bursts retain one coalesced publication. A source that has
+	  // stopped acknowledging data must not hold already verified files hostage.
+	  if (state.activeTransfers !== 0 && readyCount < 10000 && uploadMeasurementNow() - lastUploadAcknowledgementAt < 15000) return;
 	  const transfers = completionCandidates();
 	  if (!transfers.length) return;
 	  state.uploadCompletionActive = true;
@@ -1149,7 +1308,7 @@
 		if (transferFailureIsRetryable(error)) {
 		  for (const transfer of transfers) {
 			transfer.retryCount = (transfer.retryCount || 0) + 1;
-			transfer.error = "Finalization will retry automatically.";
+			transfer.error = "";
 			queueTransferPersistence(transfer);
 		  }
 		  scheduleUploadCompletionRetry(Math.min(60000, 1000 * (2 ** Math.min(6, Math.max(...transfers.map((transfer) => transfer.retryCount))))));
@@ -1187,11 +1346,14 @@
         headers.delete("Upload-Offset");
       }
       let response;
+      const source = await readUploadSource(transfer, offset, end);
       try {
-        response = await fetch(capability.url, { method: capability.method, headers, body: transfer.file.slice(offset, end), signal: transfer.controller.signal });
+        response = await fetch(capability.url, { method: capability.method, headers, body: source.body, signal: transfer.controller.signal });
       } catch (error) {
         if (error.name === "AbortError") throw error;
         response = null;
+      } finally {
+        source.release();
       }
       if (response && (response.ok || (framing === "content-range" && response.status === 308))) {
         const range = response.headers.get("Range") || "";
@@ -1203,12 +1365,15 @@
           const status = await api(`/api/v1/uploads/${encodeURIComponent(capability.uploadID)}`);
           confirmed = status.confirmedOffset;
         }
-        offset = Math.max(offset, confirmed);
+        if (!Number.isSafeInteger(confirmed) || confirmed < offset || confirmed > end) throw new Error("Upload returned an invalid confirmed offset.");
+        failures = confirmed > offset || size === 0 ? 0 : failures + 1;
+        offset = confirmed;
         recordTransferProgress(transfer, offset);
-        failures = 0;
-        transfer.recoveryFailures = 0;
+        transfer.recoveryFailures = failures;
+        if (failures > 3) throw new TypeError("Upload made no progress after three recovery attempts.");
         scheduleTransferRender();
         if (size === 0) break;
+        if (failures) await new Promise((resolve) => window.setTimeout(resolve, 250 * (2 ** (failures - 1))));
         continue;
       }
       const status = await api(`/api/v1/uploads/${encodeURIComponent(capability.uploadID)}`);
@@ -1451,7 +1616,7 @@
 	  if (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c) {
 		transfer.cancelRequested = false;
 		transfer.state = "uploading";
-		transfer.error = "Finalizing uploaded data.";
+		transfer.error = "";
 		transfer.errorCode = "";
 		queueTransferPersistence(transfer);
 		continue;
@@ -1497,7 +1662,7 @@
 	if (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c) {
 	  transfer.cancelRequested = false;
 	  transfer.state = "uploading";
-	  transfer.error = "Finalizing uploaded data.";
+	  transfer.error = "";
 	  transfer.errorCode = "";
 	  queueTransferPersistence(transfer);
 	  rebuildTransferProjection();
@@ -1536,7 +1701,7 @@
 		transfer.retryCount = 0;
 		transfer.nextRetryAt = 0;
 		transfer.cancelRequested = false;
-		transitionTransfer(transfer, "uploading", "Finalizing uploaded data.");
+		transitionTransfer(transfer, "uploading");
 		continue;
 	  }
       if (["expired", "aborted"].includes(transfer.errorCode)) {
@@ -1648,6 +1813,7 @@
     let eta = "ETA —";
     if (summary.totalCount > 0 && summary.counts.complete === summary.totalCount) eta = "Complete";
     else if (!navigator.onLine && summary.active + summary.pending > 0) eta = "Offline";
+    else if (summary.counts.uploading > 0 && summary.remainingBytes === 0 && summary.counts.preparing === 0 && summary.pending === 0) eta = "Finalizing";
     else if (summary.speedBps > 0 && summary.remainingBytes > 0) eta = formatDuration(summary.remainingBytes / summary.speedBps);
     else if (summary.active > 0) eta = "Calculating ETA";
     else if (summary.counts["needs-source"] > 0) eta = "Source needed";
@@ -1720,14 +1886,15 @@
     const confirmed = Math.min(transfer.confirmed, total);
     const percent = transferPercent(transfer);
     let eta = "Waiting";
-    if (transfer.state === "uploading") eta = transfer.speedBps > 0 ? formatDuration((total - confirmed) / transfer.speedBps) : "Calculating ETA";
+    const recentSpeed = !transfer.fixture && uploadMeasurementNow() - transfer.lastProgressAt >= 15000 ? 0 : transfer.speedBps;
+    if (transfer.state === "uploading") eta = transfer.awaitingCompletion ? (transfer.retryCount > 0 ? "Retrying finalization" : "Finalizing") : transfer.sourcePhase === "reading" ? "Reading source" : transfer.sourcePhase === "waiting-source" ? "Waiting for source read" : recentSpeed > 0 ? formatDuration((total - confirmed) / recentSpeed) : "Calculating ETA";
     else if (transfer.state === "preparing") eta = transfer.planPhase && transfer.planPhase !== "done" ? "Checking duplicates" : "Preparing";
     else if (transfer.state === "retry-wait") eta = transfer.nextRetryAt > Date.now() ? `Retry in ${formatDuration((transfer.nextRetryAt - Date.now()) / 1000)}` : "Retrying";
     else if (transfer.state === "paused") eta = "Offline";
     else if (transfer.state === "needs-source") eta = "Source needed";
     else if (transfer.state === "complete") eta = "Complete";
     else if (transfer.state === "cancelled") eta = "Cancelled";
-    return `${percent}% · ${eta} · ${formatRate(transfer.speedBps)}`;
+    return `${percent}% · ${eta} · ${formatRate(recentSpeed)}`;
   }
 
   function transferRow(transfer, sharedFailure = false) {

@@ -23,6 +23,7 @@ func TestStorageSchemaLedgerIsLinearAndAppendOnly(t *testing.T) {
 		"endlessfs-portable-v1/schema-009",
 		"endlessfs-portable-v1/schema-010",
 		"endlessfs-portable-v1/schema-011",
+		"endlessfs-portable-v1/schema-012",
 	}
 	if len(storageSchemaLedger) != len(wantIDs) {
 		t.Fatalf("storage schema ledger length = %d; want %d", len(storageSchemaLedger), len(wantIDs))
@@ -132,7 +133,8 @@ func TestStorageSchemaReleaseLedgerDefinesDerivedValidityRanges(t *testing.T) {
 		"endlessfs-portable-v1/schema-008": nil,
 		"endlessfs-portable-v1/schema-009": {{First: "v0.4.0", Before: "v0.5.0"}},
 		"endlessfs-portable-v1/schema-010": {{First: "v0.5.0", Before: "v0.7.0"}},
-		"endlessfs-portable-v1/schema-011": {{First: "v0.7.0"}},
+		"endlessfs-portable-v1/schema-011": {{First: "v0.7.0", Before: "v0.8.0"}},
+		"endlessfs-portable-v1/schema-012": {{First: "v0.8.0"}},
 	}
 	for _, schema := range storageSchemaLedger {
 		got := releaseRangesForSchema(schema.id)
@@ -182,6 +184,8 @@ func TestStorageSchemaLedgerResolvesReleaseValidityRanges(t *testing.T) {
 		{release: "v0.6.0", want: "endlessfs-portable-v1/schema-010", found: true},
 		{release: "v0.7.0", want: "endlessfs-portable-v1/schema-011", found: true},
 		{release: "v0.7.999", want: "endlessfs-portable-v1/schema-011", found: true},
+		{release: "v0.8.0", want: "endlessfs-portable-v1/schema-012", found: true},
+		{release: "v0.8.999", want: "endlessfs-portable-v1/schema-012", found: true},
 		{release: "v0.0.9"},
 		{release: "0.1.7"},
 		{release: "v0.1"},
@@ -218,21 +222,22 @@ func TestStorageSchemaLedgerBuildsEveryRemainingMigrationPath(t *testing.T) {
 	}{
 		{
 			from: "endlessfs-portable-v1/schema-001",
-			want: []storageMigrationID{"schema-001-to-002", "schema-002-to-003", "schema-003-to-004", "schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"},
+			want: []storageMigrationID{"schema-001-to-002", "schema-002-to-003", "schema-003-to-004", "schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011", "schema-011-to-012"},
 		},
 		{
 			from: "endlessfs-portable-v1/schema-002",
-			want: []storageMigrationID{"schema-002-to-003", "schema-003-to-004", "schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"},
+			want: []storageMigrationID{"schema-002-to-003", "schema-003-to-004", "schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011", "schema-011-to-012"},
 		},
-		{from: "endlessfs-portable-v1/schema-003", want: []storageMigrationID{"schema-003-to-004", "schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"}},
-		{from: "endlessfs-portable-v1/schema-004", want: []storageMigrationID{"schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"}},
-		{from: "endlessfs-portable-v1/schema-005", want: []storageMigrationID{"schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"}},
-		{from: "endlessfs-portable-v1/schema-006", want: []storageMigrationID{"schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"}},
-		{from: "endlessfs-portable-v1/schema-007", want: []storageMigrationID{"schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011"}},
-		{from: "endlessfs-portable-v1/schema-008", want: []storageMigrationID{"schema-008-to-009", "schema-009-to-010", "schema-010-to-011"}},
-		{from: "endlessfs-portable-v1/schema-009", want: []storageMigrationID{"schema-009-to-010", "schema-010-to-011"}},
-		{from: "endlessfs-portable-v1/schema-010", want: []storageMigrationID{"schema-010-to-011"}},
-		{from: "endlessfs-portable-v1/schema-011"},
+		{from: "endlessfs-portable-v1/schema-003", want: []storageMigrationID{"schema-003-to-004", "schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011", "schema-011-to-012"}},
+		{from: "endlessfs-portable-v1/schema-004", want: []storageMigrationID{"schema-004-to-005", "schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011", "schema-011-to-012"}},
+		{from: "endlessfs-portable-v1/schema-005", want: []storageMigrationID{"schema-005-to-006", "schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011", "schema-011-to-012"}},
+		{from: "endlessfs-portable-v1/schema-006", want: []storageMigrationID{"schema-006-to-007", "schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011", "schema-011-to-012"}},
+		{from: "endlessfs-portable-v1/schema-007", want: []storageMigrationID{"schema-007-to-008", "schema-008-to-009", "schema-009-to-010", "schema-010-to-011", "schema-011-to-012"}},
+		{from: "endlessfs-portable-v1/schema-008", want: []storageMigrationID{"schema-008-to-009", "schema-009-to-010", "schema-010-to-011", "schema-011-to-012"}},
+		{from: "endlessfs-portable-v1/schema-009", want: []storageMigrationID{"schema-009-to-010", "schema-010-to-011", "schema-011-to-012"}},
+		{from: "endlessfs-portable-v1/schema-010", want: []storageMigrationID{"schema-010-to-011", "schema-011-to-012"}},
+		{from: "endlessfs-portable-v1/schema-011", want: []storageMigrationID{"schema-011-to-012"}},
+		{from: "endlessfs-portable-v1/schema-012"},
 	}
 	for _, test := range tests {
 		t.Run(fmt.Sprint(test.from), func(t *testing.T) {

@@ -37,6 +37,20 @@ func TestContractGCSUploadAbort(t *testing.T) {
 	})
 }
 
+func TestContractGCSUploadLifetime(t *testing.T) {
+	objectstorecontract.RunUploadLifetime(t, func(t *testing.T) objectstorecontract.UploadLifetimeHarness {
+		server, _ := newGCSServerWithFake(t)
+		clock := domain.NewFixedClock(time.Now().UTC().Truncate(time.Second))
+		backend, err := gcstransport.NewWithTransfers(protocolClient(t, server), "endlessfs-test", gcstransport.TransferOptions{
+			HTTPClient: server.Client(), GoogleAccessID: "writer@example.iam.gserviceaccount.com", SignBytes: func([]byte) ([]byte, error) { return bytes.Repeat([]byte{0x5a}, 256), nil }, Hostname: strings.TrimPrefix(server.URL, "http://"), Insecure: true, LeaseKey: bytes.Repeat([]byte{0x42}, 32), Random: bytes.NewReader(bytes.Repeat([]byte{0x27}, 4096)), Clock: clock,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return objectstorecontract.UploadLifetimeHarness{Backend: backend, Clock: clock}
+	})
+}
+
 func TestGCSResumableCapabilityCanMoveBetweenReplicas(t *testing.T) {
 	server, _ := newGCSServerWithFake(t)
 	client := protocolClient(t, server)

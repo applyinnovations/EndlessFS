@@ -508,6 +508,17 @@ type DownloadCapability struct {
 - They MUST be scoped to the minimum action and shortest practical lifetime.
 - Download capabilities default to 60 seconds and MUST NOT exceed 10 minutes.
 - Upload-initiation capabilities default to 5 minutes. A resumable session MAY remain valid for a bounded provider-supported duration required to complete a large transfer; its leakage risk MUST be documented and it MUST remain restricted to one destination.
+- The initiation and admitted resumable-session deadlines are separate. New
+  resumable transfers default to a 24-hour absolute session window, configurable
+  up to seven days through `ENDLESSFS_UPLOAD_SESSION_TTL`. This supports a large
+  folder taking hours on slow storage or a slow uplink without expanding the
+  five-minute signed initiation authority. Resume preserves the original
+  destination, identity and absolute deadline; it cannot extend expiry.
+  Existing records retain their original expiry. Capability drain uses the
+  actual session deadline, including while a file waits in the browser queue.
+  A leaked GCS session URI remains usable at the provider until revoked or its
+  provider expiry, so these bearers require the same redaction and cleanup as
+  every direct upload. Expired authority cannot publish a visible file.
 - API responses containing capabilities MUST use `Cache-Control: no-store`.
 - Capability values MUST be redacted from logs, metrics, traces, error messages, and referrers.
 - The browser MUST send only the returned method and allowlisted headers to the returned URL.
@@ -1325,9 +1336,36 @@ Requirements:
   upload concurrency. Concurrency is not a user-controlled input. Pinned
   upstream source, license, selection, and rejection evidence is normative in
   `docs/upload-worker-pool-upstream-evidence.md`.
+- Schema 012 gives each independent batch admission an owner-bound identity
+  derived from its ordered idempotency keys. Equal destinations, sizes and
+  media types MUST NOT alias independent attempts, including attempts after
+  cancellation or expiry. A replay resolves the stored batch ID, member IDs,
+  order and count from canonical authority; it never regenerates published
+  identifiers. Changed content under the same keys, reordered membership,
+  subsets and mixtures of batches fail closed. Older writers are fenced by
+  the `upload-intent-identities-v1` required feature before this behavior is
+  activated. The adjacent 011-to-012 migration preserves all existing upload,
+  file and outcome identifiers and verifies complete frozen authority before
+  activation. `docs/storage-schema-012-implementation.md` records the scope.
+- File-task concurrency is separate from source I/O. The browser materializes
+  resumable chunks through one cancellable source reader, with a bounded shared
+  buffer retained until each data request settles. A slow read MUST not occupy
+  a provider network stream, fail solely because it is slow, or prevent the UI
+  from responding to cancellation. Whole-object providers retain exclusive
+  native streaming for bodies larger than that memory budget. Checksums and
+  acknowledged offsets remain mandatory; source reads are never counted as
+  confirmed uploaded bytes. Source errors request reconnection without losing
+  confirmed progress. Transfer speed/ETA age from cohort acknowledgements and
+  finalization is a normal phase rather than an error.
 - Completion publication MUST accumulate affected directories and refresh a
-  visible directory once after the active upload burst drains. Per-file and
-  competing group-level directory refreshes are forbidden.
+  visible directory once after a healthy active upload burst drains. If no
+  provider acknowledgement arrives for the 15-second progress window, already
+  integrity-verified files MUST publish in one accumulated partial batch and
+  refresh once, even while a slow or unavailable source remains active.
+  Later verified files retain normal accumulated completion. A source stall
+  cannot hold completed files indefinitely; publication retries preserve their
+  transaction identity and backoff. Per-file and competing group refreshes
+  remain forbidden.
 - Batch completion and cancellation persist an authenticated prefix every 1,000
   items, so process loss repeats at most the current 1,000-item segment. The
   final namespace publication is one owner-head CAS. Whole-batch cancellation
@@ -1991,6 +2029,7 @@ Configuration is read from environment variables. Secrets MUST NOT be accepted a
 | `ENDLESSFS_SESSION_TTL` | Default `12h`, max `168h` | Absolute session lifetime. |
 | `ENDLESSFS_DOWNLOAD_CAPABILITY_TTL` | Default `60s`, max `10m` | Download bearer lifetime. |
 | `ENDLESSFS_UPLOAD_INIT_TTL` | Default `5m` | Upload initiation lifetime. |
+| `ENDLESSFS_UPLOAD_SESSION_TTL` | Default `24h`; maximum `168h` | Absolute resumable-transfer lifetime, separate from initiation; cannot be renewed by resume. |
 | `ENDLESSFS_TEXT_PREVIEW_MAX_BYTES` | Default `1048576` | Bounded text preview. |
 | `ENDLESSFS_DEFAULT_LIGHT_THEME` | Default `endlessfs-light` | Installed light-appearance theme used by `system`; invalid values fail startup. |
 | `ENDLESSFS_DEFAULT_DARK_THEME` | Default `endlessfs-dark` | Installed dark-appearance theme used by `system`; invalid values fail startup. |

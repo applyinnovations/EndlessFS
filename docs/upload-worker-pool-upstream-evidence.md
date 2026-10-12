@@ -28,8 +28,10 @@ existing dependency-free browser scheduler:
 - a selected set of up to 10,000 discovered files is admitted in one durable
   batch transaction;
 - the scheduler starts up to 100 file tasks, bounded by queue depth;
-- every task sends bytes directly from `File.slice(...)` to its provider
-  capability; object bytes never enter the Go service;
+- file-task admission is independent of source reads: resumable chunks pass
+  through one cancellable browser reader and a bounded shared byte window
+  before reaching the provider capability; object bytes never enter the Go
+  service. Whole-object framing larger than the window streams exclusively;
 - a settling task releases exactly one worker slot and the next queued task
   takes it;
 - explicit browser Data Saver intent reduces the active worker count to one;
@@ -66,3 +68,15 @@ per file.
 
 The deterministic fixture proves orchestration, bounds, request counts, and UI
 publication. It is not presented as a live-GCS throughput benchmark.
+
+The v0.7.5 external-drive incident showed why the upstream task count cannot
+also become the number of concurrent disk streams. 64 external photos completed;
+100 SSD copies completed in about 194 seconds, while a fresh 100-photo external
+attempt stopped acknowledging data with the drive continuously busy. The
+source-read window candidates (one, two and four 8 MiB chunks) preserve the
+100-task/control-plane pool and are qualified separately. Chromium regressions
+prove bounded reads, cancellation, responsiveness while reads are held,
+integrity-checked completion, and the existing single admission/completion
+workflow. Hardware qualification streams the authorized photos into a local
+SHA-256-attesting sink; that result is source-orchestration evidence, not live
+GCS throughput or production publication proof.

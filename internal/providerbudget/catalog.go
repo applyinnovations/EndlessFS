@@ -250,7 +250,7 @@ func ProductionWorkloads() []ProductionWorkload {
 
 		workload("transfer/create-upload", "transfer", "file-create-upload-cold-schema-011", "file-create-upload-warm-schema-011"),
 		workload("transfer/create-upload-batch", "transfer", "file-create-upload-batch-100-schema-012", "file-create-upload-batch-2001-schema-012"),
-		workload("transfer/complete-upload-batch", "transfer", "file-complete-upload-batch-2001-schema-012"),
+		workload("transfer/complete-upload-batch", "transfer", "file-complete-upload-batch-2001-schema-012", "file-complete-upload-incremental-2001-window-1000-schema-012", "file-complete-upload-incremental-2001-window-100-schema-012"),
 		workload("transfer/abort-upload-batch", "transfer", "file-abort-upload-batch-2001-schema-012"),
 		workload("transfer/plan-upload-sizes", "derived-read", "upload-plan-index-cold-256-schema-011", "upload-plan-index-incremental-one-schema-011", "upload-plan-sizes-1024-schema-011"),
 		workload("transfer/plan-upload-fingerprints", "derived-read", "upload-plan-fingerprints-1024-schema-011"),

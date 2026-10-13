@@ -93,7 +93,7 @@ func TestTransferMonitorUsesScalableSideSheet(t *testing.T) {
 		`byID("header-transfer-eta").textContent =`,
 		`byID("header-transfer-count").textContent =`,
 		`.header-transfer-summary > span { overflow: hidden; text-align: end; text-overflow: ellipsis; }`,
-		`#header-transfer-percent { width: 4ch; }`,
+		`#header-transfer-percent { width: 5ch; }`,
 		`#header-transfer-speed { width: 11ch; }`,
 		`#header-transfer-eta { width: 10ch; }`,
 		`#header-transfer-count { width: 10ch; }`,
@@ -369,7 +369,10 @@ func TestTransferRowsUseDenseAlignedHeaders(t *testing.T) {
 		`header.className = "transfer-row-header";`,
 		`header.append(text("strong", label, "transfer-row-main"), tail);`,
 		`row.append(details, tail);`,
-		`row.append(header, metrics, progress);`,
+		`row.append(header, metrics, stackedTransferProgress(`,
+		`stack.className = "transfer-progress-stack";`,
+		`stack.append(progress, checking);`,
+		`checking.setAttribute("aria-label",`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Errorf("transfer rows are missing dense aligned structure %q", required)

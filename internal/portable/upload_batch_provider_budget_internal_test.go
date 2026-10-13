@@ -3,9 +3,11 @@ package portable
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -239,4 +241,84 @@ func TestProviderBudgetUploadBatchSegmentedScaleLifecycle(t *testing.T) {
 	}
 	assertTransferScaleShape(t, "upload-cancellation", fixture.stateLedger.Events(), fixture.fileLedger.Events(), providerbudget.RequestUploadAbort)
 	checkTransferScaleBudget(t, "file-abort-upload-batch-2001-schema-012", fixture.stateLedger.Events(), fixture.fileLedger.Events())
+}
+
+// Compare publication windows without changing the existing lifecycle ratchets.
+// Empty bodies isolate control-plane/provider economics, not throughput.
+func TestProviderBudgetIncrementalUploadPublicationComparison(t *testing.T) {
+	ctx := telemetry.Context(context.Background(), telemetry.New(nil, nil))
+	economics, err := gcs.RegionalStandardFlatEconomics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range []struct {
+		window int
+		budget string
+	}{
+		{2001, "file-complete-upload-incremental-2001-window-2001-schema-012"},
+		{1000, "file-complete-upload-incremental-2001-window-1000-schema-012"},
+		{100, "file-complete-upload-incremental-2001-window-100-schema-012"},
+	} {
+		window := candidate.window
+		t.Run(fmt.Sprint(window), func(t *testing.T) {
+			fixture := newUploadBatchScaleFixture(t, 0x22334455)
+			capabilities, err := fixture.engine.Files().CreateUploadBatch(ctx, fixture.scope, scaleUploadRequests("publication"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			uploadEmptyCapabilities(t, fixture.server.Client(), capabilities)
+			fixture.stateLedger.Reset()
+			fixture.fileLedger.Reset()
+			publications := 0
+			for start := 0; start < len(capabilities); start += window {
+				end := min(len(capabilities), start+window)
+				items := make([]domain.CompleteUploadBatchItem, end-start)
+				for index, capability := range capabilities[start:end] {
+					items[index] = domain.CompleteUploadBatchItem{UploadID: capability.UploadID, CRC32C: "AAAAAA"}
+				}
+				result, err := fixture.engine.Files().CompleteUploadBatch(ctx, fixture.scope, domain.CompleteUploadBatchRequest{Items: items, IdempotencyKey: fmt.Sprintf("publish-%d", start)})
+				if err != nil || len(result.Entries) != len(items) {
+					t.Fatalf("publication %d: entries=%d, %v", start, len(result.Entries), err)
+				}
+				publications++
+			}
+			stateEvents, fileEvents := fixture.stateLedger.Events(), fixture.fileLedger.Events()
+			if len(fileEvents) != 2001 {
+				t.Fatalf("incremental publication repeated file-provider work: %d", len(fileEvents))
+			}
+			for _, event := range fileEvents {
+				if event.Kind != providerbudget.RequestObjectVerify {
+					t.Fatalf("publication contacted file bodies: %s", event.Kind)
+				}
+			}
+			metrics, err := economics.Estimate(append(append([]providerbudget.Event(nil), stateEvents...), fileEvents...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			budget, err := providerbudget.Calibrate(candidate.budget, economics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, append(append([]providerbudget.Event(nil), stateEvents...), fileEvents...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(budget)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("calibrated budget: %s", encoded)
+			if window != 2001 {
+				checkTransferScaleBudget(t, budget.Name, stateEvents, fileEvents)
+			}
+			if directory := os.Getenv("ENDLESSFS_PIPELINE_BUDGET_EVIDENCE"); directory != "" {
+				if err := os.WriteFile(fmt.Sprintf("%s/window-%d.json", directory, window), encoded, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			puts := 0
+			for _, event := range stateEvents {
+				if event.Kind == providerbudget.RequestObjectPut {
+					puts++
+				}
+			}
+			t.Logf("window=%d publications=%d state=%d file=%d immutable-and-head-puts=%d requestBytes=%d responseBytes=%d costPicoUSD=%d p50=%d p95=%d p99=%d criticalP50=%d criticalP95=%d criticalP99=%d", window, publications, len(stateEvents), len(fileEvents), puts, metrics.RequestBytes, metrics.ResponseBytes, metrics.CostPicoUSD, metrics.P50Micros, metrics.P95Micros, metrics.P99Micros, metrics.CriticalP50Micros, metrics.CriticalP95Micros, metrics.CriticalP99Micros)
+		})
+	}
 }

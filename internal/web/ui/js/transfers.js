@@ -10,6 +10,7 @@
   let uploadSourceBudget = 4 * uploadSourceChunkBytes;
   const uploadSource = { usedBytes: 0, peakBytes: 0, readers: 0, peakReaders: 0, queue: [], reading: false };
   const uploadRates = new Map();
+  const uploadEstimates = new Map();
   let uploadProgressTimer = 0;
   let uploadMeasurementOffset = 0;
   let lastUploadAcknowledgementAt = 0;
@@ -17,7 +18,7 @@
 
   function uploadCohort(transfer) { return transfer.groupID || transfer.id; }
 
-  function measuredUploadRate(cohorts, now = uploadMeasurementNow()) {
+  function measuredUploadRate(cohorts, now = uploadMeasurementNow(), minimumBytes = uploadSourceChunkBytes) {
     let rate = 0;
     for (const cohort of cohorts) {
       const measure = uploadRates.get(cohort);
@@ -25,9 +26,37 @@
       const start = Math.max(measure.startedAt, now - 15000);
       measure.samples = measure.samples.filter((sample) => sample.at > start);
       const bytes = measure.samples.reduce((sum, sample) => sum + sample.bytes, 0);
-      if (now > start) rate += bytes * 1000 / (now - start);
+      const raw = now > start ? bytes * 1000 / (now - start) : 0;
+      if (now - measure.startedAt < 3000 || measure.samples.length < 2 || bytes < minimumBytes) {
+        measure.rate = 0;
+        measure.rateAt = 0;
+        continue;
+      }
+      if (!measure.rateAt || now - measure.rateAt >= 1000) {
+        const elapsed = measure.rateAt ? now - measure.rateAt : 15000;
+        const weight = 1 - Math.exp(-elapsed / 15000);
+        measure.rate = raw === 0 ? 0 : measure.rate ? measure.rate + weight * (raw - measure.rate) : raw;
+        measure.rateAt = now;
+      }
+      rate += measure.rate || 0;
     }
     return rate;
+  }
+
+  function uploadCheckBytes(transfer) {
+    const size = transferFileSize(transfer);
+    return !transfer.planPhase || transfer.planPhase === "done" || transfer.md5 && transfer.crc32c
+      ? size : Math.min(size, transfer.checkedBytes || 0);
+  }
+
+  function recordUploadCheckProgress(transfer, bytes) {
+    const prior = uploadCheckBytes(transfer);
+    transfer.checkedBytes = Math.max(transfer.checkedBytes || 0, Math.min(bytes, transferFileSize(transfer)));
+    const delta = uploadCheckBytes(transfer) - prior;
+    for (const summary of [state.transferSummary, state.transferOverviewIDs.has(transfer.id) ? state.transferOverview : null, state.transferGroups.get(transfer.groupID)?.transferSummary]) {
+      if (summary) summary.checkedBytes = Math.min(summary.totalBytes, (summary.checkedBytes || 0) + delta);
+    }
+    scheduleTransferRender();
   }
 
   function refreshUploadRates() {
@@ -36,7 +65,7 @@
     const now = uploadMeasurementNow();
     const summaryRate = (summary, transfers) => {
       if (!summary) return;
-      summary.speedBps = measuredUploadRate(new Set(transfers.map(uploadCohort)), now);
+      summary.speedBps = measuredUploadRate(new Set(transfers.map(uploadCohort)), now, Math.min(summary.remainingBytes || summary.totalBytes, uploadSourceChunkBytes));
       finalizeTransferSummary(summary);
     };
     summaryRate(state.transferSummary, active);
@@ -317,6 +346,7 @@
     transfer.planOutcome = "";
     transfer.md5 = "";
     transfer.crc32c = "";
+    transfer.checkedBytes = 0;
     transfer.targetExists = false;
     transfer.targetKind = "";
     transfer.targetVersion = "";
@@ -329,6 +359,7 @@
     if (["complete", "cancelled", "failed"].includes(transfer.state)) return;
 	if (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c) {
 	  transfer.state = "uploading";
+	  transfer.completionReadyAt = uploadMeasurementNow();
 	  transfer.error = "";
 	} else if (!(transfer.file instanceof File)) {
       transfer.state = "needs-source";
@@ -722,7 +753,11 @@
     await ensureDirectories(transfer.baseDirectory, transfer.relativeDirectory, group ? group.preparedDirectories : null);
   }
 
-  async function prepareTransferGroup(group) {
+  function prepareTransferGroup(group) {
+    return withUploadNamespaceTurn(() => group.cancelled ? undefined : prepareTransferGroupDirectories(group));
+  }
+
+  async function prepareTransferGroupDirectories(group) {
     group.cancelled = false;
     group.state = "preparing";
     group.error = "";
@@ -781,6 +816,19 @@
   function installUploadWorkerPoolTestFixture() {
     if (!state.config || !state.config.localFixture) return;
     window.__endlessfsUploadSourceTest = {
+      beginRateScenario: (size) => {
+        if (!Number.isSafeInteger(size) || size <= 0) throw new Error("Invalid rate fixture size");
+        const transfer = { id: "rate-fixture", name: "Rate fixture", size, state: "uploading", confirmed: 0, speedBps: 0, lastProgressBytes: 0, lastProgressAt: 0, planPhase: "done", createdAt: Date.now() };
+        state.transfers = [transfer];
+        state.transferByID = new Map([[transfer.id, transfer]]);
+        state.transferGroups.clear();
+        uploadRates.clear();
+        uploadEstimates.clear();
+        beginTransferMeasurement(transfer);
+        renderTransfers();
+        setTransferSheetOpen(true);
+      },
+      acknowledgeRateScenario: (bytes) => { recordTransferProgress(state.transferByID.get("rate-fixture"), bytes); refreshUploadRates(); renderTransferProgress(); },
       advanceMeasurement: (milliseconds) => {
         if (!Number.isFinite(milliseconds) || milliseconds < 0) throw new Error("Invalid measurement clock advance");
         uploadMeasurementOffset += milliseconds;
@@ -835,10 +883,11 @@
 
   function queueUploadDirectoryRefresh(directory) {
     state.uploadRefreshDirectories.add(directory);
+    if (state.currentDirectory === "/" || directory.startsWith(`${state.currentDirectory}/`)) state.uploadRefreshDirectories.add(state.currentDirectory);
   }
 
   async function flushUploadDirectoryRefresh() {
-    if (state.activeTransfers !== 0 && uploadMeasurementNow() - lastUploadAcknowledgementAt < 15000 || state.uploadRefreshInFlight || state.uploadRefreshDirectories.size === 0) return;
+    if (state.uploadRefreshInFlight || state.uploadRefreshDirectories.size === 0) return;
     const directories = new Set(state.uploadRefreshDirectories);
     state.uploadRefreshDirectories.clear();
     if (!directories.has(state.currentDirectory)) return;
@@ -863,6 +912,7 @@
         window.clearInterval(uploadProgressTimer);
         uploadProgressTimer = 0;
         uploadRates.clear();
+        uploadEstimates.clear();
         lastUploadAcknowledgementAt = 0;
         return;
       }
@@ -1218,6 +1268,7 @@
       transfer.retryCount = 0;
       transfer.nextRetryAt = 0;
 	  transfer.awaitingCompletion = true;
+	  transfer.completionReadyAt = uploadMeasurementNow();
 	  transfer.error = "";
 	  transfer.speedBps = 0;
 	  queueTransferPersistence(transfer);
@@ -1275,9 +1326,10 @@
 	async function flushUploadCompletions() {
 	  if (!navigator.onLine || state.uploadCompletionActive || state.uploadCompletionTimer) return;
 	  const readyCount = state.transfers.reduce((count, transfer) => count + (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c && !transfer.cancelRequested ? 1 : 0), 0);
-	  // Healthy bursts retain one coalesced publication. A source that has
-	  // stopped acknowledging data must not hold already verified files hostage.
-	  if (state.activeTransfers !== 0 && readyCount < 10000 && uploadMeasurementNow() - lastUploadAcknowledgementAt < 15000) return;
+	  const readyAt = state.transfers.filter((transfer) => transfer.awaitingCompletion && !transfer.cancelRequested).reduce((oldest, transfer) => Math.min(oldest, transfer.completionReadyAt ?? uploadMeasurementNow()), Infinity);
+	  // Age verified work independently of other files' acknowledgements, and
+	  // flush at one existing durable progress segment. Short bursts coalesce.
+	  if (state.activeTransfers !== 0 && readyCount < 1000 && uploadMeasurementNow() - readyAt < 15000 && uploadMeasurementNow() - lastUploadAcknowledgementAt < 15000) return;
 	  const transfers = completionCandidates();
 	  if (!transfers.length) return;
 	  state.uploadCompletionActive = true;
@@ -1289,10 +1341,10 @@
 	  }
 	  await Promise.all(transfers.map(persistTransferItem));
 	  try {
-		const result = await api("/api/v1/uploads/batch/complete", {
+		const result = await withUploadNamespaceTurn(() => api("/api/v1/uploads/batch/complete", {
 		  method: "POST", headers: { "Idempotency-Key": batchKey },
 		  body: { uploads: transfers.map((transfer) => ({ uploadID: transfer.uploadID, crc32c: transfer.crc32c })) },
-		});
+		}));
 		if (!result || !Array.isArray(result.entries) || result.entries.length !== transfers.length) throw new Error("Upload completion returned an invalid response.");
 		for (const transfer of transfers) {
 		  transfer.awaitingCompletion = false;
@@ -1791,16 +1843,25 @@
     let remainingBytes = 0;
     let speedBps = 0;
     let retryableFailed = 0;
+    let checkedBytes = 0;
+    let planning = 0;
+    const cohorts = new Set();
+    let fixtures = false;
     for (const transfer of transfers) {
       if (Object.hasOwn(counts, transfer.state)) counts[transfer.state] += 1;
       const size = transferFileSize(transfer);
       totalBytes += size;
+      checkedBytes += uploadCheckBytes(transfer);
+      if (transfer.strategy && transfer.strategy !== "keep-both") planning++;
+      if (transfer.fixture) fixtures = true;
+      else cohorts.add(uploadCohort(transfer));
       confirmedBytes += Math.min(transfer.confirmed, size);
       if (["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(transfer.state)) remainingBytes += Math.max(0, size - transfer.confirmed);
       if (transfer.state === "uploading" && Number.isFinite(transfer.speedBps)) speedBps += transfer.speedBps;
       if (transfer.state === "failed" && transferCanRetry(transfer)) retryableFailed += 1;
     }
-    return finalizeTransferSummary({ counts, totalCount: transfers.length, totalBytes, confirmedBytes, remainingBytes, speedBps, retryableFailed });
+    if (!fixtures) speedBps = measuredUploadRate(cohorts, uploadMeasurementNow(), Math.min(remainingBytes || totalBytes, uploadSourceChunkBytes));
+    return finalizeTransferSummary({ counts, totalCount: transfers.length, totalBytes, confirmedBytes, remainingBytes, speedBps, retryableFailed, checkedBytes, planning, estimateKey: [...cohorts].sort().join(":") });
   }
 
   function finalizeTransferSummary(summary) {
@@ -1814,8 +1875,16 @@
     if (summary.totalCount > 0 && summary.counts.complete === summary.totalCount) eta = "Complete";
     else if (!navigator.onLine && summary.active + summary.pending > 0) eta = "Offline";
     else if (summary.counts.uploading > 0 && summary.remainingBytes === 0 && summary.counts.preparing === 0 && summary.pending === 0) eta = "Finalizing";
-    else if (summary.speedBps > 0 && summary.remainingBytes > 0) eta = formatDuration(summary.remainingBytes / summary.speedBps);
-    else if (summary.active > 0) eta = "Calculating ETA";
+    else if (summary.speedBps > 0 && summary.remainingBytes > 0) {
+      const now = uploadMeasurementNow();
+      let estimate = uploadEstimates.get(summary.estimateKey);
+      if (!estimate || now - estimate.at >= 5000) {
+        estimate = { at: now, seconds: summary.remainingBytes / summary.speedBps };
+        uploadEstimates.set(summary.estimateKey, estimate);
+      }
+      eta = formatDuration(estimate.seconds);
+    }
+    else if (summary.active > 0) eta = summary.counts.uploading ? "Measuring speed" : summary.planning && summary.checkedBytes < summary.totalBytes ? "Checking duplicates" : "Preparing uploads";
     else if (summary.counts["needs-source"] > 0) eta = "Source needed";
     else if (summary.pending > 0) eta = "Waiting";
     else if (summary.counts.failed > 0) eta = "Needs attention";
@@ -1856,7 +1925,7 @@
     const confirmedDelta = Math.min(transfer.confirmed, size) - Math.min(priorConfirmed, size);
     summary.confirmedBytes += confirmedDelta;
     if (["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(transfer.state)) summary.remainingBytes = Math.max(0, summary.remainingBytes - confirmedDelta);
-    if (transfer.state === "uploading") summary.speedBps = Math.max(0, summary.speedBps + transfer.speedBps - priorSpeed);
+    if (transfer.fixture && transfer.state === "uploading") summary.speedBps = Math.max(0, summary.speedBps + transfer.speedBps - priorSpeed);
     finalizeTransferSummary(summary);
   }
 
@@ -1868,8 +1937,8 @@
     if (Object.hasOwn(summary.counts, nextState)) summary.counts[nextState] += 1;
     if (["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(priorState)) summary.remainingBytes = Math.max(0, summary.remainingBytes - remaining);
     if (["queued", "preparing", "uploading", "retry-wait", "paused", "needs-source"].includes(nextState)) summary.remainingBytes += remaining;
-    if (priorState === "uploading") summary.speedBps = Math.max(0, summary.speedBps - priorSpeed);
-    if (nextState === "uploading") summary.speedBps += transfer.speedBps;
+    if (transfer.fixture && priorState === "uploading") summary.speedBps = Math.max(0, summary.speedBps - priorSpeed);
+    if (transfer.fixture && nextState === "uploading") summary.speedBps += transfer.speedBps;
     if (priorState === "failed" && transferCanRetry(transfer)) summary.retryableFailed = Math.max(0, summary.retryableFailed - 1);
     if (nextState === "failed" && transferCanRetry(transfer)) summary.retryableFailed += 1;
     finalizeTransferSummary(summary);
@@ -1887,7 +1956,7 @@
     const percent = transferPercent(transfer);
     let eta = "Waiting";
     const recentSpeed = !transfer.fixture && uploadMeasurementNow() - transfer.lastProgressAt >= 15000 ? 0 : transfer.speedBps;
-    if (transfer.state === "uploading") eta = transfer.awaitingCompletion ? (transfer.retryCount > 0 ? "Retrying finalization" : "Finalizing") : transfer.sourcePhase === "reading" ? "Reading source" : transfer.sourcePhase === "waiting-source" ? "Waiting for source read" : recentSpeed > 0 ? formatDuration((total - confirmed) / recentSpeed) : "Calculating ETA";
+    if (transfer.state === "uploading") eta = transfer.awaitingCompletion ? (transfer.retryCount > 0 ? "Retrying finalization" : "Finalizing") : transfer.sourcePhase === "reading" ? "Reading source" : transfer.sourcePhase === "waiting-source" ? "Waiting for source read" : recentSpeed > 0 ? "Uploading" : "Waiting for acknowledgement";
     else if (transfer.state === "preparing") eta = transfer.planPhase && transfer.planPhase !== "done" ? "Checking duplicates" : "Preparing";
     else if (transfer.state === "retry-wait") eta = transfer.nextRetryAt > Date.now() ? `Retry in ${formatDuration((transfer.nextRetryAt - Date.now()) / 1000)}` : "Retrying";
     else if (transfer.state === "paused") eta = "Offline";
@@ -1895,6 +1964,20 @@
     else if (transfer.state === "complete") eta = "Complete";
     else if (transfer.state === "cancelled") eta = "Cancelled";
     return `${percent}% · ${eta} · ${formatRate(recentSpeed)}`;
+  }
+
+  function stackedTransferProgress(progress, checked, maximum, label, enabled) {
+    const stack = document.createElement("div");
+    stack.className = "transfer-progress-stack";
+    const checking = document.createElement("progress");
+    checking.className = "transfer-check-progress";
+    checking.max = Math.max(1, maximum);
+    checking.value = checked;
+    checking.hidden = !enabled;
+    checking.setAttribute("aria-label", `Duplicate checking progress for ${label}`);
+    // Keep upload progress first for consumers of the existing semantic row.
+    stack.append(progress, checking);
+    return stack;
   }
 
   function transferRow(transfer, sharedFailure = false) {
@@ -1945,7 +2028,7 @@
     progress.max = Math.max(1, transferFileSize(transfer));
     progress.value = transferFileSize(transfer) === 0 && transfer.state === "complete" ? 1 : transfer.confirmed;
     progress.setAttribute("aria-label", `Upload progress for ${label}`);
-    row.append(header, metrics, progress);
+    row.append(header, metrics, stackedTransferProgress(progress, uploadCheckBytes(transfer), transferFileSize(transfer), label, transfer.strategy && transfer.strategy !== "keep-both"));
     if (transfer.error) row.append(text("span", transfer.error, "transfer-row-error"));
     return row;
   }
@@ -2010,7 +2093,7 @@
     const metrics = document.createElement("div");
     metrics.className = "transfer-row-metrics";
     const duplicatePlanning = transfers.some((transfer) => transfer.planPhase && transfer.planPhase !== "done" && !["cancelled", "failed"].includes(transfer.state));
-    const metricText = duplicatePlanning
+    const metricText = duplicatePlanning && !summary.counts.uploading
       ? `${summary.percent}% · Checking duplicates · ${formatRate(summary.speedBps)}`
       : group.state === "preparing" && !transfers.some((transfer) => transfer.state !== "queued")
       ? `${summary.percent}% · Preparing · ${formatRate(summary.speedBps)}`
@@ -2024,7 +2107,7 @@
     progress.value = group.totalSize > 0 ? summary.confirmedBytes : transfers.length ? summary.counts.complete : group.state === "complete" ? 1 : 0;
     progress.setAttribute("aria-label", `Upload progress for folder ${group.name}`);
     row.dataset.transferGroupId = group.id;
-    row.append(header, metrics, progress);
+    row.append(header, metrics, stackedTransferProgress(progress, summary.checkedBytes || 0, progress.max, `folder ${group.name}`, summary.planning));
     if (group.error && ![...sharedFailures.values()].some((failure) => failure.message === group.error)) row.append(text("span", group.error, "transfer-row-error"));
     return row;
   }
@@ -2083,6 +2166,15 @@
     progress.max = summary.totalBytes > 0 ? summary.totalBytes : Math.max(1, summary.totalCount);
     progress.value = summary.totalBytes > 0 ? summary.confirmedBytes : summary.counts.complete;
     progress.setAttribute("aria-valuetext", `${summary.percent}% uploaded`);
+    const checking = byID("transfer-check-progress");
+    checking.max = progress.max;
+    checking.value = summary.totalBytes > 0 ? summary.checkedBytes || 0 : summary.counts.complete;
+    checking.hidden = !summary.planning;
+    const checkedPercent = Math.round(checking.value / checking.max * 100);
+    checking.setAttribute("aria-valuetext", `${checkedPercent}% checked locally`);
+    byID("transfer-check-label").textContent = summary.planning ? `Checking ${checkedPercent}%` : "Checking —";
+    byID("transfer-check-label").parentElement.dataset.checking = summary.planning ? "active" : "none";
+    byID("transfer-upload-label").textContent = `Uploaded ${summary.percent}%`;
     byID("transfer-percent").textContent = `${summary.percent}%`;
     const eta = summary.eta.replace(" remaining", "");
     byID("transfer-eta").textContent = /^\d/.test(eta) ? `ETA ${eta}` : eta === "Calculating ETA" ? "ETA …" : eta;
@@ -2245,6 +2337,7 @@
   function updateRenderedTransferProgress() {
     for (const row of byID("transfer-list").querySelectorAll("[data-transfer-id], [data-transfer-group-id]")) {
       const progress = row.querySelector("progress");
+      const checking = row.querySelector(".transfer-check-progress");
       const metric = row.querySelector(".transfer-row-metric");
       const bytes = row.querySelector(".transfer-row-bytes");
       if (row.dataset.transferId) {
@@ -2262,17 +2355,19 @@
         bytes.textContent = `${formatBytes(transfer.confirmed)} of ${formatBytes(size)}`;
         progress.max = Math.max(1, size);
         progress.value = size === 0 && transfer.state === "complete" ? 1 : transfer.confirmed;
+        if (checking) { checking.max = progress.max; checking.value = uploadCheckBytes(transfer); }
         continue;
       }
       const group = state.transferGroups.get(row.dataset.transferGroupId);
       const summary = group && group.transferSummary;
       if (!group || !summary) continue;
-      metric.textContent = group.state === "preparing"
+      metric.textContent = group.state === "preparing" && !summary.counts.uploading
         ? `${summary.percent}% · Preparing · ${formatRate(summary.speedBps)}`
         : `${summary.percent}% · ${summary.eta} · ${formatRate(summary.speedBps)}`;
       bytes.textContent = `${summary.counts.complete} of ${summary.totalCount} files${summary.counts.failed ? ` · ${summary.counts.failed} failed` : ""}`;
       progress.max = group.totalSize > 0 ? group.totalSize : Math.max(1, summary.totalCount);
       progress.value = group.totalSize > 0 ? summary.confirmedBytes : summary.totalCount ? summary.counts.complete : group.state === "complete" ? 1 : 0;
+      if (checking) { checking.max = progress.max; checking.value = summary.checkedBytes || 0; }
     }
   }
 

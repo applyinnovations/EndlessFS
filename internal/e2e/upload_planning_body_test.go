@@ -76,19 +76,33 @@ func TestE2ESmartMergePartitionsUTF8RequestsWithinControlBodyLimit(t *testing.T)
 	if err := closeTransferSheet(client.ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Valid paths below 4096 UTF-8 bytes and 255 bytes per component. Their
-	// UTF-16 lengths and item count fit, but one encoded request exceeds 1 MiB.
+	// Fewer, longer valid paths retain the same >1 MiB UTF-8/escaping proof.
+	// Their UTF-16 envelope still fits; every component is below 255 bytes and
+	// each complete path is below 4096 bytes. This is a byte-limit test, not a
+	// namespace scale fixture, and avoids repeated small publication windows.
 	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`(() => {
 		const transfer = new DataTransfer();
-		const prefix = Array(6).fill('界"'.repeat(60)).join('/') + '/';
-		for (let index = 0; index < 900; index++) {
+		const prefix = Array(8).fill('界"'.repeat(60)).join('/') + '/';
+		for (let index = 0; index < 500; index++) {
 			const file = new File(['abc'], 'item-' + index + '.txt', {type:'text/plain'});
 			Object.defineProperty(file, 'webkitRelativePath', {value: prefix + file.name}); transfer.items.add(file);
 		}
+		const envelope = JSON.stringify({items:Array.from(transfer.files).map((file,index)=>({id:'00000000-0000-4000-8000-'+String(index).padStart(12,'0'),path:'/'+file.webkitRelativePath,size:file.size}))});
+		window.uploadBodyGeometry = {utf8:new TextEncoder().encode(envelope).byteLength,utf16:envelope.length};
 		const input = document.querySelector('#folder-input'); input.files = transfer.files;
 		input.dispatchEvent(new Event('change', {bubbles:true}));
 	})()`, nil)); err != nil {
 		t.Fatal(err)
+	}
+	var geometry struct {
+		UTF8  int `json:"utf8"`
+		UTF16 int `json:"utf16"`
+	}
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`window.uploadBodyGeometry`, &geometry)); err != nil {
+		t.Fatal(err)
+	}
+	if geometry.UTF8 <= 1<<20 || geometry.UTF16 >= 1<<20 {
+		t.Fatalf("fixture lost UTF-8-only body overflow: %+v", geometry)
 	}
 	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
 		t.Fatal(err)
@@ -96,7 +110,7 @@ func TestE2ESmartMergePartitionsUTF8RequestsWithinControlBodyLimit(t *testing.T)
 	if err := chromedp.Run(client.ctx, chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(901)' || document.querySelector('[data-transfer-count="failed"]').textContent !== '(0)'`, 45*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(501)' || document.querySelector('[data-transfer-count="failed"]').textContent !== '(0)'`, 45*time.Second); err != nil {
 		var panel string
 		_ = chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector('#transfer-panel').textContent`, &panel))
 		mu.Lock()
@@ -123,8 +137,8 @@ func TestE2ESmartMergePartitionsUTF8RequestsWithinControlBodyLimit(t *testing.T)
 		}
 	}
 	var completed string
-	if err := chromedp.Run(client.ctx, chromedp.Text(`[data-transfer-count="complete"]`, &completed, chromedp.ByQuery)); err != nil || completed != "(901)" {
-		t.Errorf("Smart merge completed %s, want (901): %v", completed, err)
+	if err := chromedp.Run(client.ctx, chromedp.Text(`[data-transfer-count="complete"]`, &completed, chromedp.ByQuery)); err != nil || completed != "(501)" {
+		t.Errorf("Smart merge completed %s, want (501): %v", completed, err)
 	}
 	accounts, err := harness.repository.Accounts(context.Background())
 	if err != nil || len(accounts) != 1 {
@@ -138,8 +152,8 @@ func TestE2ESmartMergePartitionsUTF8RequestsWithinControlBodyLimit(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefix := "/" + strings.TrimSuffix(strings.Repeat(strings.Repeat("界\"", 60)+"/", 6), "/")
-	for _, name := range []string{"item-0.txt", "item-899.txt"} {
+	prefix := "/" + strings.TrimSuffix(strings.Repeat(strings.Repeat("界\"", 60)+"/", 8), "/")
+	for _, name := range []string{"item-0.txt", "item-499.txt"} {
 		entry, err := harness.files.Stat(context.Background(), scope, domain.MustParseUserPath(prefix+"/"+name))
 		if err != nil || entry.Size != 3 || entry.ContentID != source.ContentID {
 			t.Errorf("reuse authority %s: size=%d, shared=%v, %v", name, entry.Size, entry.ContentID == source.ContentID, err)

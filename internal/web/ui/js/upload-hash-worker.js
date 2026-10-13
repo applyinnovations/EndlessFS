@@ -72,6 +72,7 @@ async function fingerprint(id, file) {
     const complete = bytes.length - (bytes.length % 64);
     for (let position = 0; position < complete; position += 64) processMD5Block(state, bytes, position);
     tail = bytes.slice(complete);
+    self.postMessage({ id, checkedBytes: Math.min(file.size, offset + incoming.length) });
   }
   if (cancelled.has(id)) throw new DOMException("Cancelled", "AbortError");
   const paddingLength = tail.length < 56 ? 64 : 128;

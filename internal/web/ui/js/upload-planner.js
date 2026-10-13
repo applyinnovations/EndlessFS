@@ -2,6 +2,14 @@
   const uploadHashWorkerLimit = 2;
   const uploadControlBodyBytes = 1 << 20;
   const uploadControlEncoder = new TextEncoder();
+  // This only avoids conflicts caused by this tab's own publications. Server
+  // snapshot validation and source/target versions still decide correctness.
+  let uploadNamespaceTurn = Promise.resolve();
+  function withUploadNamespaceTurn(operation) {
+    const result = uploadNamespaceTurn.then(operation);
+    uploadNamespaceTurn = result.catch(() => {});
+    return result;
+  }
 
   // Count the exact serialized UTF-8 envelope and each item once. File count
   // alone cannot bound long paths, escaping, tokens, or logical versions.
@@ -62,6 +70,10 @@
       worker.addEventListener("message", (event) => {
         const pending = state.uploadHashPending.get(event.data && event.data.id);
         if (!pending || pending.worker !== worker) return;
+        if (Number.isSafeInteger(event.data.checkedBytes)) {
+          recordUploadCheckProgress(pending.transfer, event.data.checkedBytes);
+          return;
+        }
         state.uploadHashPending.delete(event.data.id);
         worker.busy = false;
         if (event.data.error) pending.reject(new Error(event.data.error));
@@ -125,6 +137,7 @@
   }
 
   function markPlannedUpload(transfer, conflict = "rename", expectedVersion = "") {
+    recordUploadCheckProgress(transfer, transferFileSize(transfer));
     transfer.planPhase = "done";
     transfer.planOutcome = "upload";
     transfer.uploadConflict = conflict;
@@ -133,6 +146,7 @@
   }
 
   function markPlannedComplete(transfer, outcome) {
+    recordUploadCheckProgress(transfer, transferFileSize(transfer));
     transfer.planPhase = "done";
     transfer.planOutcome = outcome;
     transfer.confirmed = transferFileSize(transfer);
@@ -182,10 +196,10 @@
     return { token: response.token, exact };
   }
 
-  async function hashUploadCandidates(transfers) {
+  async function hashUploadCandidates(transfers, ready = () => {}) {
     await Promise.all(transfers.map(async (transfer) => {
       if (transfer.cancelRequested) return;
-      if (transfer.md5 && transfer.crc32c) return;
+      if (transfer.md5 && transfer.crc32c) { ready(transfer); return; }
       transfer.planPhase = "hashing";
       transitionTransfer(transfer, "preparing", "Checking content locally.");
       await persistTransferItem(transfer);
@@ -202,7 +216,53 @@
       transfer.planPhase = "exact-pending";
       transitionTransfer(transfer, "preparing", "Checking for matching content.");
       await persistTransferItem(transfer);
+      ready(transfer);
     }));
+  }
+
+  async function pipelineUploadFingerprints(transfers, group, signal) {
+    const ready = [];
+    let finished = false;
+    let failure = null;
+    let firstReadyAt = 0;
+    let wake = null;
+    const hashing = hashUploadCandidates(transfers, (transfer) => {
+      if (!ready.length) firstReadyAt = uploadMeasurementNow();
+      ready.push(transfer);
+      if (ready.length >= configuredTransferConcurrency(transfers.length)) wake?.();
+    }).then(() => { finished = true; wake?.(); }, (error) => { failure = error; finished = true; wake?.(); });
+    try {
+      while (!finished || ready.length) {
+        if (signal.aborted) throw new DOMException("Cancelled", "AbortError");
+        if (failure) throw failure;
+        // Coalesce at the existing task-pool bound, or the existing 15-second
+        // progress window. A held hash cannot block already readable files.
+        if (!ready.length || !finished && ready.length < configuredTransferConcurrency(transfers.length) && uploadMeasurementNow() - firstReadyAt < 15000) {
+          await new Promise((resolve) => {
+            const timer = window.setTimeout(resolve, 1000);
+            wake = () => { window.clearTimeout(timer); resolve(); };
+          });
+          wake = null;
+          continue;
+        }
+        const batch = ready.splice(0, 100);
+        firstReadyAt = ready.length ? uploadMeasurementNow() : 0;
+        await withUploadNamespaceTurn(async () => {
+          // Earlier uploads may have advanced the root during local hashing.
+          // Refresh this small ready set; never disable stale-token rejection.
+          const planned = await planUploadSizeBatch(batch, signal);
+          await applyUploadFingerprintDecisions(planned.token, planned.exact, group, signal);
+        });
+        renderTransfers();
+        pumpTransfers();
+      }
+      await hashing;
+      if (failure) throw failure;
+    } catch (error) {
+      for (const transfer of transfers) cancelUploadFingerprint(transfer);
+      await hashing;
+      throw error;
+    }
   }
 
   async function applyUploadFingerprintDecisions(token, transfers, group, signal) {
@@ -266,13 +326,12 @@
     state.transferPlanControllers.set(key, controller);
     if (group) { group.state = "preparing"; group.error = ""; persistTransferGroup(group); }
     try {
+      if (group && !group.cancelled) await prepareTransferGroup(group);
       for (const batch of uploadControlBatches(pending, uploadSizePlanItem)) {
-        const planned = await planUploadSizeBatch(batch, controller.signal);
-        await hashUploadCandidates(planned.exact);
-        await applyUploadFingerprintDecisions(planned.token, planned.exact, group, controller.signal);
+        const planned = await withUploadNamespaceTurn(() => planUploadSizeBatch(batch, controller.signal));
+        await pipelineUploadFingerprints(planned.exact, group, controller.signal);
       }
       for (const transfer of pending) { transfer.retryCount = 0; transfer.nextRetryAt = 0; }
-      if (group && !group.cancelled) await prepareTransferGroup(group);
       rebuildTransferProjection();
       renderTransfers();
       pumpTransfers();

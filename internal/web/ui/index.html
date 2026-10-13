@@ -251,7 +251,11 @@
                   <div class="transfer-overview-progress"><strong id="transfer-percent">0%</strong><span class="transfer-overview-separator" aria-hidden="true">·</span><span id="transfer-volume">0 B / 0 B</span></div>
                   <div class="transfer-overview-operation"><span id="transfer-eta">ETA —</span><span class="transfer-overview-separator" aria-hidden="true">·</span><span id="transfer-speed">—/s</span><span class="transfer-overview-separator" aria-hidden="true">·</span><span id="transfer-active">0 active</span></div>
                 </div>
-                <progress id="transfer-progress" class="transfer-overall-progress" max="1" value="0" aria-label="Overall upload progress"></progress>
+                <div class="transfer-progress-stack">
+                  <progress id="transfer-check-progress" class="transfer-check-progress" max="1" value="0" aria-label="Duplicate checking progress"></progress>
+                  <progress id="transfer-progress" class="transfer-overall-progress" max="1" value="0" aria-label="Overall upload progress"></progress>
+                </div>
+                <div class="transfer-progress-legend"><span id="transfer-check-label">Checking —</span><span id="transfer-upload-label">Uploaded 0%</span></div>
                 <div id="transfer-filter" class="tabs transfer-tabs" role="tablist" aria-label="Show transfers">
                   <span class="tab" role="tab" aria-selected="true" aria-controls="transfer-list" data-tab-value="current">Current <span class="tab-count" data-transfer-count="current">(0)</span></span>
                   <span class="tab" role="tab" aria-selected="false" aria-controls="transfer-list" data-tab-value="failed" tabindex="-1">Failed <span class="tab-count" data-transfer-count="failed">(0)</span></span>

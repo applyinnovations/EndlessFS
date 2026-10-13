@@ -1357,15 +1357,16 @@ Requirements:
   confirmed uploaded bytes. Source errors request reconnection without losing
   confirmed progress. Transfer speed/ETA age from cohort acknowledgements and
   finalization is a normal phase rather than an error.
-- Completion publication MUST accumulate affected directories and refresh a
-  visible directory once after a healthy active upload burst drains. If no
-  provider acknowledgement arrives for the 15-second progress window, already
-  integrity-verified files MUST publish in one accumulated partial batch and
-  refresh once, even while a slow or unavailable source remains active.
-  Later verified files retain normal accumulated completion. A source stall
-  cannot hold completed files indefinitely; publication retries preserve their
-  transaction identity and backoff. Per-file and competing group refreshes
-  remain forbidden.
+- Completion publication MUST coalesce short bursts and make integrity-verified
+  work eligible after the 15-second progress window measured from its own
+  readiness, at a 1,000-item durable progress segment, or when active data tasks
+  drain. Acknowledgements for other files MUST NOT reset verified-work age.
+  Successful atomic batches increment completed counts and trigger one
+  coalesced visible-directory or ancestor refresh. Publication retries preserve
+  their transaction identity and order; eligibility is not a latency guarantee
+  during provider failure. Per-file commits and competing group refreshes
+  remain forbidden. `docs/upload-pipeline-progress-evidence.md` records the
+  deliberate additional metadata cost versus end-of-burst-only publication.
 - Batch completion and cancellation persist an authenticated prefix every 1,000
   items, so process loss repeats at most the current 1,000-item segment. The
   final namespace publication is one owner-head CAS. Whole-batch cancellation
@@ -1391,6 +1392,13 @@ Requirements:
   destination, size)` records to the authenticated control plane. Files whose
   sizes cannot match existing live files are released to the ordinary upload
   queue immediately; planning for ambiguous files continues independently.
+  Folder preparation MUST NOT hold cleared files behind another fingerprint.
+  Ready fingerprints are coalesced at the file-task pool bound, the existing
+  progress window, or the end of hashing. Each ready group obtains a current
+  size snapshot before exact decisions. Tab-local coordination of namespace
+  control operations MAY avoid self-induced conflicts but MUST NOT be a
+  correctness dependency or enclose file reads; server snapshot and logical
+  version validation remain mandatory across tabs and replicas.
 - The browser computes canonical MD5 and CRC32C together, in one bounded-chunk
   pass, only for ambiguous local files. At most two dedicated Web Workers hash
   concurrently so hashing neither blocks the application thread nor retains a
@@ -1430,6 +1438,15 @@ Requirements:
   reconnection is required only when the browser no longer holds a safe file
   handle. Cancellation terminates an active hash worker and cannot leave an
   unresolved planning task.
+- Checking and confirmed-upload progress MUST occupy stable layered geometry,
+  with Primary checking behind Foreground upload progress, independent
+  accessible names and textual percentages. Local reads cannot advance upload
+  bytes. Keep-both MUST NOT display fictitious duplicate checking. ETA is a
+  continuously evolving estimate over declared remaining work, which reuse may
+  reduce; it MUST use qualified cohort acknowledgements rather than sums of
+  per-file rates. Initial tiny samples remain provisional, numeric estimates
+  use a stable display cadence, and stale acknowledgements suppress numerical
+  ETA. Preparation is an operational phase, not a blocking ETA calculation.
 - Upload control requests MUST satisfy both the 10,000-item bound and the exact
   1 MiB serialized UTF-8 body bound, including paths, escaping, tokens, and
   logical-version preconditions. Size, fingerprint, and logical-reuse requests

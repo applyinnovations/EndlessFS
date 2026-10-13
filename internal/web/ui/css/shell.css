@@ -51,7 +51,7 @@
   white-space: nowrap;
 }
 .header-transfer-summary > span { overflow: hidden; text-align: end; text-overflow: ellipsis; }
-#header-transfer-percent { width: 4ch; }
+#header-transfer-percent { width: 5ch; }
 #header-transfer-speed { width: 11ch; }
 #header-transfer-eta { width: 10ch; }
 #header-transfer-count { width: 10ch; }

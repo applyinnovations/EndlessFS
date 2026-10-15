@@ -99,6 +99,65 @@ newly admitted day-long session.
 
 ## Current provider vectors
 
+### Oversized admission metadata fallback
+
+`TestUploadBatchLargeMetadataAdmission` reproduces a valid compact request
+that failed before provider initialization on `e856157`: 4,001 synthetic
+zero-byte uploads share a 3,012-byte destination directory. The compact
+control request is 183,169 bytes, but the canonical upload/idempotency records
+expand past the 32 MiB pack envelope. The red result was
+`invalid: expanded consistency-domain page pack exceeds size limit`.
+An 8,377-item short-path synthetic control passed. File count and total file
+bytes alone therefore do not identify this metadata bound.
+
+Materialized mutation publication now distinguishes a locally encoded pack
+overflow from malformed authority. For admission, which has no pre-staged
+child-page references, only overflow retries preparation with
+ordinary immutable pages from the same authenticated snapshot. It retains
+the exact intent fingerprint, mutation ID, expected revision, retained
+outcome, and conditional head version. The regression observes 53 page
+writes, 61 state requests, 4,001 independent provider starts and exactly one
+head publication. It records the state/file economic vectors using
+the existing offline model. Small packed workloads keep their existing
+provider budgets. This fallback pays an additional metadata preparation
+pass and page requests for a workload that previously failed; it does not
+raise either pack bound or alter provider limits.
+
+The boundary suite covers compressed overflow, a lost successful head
+response, exact replay, concurrent-writer and freeze denial, cancellation,
+and malformed-pack denial. Sessions with pre-staged child pages still fail
+closed on overflow: retrying their opaque value references in a new session
+would lose the staged pages. Extending fallback to those other namespace
+workflows is outside this admission fix. The upload regression verifies stable upload and
+batch IDs without new provider starts on replay, and rejects changed content
+under existing item keys. Preparation remains invisible until the one head
+CAS; unsuccessful fallback leaves only unreachable immutable metadata.
+
+This implements the existing section 5 pack-overflow rule. Authoritative
+record shapes, value semantics, key construction, IDs, fingerprints, format
+limits and required features are unchanged. Existing readers already accept
+unpacked pages; no storage epoch, migration, fixture rewrite or file-body
+operation is needed. Raising format limits would weaken the existing bounds;
+splitting logical admission would change batch membership and recovery
+semantics. Both are unnecessary for the required fallback.
+
+The 15 October incident's trace reported `domain.commit=invalid` and the HTTP
+batch handler copied that error to every valid item under HTTP 201. It did not
+record the validation reason. This reproduction establishes a compatible
+failure mechanism, not proof that the incident hit this exact bound. The
+observed directory 429 and long provider starts remain separate limitations.
+GCS initiation uses the incoming context for its HTTP POST, but its default
+transfer client has no explicit timeout; capability signing calls the pinned
+storage SDK's `BucketHandle.SignedURL`, whose default IAM signer uses a
+background context and transient-error retries. A server write timeout does
+not establish a handler/signing deadline. The observed approximately
+360-second failures cannot be attributed to GCS quota exhaustion from the
+collapsed telemetry alone. This patch does not change those timeouts,
+provider concurrency, retry policy, HTTP per-item response behavior, or
+directory admission. It performs no production retry or repair.
+
+### Existing qualified workflows
+
 The current executable catalog references explicit schema-012 workloads.
 Prior schema-011 measurements remain immutable in historical epochs; their
 replaced names are retired with this reviewed qualification record. There is

@@ -175,7 +175,7 @@ func TestDomainPagePackEnforcesIndependentExpandedAndWireBounds(t *testing.T) {
 	for index := range expandedValues {
 		expandedValues[index] = bytes.Repeat([]byte{byte('a' + index%26)}, 600_000)
 	}
-	if _, err := EncodeDomainPagePack(testDomainPagePackWithValues(t, expandedValues)); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := EncodeDomainPagePack(testDomainPagePackWithValues(t, expandedValues)); !errors.Is(err, domain.ErrInvalid) || !errors.Is(err, ErrDomainPagePackTooLarge) {
 		t.Fatalf("expanded limit error = %v", err)
 	}
 
@@ -183,7 +183,7 @@ func TestDomainPagePackEnforcesIndependentExpandedAndWireBounds(t *testing.T) {
 	for index := range compressedValues {
 		compressedValues[index] = deterministicNoise(600_000, uint64(index+1))
 	}
-	if _, err := EncodeDomainPagePack(testDomainPagePackWithValues(t, compressedValues)); !errors.Is(err, domain.ErrInvalid) {
+	if _, err := EncodeDomainPagePack(testDomainPagePackWithValues(t, compressedValues)); !errors.Is(err, domain.ErrInvalid) || !errors.Is(err, ErrDomainPagePackTooLarge) {
 		t.Fatalf("wire limit error = %v", err)
 	}
 }

@@ -427,6 +427,12 @@ func (store *consistencyDomainStore) mutateMaterializedPrepared(ctx context.Cont
 		}
 		return consistencyDomainOutcome{}, domain.NewError(domain.ErrorInvalid, "materialized consistency-domain mutation requires a bound live snapshot")
 	}
+	// Some namespace callers have already staged child pages whose descriptors
+	// are embedded in mutation values. A fresh session cannot reconstruct those
+	// opaque references. Upload admission stages only the changes supplied here.
+	session.mu.RLock()
+	canRetryUnpacked := len(session.pendingPack) == 0
+	session.mu.RUnlock()
 	if mutation.RetainUntil.IsZero() {
 		mutation.RetainUntil = store.clock.Now().UTC().Add(terminalOperationRetention)
 	} else {
@@ -516,6 +522,15 @@ func (store *consistencyDomainStore) mutateMaterializedPrepared(ctx context.Cont
 		return consistencyDomainOutcome{}, err
 	}
 	if err := session.flushPack(ctx); err != nil {
+		if canRetryUnpacked && errors.Is(err, storageformat.ErrDomainPagePackTooLarge) {
+			// Packing is optional. Rebuild from the same authenticated snapshot
+			// with ordinary immutable pages, so every descriptor names bytes
+			// actually published before the one conditional head replacement.
+			// Keep the mutation identity, preconditions and expected revision;
+			// a concurrent writer or freeze must still defeat this snapshot.
+			unpacked := newConsistencyDomainTreeSession(store, reference)
+			return store.mutateMaterializedPrepared(ctx, reference, mutation, snapshot, unpacked)
+		}
 		return consistencyDomainOutcome{}, err
 	}
 	if err := store.step(ctx, StepDomainBeforeHeadCommit); err != nil {

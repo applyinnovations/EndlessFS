@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/applyinnovations/endlessfs/internal/telemetry"
 	"io"
 	"sort"
@@ -23,6 +24,11 @@ const (
 )
 
 var domainPagePackMagic = []byte("EFS-PACK-1\n")
+
+// ErrDomainPagePackTooLarge distinguishes an encoding optimization's size
+// bound from malformed authority. Writers may retry with canonical pages;
+// readers must continue to reject an oversized stored pack.
+var ErrDomainPagePackTooLarge = errors.New("consistency-domain page pack exceeds encoding bounds")
 
 // EncodeDomainPagePack returns a deterministic gzip member prefixed by a
 // format discriminator. Object bytes are canonical state metadata, never file
@@ -48,11 +54,11 @@ func encodeValidatedDomainPagePack(pack DomainPagePack) ([]byte, error) {
 	}
 	canonical := bytes.TrimSuffix(expanded.Bytes(), []byte{'\n'})
 	if len(canonical) == 0 || len(canonical) > MaxExpandedDomainPagePackBytes {
-		return nil, domain.NewError(domain.ErrorInvalid, "expanded consistency-domain page pack exceeds size limit")
+		return nil, domain.WrapError(domain.ErrorInvalid, "expanded consistency-domain page pack exceeds size limit", ErrDomainPagePackTooLarge)
 	}
 	compressed := encodeDeterministicGZIP(domainPagePackMagic, canonical)
 	if len(compressed) > MaxDomainPagePackBytes {
-		return nil, domain.NewError(domain.ErrorInvalid, "consistency-domain page pack exceeds size limit")
+		return nil, domain.WrapError(domain.ErrorInvalid, "consistency-domain page pack exceeds size limit", ErrDomainPagePackTooLarge)
 	}
 	return compressed, nil
 }

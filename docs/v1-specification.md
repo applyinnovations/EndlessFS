@@ -789,7 +789,12 @@ only the later head CAS publishes them.
 
 A schema-011 packed head names one immutable pack containing the authenticated
 page records needed by that bounded snapshot. One request-local decode cache
-serves every lookup in the operation. A bounded materialized mutation writes
+serves every lookup in the operation. Concurrent requests within one engine
+MAY share an in-flight authenticated immutable pack read bound to the complete
+domain key; they MUST NOT share mutable heads or cached failures. Pack expansion
+and verification MUST have cancellable process-wide admission so a request
+burst cannot multiply the expanded-pack working set without bound. Cancellation
+of one caller MUST NOT cancel an independent caller's successful read. A bounded materialized mutation writes
 one successor pack and one conditional head; it MUST NOT retain one provider
 object or one outcome row per selected logical item. Uniform batch results are
 reconstructed from the fingerprint-bound compact transaction descriptor.

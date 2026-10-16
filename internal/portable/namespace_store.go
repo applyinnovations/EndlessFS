@@ -82,7 +82,7 @@ type namespaceListCursor struct {
 }
 
 func newNamespaceStore(engine *Engine) *namespaceStore {
-	return &namespaceStore{engine: engine, domain: newConsistencyDomainStore(engine.backend, engine.scheduler, engine.clock)}
+	return &namespaceStore{engine: engine, domain: engine.stateDomainStore()}
 }
 
 func namespaceReference(owner domain.UserID) consistencyDomainRef {

@@ -48,8 +48,8 @@ func BenchmarkDomainPagePackDecodeMetadataAmplification(b *testing.B) {
 	b.ReportMetric(float64(len(wire)), "wire-B")
 }
 
-// The selected decoder measured 37.9 MB/op on this valid metadata workload,
-// versus 49.6 MB/op before ownership and duplicate-validation repairs. This
+// The selected decoder measured 23.0 MB/op on this valid metadata workload,
+// versus 37.5 MB/op before canonical-comparison repair. This
 // ratchet comes from that comparison; it is not a guessed architecture ceiling.
 func TestDomainPagePackDecodeRetainsMeasuredAllocationImprovement(t *testing.T) {
 	pack, wire := metadataAmplificationPack(t)

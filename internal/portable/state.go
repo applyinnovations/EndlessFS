@@ -225,7 +225,11 @@ func stateDomainReferenceForPrefix(prefix state.Prefix) (consistencyDomainRef, b
 }
 
 func (e *Engine) stateDomainStore() *consistencyDomainStore {
-	return newConsistencyDomainStore(e.backend, e.scheduler, e.clock)
+	store := newConsistencyDomainStore(e.backend, e.scheduler, e.clock)
+	if e.packReads != nil {
+		store.packReads = e.packReads
+	}
+	return store
 }
 
 func (e *Engine) Get(ctx context.Context, key state.Key) (state.Value, error) {

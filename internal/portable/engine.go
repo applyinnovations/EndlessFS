@@ -95,6 +95,7 @@ const (
 )
 
 type Engine struct {
+	packReads           *consistencyDomainPackReads
 	backend             objectstore.Backend
 	fileBackend         objectstore.FileControlBackend
 	separateFileBackend bool
@@ -148,6 +149,7 @@ func Open(ctx context.Context, options Options) (*Engine, error) {
 		fileBackend = options.Backend
 	}
 	engine := &Engine{backend: options.Backend, fileBackend: fileBackend, separateFileBackend: separateFileBackend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, uploadTTL: options.UploadTTL, uploadSessionTTL: options.UploadSessionTTL, downloadTTL: options.DownloadTTL, cursorAEAD: cursorAEAD, cursorTTL: options.CursorTTL, scheduler: options.Scheduler, migrationObserver: options.MigrationObserver}
+	engine.packReads = &consistencyDomainPackReads{}
 	if err := engine.initialize(ctx); err != nil {
 		return nil, err
 	}

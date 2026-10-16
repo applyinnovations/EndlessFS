@@ -83,6 +83,7 @@ type consistencyDomainHeadSnapshot struct {
 }
 
 type consistencyDomainStore struct {
+	packReads *consistencyDomainPackReads
 	backend   objectstore.Backend
 	scheduler Scheduler
 	clock     domain.Clock
@@ -93,7 +94,7 @@ func newConsistencyDomainStore(backend objectstore.Backend, scheduler Scheduler,
 	if len(clocks) > 0 && clocks[0] != nil {
 		clock = clocks[0]
 	}
-	return &consistencyDomainStore{backend: backend, scheduler: scheduler, clock: clock}
+	return &consistencyDomainStore{backend: backend, scheduler: scheduler, clock: clock, packReads: &consistencyDomainPackReads{}}
 }
 
 func (store *consistencyDomainStore) step(ctx context.Context, step string) error {

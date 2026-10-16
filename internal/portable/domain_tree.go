@@ -94,18 +94,21 @@ func (session *consistencyDomainTreeSession) loadPack(ctx context.Context, packI
 	session.mu.Unlock()
 
 	key := session.packKey(packID)
-	object, err := session.store.backend.Get(ctx, key)
-	var pack map[string]storageformat.DomainPage
-	if err == nil {
-		var decoded storageformat.DomainPagePack
-		decoded, err = storageformat.DecodeDomainPagePack(ctx, object.Body, session.reference.ID, session.reference.Kind, packID)
-		if err == nil {
-			pack = make(map[string]storageformat.DomainPage, len(decoded.Pages))
-			for _, packed := range decoded.Pages {
-				pack[packed.Digest] = packed.Page
-			}
+	pack, err := session.store.packReads.read(ctx, key, func() (map[string]storageformat.DomainPage, error) {
+		object, err := session.store.backend.Get(ctx, key)
+		if err != nil {
+			return nil, err
 		}
-	}
+		decoded, err := storageformat.DecodeDomainPagePack(ctx, object.Body, session.reference.ID, session.reference.Kind, packID)
+		if err != nil {
+			return nil, err
+		}
+		pages := make(map[string]storageformat.DomainPage, len(decoded.Pages))
+		for _, packed := range decoded.Pages {
+			pages[packed.Digest] = packed.Page
+		}
+		return pages, nil
+	})
 	session.mu.Lock()
 	if err == nil {
 		session.packs[packID] = pack

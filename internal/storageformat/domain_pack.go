@@ -11,7 +11,6 @@ import (
 	"sort"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
-	"github.com/applyinnovations/endlessfs/internal/state"
 )
 
 const (
@@ -24,6 +23,24 @@ const (
 )
 
 var domainPagePackMagic = []byte("EFS-PACK-1\n")
+
+// Expansion, JSON decoding and canonical verification can each temporarily
+// hold the expanded metadata. Bound this work across every engine in a process,
+// including unrelated packs that cannot share an in-flight read. Waiting must
+// remain cancellable; it must not allocate an expanded buffer.
+var domainPagePackDecodeSlot = make(chan struct{}, 1)
+
+type domainPackContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader domainPackContextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(buffer)
+}
 
 // ErrDomainPagePackTooLarge distinguishes an encoding optimization's size
 // bound from malformed authority. Writers may retry with canonical pages;
@@ -64,6 +81,15 @@ func encodeValidatedDomainPagePack(pack DomainPagePack) ([]byte, error) {
 }
 
 func DecodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID string, expectedKind ConsistencyDomainKind, expectedPackID string) (outcome DomainPagePack, err error) {
+	if err := ctx.Err(); err != nil {
+		return DomainPagePack{}, domain.WrapError(domain.ErrorUnavailable, "consistency-domain pack decode canceled", err)
+	}
+	select {
+	case domainPagePackDecodeSlot <- struct{}{}:
+		defer func() { <-domainPagePackDecodeSlot }()
+	case <-ctx.Done():
+		return DomainPagePack{}, domain.WrapError(domain.ErrorUnavailable, "consistency-domain pack decode canceled", ctx.Err())
+	}
 	_, activity := telemetry.Start(ctx, telemetry.MetadataPackDecode, telemetry.State)
 	defer telemetry.Finish(activity, &err)
 	activity.Bytes(int64(len(data)), 0)
@@ -74,9 +100,12 @@ func DecodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID str
 	if err != nil {
 		return DomainPagePack{}, domain.WrapError(domain.ErrorInvalid, "open consistency-domain page pack", err)
 	}
-	expanded, readErr := io.ReadAll(io.LimitReader(reader, MaxExpandedDomainPagePackBytes+1))
+	expanded, readErr := io.ReadAll(io.LimitReader(domainPackContextReader{ctx: ctx, reader: reader}, MaxExpandedDomainPagePackBytes+1))
 	activity.Bytes(0, int64(len(expanded)))
 	closeErr := reader.Close()
+	if err := ctx.Err(); err != nil {
+		return DomainPagePack{}, domain.WrapError(domain.ErrorUnavailable, "consistency-domain pack decode canceled", err)
+	}
 	if readErr != nil || closeErr != nil || len(expanded) == 0 || len(expanded) > MaxExpandedDomainPagePackBytes {
 		if readErr != nil {
 			return DomainPagePack{}, domain.WrapError(domain.ErrorInvalid, "expand consistency-domain page pack", readErr)
@@ -87,8 +116,15 @@ func DecodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID str
 		return DomainPagePack{}, domain.NewError(domain.ErrorInvalid, "expanded consistency-domain page pack exceeds size limit")
 	}
 	var pack DomainPagePack
-	if err := state.DecodeJSONWithLimit(expanded, &pack, MaxExpandedDomainPagePackBytes); err != nil {
-		return DomainPagePack{}, err
+	// Exact canonical wire equality below rejects duplicate/unknown fields,
+	// invalid UTF-8, trailing JSON, whitespace and alternate field spellings.
+	// Unmarshal avoids two decoder-owned copies and the duplicate-token scan
+	// of the complete expanded pack; no unvalidated page escapes this function.
+	if err := json.Unmarshal(expanded, &pack); err != nil {
+		return DomainPagePack{}, domain.WrapError(domain.ErrorInvalid, "invalid consistency-domain page pack JSON", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return DomainPagePack{}, domain.WrapError(domain.ErrorUnavailable, "consistency-domain pack decode canceled", err)
 	}
 	if pack.DomainID != expectedDomainID || pack.Kind != expectedKind || pack.PackID != expectedPackID {
 		return DomainPagePack{}, domain.NewError(domain.ErrorInvalid, "consistency-domain page pack key binding mismatch")
@@ -99,6 +135,9 @@ func DecodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID str
 	canonical, err := encodeValidatedDomainPagePack(pack)
 	if err != nil || !bytes.Equal(canonical, data) {
 		return DomainPagePack{}, domain.NewError(domain.ErrorInvalid, "non-canonical consistency-domain page pack encoding")
+	}
+	if err := ctx.Err(); err != nil {
+		return DomainPagePack{}, domain.WrapError(domain.ErrorUnavailable, "consistency-domain pack decode canceled", err)
 	}
 	return pack, nil
 }

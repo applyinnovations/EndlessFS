@@ -171,7 +171,11 @@ func (builder *consistencyDomainTreeBuilder) flushLevel(level int) error {
 	}
 	children := make([]storageformat.DomainPageChild, len(references))
 	for index, child := range references {
-		children[index] = storageformat.DomainPageChild{FirstKey: child.firstKey, LastKey: child.lastKey, Digest: child.root.Digest, PackID: child.root.PackID, LeafKeyFilter: child.leafKeyFilter, Level: child.root.Level, EntryCount: child.root.EntryCount, ByteCount: child.root.ByteCount}
+		var err error
+		children[index], err = builder.session.pageChild(child)
+		if err != nil {
+			return err
+		}
 	}
 	page := storageformat.DomainPage{SchemaVersion: 1, DomainID: builder.session.reference.ID, Kind: builder.session.reference.Kind, Level: level + 1, Children: children}
 	reference, err := builder.session.writePage(builder.ctx, page)

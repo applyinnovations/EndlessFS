@@ -277,10 +277,10 @@ func TestE2EUpstreamGCSWorkerPoolUploadsOneHundredFilesAndCoalescesRefresh(t *te
 	if preflightRequests != len(uploadPaths) {
 		t.Errorf("direct upload preflight requests = %d, want %d; requests=%v", preflightRequests, len(uploadPaths), requests)
 	}
-	if got := countExactRequest(requests, "POST /api/v1/uploads/batch/complete"); got != 1 {
+	if got := countExactRequest(requests, "POST /api/v1/uploads/batch/actions"); got != 1 {
 		t.Errorf("worker-pool batch completion requests = %d, want 1; requests=%v", got, requests)
 	}
-	if got := countRequestPath(requests, "/api/v1/uploads/") - countExactRequest(requests, "POST /api/v1/uploads/batch/admit") - countExactRequest(requests, "POST /api/v1/uploads/batch/complete"); got != 0 {
+	if got := countRequestPath(requests, "/api/v1/uploads/") - countExactRequest(requests, "POST /api/v1/uploads/batch/admit") - countExactRequest(requests, "POST /api/v1/uploads/batch/actions"); got != 0 {
 		t.Errorf("worker-pool upload used %d per-item completion requests; requests=%v", got, requests)
 	}
 	if got := countExactRequest(requests, "GET /api/v1/files"); got != 1 {
@@ -741,11 +741,14 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if got := countExactRequest(folderRequests, "POST "+harness.origin+"/api/v1/uploads"); got != 0 {
 		t.Fatalf("folder upload used %d single-item admissions; requests=%v", got, folderRequests)
 	}
-	if got := countExactRequest(folderRequests, "POST "+harness.origin+"/api/v1/directories"); got != 2 {
-		t.Fatalf("folder upload created directories %d times, want once per unique directory; requests=%v", got, folderRequests)
+	if got := countExactRequest(folderRequests, "POST "+harness.origin+"/api/v1/directories/prepare"); got != 1 {
+		t.Fatalf("folder preparation pages = %d, want one shared page; requests=%v", got, folderRequests)
 	}
-	if got := countRequestPath(folderRequests, "/api/v1/files/stat"); got != 2 {
-		t.Fatalf("folder upload checked directories %d times, want once per unique directory; requests=%v", got, folderRequests)
+	if got := countExactRequest(folderRequests, "POST "+harness.origin+"/api/v1/directories"); got != 0 {
+		t.Fatalf("folder upload issued %d scalar directory creations; requests=%v", got, folderRequests)
+	}
+	if got := countRequestPath(folderRequests, "/api/v1/files/stat"); got != 0 {
+		t.Fatalf("folder upload issued %d scalar directory checks; requests=%v", got, folderRequests)
 	}
 	if err := closeTransferSheet(ctx); err != nil {
 		t.Fatalf("close folder transfer sheet: %v (%s)", err, browserStatus(ctx))

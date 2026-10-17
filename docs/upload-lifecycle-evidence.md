@@ -1,5 +1,11 @@
 # Bulk upload recovery and preparation
 
+This record describes the earlier bulk classification/admission slice. Its
+2,638-item expired-session regression proves bounded classification and
+rendering, not successful upload recovery. The subsequent real smart-planning,
+directory preparation, transferred-byte and final-publication acceptance is
+recorded in [the corrective evidence](upload-recovery-corrective-acceptance.md).
+
 The reconnect incident issued 7,914 control requests for 2,638 old upload IDs:
 one status, resume, status sequence per item. Expired authority was correctly
 rejected, but reconnect retained the expired IDs and the group retained an old
@@ -25,8 +31,8 @@ request and reusable only for the exact upload-record logical version and
 checksum. A second bounded shared read handles concurrent changes; persistent
 contention returns unknown/retryable. Uncertain responses are replayable.
 The legacy admission route retains its exact ordered membership and stable item keys. The
-ordinary 10,000-item atomic completion/cancel routes remain supported. The UI
-uses independent terminal actions after an explicit rejected atomic cohort;
+ordinary 10,000-item atomic completion/cancel routes remain supported. The original UI
+used independent terminal actions after an explicit rejected atomic cohort;
 network ambiguity preserves and replays the original atomic cohort.
 
 No authoritative field, record encoding, feature requirement or CAS/freeze

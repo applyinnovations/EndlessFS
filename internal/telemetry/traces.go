@@ -24,7 +24,7 @@ func TraceProvider(exporter sdktrace.SpanExporter, observer *Observer, version s
 	provider := sdktrace.NewTracerProvider(
 		sdktrace.WithResource(resource.NewSchemaless(attribute.String("service.name", "endlessfs"), attribute.String("service.version", safeVersion(version)))),
 		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(sampleRatio)),
-		sdktrace.WithRawSpanLimits(sdktrace.SpanLimits{AttributeValueLengthLimit: 128, AttributeCountLimit: 4, EventCountLimit: 0, LinkCountLimit: 0, AttributePerEventCountLimit: 0, AttributePerLinkCountLimit: 0}),
+		sdktrace.WithRawSpanLimits(sdktrace.SpanLimits{AttributeValueLengthLimit: 128, AttributeCountLimit: 6, EventCountLimit: 0, LinkCountLimit: 0, AttributePerEventCountLimit: 0, AttributePerLinkCountLimit: 0}),
 		sdktrace.WithSpanProcessor(processor),
 	)
 	observer.tracer = provider.Tracer(instrumentationName)
@@ -107,10 +107,12 @@ func safeSpan(span sdktrace.ReadOnlySpan) bool {
 		}
 	}
 	operation, role, result, route := "", "", "", ""
+	seen := make(map[attribute.Key]bool)
 	for _, value := range span.Attributes() {
-		if value.Value.Type() != attribute.STRING {
+		if value.Value.Type() != attribute.STRING || seen[value.Key] {
 			return false
 		}
+		seen[value.Key] = true
 		switch string(value.Key) {
 		case "operation":
 			operation = value.Value.AsString()
@@ -120,6 +122,14 @@ func safeSpan(span sdktrace.ReadOnlySpan) bool {
 			result = value.Value.AsString()
 		case "route":
 			route = value.Value.AsString()
+		case "stage":
+			if !contains(stageNames[:], value.Value.AsString()) {
+				return false
+			}
+		case "reason":
+			if !contains(reasonNames[:], value.Value.AsString()) {
+				return false
+			}
 		default:
 			return false
 		}

@@ -12,6 +12,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 )
 
 const maximumUploadPlanItems = 10_000
@@ -208,7 +209,26 @@ func (s *FileStore) buildUploadPlanningProjection008(ctx context.Context, view *
 	return mergeDuplicateProjectionRuns008(ctx, session, runs)
 }
 
-func (s *FileStore) uploadPlanningProjection008(ctx context.Context, owner domain.UserID) (duplicateProjectionSnapshot008, error) {
+func planningDiagnostic(err error, stage telemetry.Stage) error {
+	reason := telemetry.ProviderFailure
+	switch {
+	case errors.Is(err, storageformat.ErrDomainPagePackTooLarge):
+		reason = telemetry.PackCapacity
+	case errors.Is(err, errDomainPagePackIdentityCollision):
+		reason = telemetry.PackCollision
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		reason = telemetry.ContextCanceled
+	case errors.Is(err, domain.ErrInvalid):
+		reason = telemetry.CorruptMetadata
+	case errors.Is(err, domain.ErrConflict), errors.Is(err, domain.ErrPreconditionFailed):
+		reason = telemetry.SnapshotStale
+	}
+	return telemetry.Diagnostic(err, stage, reason)
+}
+
+func (s *FileStore) uploadPlanningProjection008(ctx context.Context, owner domain.UserID) (outcome duplicateProjectionSnapshot008, failure error) {
+	stage := telemetry.NamespaceRead
+	defer func() { failure = planningDiagnostic(failure, stage) }()
 	if !owner.Valid() {
 		return duplicateProjectionSnapshot008{}, domain.NewError(domain.ErrorInvalid, "invalid upload planning owner")
 	}
@@ -217,6 +237,7 @@ func (s *FileStore) uploadPlanningProjection008(ctx context.Context, owner domai
 	key := storageformat.ScopedProjectionHeadKey(owner.String(), storageformat.ProjectionDuplicates, projectionID)
 	var aheadSourceRevision uint64
 	for {
+		stage = telemetry.NamespaceRead
 		view, err := store.loadView(ctx, owner, "")
 		if err != nil {
 			return duplicateProjectionSnapshot008{}, err
@@ -253,6 +274,21 @@ func (s *FileStore) uploadPlanningProjection008(ctx context.Context, owner domai
 			return duplicateProjectionSnapshot008{head: current, root: current.Root, projectionID: projectionID, session: duplicateProjectionSession008(s.engine, owner, projectionID), view: view}, nil
 		}
 		session := duplicateProjectionSession008(s.engine, owner, projectionID)
+		stage = telemetry.ProjectionBuild
+		// The first sorted run is not a complete build identity. A rebuilt
+		// projection may share that run with an older namespace and diverge later.
+		// Bind every source and prior root before staging any packed page.
+		binding, err := storageformat.EncodeCanonical(struct {
+			Source      storageformat.DomainTreeRoot `json:"source"`
+			PriorSource storageformat.DomainTreeRoot `json:"priorSource"`
+			Prior       storageformat.DomainTreeRoot `json:"prior"`
+		}{currentNamespaceRoot, current.SourceRoot, current.Root})
+		if err != nil {
+			return duplicateProjectionSnapshot008{}, err
+		}
+		if err := session.bindPackedMutation(storageformat.Digest(binding)); err != nil {
+			return duplicateProjectionSnapshot008{}, err
+		}
 		var root storageformat.DomainTreeRoot
 		var buildErr error
 		if valid && current.SourceDomainID == view.reference.ID {
@@ -263,6 +299,25 @@ func (s *FileStore) uploadPlanningProjection008(ctx context.Context, owner domai
 		if buildErr != nil {
 			return duplicateProjectionSnapshot008{}, buildErr
 		}
+		// Sort runs and merge intermediates are unreachable scratch metadata.
+		// Only retain the final closure in the optimization pack. If even that
+		// closure exceeds a pack bound, repack only that closure into bounded
+		// compressed packs. Never fall back on malformed authority.
+		if err := session.prunePendingProjectionPages(root); err != nil {
+			return duplicateProjectionSnapshot008{}, err
+		}
+		stage = telemetry.ProjectionPublish
+		if err := session.flushPack(ctx); err != nil {
+			if !errors.Is(err, storageformat.ErrDomainPagePackTooLarge) {
+				return duplicateProjectionSnapshot008{}, err
+			}
+			root, buildErr = repackProjectionClosure(ctx, session, root)
+			if buildErr != nil {
+				return duplicateProjectionSnapshot008{}, buildErr
+			}
+			session = duplicateProjectionSession008(s.engine, owner, projectionID)
+		}
+		stage = telemetry.ProjectionPublish
 		next := storageformat.ProjectionHead{SchemaVersion: 1, OwnerID: owner.String(), ProjectionID: projectionID, Kind: storageformat.ProjectionDuplicates, SourceDomainID: view.reference.ID, SourceRevision: view.head.Revision, SourceRoot: currentNamespaceRoot, Root: root}
 		if err := storageformat.ValidateProjectionHead(next); err != nil {
 			return duplicateProjectionSnapshot008{}, err
@@ -277,9 +332,6 @@ func (s *FileStore) uploadPlanningProjection008(ctx context.Context, owner domai
 		}
 		body, err := storageformat.EncodeEnvelope(duplicateProjectionHeadSchema, key, revision, next)
 		if err != nil {
-			return duplicateProjectionSnapshot008{}, err
-		}
-		if err := session.flushPack(ctx); err != nil {
 			return duplicateProjectionSnapshot008{}, err
 		}
 		if _, err := s.engine.backend.Put(ctx, key, body, condition); err == nil {
@@ -371,7 +423,7 @@ func warmUploadPlanningRoots008(ctx context.Context, roots ...uploadPlanningRoot
 
 func (s *FileStore) planUploadSizes008(ctx context.Context, owner domain.UserID, request domain.UploadSizePlanRequest) (domain.UploadSizePlan, error) {
 	if err := validateUploadSizePlan008(owner, request); err != nil {
-		return domain.UploadSizePlan{}, err
+		return domain.UploadSizePlan{}, telemetry.Diagnostic(err, telemetry.RequestValidation, telemetry.Validation)
 	}
 	projection, err := s.uploadPlanningProjection008(ctx, owner)
 	if err != nil {
@@ -380,28 +432,28 @@ func (s *FileStore) planUploadSizes008(ctx context.Context, owner domain.UserID,
 	store := newNamespaceStore(s.engine)
 	view := projection.view
 	if view == nil {
-		return domain.UploadSizePlan{}, domain.NewError(domain.ErrorInvalid, "upload planning projection omitted its source view")
+		return domain.UploadSizePlan{}, telemetry.Diagnostic(domain.NewError(domain.ErrorInvalid, "upload planning projection omitted its source view"), telemetry.ProjectionBuild, telemetry.InternalFailure)
 	}
 	if view.roots[domain.AreaLive].Children != projection.head.SourceRoot {
-		return domain.UploadSizePlan{}, domain.NewError(domain.ErrorConflict, "upload planning snapshot changed")
+		return domain.UploadSizePlan{}, telemetry.Diagnostic(domain.NewError(domain.ErrorConflict, "upload planning snapshot changed"), telemetry.SnapshotCheck, telemetry.SnapshotStale)
 	}
 	if err := warmUploadPlanningRoots008(ctx,
 		uploadPlanningRoot008{view.session, view.roots[domain.AreaLive].Children},
 		uploadPlanningRoot008{projection.session, projection.root},
 	); err != nil {
-		return domain.UploadSizePlan{}, err
+		return domain.UploadSizePlan{}, planningDiagnostic(err, telemetry.NamespaceRead)
 	}
 	live, _ := domain.NewScope(owner, domain.AreaLive)
 	result := domain.UploadSizePlan{Items: make([]domain.UploadSizePlanDecision, len(request.Items))}
 	for index, item := range request.Items {
 		values, err := uploadPlanningCollect008(ctx, projection.session, projection.root, duplicateProjectionSizePrefix008(item.Size))
 		if err != nil {
-			return domain.UploadSizePlan{}, err
+			return domain.UploadSizePlan{}, planningDiagnostic(err, telemetry.TargetLookup)
 		}
 		decision := domain.UploadSizePlanDecision{ID: item.ID, FingerprintRequired: len(values) != 0}
 		target, found, err := uploadPlanTarget008(ctx, store, view, live, item.Path)
 		if err != nil {
-			return domain.UploadSizePlan{}, err
+			return domain.UploadSizePlan{}, planningDiagnostic(err, telemetry.TargetLookup)
 		}
 		if found {
 			decision.TargetExists, decision.TargetKind = true, target.Entry.Kind
@@ -417,7 +469,7 @@ func (s *FileStore) planUploadSizes008(ctx context.Context, owner domain.UserID,
 		Root: projection.root, SourceRoot: projection.head.SourceRoot, ExpiresAt: s.engine.clock.Now().UTC().Add(s.engine.cursorTTL),
 	})
 	result.Token = token
-	return result, err
+	return result, telemetry.Diagnostic(err, telemetry.ProjectionBuild, telemetry.InternalFailure)
 }
 
 func validateUploadFingerprintPlan008(owner domain.UserID, request domain.UploadFingerprintPlanRequest) error {
@@ -438,22 +490,25 @@ func validateUploadFingerprintPlan008(owner domain.UserID, request domain.Upload
 	return nil
 }
 
-func (s *FileStore) planUploadFingerprints008(ctx context.Context, owner domain.UserID, request domain.UploadFingerprintPlanRequest) (domain.UploadFingerprintPlan, error) {
+func (s *FileStore) planUploadFingerprints008(ctx context.Context, owner domain.UserID, request domain.UploadFingerprintPlanRequest) (outcome domain.UploadFingerprintPlan, failure error) {
+	stage := telemetry.RequestValidation
+	defer func() { failure = planningDiagnostic(failure, stage) }()
 	if err := validateUploadFingerprintPlan008(owner, request); err != nil {
-		return domain.UploadFingerprintPlan{}, err
+		return domain.UploadFingerprintPlan{}, telemetry.Diagnostic(err, telemetry.RequestValidation, telemetry.Validation)
 	}
 	var token uploadPlanProjectionToken008
 	if err := s.decodeDuplicateCursor(request.Token, &token); err != nil || token.SchemaVersion != 1 || token.OwnerID != owner.String() || token.ProjectionID != uploadPlanningProjectionID008(owner) || !s.engine.clock.Now().Before(token.ExpiresAt) {
-		return domain.UploadFingerprintPlan{}, domain.NewError(domain.ErrorInvalid, "invalid upload planning token")
+		return domain.UploadFingerprintPlan{}, telemetry.Diagnostic(domain.NewError(domain.ErrorInvalid, "invalid upload planning token"), telemetry.RequestValidation, telemetry.Validation)
 	}
 	session := duplicateProjectionSession008(s.engine, owner, token.ProjectionID)
 	store := newNamespaceStore(s.engine)
+	stage = telemetry.NamespaceRead
 	view, err := store.loadView(ctx, owner, "")
 	if err != nil {
 		return domain.UploadFingerprintPlan{}, err
 	}
 	if view.roots[domain.AreaLive].Children != token.SourceRoot {
-		return domain.UploadFingerprintPlan{}, domain.NewError(domain.ErrorConflict, "upload planning snapshot changed")
+		return domain.UploadFingerprintPlan{}, telemetry.Diagnostic(domain.NewError(domain.ErrorConflict, "upload planning snapshot changed"), telemetry.SnapshotCheck, telemetry.SnapshotStale)
 	}
 	if err := warmUploadPlanningRoots008(ctx,
 		uploadPlanningRoot008{view.session, view.roots[domain.AreaLive].Children},
@@ -462,6 +517,7 @@ func (s *FileStore) planUploadFingerprints008(ctx context.Context, owner domain.
 		return domain.UploadFingerprintPlan{}, err
 	}
 	live, _ := domain.NewScope(owner, domain.AreaLive)
+	stage = telemetry.TargetLookup
 	result := domain.UploadFingerprintPlan{Items: make([]domain.UploadFingerprintPlanDecision, len(request.Items))}
 	for index, item := range request.Items {
 		groupID, err := duplicateFileGroupID(storageformat.DirectoryEntry{Kind: domain.EntryFile, Size: item.Size, MD5: item.MD5, CRC32C: item.CRC32C})

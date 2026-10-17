@@ -11,7 +11,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
-func materializedDomainView(t *testing.T, store *consistencyDomainStore, reference consistencyDomainRef, mutationID string) (consistencyDomainHeadSnapshot, *consistencyDomainTreeSession) {
+func materializedDomainView(t *testing.T, store *consistencyDomainStore, reference consistencyDomainRef, mutationID string, retainUntil ...time.Time) (consistencyDomainHeadSnapshot, *consistencyDomainTreeSession) {
 	t.Helper()
 	snapshot, err := store.loadHead(context.Background(), reference)
 	if err != nil {
@@ -23,7 +23,11 @@ func materializedDomainView(t *testing.T, store *consistencyDomainStore, referen
 		t.Fatal(err)
 	}
 	session.enablePackedWrites(storageformat.Digest(headBody))
-	if err := session.bindPackedMutation(storageformat.Digest([]byte("materialized-test\x00" + mutationID))); err != nil {
+	var deadline time.Time
+	if len(retainUntil) > 0 {
+		deadline = retainUntil[0]
+	}
+	if err := session.bindPreparedMutation(storageformat.Digest([]byte("materialized-test\x00"+mutationID)), deadline); err != nil {
 		t.Fatal(err)
 	}
 	return snapshot, session
@@ -44,7 +48,7 @@ func TestMaterializedConsistencyDomainMutationPublishesReplaysAndRejectsReuse(t 
 			{Key: "beta", Require: domainValueAbsent, Value: []byte("two")},
 		},
 	}
-	snapshot, session := materializedDomainView(t, store, reference, mutation.ID)
+	snapshot, session := materializedDomainView(t, store, reference, mutation.ID, mutation.RetainUntil)
 	outcome, err := store.mutateMaterializedPrepared(ctx, reference, mutation, &snapshot, session)
 	if err != nil || outcome.Replayed || outcome.Revision != 1 || string(outcome.Result) != "committed" || outcome.RetainUntil != mutation.RetainUntil {
 		t.Fatalf("outcome = %+v, %v", outcome, err)
@@ -55,7 +59,7 @@ func TestMaterializedConsistencyDomainMutationPublishesReplaysAndRejectsReuse(t 
 			t.Fatalf("%s = %+v, %v", key, value, err)
 		}
 	}
-	snapshot, session = materializedDomainView(t, store, reference, mutation.ID)
+	snapshot, session = materializedDomainView(t, store, reference, mutation.ID, mutation.RetainUntil)
 	replayed, err := store.mutateMaterializedPrepared(ctx, reference, mutation, &snapshot, session)
 	if err != nil || !replayed.Replayed || replayed.Revision != outcome.Revision {
 		t.Fatalf("replay = %+v, %v", replayed, err)
@@ -63,7 +67,7 @@ func TestMaterializedConsistencyDomainMutationPublishesReplaysAndRejectsReuse(t 
 	changed := mutation
 	changed.Changes = append([]consistencyDomainChange(nil), mutation.Changes...)
 	changed.Changes[0].Value = []byte("different")
-	snapshot, session = materializedDomainView(t, store, reference, mutation.ID)
+	snapshot, session = materializedDomainView(t, store, reference, mutation.ID, mutation.RetainUntil)
 	if _, err := store.mutateMaterializedPrepared(ctx, reference, changed, &snapshot, session); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("changed replay = %v", err)
 	}

@@ -61,20 +61,45 @@ func TestMaterializedPackWireFallbackPreservesPublicationBoundaries(t *testing.T
 				return nil
 			})
 			snapshot, session := materializedDomainView(t, store, reference, mutation.ID)
+			candidate := mutation
+			candidate.Changes = append([]consistencyDomainChange(nil), mutation.Changes...)
+			var childRoot storageformat.DomainTreeRoot
 			if mode == "prepared-child-pages" {
 				// A caller may embed this descriptor in an opaque mutation value.
 				// Dropping its session would publish a dangling packed reference.
-				if _, err := session.writePage(ctx, storageformat.DomainPage{SchemaVersion: 1, DomainID: reference.ID, Kind: reference.Kind, Entries: []storageformat.DomainEntry{{Key: "child", Value: []byte("child"), LogicalVersion: "child-version"}}}); err != nil {
+				child, err := session.writePage(ctx, storageformat.DomainPage{SchemaVersion: 1, DomainID: reference.ID, Kind: reference.Kind, Entries: []storageformat.DomainEntry{{Key: "child", Value: []byte("child"), LogicalVersion: "child-version"}}})
+				if err != nil {
 					t.Fatal(err)
 				}
-			}
-			outcome, err := store.mutateMaterializedPrepared(ctx, reference, mutation, &snapshot, session)
-			if mode == "prepared-child-pages" {
-				if boundaryReached || !errors.Is(err, storageformat.ErrDomainPagePackTooLarge) {
-					t.Fatalf("pre-staged references did not fail closed: %v", err)
+				childRoot = child.root
+				body, err := storageformat.EncodeCanonical(childRoot)
+				if err != nil {
+					t.Fatal(err)
 				}
-				if _, err := other.get(ctx, reference, mutation.Changes[0].Key); !errors.Is(err, domain.ErrNotFound) {
-					t.Fatalf("unpublished pre-staged mutation became visible: %v", err)
+				candidate.Changes = append(candidate.Changes, consistencyDomainChange{Key: "opaque-child", Require: domainValueAbsent, Value: body})
+			}
+			outcome, err := store.mutateMaterializedPrepared(ctx, reference, candidate, &snapshot, session)
+			if mode == "prepared-child-pages" {
+				if !boundaryReached || err != nil {
+					t.Fatalf("pre-staged references did not publish safely through the original conditional boundary: %v", err)
+				}
+				value, err := other.get(ctx, reference, "opaque-child")
+				if err != nil {
+					t.Fatal(err)
+				}
+				var restored storageformat.DomainTreeRoot
+				if err := decodeCanonicalValue(value.Data, &restored); err != nil || restored != childRoot {
+					t.Fatalf("opaque staged reference changed: %+v %v", restored, err)
+				}
+				page, err := newConsistencyDomainTreeSession(other, reference).readPage(ctx, domainPageRef{root: restored})
+				if err != nil || len(page.Entries) != 1 || string(page.Entries[0].Value) != "child" {
+					t.Fatalf("committed opaque child is unreachable or changed: %+v %v", page, err)
+				}
+				for _, change := range candidate.Changes {
+					actual, err := other.get(ctx, reference, change.Key)
+					if err != nil || !bytes.Equal(actual.Data, change.Value) {
+						t.Fatalf("repacked authoritative value changed: %v", err)
+					}
 				}
 				return
 			}

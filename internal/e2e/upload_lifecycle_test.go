@@ -22,6 +22,33 @@ import (
 	"github.com/chromedp/chromedp/kb"
 )
 
+func readUploadCompletionActionPage(t *testing.T, r *http.Request) []domain.UploadActionItem {
+	t.Helper()
+	encoded, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Error(err)
+		return nil
+	}
+	r.Body = io.NopCloser(bytes.NewReader(encoded))
+	r.ContentLength = int64(len(encoded))
+	var body struct {
+		Items []domain.UploadActionItem `json:"items"`
+	}
+	if err := json.Unmarshal(encoded, &body); err != nil {
+		t.Error(err)
+		return nil
+	}
+	if len(body.Items) < 1 || len(body.Items) > 100 {
+		t.Errorf("unbounded terminal action page: %d", len(body.Items))
+	}
+	for _, item := range body.Items {
+		if item.Action != "complete" || item.UploadID == "" || item.CRC32C == "" {
+			t.Errorf("incomplete completion action fixture: %+v", item)
+		}
+	}
+	return body.Items
+}
+
 func TestE2EUploadAdmissionIgnoresReplyForReplacedAttempt(t *testing.T) {
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
@@ -149,12 +176,13 @@ func TestE2EUploadActionsRetryOnlyRejectedFinalizationWithoutResendingData(t *te
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
-	var calls atomic.Int64
+	var calls, rejectedChecksums, legacyCompletions atomic.Int64
 	var mu sync.Mutex
 	var pages [][]domain.UploadID
 	h := newPortableHarnessWithControlPlaneWrapper(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/api/v1/uploads/batch/complete" {
+				legacyCompletions.Add(1)
 				w.Header().Set("Content-Type", "application/problem+json")
 				w.WriteHeader(http.StatusConflict)
 				_, _ = w.Write([]byte(`{"status":409,"code":"conflict"}`))
@@ -168,6 +196,10 @@ func TestE2EUploadActionsRetryOnlyRejectedFinalizationWithoutResendingData(t *te
 					t.Error(err)
 					return
 				}
+				if len(body.Items) < 1 || len(body.Items) > 100 {
+					t.Errorf("unbounded completion action page: %d", len(body.Items))
+					return
+				}
 				ids := make([]domain.UploadID, len(body.Items))
 				for i, item := range body.Items {
 					ids[i] = item.UploadID
@@ -177,6 +209,7 @@ func TestE2EUploadActionsRetryOnlyRejectedFinalizationWithoutResendingData(t *te
 				mu.Unlock()
 				if calls.Add(1) == 1 {
 					body.Items[0].CRC32C = objectstore.FingerprintFor([]byte("wrong")).CRC32C
+					rejectedChecksums.Add(1)
 				}
 				encoded, _ := json.Marshal(body)
 				r.Body = io.NopCloser(bytes.NewReader(encoded))
@@ -232,6 +265,9 @@ func TestE2EUploadActionsRetryOnlyRejectedFinalizationWithoutResendingData(t *te
 	defer mu.Unlock()
 	if afterWrites != writes || len(pages) != 2 || len(pages[0]) != 3 || len(pages[1]) != 1 || pages[1][0] != pages[0][0] {
 		t.Fatalf("retry repeated successful work: writes=%d=>%d pages=%+v", writes, afterWrites, pages)
+	}
+	if calls.Load() != 2 || rejectedChecksums.Load() != 1 || legacyCompletions.Load() != 0 {
+		t.Fatalf("fresh action rejection/retry was not exercised exactly: calls=%d injections=%d legacy=%d", calls.Load(), rejectedChecksums.Load(), legacyCompletions.Load())
 	}
 	client.assertNoExternalRequests(t, h)
 }

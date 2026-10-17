@@ -98,7 +98,7 @@ func TestE2EUploadStalledSourceDoesNotBlockVerifiedFiles(t *testing.T) {
 	if err := waitFor(client.ctx, `window.__endlessfsUploadSourceTest.snapshot().finalizing === 1 && window.__endlessfsUploadWorkerPoolTest.active() === 1`, 15*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/complete"); got != 0 {
+	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/actions"); got != 0 {
 		t.Fatalf("healthy burst prematurely split publication: %d", got)
 	}
 	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`window.__endlessfsUploadSourceTest.advanceMeasurement(16000)`, nil)); err != nil {
@@ -114,7 +114,7 @@ func TestE2EUploadStalledSourceDoesNotBlockVerifiedFiles(t *testing.T) {
 	if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.snapshot().groups.some(group => group.files === 2 && group.complete === 2)`, 15*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/complete"); got != 2 {
+	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/actions"); got != 2 {
 		t.Fatalf("stalled recovery publication batches = %d, want partial plus final", got)
 	}
 }
@@ -198,7 +198,7 @@ func TestE2EUploadSourceBackpressureRemainsResponsiveAndCompletes(t *testing.T) 
 			if got := countExactRequest(requests, "POST /api/v1/uploads/batch/admit"); got != 1 {
 				t.Fatalf("admission requests = %d, want one", got)
 			}
-			if got := countExactRequest(requests, "POST /api/v1/uploads/batch/complete"); got != 1 {
+			if got := countExactRequest(requests, "POST /api/v1/uploads/batch/actions"); got != 1 {
 				t.Fatalf("completion requests = %d, want one", got)
 			}
 			client.assertNoExternalRequests(t, h)
@@ -216,7 +216,7 @@ func TestE2EUploadVerifiedFilesPublishWhileOtherAcknowledgementsContinue(t *test
 	t.Cleanup(release)
 	h := newHarnessWithStorage(t, false, true, true, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/api/v1/uploads/batch/complete" {
+			if r.URL.Path != "/api/v1/uploads/batch/actions" {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -283,7 +283,7 @@ func TestE2EUploadVerifiedFilesPublishWhileOtherAcknowledgementsContinue(t *test
 		_ = chromedp.Run(c.ctx, chromedp.Evaluate(`JSON.stringify({summary:window.__endlessfsUploadWorkerPoolTest.snapshot(),panel:document.querySelector('#transfer-panel').textContent})`, &detail))
 		t.Fatalf("remaining stream did not complete: %v; %s", err, detail)
 	}
-	if calls := countExactRequest(c.requestSnapshot(), "POST /api/v1/uploads/batch/complete"); calls != 2 {
+	if calls := countExactRequest(c.requestSnapshot(), "POST /api/v1/uploads/batch/actions"); calls != 2 {
 		t.Fatalf("publication requests=%d, want partial plus final", calls)
 	}
 }

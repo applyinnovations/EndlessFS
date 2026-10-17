@@ -22,6 +22,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/preview"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 	"github.com/applyinnovations/endlessfs/internal/theme"
 )
 
@@ -538,13 +539,13 @@ func decodeEmptyJSON(w http.ResponseWriter, r *http.Request) bool {
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) bool {
 	if mediaType := r.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(mediaType), "application/json") {
-		writeProblem(w, r, domain.NewError(domain.ErrorInvalid, "Content-Type must be application/json"))
+		writeProblem(w, r, telemetry.Diagnostic(domain.NewError(domain.ErrorInvalid, "Content-Type must be application/json"), telemetry.RequestValidation, telemetry.Validation))
 		return false
 	}
 	reader := http.MaxBytesReader(w, r.Body, maxControlBodyBytes)
 	data, err := io.ReadAll(reader)
 	if err != nil || state.DecodeJSONWithLimit(data, destination, maxControlBodyBytes) != nil {
-		writeProblem(w, r, domain.NewError(domain.ErrorInvalid, "invalid JSON request"))
+		writeProblem(w, r, telemetry.Diagnostic(domain.NewError(domain.ErrorInvalid, "invalid JSON request"), telemetry.RequestValidation, telemetry.Validation))
 		return false
 	}
 	return true
@@ -566,6 +567,7 @@ type problem struct {
 }
 
 func writeProblem(w http.ResponseWriter, r *http.Request, err error) {
+	telemetry.RecordProblem(r.Context(), err)
 	kind := domain.KindOf(err)
 	status := http.StatusInternalServerError
 	title := "Internal server error"
@@ -620,6 +622,6 @@ func requestIDMiddleware(next http.Handler) http.Handler {
 			value = newRequestID()
 		}
 		w.Header().Set("X-Request-ID", value)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDContextKey{}, value)))
+		next.ServeHTTP(w, r.WithContext(telemetry.WithRequestID(context.WithValue(r.Context(), requestIDContextKey{}, value), value)))
 	})
 }

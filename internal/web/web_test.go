@@ -268,7 +268,7 @@ func TestSmartUploadPlannerIsBoundedPersistentAndMetadataOnly(t *testing.T) {
 		`md5: transfer.md5`, `crc32c: transfer.crc32c`,
 		"const reuseKey = `${batch[0].transfer.id}-content-reuse`;",
 		`const uploadControlBodyBytes = 1 << 20;`, `new TextEncoder()`,
-		`uploadControlBatches(pending, uploadSizePlanItem)`,
+		`uploadControlBatches(pending.filter((transfer) => transfer.state !== "failed"), uploadSizePlanItem)`,
 		`uploadControlBatches(active, uploadFingerprintPlanItem, "items", { token })`,
 		`uploadControlBatches(activeReuse, uploadReuseItem)`,
 		`resetUploadPlanForReconnectedSource(transfer);`, `transfer.md5 = "";`, `transfer.crc32c = "";`,

@@ -50,7 +50,7 @@ func (view *namespaceView) bindMutation(mutationID, fingerprint string) error {
 		return domain.NewError(domain.ErrorInvalid, "namespace mutation binding is invalid")
 	}
 	seed := storageformat.Digest([]byte("endlessfs-namespace-packed-mutation-v1\x00" + mutationID + "\x00" + fingerprint))
-	return view.session.bindPackedMutation(seed)
+	return view.session.bindPreparedMutation(seed, time.Time{})
 }
 
 type namespaceFrame struct {
@@ -480,6 +480,21 @@ func (store *namespaceStore) commitMaterializedWithAdditionalChanges(ctx context
 }
 
 func (store *namespaceStore) commitWithAdditionalChangesMode(ctx context.Context, view *namespaceView, mutationID string, requestFingerprint string, changes map[string]storageformat.NamespaceEntry, additional []consistencyDomainChange, result storageformat.NamespaceMutationResult, materialized bool) (storageformat.NamespaceMutationResult, error) {
+	return store.commitWithAdditionalChangesResultMode(ctx, view, mutationID, requestFingerprint, changes, additional, result, materialized, true)
+}
+
+// commitMaterializedRecords publishes namespace edges and terminal records
+// atomically. Private independent upload actions replay from those records;
+// they neither retain nor decode an unused duplicate generic result.
+func (store *namespaceStore) commitMaterializedRecords(ctx context.Context, view *namespaceView, mutationID, requestFingerprint string, changes map[string]storageformat.NamespaceEntry, additional []consistencyDomainChange) error {
+	_, err := store.commitWithAdditionalChangesResultMode(ctx, view, mutationID, requestFingerprint, changes, additional, storageformat.NamespaceMutationResult{}, true, false)
+	return err
+}
+
+func (store *namespaceStore) commitWithAdditionalChangesResultMode(ctx context.Context, view *namespaceView, mutationID string, requestFingerprint string, changes map[string]storageformat.NamespaceEntry, additional []consistencyDomainChange, result storageformat.NamespaceMutationResult, materialized, retainResult bool) (storageformat.NamespaceMutationResult, error) {
+	if !retainResult && (!materialized || !storageformat.ValidDigest(requestFingerprint)) {
+		return storageformat.NamespaceMutationResult{}, domain.NewError(domain.ErrorInvalid, "record-only namespace publication requires materialized changes and a valid fingerprint")
+	}
 	if view == nil || view.headSnapshot == nil || view.snapshotDigest != "" {
 		return storageformat.NamespaceMutationResult{}, domain.NewError(domain.ErrorInvalid, "namespace mutation requires a live authoritative head")
 	}
@@ -504,13 +519,17 @@ func (store *namespaceStore) commitWithAdditionalChangesMode(ctx context.Context
 		return storageformat.NamespaceMutationResult{}, domain.NewError(domain.ErrorInvalid, "namespace mutation has no root change")
 	}
 	mutationChanges = append(mutationChanges, additional...)
-	result.SchemaVersion, result.RequestFingerprint = 1, requestFingerprint
-	if err := validateNamespaceMutationResult(result); err != nil {
-		return storageformat.NamespaceMutationResult{}, err
-	}
-	resultBody, err := storageformat.EncodeCanonical(result)
-	if err != nil {
-		return storageformat.NamespaceMutationResult{}, err
+	var resultBody []byte
+	var err error
+	if retainResult {
+		result.SchemaVersion, result.RequestFingerprint = 1, requestFingerprint
+		if err := validateNamespaceMutationResult(result); err != nil {
+			return storageformat.NamespaceMutationResult{}, err
+		}
+		resultBody, err = storageformat.EncodeCanonical(result)
+		if err != nil {
+			return storageformat.NamespaceMutationResult{}, err
+		}
 	}
 	mutation := consistencyDomainMutation{ID: mutationID, Changes: mutationChanges, Result: resultBody}
 	var outcome consistencyDomainOutcome
@@ -521,6 +540,9 @@ func (store *namespaceStore) commitWithAdditionalChangesMode(ctx context.Context
 	}
 	if err != nil {
 		return storageformat.NamespaceMutationResult{}, err
+	}
+	if !retainResult {
+		return storageformat.NamespaceMutationResult{}, nil
 	}
 	if err := decodeCanonicalValue(outcome.Result, &result); err != nil || validateNamespaceMutationResult(result) != nil || result.RequestFingerprint != requestFingerprint {
 		return storageformat.NamespaceMutationResult{}, domain.NewError(domain.ErrorInvalid, "namespace committed result is invalid")

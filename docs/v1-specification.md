@@ -888,7 +888,7 @@ the `008 -> 009` checkpoint proves the replacement closure. Completed
 checkpoint inventory pages are durable checkpoint metadata and MUST be copied
 and verified with their root.
 
-Mutation outcomes and idempotency bindings remain replayable for 30 days; Trash retention is separate and indefinite until the owner permanently deletes it. Outcome expiry is itself authenticated by each domain's expiry tree. After a schema-011 checkpoint is published under the closed gate, its authenticated inventory is the immutable mark set for one checkpoint-bound garbage-collection session. Discovery writes a deterministic portable garbage plan with at most 128 entries per page and authenticates the complete plan before the first deletion. The session stores only its checkpoint/gate/inventory/plan binding and sweep position. It sweeps only explicitly recognized domain pages, packs, or inert heads, resolved transition records, rebuildable projections, transient leases/progress, state-query snapshots, and unreachable immutable blobs. It never opens a file body. Every deletion is conditional on the native version from the frozen discovery/listing result, and the closed gate is revalidated immediately before destructive work. Independent deletes use bounded concurrency; one durable cursor publication makes the page restartable. Unknown reserved objects are never deletion-eligible. Writes reopen only after the exact terminal session and checkpoint are reverified. Completed predecessor GC sessions and marks remain excluded durable compatibility residue while a supported predecessor sweeper could still exist; deleting them earlier can make a lagging sweeper unsafe. Forged or stale sessions, a changed gate/checkpoint binding, corrupt/cyclic/missing plan pages, contradictory aggregates, ambiguous reachability, unordered entries, changed native versions, or misplaced objects fail closed.
+Mutation outcomes and idempotency bindings remain replayable for 30 days; Trash retention is separate and indefinite until the owner permanently deletes it. An authoritative prepared mutation binds its exact UTC preparation time, expiry-pruning cutoff and replay deadline before staging immutable pages; the default 30-day duration begins at this binding. A declared explicit deadline cannot change after preparation. These byte-affecting inputs participate in physical pack identity. A stale preparation fails before work and before publication, without weakening strict immutable-byte equality or its original conditional head commit. Same-pack child negative hints may be omitted because fetching their parent already authenticates that full pack; cross-pack hints and complete child descriptor validation remain. Internal materialized upload phase receipts may omit an unused duplicate result while retaining their full fingerprint, revision and expiry; public replay remains bound to authenticated upload/idempotency/lease records. Their compact IDs preserve all SHA-256 bits and phase separation; predecessor receipt IDs/results remain readable. Independent terminal actions may use their validated per-file terminal records as the exact replay result and omit an unused generic materialized result. Their transaction identities MUST be cryptographically separated from public legacy batch identities, and the public legacy recognized-result protocol remains unchanged. Completed replay MUST validate owner/area, terminal state and exact CRC32C before returning the original entry, even after session expiry. Only a materialized mutation may use this record-only result path; ordinary deltas continue to require recognized results. Outcome expiry is itself authenticated by each domain's expiry tree. After a schema-011 checkpoint is published under the closed gate, its authenticated inventory is the immutable mark set for one checkpoint-bound garbage-collection session. Discovery writes a deterministic portable garbage plan with at most 128 entries per page and authenticates the complete plan before the first deletion. The session stores only its checkpoint/gate/inventory/plan binding and sweep position. It sweeps only explicitly recognized domain pages, packs, or inert heads, resolved transition records, rebuildable projections, transient leases/progress, state-query snapshots, and unreachable immutable blobs. It never opens a file body. Every deletion is conditional on the native version from the frozen discovery/listing result, and the closed gate is revalidated immediately before destructive work. Independent deletes use bounded concurrency; one durable cursor publication makes the page restartable. Unknown reserved objects are never deletion-eligible. Writes reopen only after the exact terminal session and checkpoint are reverified. Completed predecessor GC sessions and marks remain excluded durable compatibility residue while a supported predecessor sweeper could still exist; deleting them earlier can make a lagging sweeper unsafe. Forged or stale sessions, a changed gate/checkpoint binding, corrupt/cyclic/missing plan pages, contradictory aggregates, ambiguous reachability, unordered entries, changed native versions, or misplaced objects fail closed.
 
 ### 9.2 Multi-replica conditional publication, freeze, and recovery
 
@@ -1455,6 +1455,15 @@ Requirements:
   is non-authoritative, never part of a portability checkpoint, and introduces
   no storage-schema epoch. Concurrent builders publish it with native CAS and
   never move its source revision backward.
+- Projection construction MUST discard unreachable intermediate pages before
+  publication and bind physical pack identities to the complete source/build
+  intent. A valid final closure that exceeds one pack is published through
+  multiple bounded packs before the original conditional head update. The
+  existing canonical page validation, digest/reference checks, 4 MiB encoded
+  and 32 MiB expanded pack limits remain mandatory. Capacity recovery MUST NOT
+  reinterpret corruption, a physical identity collision or a provider failure
+  as permission to bypass validation. Materialized authoritative roots preserve
+  opaque prepared-child descriptors and the same single head commit point.
 - The size response carries an encrypted, owner-bound, expiring token that pins
   both the derived projection and its exact immutable namespace root. The exact
   phase fails with a conflict if the namespace changed, causing a safe replan;
@@ -1488,6 +1497,27 @@ Requirements:
   per-file rates. Initial tiny samples remain provisional, numeric estimates
   use a stable display cadence, and stale acknowledgements suppress numerical
   ETA. Preparation is an operational phase, not a blocking ETA calculation.
+- Initial selection, reconnect, retry and reload MUST retain the completed
+  members' share of whole-folder preparation. Repreparing unfinished members
+  advances only the remaining share. A new attempt clears its obsolete current
+  error while preserving bounded useful history. A directory failure MUST NOT
+  change completed or cancelled members, or block independent valid siblings.
+- `POST /api/v1/directories/prepare` accepts 1–100 unique live virtual paths and
+  returns ordered index/path-bound outcomes. Existing directories are ready;
+  files are never replaced. Missing unselected parents and file ancestors fail
+  only the affected selected subtree. Eligible creations publish together at
+  the owner namespace head; interrupted or uncertain publication is safely
+  repeatable by revalidating current state. Authoritative metadata corruption,
+  provider-read failure or uncertain head publication fails the envelope rather
+  than inventing per-item success. Parent dependencies may order related pages,
+  but independent sibling pages MUST NOT be serialized. The browser coalesces
+  directory checks and creations, with at most four active 100-item pages and
+  exact 1 MiB request/response bounds checked before mutation.
+  Transient envelope failures and a rolling-replica route gap replay the same
+  page under the existing bounded retry policy and server backoff. Backoff
+  holds no HTTP slot. Cancellation and logout abort active requests, timers,
+  dependency waits and queued group preparation before another namespace turn
+  can begin. Shared paths remain useful to other interested consumers.
 - Upload control requests MUST satisfy their route item bound (100 for independent
   admission/lifecycle/actions, 10,000 for legacy batches) and the exact
   1 MiB serialized UTF-8 body bound, including paths, escaping, tokens, and
@@ -1497,6 +1527,10 @@ Requirements:
   reuse mutations change its namespace root. Drag sources are captured during
   the drop event before an asynchronous upload-options dialog can make the
   browser's drag data store unreadable.
+- Fresh independently admitted uploads complete through independent terminal
+  action pages of at most 100 items. A persisted legacy completion cohort keeps
+  its original ordered membership and idempotency key across ambiguous replay;
+  a refresh MUST NOT silently split or replace that existing intent.
 - Failed upload history offers accessible clear actions for one item, the
   failed members of a folder, and all failed items. Clear first revokes allocated
   unfinished sessions through the owner-scoped control plane; a verified
@@ -1666,6 +1700,7 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 | GET | `/api/v1/files/storage-map` | Return the bounded, snapshot-checked two-level hierarchy for the authenticated owner's storage map. |
 | GET | `/api/v1/files/stat` | Stat one virtual path. |
 | POST | `/api/v1/directories` | Create an empty directory. |
+| POST | `/api/v1/directories/prepare` | Ensure a bounded selection of destination directories with per-item path outcomes. |
 | POST | `/api/v1/uploads` | Create one upload capability. |
 | POST | `/api/v1/uploads/batch` | Create up to 10,000 destination-bound upload capabilities with safe batch recovery bindings. |
 | POST | `/api/v1/uploads/batch/admit` | Admit 1–100 independent attempts with stable per-item intent receipts and bounded partial outcomes. |
@@ -2172,6 +2207,15 @@ be recorded as an evidence gap rather than replaced with a guessed diagnosis.
   NOT export capability URLs, query strings, object keys, tokens, headers, file
   names, or raw exception text. HTTP instrumentation uses route templates and
   coarse result classes rather than raw request targets.
+- Failure boundaries retain safe closed stage and reason codes alongside the
+  operation, result class, duration and build identity. Structured lifecycle
+  logs may correlate a validated bounded request reference with trace/span IDs;
+  request references MUST NOT become metric labels. HTTP problem responses
+  retain the internal classification without exporting the underlying error
+  text, paths, filenames, owner identifiers, storage keys, credentials,
+  capabilities or request bodies. Nested operations and cancelled contexts
+  MUST NOT erase a recorded diagnosis. Diagnostic cardinality and redaction
+  require denial tests, including collector failure and concurrent requests.
 - Profiling captures code locations and aggregate CPU, allocation, live-heap,
   or contention samples. It MUST NOT export raw heap dumps, file buffers,
   process environments, command lines, or user-derived profile labels. Diagnostic

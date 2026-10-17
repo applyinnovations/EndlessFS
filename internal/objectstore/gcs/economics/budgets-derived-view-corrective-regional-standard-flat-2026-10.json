@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "provider": "gcs",
+  "profile": "regional-standard-flat",
+  "id": "018-derived-view-corrective-metadata",
+  "budgets": [
+    {
+      "name": "duplicates-list-directory-overlaps-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 18,
+        "costPicoUSD": 16400000,
+        "p50Micros": 402720,
+        "p95Micros": 1200720,
+        "p99Micros": 2960720,
+        "criticalP50Micros": 402720,
+        "criticalP95Micros": 1200720,
+        "criticalP99Micros": 2960720
+      },
+      "roles": {
+        "file": {
+          "requests": 0,
+          "costPicoUSD": 0,
+          "p50Micros": 0,
+          "p95Micros": 0,
+          "p99Micros": 0
+        },
+        "state": {
+          "requests": 18,
+          "costPicoUSD": 16400000,
+          "p50Micros": 402720,
+          "p95Micros": 1200720,
+          "p99Micros": 2960720
+        }
+      }
+    },
+    {
+      "name": "maintenance-derived-view-rebuild-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 8,
+        "costPicoUSD": 12400000,
+        "p50Micros": 182455,
+        "p95Micros": 550455,
+        "p99Micros": 1360455,
+        "criticalP50Micros": 182455,
+        "criticalP95Micros": 550455,
+        "criticalP99Micros": 1360455
+      },
+      "roles": {
+        "file": {
+          "requests": 0,
+          "costPicoUSD": 0,
+          "p50Micros": 0,
+          "p95Micros": 0,
+          "p99Micros": 0
+        },
+        "state": {
+          "requests": 8,
+          "costPicoUSD": 12400000,
+          "p50Micros": 182455,
+          "p95Micros": 550455,
+          "p99Micros": 1360455
+        }
+      }
+    }
+  ]
+}

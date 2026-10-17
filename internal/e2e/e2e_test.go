@@ -255,7 +255,7 @@ func TestE2EUpstreamGCSWorkerPoolUploadsOneHundredFilesAndCoalescesRefresh(t *te
 		t.Fatalf("wait for worker-pool uploads and coalesced listing refresh: %v (%s scheduler=%s requests=%v)", err, browserStatus(client.ctx), diagnostic, client.requestSnapshot()[requestStart:])
 	}
 	requests := client.requestSnapshot()[requestStart:]
-	if got := countExactRequest(requests, "POST /api/v1/uploads/batch"); got != 1 {
+	if got := countExactRequest(requests, "POST /api/v1/uploads/batch/admit"); got != 1 {
 		t.Errorf("worker-pool upload batch admissions = %d, want 1; requests=%v", got, requests)
 	}
 	if got := countExactRequest(requests, "POST /api/v1/uploads"); got != 0 {
@@ -280,7 +280,7 @@ func TestE2EUpstreamGCSWorkerPoolUploadsOneHundredFilesAndCoalescesRefresh(t *te
 	if got := countExactRequest(requests, "POST /api/v1/uploads/batch/complete"); got != 1 {
 		t.Errorf("worker-pool batch completion requests = %d, want 1; requests=%v", got, requests)
 	}
-	if got := countRequestPath(requests, "/api/v1/uploads/") - countExactRequest(requests, "POST /api/v1/uploads/batch") - countExactRequest(requests, "POST /api/v1/uploads/batch/complete"); got != 0 {
+	if got := countRequestPath(requests, "/api/v1/uploads/") - countExactRequest(requests, "POST /api/v1/uploads/batch/admit") - countExactRequest(requests, "POST /api/v1/uploads/batch/complete"); got != 0 {
 		t.Errorf("worker-pool upload used %d per-item completion requests; requests=%v", got, requests)
 	}
 	if got := countExactRequest(requests, "GET /api/v1/files"); got != 1 {
@@ -735,7 +735,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	mu.Lock()
 	folderRequests := append([]string(nil), requestedURLs[folderRequestStart:]...)
 	mu.Unlock()
-	if got := countExactRequest(folderRequests, "POST "+harness.origin+"/api/v1/uploads/batch"); got != 1 {
+	if got := countExactRequest(folderRequests, "POST "+harness.origin+"/api/v1/uploads/batch/admit"); got != 1 {
 		t.Fatalf("folder upload batch admissions = %d, want 1; requests=%v", got, folderRequests)
 	}
 	if got := countExactRequest(folderRequests, "POST "+harness.origin+"/api/v1/uploads"); got != 0 {

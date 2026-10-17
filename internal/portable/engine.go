@@ -83,6 +83,9 @@ func (f SchedulerFunc) Step(ctx context.Context, step string) error { return f(c
 const (
 	StepDomainBeforeHeadCommit         = "consistency-domain:before-head-commit"
 	StepDomainAfterHeadCommit          = "consistency-domain:after-head-commit"
+	StepUploadAdmissionAfterIntents    = "upload-admission:after-intents"
+	StepUploadAdmissionAfterLeases     = "upload-admission:after-leases"
+	StepUploadAdmissionAfterActivation = "upload-admission:after-activation"
 	StepUploadBatchAfterIntents        = "upload-batch:after-intents"
 	StepUploadBatchAfterSessions       = "upload-batch:after-sessions"
 	StepUploadBatchAfterActivation     = "upload-batch:after-activation"
@@ -95,21 +98,22 @@ const (
 )
 
 type Engine struct {
-	packReads           *consistencyDomainPackReads
-	backend             objectstore.Backend
-	fileBackend         objectstore.FileControlBackend
-	separateFileBackend bool
-	clock               domain.Clock
-	ids                 *domain.IDGenerator
-	writer              storageformat.WriterSet
-	leaseTTL            time.Duration
-	uploadTTL           time.Duration
-	uploadSessionTTL    time.Duration
-	downloadTTL         time.Duration
-	cursorAEAD          cipher.AEAD
-	cursorTTL           time.Duration
-	scheduler           Scheduler
-	migrationObserver   func(MigrationProgress)
+	uploadLifecycleSlots chan struct{}
+	packReads            *consistencyDomainPackReads
+	backend              objectstore.Backend
+	fileBackend          objectstore.FileControlBackend
+	separateFileBackend  bool
+	clock                domain.Clock
+	ids                  *domain.IDGenerator
+	writer               storageformat.WriterSet
+	leaseTTL             time.Duration
+	uploadTTL            time.Duration
+	uploadSessionTTL     time.Duration
+	downloadTTL          time.Duration
+	cursorAEAD           cipher.AEAD
+	cursorTTL            time.Duration
+	scheduler            Scheduler
+	migrationObserver    func(MigrationProgress)
 }
 
 func Open(ctx context.Context, options Options) (*Engine, error) {
@@ -150,6 +154,7 @@ func Open(ctx context.Context, options Options) (*Engine, error) {
 	}
 	engine := &Engine{backend: options.Backend, fileBackend: fileBackend, separateFileBackend: separateFileBackend, clock: options.Clock, ids: options.IDs, writer: writer, leaseTTL: options.LeaseTTL, uploadTTL: options.UploadTTL, uploadSessionTTL: options.UploadSessionTTL, downloadTTL: options.DownloadTTL, cursorAEAD: cursorAEAD, cursorTTL: options.CursorTTL, scheduler: options.Scheduler, migrationObserver: options.MigrationObserver}
 	engine.packReads = &consistencyDomainPackReads{}
+	engine.uploadLifecycleSlots = make(chan struct{}, uploadLifecycleProviderConcurrency)
 	if err := engine.initialize(ctx); err != nil {
 		return nil, err
 	}

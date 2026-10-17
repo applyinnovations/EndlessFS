@@ -258,8 +258,11 @@ func TestE2EClearFailedUploadAfterLostCompletionPreservesPublishedFile(t *testin
 	}
 	lookups := 0
 	for _, request := range client.requestSnapshot() {
-		if strings.HasPrefix(request, "GET /api/v1/uploads/") {
+		if request == "POST /api/v1/uploads/batch/status" {
 			lookups++
+		}
+		if strings.HasPrefix(request, "GET /api/v1/uploads/") {
+			t.Fatalf("cleanup returned to per-file recovery: %s", request)
 		}
 	}
 	if lookups != 1 || countExactRequest(client.requestSnapshot(), "DELETE /api/v1/uploads/batch") != 1 {
@@ -332,7 +335,7 @@ func TestE2ERetryFailedFinalizationAfterReloadDoesNotRequireSource(t *testing.T)
 	if completions.Load() != 2 {
 		t.Fatalf("explicit retry completions = %d", completions.Load())
 	}
-	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads"); got != 1 {
+	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/admit"); got != 1 {
 		t.Fatalf("finalization retry initialized %d upload sessions", got)
 	}
 }

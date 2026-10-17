@@ -195,7 +195,7 @@ func TestE2EUploadSourceBackpressureRemainsResponsiveAndCompletes(t *testing.T) 
 				t.Fatalf("slow source did not complete when available: %v (%s)", err, browserStatus(client.ctx))
 			}
 			requests := client.requestSnapshot()
-			if got := countExactRequest(requests, "POST /api/v1/uploads/batch"); got != 1 {
+			if got := countExactRequest(requests, "POST /api/v1/uploads/batch/admit"); got != 1 {
 				t.Fatalf("admission requests = %d, want one", got)
 			}
 			if got := countExactRequest(requests, "POST /api/v1/uploads/batch/complete"); got != 1 {

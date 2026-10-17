@@ -111,6 +111,7 @@
   }
 
   function fingerprintUploadFile(transfer) {
+    setPreparationState(transfer, "fingerprints");
     return new Promise((resolve, reject) => {
       state.uploadHashQueue.push({ transfer, resolve, reject });
       dispatchUploadHashQueue();
@@ -169,6 +170,7 @@
   }
 
   async function planUploadSizeBatch(transfers, signal) {
+    for (const transfer of transfers) setPreparationState(transfer, "duplicates");
     const response = await api("/api/v1/uploads/plan/sizes", {
       method: "POST", signal,
       body: { items: transfers.map(uploadSizePlanItem) },
@@ -188,7 +190,8 @@
         continue;
       }
       transfer.planPhase = transfer.md5 && transfer.crc32c ? "exact-pending" : "hash-pending";
-      transitionTransfer(transfer, "preparing", transfer.planPhase === "hash-pending" ? "Checking content locally." : "Checking for matching content.");
+      setPreparationState(transfer, transfer.planPhase === "hash-pending" ? "fingerprints" : "duplicates");
+      transitionTransfer(transfer, "preparing");
       exact.push(transfer);
     }
     await Promise.all(transfers.map(persistTransferItem));
@@ -288,6 +291,7 @@
   }
 
   async function applyUploadFingerprintBatch(token, active, signal) {
+    for (const transfer of active) setPreparationState(transfer, "duplicates");
     const response = await api("/api/v1/uploads/plan/fingerprints", {
       method: "POST", signal,
       body: { token, items: active.map(uploadFingerprintPlanItem) },

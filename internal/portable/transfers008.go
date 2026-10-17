@@ -453,7 +453,7 @@ func (s *FileStore) ensurePortableUploadLease(ctx context.Context, intent storag
 	var leaseObject objectstore.Object
 	var leaseErr error
 	if !leaseKnownAbsent {
-		leaseObject, leaseErr = s.engine.backend.Get(ctx, leaseKey)
+		leaseObject, leaseErr = s.engine.backend.Get(admissionProviderContext(ctx, "lease-read"), leaseKey)
 	} else {
 		leaseErr = domain.ErrNotFound
 	}
@@ -465,18 +465,23 @@ func (s *FileStore) ensurePortableUploadLease(ctx context.Context, intent storag
 		if beginErr != nil {
 			return objectstore.UploadCapability{}, objectstore.Object{}, beginErr
 		}
-		version, putErr := s.engine.backend.Put(ctx, leaseKey, handle.Lease, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
+		version, putErr := s.engine.backend.Put(admissionProviderContext(ctx, "lease-write"), leaseKey, handle.Lease, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
 		if putErr == nil {
 			leaseObject = objectstore.Object{Key: leaseKey, Body: append([]byte(nil), handle.Lease...), Version: version, Size: int64(len(handle.Lease))}
 			capability = handle.Capability
 		} else {
-			if !errors.Is(putErr, domain.ErrConflict) && !errors.Is(putErr, domain.ErrPreconditionFailed) {
-				_ = transfers.AbortUpload(ctx, handle.Lease)
-				return objectstore.UploadCapability{}, objectstore.Object{}, putErr
-			}
-			leaseObject, leaseErr = s.engine.backend.Get(ctx, leaseKey)
+			// A lost PUT reply may hide a committed lease. Read its authority
+			// before revoking anything; aborting an equal durable lease would
+			// revoke the winner. If the read is also uncertain, leave the native
+			// session bounded by its deadline and let replay settle the result.
+			leaseObject, leaseErr = s.engine.backend.Get(admissionProviderContext(ctx, "lease-read"), leaseKey)
 			if leaseErr != nil {
-				_ = transfers.AbortUpload(ctx, handle.Lease)
+				if errors.Is(leaseErr, domain.ErrNotFound) {
+					_ = transfers.AbortUpload(admissionProviderContext(ctx, "abort"), handle.Lease)
+					if !errors.Is(putErr, domain.ErrConflict) && !errors.Is(putErr, domain.ErrPreconditionFailed) {
+						return objectstore.UploadCapability{}, objectstore.Object{}, putErr
+					}
+				}
 				return objectstore.UploadCapability{}, objectstore.Object{}, leaseErr
 			}
 			// Providers may make BeginUpload idempotent for the canonical upload
@@ -484,7 +489,7 @@ func (s *FileStore) ensurePortableUploadLease(ctx context.Context, intent storag
 			// aborting the losing create attempt would revoke the durable winner.
 			// Only a genuinely distinct, uncommitted lease is disposable.
 			if !bytes.Equal(handle.Lease, leaseObject.Body) {
-				_ = transfers.AbortUpload(ctx, handle.Lease)
+				_ = transfers.AbortUpload(admissionProviderContext(ctx, "abort"), handle.Lease)
 			}
 		}
 	} else if leaseErr != nil {
@@ -494,7 +499,7 @@ func (s *FileStore) ensurePortableUploadLease(ctx context.Context, intent storag
 		return objectstore.UploadCapability{}, objectstore.Object{}, domain.NewError(domain.ErrorInvalid, "empty runtime upload lease")
 	}
 	if capability.URL == "" {
-		capability, err = transfers.ResumeUpload(ctx, leaseObject.Body)
+		capability, err = transfers.ResumeUpload(admissionProviderContext(ctx, "resume"), leaseObject.Body)
 		if err != nil {
 			return objectstore.UploadCapability{}, objectstore.Object{}, err
 		}

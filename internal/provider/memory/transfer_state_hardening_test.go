@@ -15,6 +15,35 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/integrity"
 )
 
+func TestIndependentAdmissionProviderFaultPreservesSibling(t *testing.T) {
+	p, scope, _ := boundaryProvider(t)
+	ctx := context.Background()
+	requests := []domain.CreateUploadRequest{
+		{Path: domain.MustParseUserPath("/admission-fault-a"), Size: 0, MediaType: "application/octet-stream", Resumable: true, IdempotencyKey: "admission-mock-fault-a"},
+		{Path: domain.MustParseUserPath("/admission-fault-b"), Size: 0, MediaType: "application/octet-stream", Resumable: true, IdempotencyKey: "admission-mock-fault-b"},
+	}
+	p.InjectFault(OperationCreateUpload, FaultUnavailable)
+	page, err := p.AdmitUploads(ctx, scope, requests)
+	if err != nil || page[0].Outcome != "retryable" || !page[0].Retryable || page[1].Capability == nil {
+		t.Fatalf("independent fault: %+v %v", page, err)
+	}
+	retry, err := p.AdmitUploads(ctx, scope, requests[:1])
+	if err != nil || retry[0].Capability == nil {
+		t.Fatalf("selective retry: %+v %v", retry, err)
+	}
+	replay, err := p.AdmitUploads(ctx, scope, requests[1:])
+	if err != nil || replay[0].UploadID != page[1].UploadID {
+		t.Fatalf("accepted sibling changed: %+v %v", replay, err)
+	}
+	trash, err := domain.NewScope(scope.UserID(), domain.AreaTrash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaked, err := p.AdmitUploads(ctx, trash, requests[1:]); !errors.Is(err, domain.ErrNotFound) || leaked != nil {
+		t.Fatalf("cross-area replay leaked capability: %+v %v", leaked, err)
+	}
+}
+
 func TestUploadMetadataStateTransitionsFailClosedWithoutBodyStreaming(t *testing.T) {
 	ctx := context.Background()
 	provider, scope, clock := boundaryProvider(t)

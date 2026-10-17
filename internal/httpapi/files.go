@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -27,6 +28,10 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/directories", api.createDirectory)
 	mux.HandleFunc("POST /api/v1/uploads", api.createUpload)
 	mux.HandleFunc("POST /api/v1/uploads/batch", api.createUploadBatch)
+	mux.HandleFunc("POST /api/v1/uploads/batch/admit", api.admitUploads)
+	mux.HandleFunc("POST /api/v1/uploads/batch/status", api.uploadLifecycle(false))
+	mux.HandleFunc("POST /api/v1/uploads/batch/resume", api.uploadLifecycle(true))
+	mux.HandleFunc("POST /api/v1/uploads/batch/actions", api.uploadActions)
 	mux.HandleFunc("POST /api/v1/uploads/batch/complete", api.completeUploadBatch)
 	mux.HandleFunc("DELETE /api/v1/uploads/batch", api.abortUploadBatch)
 	mux.HandleFunc("POST /api/v1/uploads/plan/sizes", api.planUploadSizes)
@@ -620,6 +625,72 @@ func (api *identityAPI) uploadStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (api *identityAPI) uploadLifecycle(resume bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// POST queries keep the same exact-origin and CSRF boundary as explicit
+		// capability recovery. Neither endpoint accepts file bytes or owner IDs.
+		current, ok := api.mutation(w, r)
+		if !ok {
+			return
+		}
+		var request struct {
+			UploadIDs []domain.UploadID `json:"uploadIDs"`
+		}
+		if !decodeJSON(w, r, &request) {
+			return
+		}
+		items, err := api.drive.UploadLifecycle(r.Context(), current.Record.UserID, request.UploadIDs, resume)
+		if err != nil {
+			writeProblem(w, r, err)
+			return
+		}
+		for index := range items {
+			if items[index].ErrorKind != "" {
+				items[index].RequestID = requestID(r)
+			}
+		}
+		writeUploadLifecyclePage(w, r, items)
+	}
+}
+
+func (api *identityAPI) uploadActions(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.mutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Items []domain.UploadActionItem `json:"items"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	items, err := api.drive.UploadActions(r.Context(), current.Record.UserID, request.Items)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	for index := range items {
+		if items[index].ErrorKind != "" {
+			items[index].RequestID = requestID(r)
+		}
+	}
+	writeUploadLifecyclePage(w, r, items)
+}
+
+// Recovery pages are deliberately smaller than atomic bulk publication. Bound
+// encoded capabilities and paths as well as item count before writing headers.
+func writeUploadLifecyclePage(w http.ResponseWriter, r *http.Request, items any) {
+	w.Header().Set("Cache-Control", "no-store")
+	body, err := json.Marshal(map[string]any{"uploads": items})
+	if err != nil || len(body) > 1<<20 {
+		writeProblem(w, r, domain.NewError(domain.ErrorUnavailable, "upload recovery response exceeds its safe bound"))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 func (api *identityAPI) resumeUpload(w http.ResponseWriter, r *http.Request) {

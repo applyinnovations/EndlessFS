@@ -57,6 +57,14 @@ type UploadBatchStorage interface {
 	CreateUploadBatch(context.Context, domain.Scope, []domain.CreateUploadRequest) ([]domain.UploadCapability, error)
 }
 
+// UploadAdmissionStorage admits a bounded page with independent stable item
+// keys and outcomes. Canonical writes must coalesce; looping over CreateUpload
+// and executing a complete state transaction per item is not conforming.
+// The legacy exact-membership UploadBatchStorage contract remains unchanged.
+type UploadAdmissionStorage interface {
+	AdmitUploads(context.Context, domain.Scope, []domain.CreateUploadRequest) ([]domain.UploadAdmissionResult, error)
+}
+
 // UploadTransactionStorage completes or revokes a product-scale selection
 // through one control-plane request and one atomic terminal state publication.
 // Distinct provider objects remain unavoidable per-item effects, but state
@@ -64,6 +72,21 @@ type UploadBatchStorage interface {
 type UploadTransactionStorage interface {
 	CompleteUploadBatch(context.Context, domain.Scope, domain.CompleteUploadBatchRequest) (domain.CompleteUploadBatchResult, error)
 	AbortUploadBatch(context.Context, domain.Scope, domain.AbortUploadBatchRequest) error
+}
+
+// UploadLifecycleStorage recovers an explicitly selected bounded page. Results
+// authorize every item independently and never renew expired attempt authority.
+// Implementations share authenticated metadata reads and bound provider work;
+// a loop over public single-item handlers is not an implementation.
+type UploadLifecycleStorage interface {
+	UploadLifecycle(context.Context, domain.Scope, []domain.UploadID, bool) ([]domain.UploadLifecycleItem, error)
+}
+
+// UploadActionStorage coalesces independently reported terminal transitions.
+// UploadID and the verified completion checksum are natural item identities;
+// published receipts survive envelope regrouping without per-item commits.
+type UploadActionStorage interface {
+	UploadActions(context.Context, domain.Scope, []domain.UploadActionItem) ([]domain.UploadActionResult, error)
 }
 
 // UploadPlanningStorage exposes metadata-only duplicate lookup. Local file

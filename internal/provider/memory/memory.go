@@ -98,6 +98,8 @@ type upload struct {
 	batchID         string
 	batchIndex      uint64
 	batchCount      uint64
+	completedEntry  *domain.Entry
+	completedCRC32C string
 }
 
 type download struct {

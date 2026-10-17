@@ -74,8 +74,11 @@ func runHeldFingerprintPipeline(t *testing.T, cancel bool) {
 		t.Logf("pipeline evidence: %s", evidence)
 		t.Fatalf("unambiguous upload waited for held fingerprint: %v (%s)", err, browserStatus(c.ctx))
 	}
-	if err := waitFor(c.ctx, `document.querySelector('#transfer-check-progress').value > document.querySelector('#transfer-progress').value`, 5*time.Second); err != nil {
-		t.Fatalf("readable fingerprint did not advance blue checking progress: %v", err)
+	// The new preparation percentage credits all prerequisites, rather than a
+	// hash alone. The unique two-byte file is ready; the two three-byte files
+	// still await planning/session readiness while source fingerprints overlap.
+	if err := waitFor(c.ctx, `(() => {const preparation=document.querySelector('#transfer-check-progress');return preparation.max===8 && preparation.value===2 && preparation.getAttribute('aria-valuetext').includes('Reading source fingerprints') && document.querySelector('#transfer-progress').value===2})()`, 5*time.Second); err != nil {
+		t.Fatalf("preparation lost ready-file credit or pending fingerprint feedback: %v", err)
 	}
 	if target := os.Getenv("ENDLESSFS_UPLOAD_PIPELINE_SCREENSHOT"); target != "" {
 		var png []byte

@@ -233,6 +233,40 @@ func (s *Service) UploadStatus(ctx context.Context, userID domain.UserID, upload
 	return s.storage.UploadStatus(ctx, scope, uploadID)
 }
 
+func (s *Service) UploadLifecycle(ctx context.Context, userID domain.UserID, uploadIDs []domain.UploadID, resume bool) (outcome []domain.UploadLifecycleItem, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.UploadStatus, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
+	if len(uploadIDs) < 1 || len(uploadIDs) > domain.MaxUploadLifecycleItems {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid upload recovery page size")
+	}
+	scope, err := liveScope(userID)
+	if err != nil {
+		return nil, err
+	}
+	storage, ok := s.storage.(provider.UploadLifecycleStorage)
+	if !ok {
+		return nil, domain.NewError(domain.ErrorUnavailable, "upload recovery is unavailable")
+	}
+	return storage.UploadLifecycle(ctx, scope, uploadIDs, resume)
+}
+
+func (s *Service) UploadActions(ctx context.Context, userID domain.UserID, items []domain.UploadActionItem) (outcome []domain.UploadActionResult, err error) {
+	ctx, activity := telemetry.Start(ctx, telemetry.UploadCompletion, telemetry.Application)
+	defer telemetry.Finish(activity, &err)
+	if len(items) < 1 || len(items) > domain.MaxUploadLifecycleItems {
+		return nil, domain.NewError(domain.ErrorInvalid, "invalid upload action page size")
+	}
+	scope, err := liveScope(userID)
+	if err != nil {
+		return nil, err
+	}
+	storage, ok := s.storage.(provider.UploadActionStorage)
+	if !ok {
+		return nil, domain.NewError(domain.ErrorUnavailable, "upload actions are unavailable")
+	}
+	return storage.UploadActions(ctx, scope, items)
+}
+
 func (s *Service) ResumeUpload(ctx context.Context, userID domain.UserID, uploadID domain.UploadID) (outcome domain.UploadCapability, err error) {
 	ctx, activity := telemetry.Start(ctx, telemetry.UploadAdmission, telemetry.Application)
 	defer telemetry.Finish(activity, &err)

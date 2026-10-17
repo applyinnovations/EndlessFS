@@ -66,6 +66,21 @@ type UploadTransactionStorage interface {
 	AbortUploadBatch(context.Context, domain.Scope, domain.AbortUploadBatchRequest) error
 }
 
+// UploadLifecycleStorage recovers an explicitly selected bounded page. Results
+// authorize every item independently and never renew expired attempt authority.
+// Implementations share authenticated metadata reads and bound provider work;
+// a loop over public single-item handlers is not an implementation.
+type UploadLifecycleStorage interface {
+	UploadLifecycle(context.Context, domain.Scope, []domain.UploadID, bool) ([]domain.UploadLifecycleItem, error)
+}
+
+// UploadActionStorage coalesces independently reported terminal transitions.
+// UploadID and the verified completion checksum are natural item identities;
+// published receipts survive envelope regrouping without per-item commits.
+type UploadActionStorage interface {
+	UploadActions(context.Context, domain.Scope, []domain.UploadActionItem) ([]domain.UploadActionResult, error)
+}
+
 // UploadPlanningStorage exposes metadata-only duplicate lookup. Local file
 // bytes stay in the browser and stored object bytes stay on the data plane.
 type UploadPlanningStorage interface {

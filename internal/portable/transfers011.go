@@ -21,6 +21,15 @@ type portableUploadTransactionItem struct {
 	record   storageformat.PortableUploadRecord
 	value    consistencyDomainValue
 	md5      string
+	verified bool
+}
+
+// These request-local proofs never enter durable records. They are reusable
+// only for the exact authenticated record version and checksum just checked.
+type uploadCompletionProof struct{ version, crc32c, md5 string }
+type uploadCancellationProof struct {
+	version string
+	lease   []byte
 }
 
 func normalizePortableUploadCompletionBatch(owner domain.UserID, request domain.CompleteUploadBatchRequest) (string, string, error) {
@@ -148,6 +157,9 @@ func (s *FileStore) verifyPortableUploadRange(ctx context.Context, items []porta
 			defer wait.Done()
 			for index := range jobs {
 				item := &items[index]
+				if item.verified {
+					continue
+				}
 				traced := providerbudget.WithTrace(ctx, providerbudget.Trace{Operation: "complete-upload-batch", Subsystem: "object-verification", ParallelGroup: "upload-verification-batch"})
 				info, err := s.engine.fileBackend.Verify(traced, storageformat.BlobKey(item.record.OwnerID, item.record.BlobID), objectstore.ExpectedIntegrity{Size: item.record.Size, Checksum: objectstore.Checksum{Algorithm: objectstore.ChecksumCRC32C, Value: item.crc32c}})
 				if err == nil && (info.Size != item.record.Size || !info.Fingerprint.Complete() || info.Fingerprint.CRC32C != item.crc32c) {
@@ -155,6 +167,7 @@ func (s *FileStore) verifyPortableUploadRange(ctx context.Context, items []porta
 				}
 				if err == nil {
 					item.md5 = info.Fingerprint.MD5
+					item.verified = true
 				}
 				errorsByIndex[index-first] = err
 			}
@@ -198,6 +211,10 @@ func completionEntriesFromRecords(items []portableUploadTransactionItem) ([]doma
 }
 
 func (s *FileStore) completeUploadBatch011(ctx context.Context, scope domain.Scope, request domain.CompleteUploadBatchRequest) (domain.CompleteUploadBatchResult, error) {
+	return s.completeUploadBatchProven(ctx, scope, request, nil)
+}
+
+func (s *FileStore) completeUploadBatchProven(ctx context.Context, scope domain.Scope, request domain.CompleteUploadBatchRequest, proofs map[string]uploadCompletionProof) (domain.CompleteUploadBatchResult, error) {
 	transactionID, fingerprint, err := normalizePortableUploadCompletionBatch(scope.UserID(), request)
 	if err != nil {
 		return domain.CompleteUploadBatchResult{}, err
@@ -236,6 +253,9 @@ func (s *FileStore) completeUploadBatch011(ctx context.Context, scope domain.Sco
 				return nil, false, domain.NewError(domain.ErrorConflict, "upload completion contains an inactive upload")
 			}
 			items[index] = portableUploadTransactionItem{uploadID: string(requested.UploadID), crc32c: requested.CRC32C, record: record, value: value}
+			if proof, found := proofs[string(requested.UploadID)]; found && proof.version == value.LogicalVersion && proof.crc32c == requested.CRC32C {
+				items[index].md5, items[index].verified = proof.md5, true
+			}
 		}
 		return view, false, nil
 	}
@@ -511,6 +531,10 @@ func (s *FileStore) runtimeUploadLeasesForRange(ctx context.Context, items []por
 }
 
 func (s *FileStore) abortPortableUploadRange(ctx context.Context, leases [][]byte, first, last int) error {
+	return s.abortPortableUploadRangeUnproven(ctx, leases, first, last, nil)
+}
+
+func (s *FileStore) abortPortableUploadRangeUnproven(ctx context.Context, leases [][]byte, first, last int, applied []bool) error {
 	transfers, err := s.transferBackend()
 	if err != nil {
 		return err
@@ -527,6 +551,9 @@ func (s *FileStore) abortPortableUploadRange(ctx context.Context, leases [][]byt
 		go func() {
 			defer wait.Done()
 			for offset := range jobs {
+				if len(applied) > first+offset && applied[first+offset] {
+					continue
+				}
 				traced := providerbudget.WithTrace(ctx, providerbudget.Trace{Operation: "abort-upload-batch", Subsystem: "upload-session", ParallelGroup: "upload-abort-batch"})
 				err := transfers.AbortUpload(traced, leases[first+offset])
 				if errors.Is(err, domain.ErrNotFound) {
@@ -550,6 +577,10 @@ func (s *FileStore) abortPortableUploadRange(ctx context.Context, leases [][]byt
 }
 
 func (s *FileStore) abortUploadBatch011(ctx context.Context, scope domain.Scope, request domain.AbortUploadBatchRequest) error {
+	return s.abortUploadBatchProven(ctx, scope, request, nil)
+}
+
+func (s *FileStore) abortUploadBatchProven(ctx context.Context, scope domain.Scope, request domain.AbortUploadBatchRequest, proofs map[string]uploadCancellationProof) error {
 	transactionID, fingerprint, err := normalizePortableUploadAbortBatch(scope.UserID(), request)
 	if err != nil {
 		return err
@@ -597,16 +628,27 @@ func (s *FileStore) abortUploadBatch011(ctx context.Context, scope domain.Scope,
 	}
 	var progress storageformat.UploadTransactionSegment
 	completed := 0
-	leases, err := s.runtimeUploadLeasesForRange(ctx, items, 0, len(items))
-	if err != nil {
-		return err
+	leases, applied := make([][]byte, len(items)), make([]bool, len(items))
+	allApplied := len(proofs) > 0
+	for index, item := range items {
+		if proof, found := proofs[item.uploadID]; found && proof.version == item.value.LogicalVersion {
+			leases[index], applied[index] = proof.lease, true
+		} else {
+			allApplied = false
+		}
+	}
+	if !allApplied {
+		leases, err = s.runtimeUploadLeasesForRange(ctx, items, 0, len(items))
+		if err != nil {
+			return err
+		}
 	}
 	for completed < len(items) {
 		last := completed + storageformat.UploadTransactionSegmentItems
 		if last > len(items) {
 			last = len(items)
 		}
-		if err := s.abortPortableUploadRange(ctx, leases, completed, last); err != nil {
+		if err := s.abortPortableUploadRangeUnproven(ctx, leases, completed, last, applied); err != nil {
 			return err
 		}
 		completed = last

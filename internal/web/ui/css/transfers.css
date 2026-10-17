@@ -125,6 +125,8 @@ div.transfer-progress-stack progress:not(.transfer-check-progress) { z-index: 1;
 .transfer-row-metrics { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: 8px; font-variant-numeric: tabular-nums; }
 .transfer-row-metrics span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .transfer-row-metrics span:first-child { color: var(--efs-color-foreground); }
+.transfer-group-row .transfer-row-metrics { flex-wrap: wrap; }
+.transfer-group-row .transfer-row-metrics span { max-width: 100%; overflow: visible; overflow-wrap: anywhere; white-space: normal; }
 .transfer-row-error { min-width: 0; color: var(--efs-color-error) !important; overflow-wrap: anywhere; white-space: normal; }
 .transfer-row-actions { align-self: center; }
 .failed-transfer-item { min-height: 36px; }

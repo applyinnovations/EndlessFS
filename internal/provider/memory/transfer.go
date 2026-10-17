@@ -308,6 +308,11 @@ func (p *Provider) completeUpload(ctx context.Context, scope domain.Scope, reque
 	delete(p.uploadTokens, session.capabilityHash)
 	session.state = domain.UploadStateCompleted
 	session.offset = session.size
+	session.completedEntry = &entry
+	session.completedCRC32C = request.CRC32C
+	if session.materialized {
+		session.completedCRC32C = integrity.CRC32C(session.data)
+	}
 	return entry, nil
 }
 

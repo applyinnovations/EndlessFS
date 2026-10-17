@@ -139,6 +139,9 @@
       this.status = response.status;
       this.code = problem && problem.code ? problem.code : "request_failed";
       this.requestID = problem && problem.requestID ? problem.requestID : "";
+      const retryAfter = response.headers.get("Retry-After");
+      const delay = retryAfter && /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : retryAfter ? Date.parse(retryAfter) - Date.now() : 0;
+      this.retryAfterMs = Number.isFinite(delay) ? Math.max(0, Math.min(delay, 2147483647)) : 0;
     }
   }
 
@@ -627,6 +630,7 @@
       transitionTransfer(transfer, "paused", "Paused on this device.", "signed_out");
     }
     for (const controller of state.transferPlanControllers.values()) controller.abort();
+    suspendUploadControl();
     state.transferPlanControllers.clear();
     for (const timer of state.uploadPlanRetryTimers.values()) window.clearTimeout(timer);
     state.uploadPlanRetryTimers.clear();

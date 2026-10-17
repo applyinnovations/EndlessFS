@@ -103,7 +103,7 @@ func runPreparingExpiredRecovery(t *testing.T, rejectStage int) {
 		t.Fatal(err)
 	}
 	if rejectStage != 0 {
-		if err := chromedp.Run(client.ctx, chromedp.Evaluate(fmt.Sprintf(`(()=>{const put=IDBObjectStore.prototype.put;IDBObjectStore.prototype.put=function(value,...args){if(this.name==='items' && value.id && !value.id.startsWith('preparing-') && (%d===1 || value.admissionBatchKey))throw new DOMException('Synthetic quota failure','QuotaExceededError');return put.call(this,value,...args)}})()`, rejectStage), nil)); err != nil {
+		if err := chromedp.Run(client.ctx, chromedp.Evaluate(fmt.Sprintf(`(()=>{const put=IDBObjectStore.prototype.put;IDBObjectStore.prototype.put=function(value,...args){if(this.name==='items' && value.id && !value.id.startsWith('preparing-') && (%d===1 || value.admissionBatchKey || value.admissionIntent))throw new DOMException('Synthetic quota failure','QuotaExceededError');return put.call(this,value,...args)}})()`, rejectStage), nil)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -135,7 +135,7 @@ func runPreparingExpiredRecovery(t *testing.T, rejectStage int) {
 			t.Fatalf("retry admitted without durable identity: %v %s", err, browserStatus(client.ctx))
 		}
 		for _, request := range client.requestSnapshot() {
-			if request == "POST /api/v1/uploads" || request == "POST /api/v1/uploads/batch" {
+			if request == "POST /api/v1/uploads" || request == "POST /api/v1/uploads/batch" || request == "POST /api/v1/uploads/batch/admit" {
 				t.Fatalf("admitted after failed identity persistence: %s", request)
 			}
 		}

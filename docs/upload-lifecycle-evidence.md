@@ -24,7 +24,7 @@ siblings receive independent outcomes. A metadata proof is private to one
 request and reusable only for the exact upload-record logical version and
 checksum. A second bounded shared read handles concurrent changes; persistent
 contention returns unknown/retryable. Uncertain responses are replayable.
-Admission retains its exact ordered membership and stable item keys. The
+The legacy admission route retains its exact ordered membership and stable item keys. The
 ordinary 10,000-item atomic completion/cancel routes remain supported. The UI
 uses independent terminal actions after an explicit rejected atomic cohort;
 network ambiguity preserves and replays the original atomic cohort.
@@ -88,9 +88,9 @@ the durable identity before admission, discard old bindings, and reset only
 their own confirmed bytes. New item IDs, group references and deletion of the
 old item IDs commit in one IndexedDB transaction. A quota/write failure keeps
 the old ledger and blocks new admission until an explicit retry succeeds.
-The batch admission key must also commit before a renewed attempt can send its
-request, including replay after reload. Admission captures immutable ordered
-intent and binds replies to owner, local ID and attempt generation. A late
+The legacy batch admission key or new independent per-item intent must also
+commit before a renewed attempt can send its request, including replay after
+reload. Admission captures immutable intent and binds replies to owner, local ID and attempt generation. A late
 reply cannot supply capabilities to a cancelled or replaced attempt; abandoned
 old sessions are cancelled only while the original owner remains signed in.
 Error history is bounded to three records.
@@ -116,3 +116,81 @@ do not promise a transaction across completion and cancellation cohorts. The
 mock models outcomes in memory and is not production provider evidence. Future
 provider support must pass the shared lifecycle contract, and real upload load
 behavior still requires separate authorized operational observation.
+
+## Independent partial admission
+
+The new authenticated `POST /api/v1/uploads/batch/admit` route accepts 1–100
+independent attempts and returns index/key/upload-ID-bound outcomes. Invalid
+metadata or one native-provider failure cannot revoke valid siblings. The old
+10,000-item route retains exact ordered membership and compact segment receipts;
+old durable browser ledgers replay that route. Fresh pages use immutable
+per-item keys/intents committed before sending. Unknown or transient results
+retain that intent. An explicit retry after a destination conflict or failed
+precondition obtains a fresh identity and replans only the rejected attempt.
+Accepted and completed siblings retain their identities, offsets and history.
+
+The portable engine coalesces canonical intent creation and activation into two
+namespace publications per cold page, rather than looping public scalar handlers.
+It reuses existing individual transient leases and single-upload canonical
+records/idempotency bindings. No epoch, authoritative encoding, feature, native
+pointer, checkpoint or migration contract changes. A successful native lease is
+never returned before durable activation. A lost lease-PUT response reads the
+winner and never aborts that equal durable lease; an uncertain read leaves the
+session bounded by its authoritative deadline for replay. Completion,
+cancellation and expiry are rechecked after native work before capability
+release. Replica/crash tests cover intent, lease and activation boundaries,
+contended activation, lost write/read responses and 2–8 engines.
+
+The existing compact legacy lease segment has lower cold-path provider cost.
+Independent pages deliberately retain one transient lease per item so a failed
+sibling can be retried without revoking accepted work or changing schema 012.
+A new grouped partial-lease format was rejected for this change because it
+would require a storage migration and a separate compatibility proof. This is
+a recovery/fault-isolation improvement with a measured cold-path cost, not a
+universal cost or memory reduction.
+
+The same 100-item synthetic fixture produces:
+
+| Metric | Legacy exact cohort | Independent page |
+| --- | ---: | ---: |
+| State calls |4 |107 |
+| Native begins |100 |100 |
+| State writes |3 |104 |
+| Request/response bytes |49,066 /350 |66,373 /32,282 |
+| Modeled marginal cost, pico USD |515,400,000 |1,021,200,000 |
+| Modeled critical p50/p95/p99, µs |137,473 /425,473 /1,060,473 |231,926 /715,926 /1,780,926 |
+| Temporary lease objects |1 compact segment |100 individual leases |
+| Retained canonical publication cohorts |1 |2 |
+| Observed allocated bytes |7,955,744 |19,861,128 |
+| Observed isolated-process peak RSS, KiB |44,928 |50,628 |
+
+Memory observations use isolated synthetic test processes and include their
+runtime/fixture overhead; they are observations rather than global heap bounds.
+The foreground work is bounded per page; retained namespace history and
+compaction remain governed by the existing engine. Ratchet 015 fixes measured
+cold, active-replay, partial-failure, selective-retry and completed-replay
+request/cost/latency vectors. Static provider trace phases distinguish dependent
+begin/lease-write and progress/resume waves without user-derived labels. A
+100-item page with one native failure makes 206 calls; retrying only the failed
+attempt makes 9 calls and one native begin. A completed 100-item replay makes two
+shared reads, zero writes and zero native calls. Tests assert accepted siblings
+are not recreated, and completed siblings are never transferred or republished.
+
+Synthetic browser coverage includes mixed admission, selective retry, a committed
+response lost across reload/source reacquisition, a rolling-replica 405 route gap,
+one 100-item transient page retry remaining one page,201-file composition as
+100/100/1, legacy exact-envelope replay, and a real destination-version change
+between planning/admission followed by explicit replan. Every synthetic source
+is written once through the browser after successful admission. No customer
+queue or file body is involved.
+
+A stored-batch cursor is unnecessary for explicit selected-ID pages backed by
+the durable client ledger. The shared 100-slot per-engine native pool, 100-item
+page/body bounds, bounded retry counters/backoff and virtualized rows bound this
+flow. They do not claim cross-owner fairness, starvation freedom, a cluster-wide
+concurrency ceiling or a global heap ceiling. A fair scheduler and dedicated
+per-item/owner-queue metrics remain separate operability work. Existing closed
+application/provider operation metrics plus explicitly allowlisted static
+admission/status/resume/action route dimensions support safe aggregate diagnosis;
+no user identity, key, path or capability becomes a dimension. Production load
+behavior remains unverified until authorized observation sees real activity.

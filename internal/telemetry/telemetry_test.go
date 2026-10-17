@@ -67,3 +67,17 @@ func TestDisabledTelemetryDoesNotChangeContextOrOperation(t *testing.T) {
 	activity.End(domain.ErrConflict)
 	activity.Bytes(1, 2)
 }
+
+func TestUploadLifecycleRoutesKeepClosedUsefulDimensions(t *testing.T) {
+	observer := New(nil, nil)
+	for _, route := range []string{"POST /api/v1/uploads/batch/admit", "POST /api/v1/uploads/batch/status", "POST /api/v1/uploads/batch/resume", "POST /api/v1/uploads/batch/actions"} {
+		_, activity := Start(Context(context.Background(), observer), HTTP, Application)
+		activity.Route(route)
+		activity.End(domain.ErrUnavailable)
+		var output bytes.Buffer
+		observer.WritePrometheus(&output)
+		if !strings.Contains(output.String(), `route="`+route+`"`) {
+			t.Fatalf("missing closed route %s", route)
+		}
+	}
+}

@@ -13,6 +13,7 @@ import (
 
 func runUploadLifecycle(t *testing.T, factory Factory) {
 	t.Helper()
+	runUploadAdmission(t, factory)
 	t.Run("bounded independent lifecycle receipts and isolation", func(t *testing.T) {
 		h := factory(t)
 		ctx := context.Background()

@@ -1325,11 +1325,20 @@ Requirements:
 
 - The control API MUST reject file bodies and request bodies over its documented limit.
 - A single upload and a batch of up to 10,000 upload initializations are supported.
-- The browser coalesces concurrently queued upload initialization into batches
-  of at most 10,000 before starting their independently concurrent direct data
-  transfers. Each batch item carries its stable transfer-ledger idempotency key
-  so a lost batch response or browser restart can resume that exact upload
-  through either initialization route without allocating another blob.
+- The browser coalesces concurrently queued upload initialization into independent
+  pages of at most 100 items through `/api/v1/uploads/batch/admit`, also bounded
+  by the exact 1 MiB serialized request and response limits. Each item carries
+  its stable transfer-ledger idempotency key and immutable admission intent,
+  persisted before sending. Valid siblings survive an independent metadata or
+  native-provider failure; retries may select a subset or reorder items. A lost
+  response or browser restart recovers the same upload without allocating
+  another blob. Completed replay never transfers or republishes the file.
+  A transient or uncertain outcome retains its key and intent. Explicit retry
+  after a rejected destination precondition replans only that item under a
+  fresh durable identity. Malformed envelopes, repeated keys and page overflow
+  fail the whole request; valid envelopes return independently bound outcomes.
+  Historical ledgers with an exact-membership batch key replay their original
+  ordered envelope through the legacy initialization route.
 - The UI uses the 100-worker shared file queue implemented by Google's
   open-source `upload-cloud-storage` action. One settled task releases one
   worker to take the next queued file; queue depth is therefore the effective
@@ -1341,7 +1350,7 @@ Requirements:
   upload concurrency. Concurrency is not a user-controlled input. Pinned
   upstream source, license, selection, and rejection evidence is normative in
   `docs/upload-worker-pool-upstream-evidence.md`.
-- Schema 012 gives each independent batch admission an owner-bound identity
+- The legacy schema 012 batch route gives each exact-membership admission an owner-bound identity
   derived from its ordered idempotency keys. Equal destinations, sizes and
   media types MUST NOT alias independent attempts, including attempts after
   cancellation or expiry. A replay resolves the stored batch ID, member IDs,
@@ -1479,7 +1488,8 @@ Requirements:
   per-file rates. Initial tiny samples remain provisional, numeric estimates
   use a stable display cadence, and stale acknowledgements suppress numerical
   ETA. Preparation is an operational phase, not a blocking ETA calculation.
-- Upload control requests MUST satisfy both the 10,000-item bound and the exact
+- Upload control requests MUST satisfy their route item bound (100 for independent
+  admission/lifecycle/actions, 10,000 for legacy batches) and the exact
   1 MiB serialized UTF-8 body bound, including paths, escaping, tokens, and
   logical-version preconditions. Size, fingerprint, and logical-reuse requests
   partition deterministically without weakening snapshot or replay guarantees.
@@ -1658,6 +1668,7 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 | POST | `/api/v1/directories` | Create an empty directory. |
 | POST | `/api/v1/uploads` | Create one upload capability. |
 | POST | `/api/v1/uploads/batch` | Create up to 10,000 destination-bound upload capabilities with safe batch recovery bindings. |
+| POST | `/api/v1/uploads/batch/admit` | Admit 1–100 independent attempts with stable per-item intent receipts and bounded partial outcomes. |
 | POST | `/api/v1/uploads/batch/status` | Query at most 100 independently authorized upload outcomes without capabilities. |
 | POST | `/api/v1/uploads/batch/resume` | Recover at most 100 upload capabilities; authoritative expiry remains unchanged. |
 | POST | `/api/v1/uploads/batch/actions` | Independently report completion/cancellation outcomes for at most 100 upload attempts. |

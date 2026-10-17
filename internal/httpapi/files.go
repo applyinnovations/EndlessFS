@@ -28,6 +28,7 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/directories", api.createDirectory)
 	mux.HandleFunc("POST /api/v1/uploads", api.createUpload)
 	mux.HandleFunc("POST /api/v1/uploads/batch", api.createUploadBatch)
+	mux.HandleFunc("POST /api/v1/uploads/batch/admit", api.admitUploads)
 	mux.HandleFunc("POST /api/v1/uploads/batch/status", api.uploadLifecycle(false))
 	mux.HandleFunc("POST /api/v1/uploads/batch/resume", api.uploadLifecycle(true))
 	mux.HandleFunc("POST /api/v1/uploads/batch/actions", api.uploadActions)

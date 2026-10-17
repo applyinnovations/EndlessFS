@@ -335,7 +335,7 @@ func TestE2ERetryFailedFinalizationAfterReloadDoesNotRequireSource(t *testing.T)
 	if completions.Load() != 2 {
 		t.Fatalf("explicit retry completions = %d", completions.Load())
 	}
-	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads"); got != 1 {
+	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/admit"); got != 1 {
 		t.Fatalf("finalization retry initialized %d upload sessions", got)
 	}
 }

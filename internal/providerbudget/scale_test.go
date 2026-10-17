@@ -233,3 +233,17 @@ func TestProviderBudgetTargetPayloadEnvelopesAreMeasured(t *testing.T) {
 	}
 	t.Logf("provider-target-payload-v1 transactionBytes=%d projectionBytes=%d transferProgressBytes=%d", len(transaction), len(projection), len(progressBody))
 }
+
+func TestProviderBudgetIndependentAdmissionLeaseEnvelope(t *testing.T) {
+	for _, target := range providerbudget.ProductionScaleTargets() {
+		if target.ID != "independent-upload-admission" {
+			continue
+		}
+		wave := target.RequestWaves[len(target.RequestWaves)-1]
+		if wave.RequestBytesEach != storageformat.MaxSealedUploadLeaseBytes {
+			t.Fatalf("admission target lease bytes=%d; canonical envelope=%d", wave.RequestBytesEach, storageformat.MaxSealedUploadLeaseBytes)
+		}
+		return
+	}
+	t.Fatal("missing independent admission target")
+}

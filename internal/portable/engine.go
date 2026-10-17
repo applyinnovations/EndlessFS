@@ -83,6 +83,9 @@ func (f SchedulerFunc) Step(ctx context.Context, step string) error { return f(c
 const (
 	StepDomainBeforeHeadCommit         = "consistency-domain:before-head-commit"
 	StepDomainAfterHeadCommit          = "consistency-domain:after-head-commit"
+	StepUploadAdmissionAfterIntents    = "upload-admission:after-intents"
+	StepUploadAdmissionAfterLeases     = "upload-admission:after-leases"
+	StepUploadAdmissionAfterActivation = "upload-admission:after-activation"
 	StepUploadBatchAfterIntents        = "upload-batch:after-intents"
 	StepUploadBatchAfterSessions       = "upload-batch:after-sessions"
 	StepUploadBatchAfterActivation     = "upload-batch:after-activation"

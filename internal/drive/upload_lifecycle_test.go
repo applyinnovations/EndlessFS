@@ -35,6 +35,18 @@ func TestUploadLifecycleServiceBoundsScopeAndUnsupportedStorage(t *testing.T) {
 			t.Fatalf("invalid action owner: %v", err)
 		}
 	}
+	requests := []domain.CreateUploadRequest{{Path: domain.MustParseUserPath("/admission-service"), Size: 0, MediaType: "application/octet-stream", IdempotencyKey: "service-admission-item"}}
+	if _, err := unsupported.AdmitUploads(ctx, env.owner, requests); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("unsupported admission failed open: %v", err)
+	}
+	for _, bad := range [][]domain.CreateUploadRequest{nil, make([]domain.CreateUploadRequest, 101), {requests[0], requests[0]}, {{IdempotencyKey: "short"}}} {
+		if _, err := env.service.AdmitUploads(ctx, env.owner, bad); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("admission boundary: %v", err)
+		}
+	}
+	if _, err := env.service.AdmitUploads(ctx, domain.UserID{}, requests); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatalf("invalid admission owner: %v", err)
+	}
 	if _, err := unsupported.UploadLifecycle(ctx, env.owner, []domain.UploadID{"missing"}, true); !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("unsupported recovery failed open: %v", err)
 	}

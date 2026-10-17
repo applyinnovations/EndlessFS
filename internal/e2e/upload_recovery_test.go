@@ -129,7 +129,7 @@ func TestE2EAutomaticRetryResumesOriginalBatchSession(t *testing.T) {
 			resumes++
 		}
 	}
-	if resumes != 1 || countExactRequest(requests, "POST /api/v1/uploads") != 0 || countExactRequest(requests, "POST /api/v1/uploads/batch") != 1 {
+	if resumes != 1 || countExactRequest(requests, "POST /api/v1/uploads") != 0 || countExactRequest(requests, "POST /api/v1/uploads/batch/admit") != 1 {
 		t.Fatalf("session was reallocated: resumes=%d, requests=%v", resumes, requests)
 	}
 }

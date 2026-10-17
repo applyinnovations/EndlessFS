@@ -57,6 +57,8 @@
   let activeUploadLifecyclePage = null;
   let uploadLifecycleRetryAt = 0;
   let uploadLifecycleRetryTimer = 0;
+  let uploadAdmissionRetryAt = 0;
+  let uploadAdmissionRetryTimer = 0;
   function uploadLifecycle(transfer, resume = false) {
     const uploadID = transfer.uploadID;
     const generation = transfer.attemptGeneration || 0;
@@ -353,6 +355,8 @@
 	  batchID: transfer.batchID || "", batchIndex: Number.isSafeInteger(transfer.batchIndex) ? transfer.batchIndex : 0,
 	  batchCount: Number.isSafeInteger(transfer.batchCount) ? transfer.batchCount : 0,
 	  admissionBatchKey: transfer.admissionBatchKey || "",
+      admissionProtocol: transfer.admissionProtocol || "",
+      admissionIntent: transfer.admissionIntent ? { path: transfer.admissionIntent.path, name: transfer.admissionIntent.name, size: transfer.admissionIntent.size, mediaType: transfer.admissionIntent.mediaType, conflict: transfer.admissionIntent.conflict, resumable: transfer.admissionIntent.resumable, expectedVersion: transfer.admissionIntent.expectedVersion, idempotencyKey: transfer.admissionIntent.idempotencyKey } : null,
       durableAdmissionRequired: Boolean(transfer.durableAdmissionRequired),
 	  admissionBatchIndex: Number.isSafeInteger(transfer.admissionBatchIndex) ? transfer.admissionBatchIndex : 0,
 	  admissionBatchCount: Number.isSafeInteger(transfer.admissionBatchCount) ? transfer.admissionBatchCount : 0,
@@ -1181,7 +1185,7 @@
     if (!navigator.onLine) return;
     if (!state.uploadBatchActive) {
       const batch = nextUploadAdmissionBatch();
-      if (batch.length > 1) {
+      if (batch.length > 0) {
         state.uploadBatchActive = true;
         const admissionRun = state.uploadAdmissionGeneration = (state.uploadAdmissionGeneration || 0) + 1;
         admitUploadBatch(batch).finally(() => {
@@ -1215,13 +1219,14 @@
       state.transferQueueCursor = (index + 1) % count;
       const transfer = state.transfers[index];
       const admitted = Boolean(transfer.pendingCapability || transfer.uploadID);
-      if (transfer.state === "queued" && transfer.file instanceof File && (admitted || !state.uploadBatchActive) && (!transfer.groupID || state.transferGroups.get(transfer.groupID)?.state !== "preparing")) return transfer;
+      if (transfer.state === "queued" && transfer.file instanceof File && admitted && (!transfer.groupID || state.transferGroups.get(transfer.groupID)?.state !== "preparing")) return transfer;
     }
     return null;
   }
 
   function nextUploadAdmissionBatch() {
-	const replay = state.transfers.find((transfer) => transfer.admissionBatchKey && !transfer.uploadID && !transfer.pendingCapability && !["complete", "failed"].includes(transfer.state));
+    if (uploadAdmissionRetryTimer || Date.now() < uploadAdmissionRetryAt) return [];
+	const replay = state.transfers.find((transfer) => transfer.admissionBatchKey && !transfer.uploadID && !transfer.pendingCapability && transfer.state === "queued" && transfer.file instanceof File);
 	if (replay) {
 	  return state.transfers
 		.filter((transfer) => transfer.admissionBatchKey === replay.admissionBatchKey)
@@ -1230,15 +1235,11 @@
     const batch = [];
 	let encodedBytes = 64;
     for (const transfer of state.transfers) {
-      if (batch.length >= 10000) break;
+      if (batch.length >= uploadLifecyclePageSize) break;
       if (transfer.state !== "queued" || !(transfer.file instanceof File) || transfer.uploadID || transfer.pendingCapability) continue;
       if (transfer.groupID && state.transferGroups.get(transfer.groupID)?.state === "preparing") continue;
 	  if (transfer.admissionBatchKey) continue;
-	  const item = compactUploadInitializationRequest(
-		transfer,
-		batch.length ? transferMediaType(batch[0]) : transferMediaType(transfer),
-		batch.length ? batch[0].directory : transfer.directory,
-	  );
+	  const item = transfer.admissionIntent || uploadInitializationRequest(transfer, true);
 	  const itemBytes = new TextEncoder().encode(JSON.stringify(item)).byteLength + (batch.length ? 1 : 0);
 	  if (encodedBytes + itemBytes > (1 << 20) - 4096) break;
 	  encodedBytes += itemBytes;
@@ -1293,7 +1294,114 @@
     return error;
   }
 
+  function deferAdmissionRetries(transfers) {
+    const pending = transfers.filter((transfer) => !transfer.uploadID && transfer.state === "retry-wait" && !transfer.cancelRequested);
+    if (!pending.length) return;
+    // Individual retry counters/deadlines remain durable, but the next page
+    // waits until the entire retry wave is queued. Timer registration follows
+    // all item timers, so one shared wake-up retains page-level batching.
+    uploadAdmissionRetryAt = Math.max(uploadAdmissionRetryAt, ...pending.map((transfer) => transfer.nextRetryAt || 0)) + 1;
+    window.clearTimeout(uploadAdmissionRetryTimer);
+    const wake = () => {
+      if (Date.now() < uploadAdmissionRetryAt) { uploadAdmissionRetryTimer = window.setTimeout(wake, uploadAdmissionRetryAt - Date.now()); return; }
+      uploadAdmissionRetryAt = 0; uploadAdmissionRetryTimer = 0; pumpTransfers();
+    };
+    uploadAdmissionRetryTimer = window.setTimeout(wake, Math.max(0, uploadAdmissionRetryAt - Date.now()));
+  }
+
   async function admitUploadBatch(transfers) {
+    // Historical envelopes retain their exact ordered membership. New pages
+    // bind each item to its own durable ID and may safely retry any subset.
+    if (transfers[0]?.admissionBatchKey && transfers[0]?.admissionProtocol !== "independent") return admitLegacyUploadBatch(transfers);
+    const owner = state.user?.userID;
+    const references = new Map(transfers.map((transfer) => [transfer, { id: transfer.id, generation: transfer.attemptGeneration || 0 }]));
+    const current = (transfer) => {
+      const reference = references.get(transfer);
+      return owner === state.user?.userID && !transfer.cleared && !transfer.suspendedByLogout
+        && reference.id === transfer.id && reference.generation === (transfer.attemptGeneration || 0)
+        && state.transferByID.get(reference.id) === transfer;
+    };
+    const controller = new AbortController(); uploadActionControllers.add(controller);
+    for (const transfer of transfers) {
+      transfer.cancelRequested = false;
+      transitionTransfer(transfer, "preparing");
+    }
+    scheduleTransferStructureRender();
+    try {
+      await Promise.all(transfers.map(waitForTransferIdentity));
+      if (owner !== state.user?.userID || controller.signal.aborted) return;
+      await Promise.all(transfers.filter(current).map(ensureTransferDirectories));
+      const intents = new Map();
+      for (const transfer of transfers.filter(current)) {
+        if (transfer.cancelRequested) continue;
+        transfer.admissionProtocol = "independent";
+        transfer.durableAdmissionRequired = true;
+        transfer.admissionIntent ||= uploadInitializationRequest(transfer, true);
+        if (transfer.admissionIntent.idempotencyKey !== transfer.id) throw uploadIdentityPersistenceError();
+        intents.set(transfer, { ...transfer.admissionIntent });
+        setPreparationState(transfer, "sessions");
+      }
+      if (!intents.size) return;
+      // Intent metadata and its item key must survive a process crash before
+      // the POST. Capability persistence may fail later: replay still finds
+      // the same server receipt, including already completed siblings.
+      if (!await persistTransferItems([...intents.keys()])) throw uploadIdentityPersistenceError();
+      const pending = [...intents.keys()].filter((transfer) => current(transfer) && !transfer.cancelRequested);
+      if (!pending.length || owner !== state.user?.userID || controller.signal.aborted) return;
+      const response = await api("/api/v1/uploads/batch/admit", {
+        method: "POST", signal: controller.signal,
+        body: { uploads: pending.map((transfer) => intents.get(transfer)) },
+      });
+      if (owner !== state.user?.userID || controller.signal.aborted) return;
+      const results = response && Array.isArray(response.uploads) ? response.uploads : [];
+      if (results.length !== pending.length || results.some((result, index) => result?.index !== index || result.id !== intents.get(pending[index]).idempotencyKey
+        || result.capability && result.capability.uploadID !== result.uploadID
+        || result.status && result.status.uploadID !== result.uploadID)) throw new TypeError("Upload admission returned misbound outcomes.");
+      const abandoned = [];
+      for (const [index, transfer] of pending.entries()) {
+        const result = results[index];
+        if (!current(transfer) || transfer.cancelRequested || transfer.state === "cancelled") {
+          if (result.capability?.uploadID) abandoned.push(result.capability.uploadID);
+          continue;
+        }
+        if (result.outcome === "completed" && result.status?.state === "completed") {
+          transfer.uploadID = result.uploadID; transfer.durableAdmissionRequired = false;
+          completeTransferLocally(transfer);
+          continue;
+        }
+        if (["expired", "aborted"].includes(result.outcome)) {
+          const error = uploadBatchItemError(result.outcome);
+          failUploadPreparation(transfer, error);
+          continue;
+        }
+        if (result.errorKind || !["accepted", "already_accepted"].includes(result.outcome) || !result.uploadID || !result.capability && !result.status?.dataComplete) {
+          const error = result.errorKind ? uploadLifecycleError(result) : uploadBatchItemError("internal");
+          failUploadPreparation(transfer, error);
+          continue;
+        }
+        transfer.uploadID = result.uploadID; transfer.durableAdmissionRequired = false;
+        transfer.batchID = result.capability?.batchID || "";
+        transfer.batchIndex = result.capability?.batchIndex || 0; transfer.batchCount = result.capability?.batchCount || 0;
+        transfer.pendingCapability = result.capability || null;
+        transfer.pendingAdmissionStatus = result.status || null;
+        restoreTransferProgress(transfer, result.status?.dataComplete ? transferFileSize(transfer) : result.status?.confirmedOffset || 0);
+        transitionTransfer(transfer, "queued");
+      }
+      deferAdmissionRetries(pending.filter(current));
+      if (abandoned.length && owner === state.user?.userID && !controller.signal.aborted) {
+        await api("/api/v1/uploads/batch", { method: "DELETE", signal: controller.signal,
+          headers: { "Idempotency-Key": idempotencyKey() }, body: { uploadIDs: abandoned } }).catch(() => {});
+      }
+      if (owner === state.user?.userID) await persistTransferItems(pending.filter(current));
+    } catch (error) {
+      if (owner !== state.user?.userID || error.name === "AbortError") return;
+      const failure = error instanceof APIError && [404, 405].includes(error.status) ? uploadBatchItemError("unavailable") : error;
+      for (const transfer of transfers.filter(current)) if (!transfer.uploadID) failUploadPreparation(transfer, failure);
+      deferAdmissionRetries(transfers.filter(current));
+    } finally { uploadActionControllers.delete(controller); }
+  }
+
+  async function admitLegacyUploadBatch(transfers) {
     const owner = state.user?.userID;
     const references = new Map(transfers.map((transfer) => [transfer, { id: transfer.id, generation: transfer.attemptGeneration || 0 }]));
     const current = (transfer) => {
@@ -1373,6 +1481,7 @@
       }
       // A cancelled/replaced attempt may have been admitted before its reply
       // arrived. Dispose only those old sessions under the original owner.
+      deferAdmissionRetries(pending.filter(current));
       if (abandoned.length && owner === state.user?.userID && !controller.signal.aborted) {
         await api("/api/v1/uploads/batch", { method: "DELETE", signal: controller.signal,
           headers: { "Idempotency-Key": `${batchKey}-stale-cancel` }, body: { uploadIDs: abandoned } }).catch(() => {});
@@ -1381,6 +1490,7 @@
     } catch (error) {
       if (owner !== state.user?.userID || error.name === "AbortError") return;
       for (const transfer of transfers.filter(current)) failUploadPreparation(transfer, error);
+      deferAdmissionRetries(transfers.filter(current));
     } finally {
       uploadActionControllers.delete(controller);
     }
@@ -1489,10 +1599,11 @@
     scheduleTransferStructureRender();
     try {
       let capability = transfer.pendingCapability || null;
-      transfer.pendingCapability = null;
+      const admissionStatus = transfer.pendingAdmissionStatus || null;
+      transfer.pendingCapability = null; transfer.pendingAdmissionStatus = null;
       const mediaType = transferMediaType(transfer);
       const size = transferFileSize(transfer);
-      if (!capability) {
+      if (!capability && !admissionStatus?.dataComplete) {
 		if (transfer.uploadID) {
           setPreparationState(transfer, "recovery");
           const item = await uploadLifecycle(transfer, true);
@@ -1627,6 +1738,8 @@
     uploadLifecycleRetryTimer = 0;
     uploadLifecycleRetryAt = 0;
     for (const controller of uploadActionControllers) controller.abort();
+    window.clearTimeout(uploadAdmissionRetryTimer);
+    uploadAdmissionRetryTimer = 0; uploadAdmissionRetryAt = 0;
     state.uploadAdmissionGeneration = (state.uploadAdmissionGeneration || 0) + 1;
     state.uploadBatchActive = false;
     state.uploadCompletionGeneration = (state.uploadCompletionGeneration || 0) + 1;
@@ -2095,6 +2208,7 @@
     transfer.uploadID = "";
     transfer.batchID = ""; transfer.batchIndex = 0; transfer.batchCount = 0;
     transfer.admissionBatchKey = ""; transfer.admissionBatchIndex = 0; transfer.admissionBatchCount = 0;
+    transfer.admissionProtocol = "independent"; transfer.admissionIntent = null; transfer.pendingAdmissionStatus = null;
     transfer.completionBatchKey = ""; transfer.completionBatchIndex = -1;
     transfer.completionProtocol = ""; transfer.pendingAction = "";
     transfer.awaitingCompletion = false; transfer.pendingCapability = null;
@@ -2144,6 +2258,18 @@
     if (owner === state.user?.userID) { rebuildTransferProjection(); renderTransfers(); }
   }
 
+  function freshAdmissionRequiredForRetry(transfer) {
+    return transfer.admissionProtocol === "independent" && !transfer.uploadID && transfer.admissionIntent
+      && ["conflict", "precondition_failed"].includes(transfer.errorCode);
+  }
+
+  function beginTransferRetry(transfer) {
+    const restart = transfer.state === "cancelled" || ["expired", "aborted"].includes(transfer.errorCode) || freshAdmissionRequiredForRetry(transfer);
+    beginTransferAttempt(transfer, true);
+    if (restart) restartExpiredTransfer(transfer);
+    return restart;
+  }
+
   function retryTransferGroup(group) {
     if (group.cleared || group.transferIDs.some((id) => state.transferByID.get(id)?.clearing)) return;
     group.cancelled = false;
@@ -2162,11 +2288,7 @@
 		queueTransferPersistence(transfer);
 		continue;
 	  }
-      const restart = transfer.state === "cancelled" || ["expired", "aborted"].includes(transfer.errorCode);
-      beginTransferAttempt(transfer, true);
-      if (restart) {
-        restartExpiredTransfer(transfer);
-      }
+      beginTransferRetry(transfer);
       transfer.cancelRequested = false;
       transfer.state = transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued";
       transfer.error = "";
@@ -2215,11 +2337,7 @@
 	  flushUploadCompletions();
 	  return;
 	}
-    const restart = transfer.state === "cancelled" || ["expired", "aborted"].includes(transfer.errorCode);
-    beginTransferAttempt(transfer, true);
-    if (restart) {
-      restartExpiredTransfer(transfer);
-    }
+    beginTransferRetry(transfer);
     transfer.cancelRequested = false;
     transfer.state = transfer.fixture ? "uploading" : transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued";
     transfer.error = "";
@@ -2253,11 +2371,7 @@
 		transitionTransfer(transfer, "uploading");
 		continue;
 	  }
-      const restart = ["expired", "aborted"].includes(transfer.errorCode);
-      beginTransferAttempt(transfer, true);
-      if (restart) {
-        restartExpiredTransfer(transfer);
-      }
+      beginTransferRetry(transfer);
       transfer.retryCount = 0;
       transfer.nextRetryAt = 0;
       transfer.cancelRequested = false;
@@ -2290,8 +2404,7 @@
       const file = supplied.get(transfer.relativePath) || supplied.get(transfer.name);
       if (!file || file.size !== transferFileSize(transfer) || (transfer.lastModified && file.lastModified !== transfer.lastModified)) continue;
       transfer.file = file;
-      beginTransferAttempt(transfer, true);
-      resetUploadPlanForReconnectedSource(transfer);
+      if (!beginTransferRetry(transfer)) resetUploadPlanForReconnectedSource(transfer);
       transitionTransfer(transfer, transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued");
       connected += 1;
     }
@@ -2313,8 +2426,7 @@
         const file = await handle.getFile();
         if (file.size !== transferFileSize(transfer) || (transfer.lastModified && file.lastModified !== transfer.lastModified)) continue;
         transfer.file = file;
-        beginTransferAttempt(transfer, true);
-        resetUploadPlanForReconnectedSource(transfer);
+        if (!beginTransferRetry(transfer)) resetUploadPlanForReconnectedSource(transfer);
         transitionTransfer(transfer, transfer.planPhase && transfer.planPhase !== "done" ? "preparing" : "queued");
         connected += 1;
       } catch {

@@ -29,7 +29,7 @@ func TestE2ELatestUploadProgressExcludesFailedHistory(t *testing.T) {
 	failCompletion.Store(true)
 	harness := newPortableHarnessWithControlPlaneWrapper(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/api/v1/uploads/batch" && r.Method == http.MethodPost && blockAdmission.Load() {
+			if r.URL.Path == "/api/v1/uploads/batch/admit" && r.Method == http.MethodPost && blockAdmission.Load() {
 				select {
 				case <-admissionGate:
 				case <-r.Context().Done():
@@ -186,7 +186,7 @@ func testLostCompletionReplayOrder(t *testing.T, omitOrdinal bool) {
 		_ = chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector('#transfer-list').textContent`, &rows))
 		t.Fatalf("ordered completion replay failed: %v; rows=%s", err, rows)
 	}
-	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch"); got != 1 {
+	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/admit"); got != 1 {
 		t.Fatalf("completion replay allocated new sessions: %d admissions", got)
 	}
 	client.assertNoExternalRequests(t, harness)

@@ -35,7 +35,7 @@ func TestE2EUploadAdmissionIgnoresReplyForReplacedAttempt(t *testing.T) {
 	var capabilities [][]domain.UploadCapability
 	h := newPortableHarnessWithControlPlaneWrapper(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost || r.URL.Path != "/api/v1/uploads/batch" {
+			if r.Method != http.MethodPost || (r.URL.Path != "/api/v1/uploads/batch" && r.URL.Path != "/api/v1/uploads/batch/admit") {
 				next.ServeHTTP(w, r)
 				return
 			}

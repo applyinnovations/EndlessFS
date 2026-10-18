@@ -20,14 +20,16 @@ func telemetryMiddleware(next http.Handler, mux *http.ServeMux) http.Handler {
 		ctx, activity := telemetry.Start(ctx, telemetry.HTTP, telemetry.Application)
 		_, pattern := mux.Handler(r)
 		activity.Route(pattern)
-		recorder := &statusRecorder{ResponseWriter: w}
+		ctx = withResponseObservation(ctx)
+		recorder := newStatusRecorder(w, ctx)
 		completed := false
 		defer func() {
 			if !completed {
 				activity.EndResult(telemetry.Panicked)
 			}
 		}()
-		next.ServeHTTP(recorder, r.WithContext(ctx))
+		next.ServeHTTP(recorder.writer(), r.WithContext(ctx))
+		recorder.finishResponse()
 		result := telemetry.Success
 		switch {
 		case recorder.status == http.StatusUnauthorized || recorder.status == http.StatusForbidden:

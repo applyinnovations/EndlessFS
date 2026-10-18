@@ -727,15 +727,18 @@ func (api *identityAPI) uploadActions(w http.ResponseWriter, r *http.Request) {
 			items[index].RequestID = requestID(r)
 		}
 	}
-	writeUploadLifecyclePage(w, r, items)
+	writeUploadActionPage(w, r, items)
 }
 
 // Recovery pages are deliberately smaller than atomic bulk publication. Bound
 // encoded capabilities and paths as well as item count before writing headers.
 func writeUploadLifecyclePage(w http.ResponseWriter, r *http.Request, items any) {
 	w.Header().Set("Cache-Control", "no-store")
-	body, err := json.Marshal(map[string]any{"uploads": items})
-	if err != nil || len(body) > 1<<20 {
+	body, overflow, err := encodeUploadRecoveryPage(items)
+	if err == nil && overflow {
+		body, err = encodeCompactUploadRecoveryPage(items, requestID(r))
+	}
+	if err != nil || len(body) > maxControlBodyBytes {
 		writeProblem(w, r, domain.NewError(domain.ErrorUnavailable, "upload recovery response exceeds its safe bound"))
 		return
 	}

@@ -194,4 +194,8 @@ func TestUploadBatchLargeMetadataAdmission(t *testing.T) {
 	if _, err := reader.Files().CreateUploadBatch(ctx, fixture.scope, requests); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("changed intent under the same keys = %v", err)
 	}
+	// Restore the admitted input after the negative probe; reuse this exact
+	// already-verified fixture for canonical multi-pack checkpoint portability.
+	requests[0].Size--
+	reviewLargeMetadataCheckpointRawCopy(t, fixture, requests, capabilities)
 }

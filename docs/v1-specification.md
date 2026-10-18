@@ -617,7 +617,7 @@ base64url(
 
 To mutate schema-009-or-later same-domain authority, the portable engine MUST read the canonical consistency-domain head together with its request-local backend-native version, validate logical preconditions against the authenticated head and referenced immutable pages or page pack, prepare changed immutable metadata, and conditionally publish the next head against that native version. It then discards the native version. The committed delta or compacted outcome binds the complete normalized intent fingerprint and result. A retry reads canonical authority and returns that result; it never assumes native identifiers survive.
 
-Schema 011 MAY encode the pages required by one bounded domain snapshot in one deterministic content-addressed pack. A pack MUST be no larger than 4 MiB compressed or 32 MiB after bounded expansion; MUST bind the domain ID, domain kind, pack ID, sorted page digests, and canonical page bodies; and MUST authenticate every page exactly as the unpacked representation does. The pack ID MUST bind the complete mutation identity before any page is written, so two mutations sharing an early page cannot alias divergent later pages. Missing, oversized, non-canonical, corrupt, misbound, or digest-inconsistent packs fail closed. Domains that do not fit the pack envelope retain immutable copy-on-write pages. Encoding choice never changes the one-head-CAS visibility, replay, fencing, checkpoint, or raw-copy contract.
+Schema 011 MAY encode the reachable staged pages required by a domain snapshot in one or more deterministically identified immutable packs. Each pack MUST be no larger than 4 MiB compressed or 32 MiB after bounded expansion; MUST bind the domain ID, domain kind, pack ID, sorted page digests, and canonical page bodies; and MUST authenticate every page exactly as the unpacked representation does. The pack ID MUST bind the complete mutation identity before any page is written, so two mutations sharing an early page cannot alias divergent later pages. Missing, oversized, non-canonical, corrupt, misbound, or digest-inconsistent packs fail closed. Writers may structurally share prior packed or unpacked immutable subtrees; readers retain both representations. Encoding choice never changes the one-head-CAS visibility, replay, fencing, checkpoint, or raw-copy contract.
 
 The domain revision and captured native head condition fence an ordinary schema-009-or-later writer. A visible same-domain commit increments the contiguous portable domain revision and uses the current request-local native condition on the same head object. Mutation, transition preparation/finalization, or freeze changes that head before a paused writer can publish, so the paused writer's conditional commit fails. Historical portable operation fences remain decode-only migration input and do not justify a runtime lease or admission object around an ordinary mutation.
 
@@ -787,8 +787,8 @@ rewrite only changed leaf/ancestor paths and structurally share unchanged
 subtrees. Independent immutable page writes use a bounded concurrency of 32;
 only the later head CAS publishes them.
 
-A schema-011 packed head names one immutable pack containing the authenticated
-page records needed by that bounded snapshot. One request-local decode cache
+A schema-011 packed head names immutable roots whose authenticated page records
+may span multiple bounded packs. One request-local decode cache
 serves every lookup in the operation. Concurrent requests within one engine
 MAY share an in-flight authenticated immutable pack read bound to the complete
 physical key, domain identity, domain kind and pack identity; they MUST NOT
@@ -818,8 +818,9 @@ cold replica MAY cause fresh provider reads and MUST NOT change canonical bytes,
 commit/replay behavior or correctness. Pack expansion
 and verification MUST have cancellable process-wide admission so a request
 burst cannot multiply the expanded-pack working set without bound. Cancellation
-of one caller MUST NOT cancel an independent caller's successful read. A bounded materialized mutation writes
-one successor pack and one conditional head; it MUST NOT retain one provider
+of one caller MUST NOT cancel an independent caller's successful read. A materialized mutation writes
+one successor pack when its staged closure fits, otherwise multiple bounded
+packs before the same single conditional head; it MUST NOT retain one provider
 object or one outcome row per selected logical item. Uniform batch results are
 reconstructed from the fingerprint-bound compact transaction descriptor.
 
@@ -1488,6 +1489,24 @@ Requirements:
   reinterpret corruption, a physical identity collision or a provider failure
   as permission to bypass validation. Materialized authoritative roots preserve
   opaque prepared-child descriptors and the same single head commit point.
+- Multi-pack closure construction MUST validate every collected staged page
+  against its original digest and every incoming staged descriptor, including
+  repeated references, before assigning successor identities. It MUST own
+  mutable page data and preserve opaque values and authenticated prior refs.
+  Final identities bind the complete immutable source/mutation/preparation
+  input, ordered roots and reachable original pages, an explicit layout-policy
+  version and each group's stable original range. Every byte-affecting policy
+  change requires a distinct layout identity. Map order, cache residency,
+  provider presence, scheduling and cancellation MUST NOT choose final bytes.
+  Only actual typed capacity failures may deterministically refine groups;
+  no monotonic compressed-size assumption or validation bypass is permitted.
+  All final groups MUST fit and validate before any pack in that new layout is
+  PUT, and existing create-only/exact-byte collision checks remain mandatory.
+  Original-ID opaque prepared dependencies may already have been flushed;
+  failure may leave them unreachable but MUST NOT publish partial authority.
+  Cancellation is checked after encoding and before each publication. This
+  changes layout policy within existing pack-v1/page representations, not the
+  schema epoch, reader contract, canonical key grammar or sole head-CAS visibility.
 - The size response carries an encrypted, owner-bound, expiring token that pins
   both the derived projection and its exact immutable namespace root. The exact
   phase fails with a conflict if the namespace changed, causing a safe replan;
@@ -1749,6 +1768,27 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 | POST | `/api/v1/trash/empty` | Confirmed empty-trash operation. |
 
 The browser sends virtual paths only. Any JSON field resembling a provider key, bucket, owner prefix, or arbitrary capability URL is rejected.
+
+Independent admission, lifecycle, and action replies retain every ordered item
+correlation within the 1 MiB response bound. Ordinary replies retain their full
+representation. When repeated display details exceed that bound, an item with
+`detailsOmitted: true` may omit its status path and an action's entry detail;
+operational status fields, outcomes, and complete usable capabilities remain.
+Clients already know their requested destinations and can fetch entry details
+separately when needed. Capabilities MUST NOT be truncated or modified to fit.
+If complete capabilities exceed the page bound, successful siblings retain
+theirs. Deferred admission items retain their accepted outcome and upload ID
+with `capacityDeferred: true` and `nextAction: "resume"`; clients persist that
+attempt and resume it rather than repeating admission. Deferred lifecycle items
+use `nextAction: "smaller_page"`; clients halve only the unresolved cohort,
+without spending a transient-failure retry. A capability that cannot fit even
+alone in an actual lifecycle/resume reply produces `detailsUnavailable: true`, `errorKind: "unavailable"`,
+`retryable: false`, and `nextAction: "attention"`, retaining its upload ID and
+request correlation so the existing attempt can be inspected or cancelled.
+No deferred or terminal representation changes authoritative expiry, receipt,
+publication, or file-byte semantics.
+An independently rejected unknown action uses the bounded action marker
+`invalid`; its index and upload ID retain request correlation.
 
 The browser uses the maximum 1,000-entry page for virtualized live, Trash, and
 public-share browsing. A terminal operation or batch result is authoritative and
@@ -2978,8 +3018,8 @@ An implementation agent should keep this checklist current and attach test names
   blob, verify provider-attested metadata, and publish the reference only
   through the owner namespace-head commit; historical staging is decode-only
   migration compatibility.
-- [x] Schema-011 upload batches publish up to 10,000 owner-scoped intents in one
-  bounded pack while independent provider sessions use 100-worker concurrency;
+- [x] Schema-011 upload batches publish up to 10,000 owner-scoped intents through
+  bounded immutable packs and one owner head CAS, while independent provider sessions use 100-worker concurrency;
   completion/cancellation restart at authenticated 1,000-item boundaries and
   the shared provider contract proves replay and failed-batch residue denial.
 - [x] Two-to-eight-replica deterministic crash schedules cover head reads,

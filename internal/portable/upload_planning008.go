@@ -1,6 +1,7 @@
 package portable
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sort"
@@ -101,6 +102,10 @@ func (s *FileStore) updateUploadPlanningProjection008(ctx context.Context, view 
 			}
 			var oldEntry, newEntry storageformat.NamespaceEntry
 			hasOld, hasNew := oldFound && oldValue.Key == name, newFound && newValue.Key == name
+			// Capture before either iterator advances its value. Identical
+			// immutable bytes and version require one full semantic decode;
+			// both traversals and all page/descriptor checks remain intact.
+			sameEncodedEntry := hasOld && hasNew && oldValue.LogicalVersion == newValue.LogicalVersion && bytes.Equal(oldValue.Value, newValue.Value)
 			if hasOld {
 				oldEntry, err = decodeNamespaceEntry(oldValue.Value)
 				if err != nil || oldEntry.Entry.Name != name {
@@ -112,7 +117,11 @@ func (s *FileStore) updateUploadPlanningProjection008(ctx context.Context, view 
 				}
 			}
 			if hasNew {
-				newEntry, err = decodeNamespaceEntry(newValue.Value)
+				if sameEncodedEntry {
+					newEntry = oldEntry
+				} else {
+					newEntry, err = decodeNamespaceEntry(newValue.Value)
+				}
 				if err != nil || newEntry.Entry.Name != name {
 					return domain.NewError(domain.ErrorInvalid, "invalid current upload planning namespace entry")
 				}

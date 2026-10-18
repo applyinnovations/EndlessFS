@@ -324,9 +324,9 @@
               inherit version;
               src = goSource;
               subPackages = [ "cmd/endlessfs" ];
-              vendorHash = "sha256-EpjQXk31oxpLeUtjcXowDwkrG7ElWRNd7akS4NxbAw8=";
-              # Keep the fixed-output dependency closure address stable when the
-              # source revision changes without changing go.mod/go.sum.
+              vendorHash = "sha256-rbtt30G5YMAV0PfLcOayu5hZfzPVjs4J3Bj/wKJkZH4=";
+              # Keep the fixed-output name stable while the actual imported
+              # dependency closure, including test packages, remains unchanged.
               overrideModAttrs = _final: _previous: {
                 name = "endlessfs-go-modules";
               };

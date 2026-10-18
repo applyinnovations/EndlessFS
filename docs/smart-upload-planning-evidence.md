@@ -80,14 +80,23 @@ schema-011 ratchets on the deterministic packed store:
 |---|---:|---:|---:|---:|---:|---|---:|
 | Cold index, 256 files | 5 | $0.0000112 | 117.387 ms | 356.387 ms | 881.387 ms | GET, PUT | 0 |
 | Incremental index, one added file | 7 | $0.0000120 | 161.692 ms | 486.692 ms | 1.202 s | GET, PUT | 0 |
-| Warm size plan, 10,000 items | 4 | $0.0000016 | 89.387 ms | 261.387 ms | 641.387 ms | GET | 0 |
-| Warm exact plan, 10,000 items | 3 | $0.0000012 | 67.380 ms | 196.380 ms | 481.380 ms | GET | 0 |
+| Warm size plan, 1,024 items | 4 | $0.0000016 | 89.387 ms | 261.387 ms | 641.387 ms | GET | 0 |
+| Warm exact plan, 1,024 items | 3 | $0.0000012 | 67.380 ms | 196.380 ms | 481.380 ms | GET | 0 |
 
-The tests compare one-item and 10,000-item warm calls and require the same provider
-request count. CPU work still scales with the submitted items, but provider
+The original test seeds 256 files and compares one-item and 1,024-item warm
+calls. These historical schema-011 rows do not establish 10,000-file coverage.
+The corrective `TestUploadPlanningProviderBudgetTenThousandExistingAndPlanningItems`
+separately seeds 10,000 files and compares one with 10,000 size and fingerprint
+queries. Its cold build uses five state requests. With the bounded immutable
+wire cache primed, economics epoch 020 measures two warm size requests and one
+warm fingerprint request, with zero file-provider requests. These modeled
+operations do not measure codec CPU, deployed latency, concurrent-owner capacity,
+or a successful transfer; whole-journey evidence is recorded in
+[upload-recovery-corrective-acceptance.md](./upload-recovery-corrective-acceptance.md).
+CPU work still scales with the submitted items, but provider
 round trips, modeled request price, and aggregate request latency do not. The
-append-only schema-011 GCS fixture ratchets the exact current totals and fails on
-drift; the earlier `005-smart-upload-planning` fixture remains immutable
+append-only GCS ratchet checks the selected current totals and fails on drift;
+the schema-011 and earlier `005-smart-upload-planning` fixtures remain immutable
 historical evidence. Logical reuse composes with the already-ratcheted
 same-owner batch-copy path, which has zero file-provider requests.
 

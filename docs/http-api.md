@@ -49,8 +49,13 @@ in [upload-worker-pool-upstream-evidence.md](./upload-worker-pool-upstream-evide
 | `GET` | `/api/v1/files` | `path`, `limit`, opaque `cursor`, `sort=name|modified|size|kind`, `order=asc|desc` |
 | `GET` | `/api/v1/files/stat` | `path` |
 | `POST` | `/api/v1/directories` | `path`, optional `conflict`, `expectedVersion` |
+| `POST` | `/api/v1/directories/prepare` | 1–100 virtual `paths`; independently correlated existing/created/error outcomes, including parent preparation. |
 | `POST` | `/api/v1/uploads` | `path` or directory `path` plus `name`, `size`, `mediaType`, `resumable`, optional conflict/version |
 | `POST` | `/api/v1/uploads/batch` | `uploads` with 1–10,000 upload initialization objects; each may carry a stable `idempotencyKey` for item-level replay independent of the batch request key. Capabilities carry safe `batchID`, `batchIndex`, and `batchCount` recovery bindings. |
+| `POST` | `/api/v1/uploads/batch/admit` | 1–100 independent upload intents with durable per-item keys; ordered accepted/already-accepted/completed/error outcomes. |
+| `POST` | `/api/v1/uploads/batch/status` | 1–100 `uploadIDs`; independent safe status outcomes without capabilities. |
+| `POST` | `/api/v1/uploads/batch/resume` | 1–100 `uploadIDs`; independent complete capabilities and status, preserving authoritative expiry. |
+| `POST` | `/api/v1/uploads/batch/actions` | 1–100 independently bound completion/cancellation `items`; partial success and exact replay preserve published versions. |
 | `POST` | `/api/v1/uploads/batch/complete` | `uploads` with 1–10,000 ordered `uploadID`/provider-attested `crc32c` items; one idempotency key binds the complete atomic publication. |
 | `DELETE` | `/api/v1/uploads/batch` | `uploadIDs` with 1–10,000 ordered IDs and optional `batchID`. The batch ID is accepted only for the complete admitted batch and enables one compact cancellation bitmap; partial/legacy selections remain individually bound. |
 | `POST` | `/api/v1/uploads/plan/sizes` | `items` with 1–10,000 client transfer `id`, virtual destination `path`, and local `size`; returns per-item target metadata, `fingerprintRequired`, and an opaque exact-phase token. |
@@ -88,13 +93,24 @@ idempotency, atomic publication, and conflict rules remain unchanged. Detailed
 request economics and browser recovery evidence are in
 [smart-upload-planning-evidence.md](./smart-upload-planning-evidence.md).
 
-The browser persists upload plan decisions, batch membership, stable item and
-transaction idempotency keys, progress, and terminal state in IndexedDB. A
-refresh or connection loss resumes the same batch rather than allocating new
-provider sessions. Admission, completion, and whole-batch cancellation each
-use one browser control-plane request and bounded server-side provider
-concurrency; object bytes continue to flow only between the browser and the
+The browser persists upload plan decisions, stable item/transaction keys,
+progress, and terminal state in IndexedDB. Fresh uploads use independent
+admission and action pages of at most 100 items; historical atomic cohorts
+retain their original bindings. Refresh and reconnect recover the existing
+attempts through bounded status/resume pages. Directory preparation is batched
+with independent outcomes. Object bytes flow between the browser and the
 direct provider capability.
+
+Replies retain ordered item correlations within 1 MiB. Exceptional
+`detailsOmitted: true` replies omit status paths and action entry details.
+Complete capabilities are preserved for siblings that fit; other accepted
+admissions retain their upload IDs with `capacityDeferred: true` and
+`nextAction: "resume"`. Resume deferrals use `nextAction: "smaller_page"`;
+halve only unresolved cohorts without charging transfer retries. An actual
+resume capability that cannot fit alone returns `detailsUnavailable: true`,
+`errorKind: "unavailable"`, `retryable: false`, and `nextAction: "attention"`.
+Retain its upload ID for status/cancellation. Never truncate capabilities or
+repeat admission merely because an acknowledgement needs subdivision.
 
 `GET /api/v1/files` returns `{ "current": Entry, "entries": [Entry...], "nextCursor": "..." }`. `current` is the directory represented by `path`; its `size`, `fileCount`, and every child row come from the same immutable manifest snapshot. Every subsequent page selected by `nextCursor` repeats that exact `current` entry even if the live directory changes between requests.
 

@@ -17,6 +17,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/httpapi"
 	"github.com/applyinnovations/endlessfs/internal/identity"
+	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
@@ -41,6 +42,10 @@ type smartRecoveryHarness struct {
 }
 
 func newSmartRecoveryHarness(t *testing.T, controlWrap, dataWrap func(http.Handler) http.Handler) *smartRecoveryHarness {
+	return newSmartRecoveryHarnessWithFileBackend(t, controlWrap, dataWrap, nil)
+}
+
+func newSmartRecoveryHarnessWithFileBackend(t *testing.T, controlWrap, dataWrap func(http.Handler) http.Handler, decorate func(objectstore.Backend) objectstore.Backend) *smartRecoveryHarness {
 	t.Helper()
 	controlListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -71,7 +76,11 @@ func newSmartRecoveryHarness(t *testing.T, controlWrap, dataWrap func(http.Handl
 		t.Fatal(err)
 	}
 	stateBackend := budgettest.Wrap(providerbudget.RoleState, h.stateBase, h.stateLedger)
-	fileBackend := budgettest.Wrap(providerbudget.RoleFile, h.fileBase, h.fileLedger)
+	var files objectstore.Backend = h.fileBase
+	if decorate != nil {
+		files = decorate(files)
+	}
+	fileBackend := budgettest.Wrap(providerbudget.RoleFile, files, h.fileLedger)
 	var handlers [2]http.Handler
 	for index := range handlers {
 		engine, err := portable.Open(context.Background(), portable.Options{

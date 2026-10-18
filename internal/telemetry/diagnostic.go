@@ -3,6 +3,8 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"net"
+	"os"
 	"regexp"
 )
 
@@ -17,6 +19,8 @@ const (
 	TargetLookup
 	SnapshotCheck
 	NamespacePublish
+	ResponseWrite
+	MetadataAdmission
 )
 
 type Reason uint8
@@ -31,10 +35,12 @@ const (
 	ProviderFailure
 	ContextCanceled
 	InternalFailure
+	ContextDeadline
+	TransportFailure
 )
 
-var stageNames = [...]string{"unknown", "request_validation", "namespace_read", "projection_build", "projection_publish", "target_lookup", "snapshot_check", "namespace_publish"}
-var reasonNames = [...]string{"unknown", "validation", "corrupt_metadata", "pack_capacity", "pack_collision", "snapshot_stale", "provider_failure", "canceled", "internal"}
+var stageNames = [...]string{"unknown", "request_validation", "namespace_read", "projection_build", "projection_publish", "target_lookup", "snapshot_check", "namespace_publish", "response_write", "metadata_admission"}
+var reasonNames = [...]string{"unknown", "validation", "corrupt_metadata", "pack_capacity", "pack_collision", "snapshot_stale", "provider_failure", "canceled", "internal", "deadline", "transport_failure"}
 
 type diagnosticError struct {
 	cause  error
@@ -87,7 +93,7 @@ func (activity *Activity) diagnosis(err error, problem bool) {
 	}
 	activity.diagnosticMu.Lock()
 	defer activity.diagnosticMu.Unlock()
-	if activity.problemRecorded && !problem {
+	if activity.transportFailed || activity.problemRecorded && !problem {
 		return
 	}
 	activity.stage, activity.reason = stage, reason
@@ -102,4 +108,39 @@ func (activity *Activity) diagnosis(err error, problem bool) {
 func RecordProblem(ctx context.Context, err error) {
 	activity, _ := ctx.Value(httpActivityKey{}).(*Activity)
 	activity.diagnosis(err, true)
+}
+
+// RecordResponseWrite observes an error surfaced by a response write or the
+// control request boundary's explicit buffered-body flush.
+// It preserves intended HTTP status while classifying transport completion. No
+// raw error is retained, and a later public problem cannot mask a failed write.
+// Later net/http terminal chunks/trailers and client receipt remain outside
+// this boundary.
+func RecordResponseWrite(ctx context.Context, err error) Result {
+	if err == nil {
+		return Success
+	}
+	result, reason := Unavailable, TransportFailure
+	var timeout net.Error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
+		result, reason = Timeout, ContextDeadline
+	case errors.Is(err, context.Canceled):
+		result, reason = Canceled, ContextCanceled
+	case errors.As(err, &timeout) && timeout.Timeout():
+		result, reason = Timeout, ContextDeadline
+	}
+	if ctx != nil {
+		activity, _ := ctx.Value(httpActivityKey{}).(*Activity)
+		if activity != nil {
+			activity.diagnosticMu.Lock()
+			if !activity.transportFailed {
+				activity.stage, activity.reason = ResponseWrite, reason
+				activity.problemRecorded, activity.problemResult = true, result
+				activity.transportFailed = true
+			}
+			activity.diagnosticMu.Unlock()
+		}
+	}
+	return result
 }

@@ -89,7 +89,7 @@
     const owner = state.user?.userID;
     const signal = transfer.controller?.signal;
     return new Promise((resolve, reject) => {
-      const job = { transfer, uploadID, generation, owner, resume, signal, resolve, reject, settled: false, page: null };
+      const job = { transfer, uploadID, generation, owner, resume, signal, resolve, reject, settled: false, page: null, capacityLimit: uploadLifecyclePageSize };
       job.finish = (error, item) => {
         if (job.settled) return;
         job.settled = true;
@@ -108,7 +108,10 @@
   }
   async function flushUploadLifecycle() {
     if (uploadLifecycleActive) return;
-    uploadLifecycleQueue = uploadLifecycleQueue.filter((job) => !job.settled);
+    uploadLifecycleQueue = uploadLifecycleQueue.filter((job) => {
+      if (!job.settled && (job.transfer.cleared || job.owner !== state.user?.userID || job.uploadID !== job.transfer.uploadID || job.generation !== (job.transfer.attemptGeneration || 0))) job.abort();
+      return !job.settled;
+    });
     if (!uploadLifecycleQueue.length) return;
     if (Date.now() < uploadLifecycleRetryAt) {
       if (!uploadLifecycleRetryTimer) uploadLifecycleRetryTimer = window.setTimeout(() => { uploadLifecycleRetryTimer = 0; flushUploadLifecycle(); }, uploadLifecycleRetryAt - Date.now());
@@ -116,7 +119,8 @@
     }
     uploadLifecycleActive = true;
     const resume = uploadLifecycleQueue[0].resume;
-    const jobs = uploadLifecycleQueue.filter((job) => job.resume === resume).slice(0, uploadLifecyclePageSize);
+    const capacityLimit = uploadLifecycleQueue[0].capacityLimit;
+    const jobs = uploadLifecycleQueue.filter((job) => job.resume === resume && job.capacityLimit === capacityLimit).slice(0, capacityLimit);
     const selected = new Set(jobs);
     uploadLifecycleQueue = uploadLifecycleQueue.filter((job) => !selected.has(job));
     const page = { jobs, controller: new AbortController() };
@@ -130,7 +134,19 @@
         if (job.settled) continue;
         if (job.transfer.cleared || job.owner !== state.user?.userID || job.uploadID !== job.transfer.uploadID || job.generation !== (job.transfer.attemptGeneration || 0)) { job.abort(); continue; }
         const item = response.uploads[index];
-        if (item?.index !== index || item.uploadID !== job.uploadID) { job.finish(new TypeError("Upload recovery returned a misbound item.")); continue; }
+        if (item?.index !== index || item.uploadID !== job.uploadID || item.status && item.status.uploadID !== job.uploadID || item.capability && item.capability.uploadID !== job.uploadID) { job.finish(new TypeError("Upload recovery returned a misbound item.")); continue; }
+        if (item.capacityDeferred) {
+          if (jobs.length < 2 || item.nextAction !== "smaller_page" || item.errorKind || item.capability || !item.status || item.status.uploadID !== job.uploadID) {
+            job.finish(new TypeError("Upload recovery returned an invalid capacity deferral.")); continue;
+          }
+          // This is response partitioning, not a failed transfer attempt.
+          // Keep the exact durable upload and promise while halving its next
+          // cohort; even a page containing only deferrals terminates at one.
+          job.capacityLimit = Math.max(1, Math.floor(jobs.length / 2));
+          job.page = null;
+          uploadLifecycleQueue.push(job);
+          continue;
+        }
         job.finish(null, item);
       }
     } catch (error) {
@@ -147,6 +163,7 @@
     const status = ({ invalid: 400, unauthenticated: 401, unauthorized: 403, not_found: 404, conflict: 409, precondition_failed: 412, rate_limited: 429, unavailable: 503 })[item.errorKind] || 500;
     const error = new APIError(new Response(null, { status }), { title: "Upload recovery needs attention", code: item.errorKind, requestID: item.requestID });
     error.batchErrorKind = item.errorKind || "internal";
+    if (typeof item.retryable === "boolean") error.batchRetryable = item.retryable;
     return error;
   }
 
@@ -576,6 +593,14 @@
     // Terminal failures require an explicit retry or clear action, including
     // failed finalization with an available source or a retained checksum.
     if (["complete", "cancelled", "failed"].includes(transfer.state)) return;
+	// A permission-granted stored handle has satisfied the old source request.
+	// Clear that obsolete code before the first smart-planning response; keep
+	// useful bounded history and leave unrelated failures for their own checks.
+	if (transfer.file instanceof File && transfer.errorCode === "source_required") {
+	  preserveTransferError(transfer);
+	  transfer.error = "";
+	  transfer.errorCode = "";
+	}
 	if (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c) {
 	  transfer.state = "uploading";
 	  transfer.completionReadyAt = uploadMeasurementNow();
@@ -1504,7 +1529,7 @@
       for (const [index, transfer] of pending.entries()) {
         const result = results[index];
         if (!current(transfer) || transfer.cancelRequested || transfer.state === "cancelled") {
-          if (result.capability?.uploadID) abandoned.push(result.capability.uploadID);
+          if (["accepted", "already_accepted"].includes(result.outcome) && result.uploadID) abandoned.push(result.uploadID);
           continue;
         }
         if (result.outcome === "completed" && result.status?.state === "completed") {
@@ -1517,7 +1542,14 @@
           failUploadPreparation(transfer, error);
           continue;
         }
-        if (result.errorKind || !["accepted", "already_accepted"].includes(result.outcome) || !result.uploadID || !result.capability && !result.status?.dataComplete) {
+        const accepted = ["accepted", "already_accepted"].includes(result.outcome) && result.uploadID;
+        const capacityDeferred = result.capacityDeferred === true && result.nextAction === "resume" && !result.capability && result.status;
+        if (accepted && (capacityDeferred || result.detailsUnavailable === true)) {
+          // Admission already succeeded. Persist its identity even if its
+          // opaque capability needs a smaller resume response or attention.
+          transfer.uploadID = result.uploadID; transfer.durableAdmissionRequired = false;
+        }
+        if (result.errorKind || !accepted || !result.capability && !result.status?.dataComplete && !capacityDeferred) {
           const error = result.errorKind ? uploadLifecycleError(result) : uploadBatchItemError("internal");
           failUploadPreparation(transfer, error);
           continue;
@@ -1664,6 +1696,7 @@
   }
 
   function transferFailureIsRetryable(error) {
+    if (error?.batchRetryable === false) return false;
     if (!navigator.onLine) return true;
     if (error instanceof APIError) return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
     if (error && ["rate_limited", "unavailable", "internal"].includes(error.batchErrorKind)) return true;

@@ -66,6 +66,7 @@ const (
 	WireDownloadData
 	WireUnknown
 	DirectoryPreparation
+	MetadataPackAdmission
 	operationCount
 )
 
@@ -141,6 +142,7 @@ var operationNames = [...]string{
 	"provider.http.download.data",
 	"provider.http.unknown",
 	"directory.prepare",
+	"metadata.pack.admission",
 }
 var roleNames = [...]string{
 	"application",
@@ -309,6 +311,7 @@ type Activity struct {
 	stage           Stage
 	reason          Reason
 	problemRecorded bool
+	transportFailed bool
 	problemResult   Result
 }
 type contextKey struct{}

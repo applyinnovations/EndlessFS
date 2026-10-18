@@ -1,5 +1,10 @@
 # Upload recovery corrective acceptance
 
+The fixed current release blockers, pass/fail conditions and bounded next
+validation proposal are in [the release checklist](upload-recovery-release-checklist.md).
+This document preserves chronological evidence; earlier passes do not qualify
+the current follow-through tree or override its failed concurrent acceptance.
+
 Candidate base: deployed production source
 `12908dd820ec0afa404b1ed2c87d2e4886902aee` (PR 61).
 This is a fresh checkout and engineering session on `xlabs`, branch
@@ -817,3 +822,359 @@ distributions remain unqualified. A fresh independent verification engine is
 opened only after the foreground snapshot; its constructor can perform normal
 startup conditional writes. Its work is excluded from foreground counters.
 The Go soft target, observed cgroup high-water and hard limit remain distinct.
+
+## Whole-lifecycle followthrough
+
+The preserved baseline is commit
+`6db3cd38d1e8932970fefc7d1b6bfd154028abe9`, tree
+`718a07ebdb06c7586c132ac185cf2c2225a48352`. Its actual required CI
+[`endlessfs-ci-g4m5v`](https://tekton.xlab.now/#/namespaces/tekton-buildkit/pipelineruns/endlessfs-ci-g4m5v)
+passed in 3,283 seconds under the unchanged 3,600-second deadline. Repository
+coverage was 87.268%, every sensitive group met 95%, and migration coverage was
+98.181%. The 19 printed coverage results are one repository aggregate plus 18
+overlapping groups. They do not constitute 19 independent upload-acceptance
+proofs. In particular, theme, preview, migration and local GCS protocol coverage
+do not establish concurrent-owner capacity or live-provider throughput.
+
+The exact-baseline isolated single-engine probe also passed with the actual
+50-second control write deadline, one CPU, 2 GiB hard memory, no application
+swap and the 450 MiB Go soft target. It transferred the remaining 2,638 bodies
+once, preserved all 7,966 completed files and verified 10,604 entries. Foreground
+recovery took 622.316 seconds; observed pre-oracle kernel peak was 816,037,888
+bytes. The maximum size handler was 35.362482 seconds. This is distinct from
+the earlier predecessor result above and remains single-process evidence.
+
+### Bounded acknowledgements after durable work
+
+Regression-first actual-router tests found another correctness gap independent
+of the deadline: successful admission or publication could precede a response
+503 caused solely by repeated valid path details expanding beyond 1 MiB.
+
+| Synthetic real-router workload | Before | Corrected result |
+| --- | --- | --- |
+| 24 files with valid 4,096-byte paths; 96 transferred bytes; 1,835-byte completion request | First completion and replay both 503 after all files were already published | Correlated 200 acknowledgements, 7,947 bytes first and 8,139 bytes reordered replay; identical published versions |
+| One valid completion plus one unknown action; 1,048,575-byte request | Invalid action text expands the reply and hides the published sibling behind 503 | 200 partial result; valid four-byte file published once; unknown action independently rejected with bounded `invalid` action marker |
+| 48 files with valid 4,096-byte paths; 202,286-byte admission request | Admission commits before 503; compact-ID status and resume also return 503 | Every admission/status/resume outcome remains representable and usable; 48 actual files complete once, 192 payload bytes |
+
+Ordinary admission, lifecycle and supported-action JSON remains byte-identical. Exceptional
+`detailsOmitted` replies omit display paths and action entry details, retaining
+correlation, outcomes and operational status. Capabilities are never truncated.
+If complete capabilities do not fit together, successful siblings retain
+theirs. An accepted admission retains its exact upload ID and directs actual
+resume, whose capability can differ from the initial one. Resume deferrals keep
+the existing promise and halve only unresolved cohorts. Only an actual resume
+capability that cannot fit even alone requires terminal attention. Singleton
+sizing normalizes index zero and considers both ordinary and compact forms;
+short paths can make the ordinary representation smaller.
+
+Real-browser smart uploads prove eight actual four-byte files complete after
+one admission, zero transient retries and no repeated body. The 600,000-byte
+opaque capability fixture recovers pages of 7, 3, 3, 1, 1, 1, 1. A near-limit
+fixture contains three all-deferral pages and recovers cohorts
+8, 4, 4, 2, 2, 2, 2, 1, 1, 1, 1. A truly unrepresentable resume retains its
+admitted ID, requires attention without retries or file bytes, and clear-failed
+cancels that exact attempt. Maximum 100-item escaped correlations preserve an
+independent missing item and completed sibling alongside usable/deferred ones.
+
+The encoder validates every ordinary item even after detecting overflow, so
+compaction cannot hide a later malformed path. It retains a bounded serialized
+page plus one transient full-item encoding, rather than all oversized capability
+encodings or another aggregate page. This is not a literal 1 MiB Go heap bound.
+Boundary tests cover nil/empty/ordinary byte equality, exact 1 MiB, one-byte
+overflow, escaped fields, short paths, index renumbering and actual
+admission-to-resume representation changes.
+
+Independent browser binding tests also exposed missing nested upload-ID checks.
+Untouched baseline controls consumed a misbound completed status, and a misbound
+capability sent one byte and completed the wrong nested identity. The correction
+checks outer, status and capability IDs before any progress or data. Both
+negative cases now stop with zero bytes/completions and cancel the original ID;
+matching controls still complete. Existing cancellation and 2,638-item bounded
+classification tests remain unchanged and passing.
+
+### Transport and decode-admission observation
+
+Response write errors now retain only closed stage/reason/result codes. A real
+HTTP/1 regression demonstrated that an expired socket deadline can still allow
+a small JSON Write to return its full length with no error: Go buffers the
+body until after middleware returns. One shared final control-response flush
+now runs before request logging and HTTP activity completion, so buffered-body
+timeout becomes `response_write/deadline/timeout` instead of success. Intended
+HTTP status and payload remain unchanged. Tests cover success, canceled and
+failed writes, short writes, wrapped writers, unsupported flush, HEAD,
+explicit lengths, 204/304, empty responses, trailers, panic and hijack.
+
+This changes valid small-response HTTP/1 framing: a measured 12-byte JSON reply
+with identical fixed headers grew from 657 to 675 wire bytes, an 18-byte header
+and chunk-framing overhead. Explicit Content-Length is preserved; implicit
+HEAD Content-Length can be absent. Later terminal chunks/trailers and actual
+client receipt remain outside this observation promise. No listener, timeout,
+provider or data-plane behavior changes.
+
+`metadata.pack.admission` now measures waiting for the existing single decoder
+slot separately from `metadata.pack.decode`. Cancellation and deadlines before
+acquisition have safe distinct diagnoses. The slot count and integrity checks
+are unchanged. Privacy/cardinality tests include errors whose Error method
+panics, 100 distinct private-error/request-reference values, all 256 enum inputs,
+real response problems, trace allowlists and metric-label denial. Request IDs
+remain correlated log/per-item fields, never metric labels.
+
+The selected deployed preview configuration uses a 45-second preview operation
+limit and therefore the existing 50-second control deadline. Preview-disabled
+configuration selects 30 seconds. The preserved 35.362482-second observation
+exceeds that default; it is not evidence of a deployed 50-second expiry or a
+permanent recovery failure. Real socket tests configure 30 seconds and inject
+an already-expired write deadline without sleeping, demonstrating that the
+handler context remains live and the buffered response fails at flush. This
+does not qualify the full planning workload at 30 seconds or explain the
+historical 400. Production configuration and all timeout limits remain unchanged.
+
+### Separately capped replicas and concurrent owners: failed qualification
+
+An independently source-bound research driver ran the exact preserved `6db`
+application in two physical processes, one engine per process. Each retained
+one CPU, 2 GiB hard memory, no application swap, the 450 MiB Go soft target,
+unset GOMAXPROCS and the actual 50-second control write deadline. Shared state
+and native file-session providers, two real passkey browser profiles and the
+driver ran outside the application cgroups. Both owners deliberately used the
+same paths and local item IDs with owner-salted four-byte bodies. The shared
+file-provider contract and 10/7/3-per-owner smoke passed, including cross-process
+completion replay and owner denial.
+
+The full workload used 10,604 files per owner, 7,966 already complete and 2,638
+remaining. Both real reload/logout/login restorations completed, both selected
+all source files, and their initial smart-size handlers genuinely overlapped on
+one physical replica. Both processes subsequently served both owners with
+handler overlap. The manifest binds 617 baseline files; production source
+remained byte-identical and only explicit research tests/adapters differed.
+
+The full run **failed the unchanged 12-minute recovery deadline**, ending after
+941.92 seconds including setup. Its last retained browser observation showed
+2,000 new completions per owner, Preparing 94%, and pending work without current
+displayed errors. Final authority, exact-once, completed-version, transport and
+controlled-replay oracles were not reached: the failure path exited before
+those final counters were saved. They must not be inferred from the partial
+ledger observations or the successful smoke.
+
+Observed kernel peaks were 884,649,984 and 938,803,200 bytes, with no OOM/max
+events. A retained approximately 712-second foreground cgroup bracket used
+449.379/450.474 CPU seconds and recorded throttling; this does not attribute CPU
+to GC, decoding, publication or provider waits. The provider recorded 19,880
+calls, 548,923,891 request-wire bytes and 6,083,472,680 response-wire bytes,
+including research framing but excluding HTTP/TCP headers. No work/memory
+safety guard fired. The last retained
+size-handler maxima were 34.544105/36.184200 seconds; admission maxima were
+21.875699/22.227929 seconds. Completed handlers at least 50 seconds were zero
+at that snapshot. Size handlers exceeded 30 seconds on both replicas, with
+exact counts unavailable from the original aggregate metric. These observations
+do not establish actual terminal response-delivery counts.
+
+All owned containers, browser groups and runtime tokens were cleaned up. The
+failed source, binary, safe snapshots and hash allowlist remain preserved. This
+result blocks comprehensive concurrent-owner qualification. It requires measured
+attribution and a successful corrected full run under the same limits; a passing
+component gate or healthy deployment cannot replace it.
+
+### Incremental projection decoding: selected narrow improvement
+
+Incremental planning traversed both the prior and current namespace and fully
+decoded both entries even when their immutable bytes and logical versions were
+identical. It now performs one full semantic decode for that identical pair.
+Both iterators, all page/pack/descriptor validation and changed-entry decoding
+remain. Identical malformed entries still fail before staging projection pages;
+the optimization never treats byte equality as semantic validation.
+
+A separately frozen comparison used 7,966 genuinely completed four-byte files
+across 43 existing nested directories, followed by six 100-file rounds of actual
+admission, data, completion and incremental planning. Each application run had
+one CPU, 2 GiB hard memory, no application swap and the 450 MiB Go soft target.
+The external state provider was outside that cap. The candidate used a reviewed
+Go launcher in place of the baseline's task-local Python launcher; source,
+application arguments, provider protocol and workload were bound independently.
+This is a direct-engine comparison, without browser or HTTP-deadline coverage.
+
+| Observed measure | Prior decoding | One decode for identical entries |
+| --- | ---: | ---: |
+| Six incremental-size calls | 3.910577 s | 2.836232 s |
+| Allocation in those calls | 1,866,749,400 B | 1,401,698,504 B |
+| Complete foreground | 33.801031 s | 32.838586 s |
+| Complete foreground allocation | 16,451,581,224 B | 15,911,721,992 B |
+| Whole-run kernel peak | 703,660,032 B | 706,732,032 B |
+
+Every one of the 32 phase provider vectors and the whole vector matched exactly:
+2,576 requests, 170,135,839 read bytes and 47,420,952 request-write bytes. Both
+runs verified all 8,566 final files, stored checksums and the 7,966 prior versions;
+600 new four-byte bodies were transferred once. Old-implementation oracles also
+match projection entries, roots and compressed wire for append, prepend, middle,
+remove and nested rename. Corrupt equal entries, invalid current entries and
+different versions retain denial behavior. Unsafe skip-all-decode controls fail.
+
+The measured incremental latency reduction is 27.47%; whole foreground improves
+2.85% in this pair. Heap and kernel observations are mixed. This is neither a
+peak-memory improvement nor an explanation or fix for the 35-second planning
+tail or failed concurrent-owner recovery. Those require separate qualification.
+
+## Bounded closure repacking candidate
+
+The unchanged current two-owner run also failed its 12-minute recovery wait.
+The earlier exact-baseline profile and source identify repeated encoding of a
+growing pack prefix as a supported corrective target; no current profile or
+October 17 root cause is inferred. The replacement owns and authenticates the
+reachable original staged closure, assigns deterministic stable-range IDs,
+rewrites postorder, and encodes whole groups. Only typed actual capacity failures
+split a group. Every final group validates and fits before any new-layout PUT;
+original opaque dependencies and the original head CAS/freeze remain intact.
+The former incremental-prefix packer is removed. No universal logarithmic
+encoding-work bound is claimed for adversarial compressed-size behavior.
+
+An old-helper regression normalized same-length corrupt cached bytes into a
+new digest and published one pack. It fails before the replacement and passes
+after original-digest validation. Runtime-entry tests cover both actual pack
+bounds, memoized descriptor forgeries, ownership, deterministic complete-input
+identity, prior references, cancellation, lost later PUTs and exact-byte
+collision denial. The focused normal preservation suite passes in 26.465 seconds
+and 32 metadata-integrity/publication race tests pass in 571.447 seconds.
+
+One sequential matched comparison uses identical 641-file research sources
+except `domain_repack.go`, the same five numeric-only instrumentation sites,
+pinned Go, 1 CPU, 2 GiB hard memory, zero swap, Go 450 MiB soft target and unset
+GOMAXPROCS. It measures real cold/fresh-replica-warm planning over 2,048 deep-path
+metadata files and an actual eight-by-600,000-byte materialized metadata commit
+with an opaque prepared child. These are metadata fixtures without retained
+upload history or transferred file bytes. Independent strict readers verify all
+logical entries, receipts, expiry, opaque references and replay.
+
+| Measured phase | Control wall | Candidate wall | Control allocation | Candidate allocation | Control sampled heap peak | Candidate sampled heap peak |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Cold planning | 5.746013 s | 3.859268 s | 4,716,939,312 B | 3,714,094,424 B | 349,351,904 B | 421,469,024 B |
+| Fresh-replica warm | 2.423190 s | 2.414723 s | 2,421,021,576 B | 2,418,926,344 B | 221,511,296 B | 244,914,624 B |
+| Materialized commit | 0.403778 s | 0.310447 s | 371,688,480 B | 289,983,688 B | 93,867,496 B | 168,331,368 B |
+
+All provider vectors reconcile: 17 requests (10 GET, seven PUT), one failed cold
+GET, unchanged modeled 39,000,000 picoUSD; request bodies increase 116 bytes and
+response bodies 220 bytes. Modeled serial/critical percentiles increase three
+microseconds. Object/pack counts remain unchanged, with no newly unreachable
+packs or file-provider work. Encoding calls fall 64 to 12, gzip input
+863,553,747 to 260,053,138 bytes, and measured GC cycles 99 to 58. Whole-process
+kernel peak increases 488,366,080 to 496,549,888 bytes, including seeding and
+independent oracles; no memory-limit or OOM event occurs. Higher sampled heap
+is a real tradeoff. The materialized oracle, excluded from operation timing,
+increases 1.199 to 1.315 seconds. This pair proves neither byte neutrality nor
+physical concurrent-recovery readiness. Its complete validated comparison
+SHA-256 is `d1affe3528be039e063e82caf404fa7eb02413e414c703242e4ec7af53f1cfe9`.
+
+A separate 14-worker deterministic cross-build export/import matrix passes
+both winner orders for the same logical intent, actual stale native CAS denial,
+lost pack/head response recovery, opposite-implementation restart and strict
+reader, freeze, exact zero-PUT replay and changed-intent denial. Its safe summary
+SHA-256 is `2f84b3eb553a00fe95bb2f91eb3dbd417a877db077919af8f5a00a55dfc36499`.
+It does not substitute for two physical processes sharing a provider.
+
+The existing 4,001-intent large-admission test now also proves a real canonical
+checkpoint/raw copy with three reachable authority packs, complete inventory,
+shifted native versions, all terminal records/logical versions and the retained
+receipt. An ordinary warm-cache read survives deletion of a non-root pack, but
+both checkpoint verifiers deny it; the engine must perform the failed provider
+GET. Exact wire restoration permits verification/reopen and replay. The initial
+normal/race tests pass in 69.070 / 1,051.327 seconds under the unchanged 30-minute
+race bound. A reviewed refinement removes only the duplicate standalone restored
+verification: the closed-gate `OpenWrites` path must read the restored child
+successfully before any gate PUT, then open at epoch + 1. All other copy,
+missing-pack, record/version, receipt and replay assertions remain. This refined
+normal test passes in 56.052 seconds; the final exact-tree gates remain pending.
+Fixture terminalization deliberately uses materialized legacy cancellation,
+not the compact batch overlay. The latter's raw-initializing-record interaction
+with checkpoint capability draining is a separate unqualified concern.
+
+The fixed R1–R8 checklist remains authoritative. Selection and delivery require
+the remaining proof, unchanged real-byte journeys and physical R3, then all
+exact-tree gates. Healthy replicas and these component results do not establish
+successful customer uploads.
+
+The closure product snapshot subsequently passes all 14 affected real-browser
+scenarios in 38.421 seconds, including the 8 MiB-confirmed-prefix recovery that
+sends only 17 remaining bytes. The standard 10,604-file journey passes in
+357.810 seconds including fixture setup; foreground recovery is 236.609 seconds.
+All 2,638 remaining four-byte files transfer exactly once and no completed file
+is readmitted or retransferred. Progress remains 75–100% with intermediate
+advancement and at most 71 rendered rows. Projection-state call counts remain
+8 / 7 / 5 / 2 / 2, without file-provider work. Actual whole-journey HTTP remains
+150 control + 2,638 PATCH + 2,638 OPTIONS = 5,426 requests.
+
+Foreground work is 4,410 state, 5,276 file-control and 2,638 data calls; state
+writes are 343,455,346 bytes and reads 2,606,915,920 bytes. Restore/auth adds
+51 state calls, 61,203 written and 320,134 read bytes, including three expected
+not-found reads. Whole-journey totals are 12,375 provider calls, 343,516,549 state
+bytes written, 2,607,236,054 state bytes read and 10,552 transferred file bytes.
+The full role/kind/subsystem/model vectors and unchanged regression ceilings are
+retained in evidence SHA-256
+`d247ccd9617eb4ed55bf686490f03742594712f4f2be491699d8e78378899635`.
+This is a new snapshot acceptance result, not a matched timing comparison or
+the independent physical two-replica R3 result; final-tree R8 remains pending.
+
+The subsequent physical closure run fails the unchanged recovery deadline:
+943.41 seconds including setup/cleanup, with owner A incomplete. Final authority,
+all-blob/version and owner-isolation oracles are unreached. Observed provider
+totals are 24,720 calls, 676,662,325 request bytes and 7,447,617,716 response bytes,
+without a guard stop. Kernel peaks are 978,059,264 / 833,200,128 bytes; no OOM is
+recorded and automatic owned-container cleanup completes. Exact partial item
+counts were not captured and cannot be inferred from provider totals. The
+uninstrumented harness disabled application logging and fetched route summaries
+only after success, so retained logs do not establish the current CPU bottleneck
+or final request-duration distribution. This failure blocks selection and all
+final gates/push. It is bound to input manifest
+`86dd6074fc93221107d84b4b0d9b7102659aa865e9fa03f2815938462e6dfdc0`,
+binary `49a01194eeff1a002db72cd63b83e1919e8c7473995454d430866a5bc0d669c0`
+and failed log SHA-256
+`59fdd589c851e2fd1482eac22b8e49048957ba59f7b9f3c8c6cab813aea30232`.
+
+## Reviewed diagnostic selection and release continuation
+
+The later sealed diagnostic report is bound by SHA-256
+`0318db73b7a4b39a560774a4bd58fab1e25497bbb0604a9265f43ee302ead3f2`.
+A real short negative control first verifies bounded failure capture and safe
+HTTP request/trace correlation. One sequential matched pair then compares
+identical sources except the old versus closure repacker. The control fails
+at the unchanged 720-second foreground deadline with 2,200 / 2,400 completion
+responses. The closure candidate passes in 440.264 foreground seconds, with
+all 5,276 new four-byte transfers exactly once, zero old-file retransfer, all
+21,208 final namespace/blob bindings and 15,932 prior portable entry versions
+verified, plus strict owner denial and lost-success replay.
+
+The candidate records 277 foreground control requests, two directory batches
+and zero scalar stats; the independent provider cut is 25,406 calls,
+705,714,931 request-body and 7,386,110,692 response-body bytes. The fixed ceilings
+remain 282 / 27,852 / 805,306,368 / 12,188,647,424. Post-foreground oracles,
+OPTIONS and HTTP headers are excluded from those provider counters. Kernel
+application peaks are 769,982,464 / 815,423,488 bytes, without OOM. Parsed CPU
+profiles show remaining pack validation on eligible cache misses/provider GETs
+dominates; they do not establish the proportions of identity churn, first
+replica access and eviction. No speculative cache change is selected.
+
+The earlier unprofiled closure failure remains an unexplained discrepancy;
+one instrumented success does not prove repeatability or identify the October
+17 root cause. The latest user instruction lifts the diagnostic-only stop and
+authorizes selecting closure repacking, final fixed R1–R8 qualification,
+commit/push to draft PR 62 and actual CI verification. Release R3 disables all
+CPU/trace/allocation profiling while retaining bounded failure diagnostics,
+the original 12-minute foreground wait, routing, provider budgets and resource
+limits. The complete final-tree results are recorded against the immutable
+commit/tree in PR 62 and the task-local delivery manifest. This source record
+states the frozen acceptance contract; it does not predeclare a passing gate.
+No merge, deployment or customer retry is authorized.
+
+Independent source review also identified a missing combination of two covered
+behaviors: a late admission reply after cancellation/retry and omitted oversized
+capabilities. The new actual-router browser regression holds an unchanged
+successful three-item response containing two real capacity deferrals and one
+usable capability. It proves every local attempt identity is replaced before
+release. Restoring the old capability-only cleanup makes it fail in 0.775
+seconds because an original outer upload ID remains active. Cleanup by the
+retained outer ID passes in 0.772 seconds: all three originals are aborted,
+old-attempt data requests are zero and the three replacements each transfer
+four bytes exactly once. The independent engine verifies terminal states,
+namespace, signed downloads and persisted ledger. Before/after log hashes are
+`aca622067262b841e950039b06a5eecd6b2bbe7ce755a6b2a7989acb00e6e275`
+and `2900f2e7a47aa8dd461b317e8a85ed6b4fae727413b2fa3ff3f1083724aaa4fc`.
+This test is included in the final frozen focused browser and complete coverage
+selections; no customer source or queue is used.

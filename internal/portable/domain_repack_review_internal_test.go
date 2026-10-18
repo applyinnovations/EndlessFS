@@ -262,9 +262,14 @@ func TestBoundedDomainRepackReviewDeniesInvalidCanceledAndUnreadablePages(t *tes
 			case "canceled-page", "canceled-root":
 				cancel()
 			case "oversized-page":
+				page.Entries = append([]storageformat.DomainEntry(nil), page.Entries...)
 				page.Entries[0].Value = bytes.Repeat([]byte("x"), storageformat.MaxCanonicalBytes)
+				source.pages[selected.root.Digest] = page
+				source.pendingPack[selected.root.Digest] = page
 			case "invalid-page":
 				page.SchemaVersion = 0
+				source.pages[selected.root.Digest] = page
+				source.pendingPack[selected.root.Digest] = page
 			case "missing-staged-root":
 				delete(source.pendingPack, selected.root.Digest)
 				delete(source.pages, selected.root.Digest)
@@ -281,12 +286,7 @@ func TestBoundedDomainRepackReviewDeniesInvalidCanceledAndUnreadablePages(t *tes
 				roots[0].PackID = storageformat.Digest([]byte("prior-durable-pack"))
 				roots = append(roots, storageformat.DomainTreeRoot{})
 			}
-			var actual []storageformat.DomainTreeRoot
-			if mode == "canceled-page" || mode == "oversized-page" || mode == "invalid-page" {
-				_, err = (&boundedDomainPacker{source: source, binding: "synthetic-root-set"}).write(ctx, page)
-			} else {
-				actual, err = repackStagedRoots(ctx, source, roots)
-			}
+			actual, err := repackStagedRoots(ctx, source, roots)
 			if mode == "prior-and-empty-roots" {
 				if err != nil || len(actual) != 2 || actual[0] != roots[0] || actual[1] != roots[1] {
 					t.Fatalf("unchanged durable/empty descriptors were rewritten: actual=%+v err=%v", actual, err)

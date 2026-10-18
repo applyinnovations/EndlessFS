@@ -432,6 +432,7 @@ func TestE2ESmartRecoveryProductionCardinalityWarmTransfersOnlyRemainingFiles(t 
 	if err := waitFor(client.ctx, `document.querySelector('#transfer-check-label').textContent==='Preparing 75%' && !document.querySelector('#transfer-list').textContent.includes('historical-reference')`, 5*time.Second); err != nil {
 		t.Fatalf("reconnect reset completed share or retained irrelevant attempt error: %v %s", err, smartRecoveryDiagnostic(client))
 	}
+	assertSmartRecoveryReconnectedErrors(t, client, total, completed)
 	unblock()
 	// This is a bounded completion deadline for a real provider/state fixture,
 	// not a product latency ceiling. Coverage instrumentation repeats all
@@ -1204,6 +1205,33 @@ func assertSmartRecoveryLedger(t *testing.T, client *testBrowser, total, complet
 	script := fmt.Sprintf(`(async()=>{for(let attempt=0;attempt<500;attempt++){const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('endlessfs-transfer-ledger-v1');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});const tx=db.transaction('items','readonly');const items=await new Promise((resolve,reject)=>{const r=tx.objectStore('items').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});db.close();if(items.length===%d&&items.filter(x=>x.state==='complete').length===%d)return true;await new Promise(resolve=>setTimeout(resolve,10));}return false})()`, total, complete)
 	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(script, &valid, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || !valid {
 		t.Fatalf("durable ledger total=%d complete=%d: valid=%t err=%v", total, complete, valid, err)
+	}
+}
+
+// Check before releasing the first real size request. Final completion alone
+// would hide obsolete reconnect errors that persisted through preparation. The
+// planner intentionally uses the message field for current informational text;
+// a nonempty-field count is not an error-category oracle.
+func assertSmartRecoveryReconnectedErrors(t *testing.T, client *testBrowser, total, completed int) {
+	t.Helper()
+	var proof struct {
+		Valid             bool `json:"valid"`
+		Items             int  `json:"items"`
+		Complete          int  `json:"complete"`
+		SourceRequired    int  `json:"sourceRequired"`
+		ObsoleteReconnect int  `json:"obsoleteReconnect"`
+		UnboundedHistory  int  `json:"unboundedHistory"`
+	}
+	script := fmt.Sprintf(`(async()=>{let proof;for(let attempt=0;attempt<500;attempt++){
+		const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('endlessfs-transfer-ledger-v1');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+		const tx=db.transaction('items','readonly');
+		const items=await new Promise((resolve,reject)=>{const r=tx.objectStore('items').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});db.close();
+		proof={items:items.length,complete:items.filter(x=>x.state==='complete').length,sourceRequired:items.filter(x=>x.errorCode==='source_required').length,obsoleteReconnect:items.filter(x=>x.error==='Reconnect the source to continue.').length,unboundedHistory:items.filter(x=>(x.errorHistory||[]).length>3||(x.errorHistory||[]).some(h=>String(h.message||'').length>240||String(h.code||'').length>80)).length};
+		proof.valid=proof.items===%d&&proof.complete===%d&&proof.sourceRequired===0&&proof.obsoleteReconnect===0&&proof.unboundedHistory===0;
+		if(proof.valid)return proof;
+		await new Promise(resolve=>setTimeout(resolve,10));}return proof})()`, total, completed)
+	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(script, &proof, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || !proof.Valid {
+		t.Fatalf("reconnected items retained obsolete source errors or unbounded history: closed-counts=%+v err=%v", proof, err)
 	}
 }
 

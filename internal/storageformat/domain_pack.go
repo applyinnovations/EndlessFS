@@ -63,21 +63,55 @@ func EncodeDomainPagePack(pack DomainPagePack) ([]byte, error) {
 // ordering. Canonical wire comparison must not validate and allocate all
 // page encodings a second time.
 func encodeValidatedDomainPagePack(pack DomainPagePack) ([]byte, error) {
-	var expanded bytes.Buffer
-	encoder := json.NewEncoder(&expanded)
+	var output domainPagePackEncoderWriter
+	encoder := json.NewEncoder(&output)
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(pack); err != nil {
+		if output.err != nil {
+			return nil, output.err
+		}
 		return nil, domain.WrapError(domain.ErrorInvalid, "encode consistency-domain page pack", err)
 	}
-	canonical := bytes.TrimSuffix(expanded.Bytes(), []byte{'\n'})
+	if !output.written || output.compressed == nil {
+		return nil, domain.NewError(domain.ErrorInvalid, "incomplete consistency-domain page pack encoding")
+	}
+	return output.compressed, nil
+}
+
+// json.Encoder writes one complete value followed by a newline. Compress it
+// synchronously while Write owns the borrowed encoder buffer, avoiding a second
+// expanded-buffer copy. Retain only the independently owned compressed result;
+// the encoder may reuse its pooled buffer as soon as Write returns. Fail closed
+// if a future encoder stops supplying the complete value in one Write.
+type domainPagePackEncoderWriter struct {
+	compressed []byte
+	written    bool
+	err        error
+}
+
+func (output *domainPagePackEncoderWriter) Write(encoded []byte) (int, error) {
+	if output.err != nil {
+		return 0, output.err
+	}
+	fail := func(err error) (int, error) {
+		output.compressed = nil
+		output.err = err
+		return 0, err
+	}
+	if output.written || len(encoded) == 0 || encoded[len(encoded)-1] != '\n' {
+		return fail(domain.NewError(domain.ErrorInvalid, "invalid consistency-domain page pack encoder write"))
+	}
+	output.written = true
+	canonical := encoded[:len(encoded)-1]
 	if len(canonical) == 0 || len(canonical) > MaxExpandedDomainPagePackBytes {
-		return nil, domain.WrapError(domain.ErrorInvalid, "expanded consistency-domain page pack exceeds size limit", ErrDomainPagePackTooLarge)
+		return fail(domain.WrapError(domain.ErrorInvalid, "expanded consistency-domain page pack exceeds size limit", ErrDomainPagePackTooLarge))
 	}
 	compressed := encodeDeterministicGZIP(domainPagePackMagic, canonical)
 	if len(compressed) > MaxDomainPagePackBytes {
-		return nil, domain.WrapError(domain.ErrorInvalid, "consistency-domain page pack exceeds size limit", ErrDomainPagePackTooLarge)
+		return fail(domain.WrapError(domain.ErrorInvalid, "consistency-domain page pack exceeds size limit", ErrDomainPagePackTooLarge))
 	}
-	return compressed, nil
+	output.compressed = compressed
+	return len(encoded), nil
 }
 
 func DecodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID string, expectedKind ConsistencyDomainKind, expectedPackID string) (DomainPagePack, error) {
@@ -85,14 +119,25 @@ func DecodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID str
 }
 
 func decodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID string, expectedKind ConsistencyDomainKind, expectedPackID string, proof *DomainPagePackWireProof, ownedWire *[]byte) (outcome DomainPagePack, err error) {
+	_, admission := telemetry.Start(ctx, telemetry.MetadataPackAdmission, telemetry.State)
+	admissionFailure := func(cause error) error {
+		reason := telemetry.ContextCanceled
+		if errors.Is(cause, context.DeadlineExceeded) {
+			reason = telemetry.ContextDeadline
+		}
+		err := telemetry.Diagnostic(domain.WrapError(domain.ErrorUnavailable, "consistency-domain pack decode canceled", cause), telemetry.MetadataAdmission, reason)
+		admission.End(err)
+		return err
+	}
 	if err := ctx.Err(); err != nil {
-		return DomainPagePack{}, domain.WrapError(domain.ErrorUnavailable, "consistency-domain pack decode canceled", err)
+		return DomainPagePack{}, admissionFailure(err)
 	}
 	select {
 	case domainPagePackDecodeSlot <- struct{}{}:
 		defer func() { <-domainPagePackDecodeSlot }()
+		admission.End(nil)
 	case <-ctx.Done():
-		return DomainPagePack{}, domain.WrapError(domain.ErrorUnavailable, "consistency-domain pack decode canceled", ctx.Err())
+		return DomainPagePack{}, admissionFailure(ctx.Err())
 	}
 	_, activity := telemetry.Start(ctx, telemetry.MetadataPackDecode, telemetry.State)
 	defer telemetry.Finish(activity, &err)

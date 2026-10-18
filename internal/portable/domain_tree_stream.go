@@ -1,6 +1,7 @@
 package portable
 
 import (
+	"bytes"
 	"context"
 	"sort"
 
@@ -111,10 +112,11 @@ func (iterator *consistencyDomainTreeIterator) Next() (storageformat.DomainEntry
 // Its buffers are bounded by one leaf and domainPageMaximumItems descriptors
 // per active level; it never accumulates the complete result set.
 type consistencyDomainTreeBuilder struct {
-	ctx     context.Context
-	session *consistencyDomainTreeSession
-	leaf    []storageformat.DomainEntry
-	levels  [][]domainPageRef
+	ctx                context.Context
+	session            *consistencyDomainTreeSession
+	leaf               []storageformat.DomainEntry
+	leafCanonicalBytes int // exact size of the privately owned leaf
+	levels             [][]domainPageRef
 }
 
 func newConsistencyDomainTreeBuilder(ctx context.Context, session *consistencyDomainTreeSession) *consistencyDomainTreeBuilder {
@@ -122,21 +124,39 @@ func newConsistencyDomainTreeBuilder(ctx context.Context, session *consistencyDo
 }
 
 func (builder *consistencyDomainTreeBuilder) Add(entry storageformat.DomainEntry) error {
-	candidate := append(append([]storageformat.DomainEntry(nil), builder.leaf...), entry)
-	page := storageformat.DomainPage{SchemaVersion: 1, DomainID: builder.session.reference.ID, Kind: builder.session.reference.Kind, Level: 0, Entries: candidate}
-	if len(candidate) <= domainPageMaximumItems {
-		if _, err := storageformat.EncodeCanonical(page); err == nil {
-			builder.leaf = candidate
+	for {
+		if err := builder.ctx.Err(); err != nil {
+			return domain.WrapError(domain.ErrorUnavailable, "consistency-domain stream canceled", err)
+		}
+		if len(builder.leaf) == 0 {
+			page := storageformat.DomainPage{SchemaVersion: 1, DomainID: builder.session.reference.ID, Kind: builder.session.reference.Kind, Level: 0, Entries: []storageformat.DomainEntry{entry}}
+			body, err := storageformat.EncodeCanonical(page)
+			if err != nil {
+				return domain.NewError(domain.ErrorInvalid, "consistency-domain entry cannot fit in a canonical page")
+			}
+			entry.Value = bytes.Clone(entry.Value)
+			builder.leaf = append(builder.leaf, entry)
+			builder.leafCanonicalBytes = len(body)
 			return nil
 		}
+		// The closed canonical entries array grows by one comma and the
+		// member encoding. Earlier accepted values are owned, so their
+		// byte contribution cannot drift between admissions.
+		if len(builder.leaf) < domainPageMaximumItems {
+			member, err := storageformat.EncodeCanonical(entry)
+			if err == nil && len(member) <= storageformat.MaxCanonicalBytes-builder.leafCanonicalBytes-1 {
+				entry.Value = bytes.Clone(entry.Value)
+				builder.leaf = append(builder.leaf, entry)
+				builder.leafCanonicalBytes += 1 + len(member)
+				return nil
+			}
+		}
+		// Preserve the prior valid-prefix publication/error precedence. A
+		// following oversized entry is rejected only after this leaf flush.
+		if err := builder.flushLeaf(); err != nil {
+			return err
+		}
 	}
-	if len(builder.leaf) == 0 {
-		return domain.NewError(domain.ErrorInvalid, "consistency-domain entry cannot fit in a canonical page")
-	}
-	if err := builder.flushLeaf(); err != nil {
-		return err
-	}
-	return builder.Add(entry)
 }
 
 func (builder *consistencyDomainTreeBuilder) flushLeaf() error {
@@ -150,6 +170,7 @@ func (builder *consistencyDomainTreeBuilder) flushLeaf() error {
 	}
 	builder.session.forgetPage(reference.root.Digest)
 	builder.leaf = nil
+	builder.leafCanonicalBytes = 0
 	return builder.addReference(0, reference)
 }
 

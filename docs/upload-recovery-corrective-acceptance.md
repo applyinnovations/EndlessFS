@@ -712,3 +712,108 @@ historical or byte ceiling is increased. Diagnostic proof SHA-256:
 
 The additional128/256-MiB frontier JSON SHA-256 is
 `4a5730687dda2f0b23be99adbbef9c2b829f7e24a354f8bd8597b8ed0e4417de`.
+
+## Streaming tree preparation runtime continuation
+
+Required CI for `55e82f11e09e7d2aa79152693c20fa61fc9eaf9d` failed at
+01:14:14 UTC on October 18: the unchanged one-hour pipeline expired while browser
+coverage was still running. Its full Nix checks passed in 2,556 seconds,
+including the ordinary portable race suite in 1,574.342 seconds. Coverage was
+cancelled after 877 seconds; no assertion failure was reported before cancellation.
+That failed run is preserved and is not qualification. No unchanged retry,
+timeout increase, resource increase, scheduler change or test omission is used
+as a correction.
+
+The fixed H=7,966/R=300 foreground profile identifies another avoidable cost:
+the streaming tree builder copied and canonically encoded every growing leaf
+prefix for every admitted member. It accounted for 11.72% of sampled CPU and
+27.69% of sampled allocation bytes in the paired baseline. The selected change
+encodes the first member with the real page header, then accounts for each
+additional canonical member and one comma. The existing 256-item and exact
+canonical-byte limits, maximal leaf boundaries, final canonical validation,
+immutable writes, prepared pack identities, native conditions and publication
+CAS are unchanged. Accepted value bytes become privately owned, preventing a
+caller's reused buffer from invalidating the cached size. Cancellation is
+checked before sizing or copying. No new idle cache is introduced.
+
+| Fixed-engine observation | Prior builder | Linear builder |
+| --- | ---: | ---: |
+| Foreground wall time, microseconds |15,208,501|13,237,098|
+| Foreground allocated bytes |10,653,323,560|7,823,179,936|
+| Sampled peak Go heap bytes |915,947,792|872,014,456|
+| Sampled CPU seconds |16.55|14.11|
+| Provider operations |1,329|1,329|
+| Provider response bytes |99,804,462|99,804,462|
+| Provider request bytes including payload |16,663,615|16,663,615|
+
+The entire modeled provider vector and every phase vector match exactly,
+including cost, failed requests and modeled latency. Both runs transfer 300
+four-byte bodies, verify 8,266 authoritative files and sample independent bytes.
+The observed foreground time reduction is 12.96% and allocation reduction 26.57%.
+This one fixed-engine pair does not predict CI, browser or GCS time. Complete
+final-tree gates and required CI remain necessary after this change.
+
+An independent test retains the previous complete builder as an oracle and
+compares 28 packed/unpacked, item-bound, byte-bound and lost-response cases.
+Canonical pages, roots, packed provider wire, full provider events and modeled
+vectors match. The matrix includes escaping, non-ASCII, nil/empty values,
+base64 padding, exact canonical limits and one-byte overflow, oversized input,
+malformed ordering, failed prefix flush and immutable retry. Ownership and
+cancelled-admission tests fail against the old source and pass after the fix.
+The quantitative cases are selected by the public provider-budget gate.
+
+Cold complete-tree construction with 64/128/256/1,024 one-KiB values measured
+0.69/1.35/2.65/8.21 MB allocated, compared with the former
+3.89/14.53/55.44/211.41 MB. Race measurements were
+1.35/2.73/5.29/24.74 MB compared with 13.02/46.26/171.96/684.25 MB.
+A separate linear allocation guard includes final canonical validation and
+provider writes, with 12 KiB per item ordinarily, 28 KiB under race instrumentation
+and 64 KiB fixed work. Five repeats of both builds pass. Existing grouping,
+codec, provider and coverage ratchets are unchanged. The more complex private
+parsed-snapshot idea remains unintegrated research because it adds persistent
+memory and another ownership/budget contract; these results do not claim that
+the remaining decode cost is optimal.
+
+### Deployed resource and response-deadline reconciliation
+
+Read-only selected configuration confirms two deployed replicas, each with
+1 CPU and 2 GiB hard memory, and `GOMEMLIMIT=450MiB`. Selected secret-key presence
+checks confirm these resource values are not overridden; no secret value is
+emitted. The 128 MiB wire-body cache budget per engine is 28.44% of the Go soft
+target and 6.25% of the hard memory limit. Cache bounds do not bound request
+scratch, pinned evicted entries, construction memory or total RSS.
+
+The earlier 450 MiB stress failure combined two engines, two caches and a state
+provider retaining all metadata bodies in one Go process. A source-pinned
+isolated probe of `55e82f11e09e7d2aa79152693c20fa61fc9eaf9d` instead places
+one physical engine inside a 1 CPU/2 GiB/no-swap cgroup with the 450 MiB Go target;
+the synthetic state provider and Chromium run outside it. The test driver and
+tiny file backend remain inside. The proxy preserves all eight backend methods
+and passes the shared backend and cancellation/inventory contracts. Two logical
+HTTP handlers share the one engine; this is not two-replica performance proof.
+
+Independent review caught the harness's unlimited HTTP write deadline. Selected
+live settings are GCS previews with a 45-second preview operation limit; the
+unchanged deployed and candidate server code therefore select a 50-second
+control response deadline. A second full probe enforces that actual 50-second
+server deadline, retaining the existing 20-minute browser and 12-minute recovery
+deadlines. It passes: all 10,604 entries verified, all 2,638 remaining bodies
+transferred once, zero completed-file readmission/retransfer, 75→100% Preparing,
+71 rendered rows and 5,426 actual whole-journey HTTP requests. Observed pre-oracle
+kernel memory high-water was 872,517,632 bytes (about 832 MiB), with no observed
+OOM events or kill. The artifact's test duration is 678.605 seconds; foreground
+recovery is 549.076 seconds. The external provider alone retains 665,181,921
+metadata body bytes after the run, exceeding the older aggregate 450 MiB target.
+That establishes the resource-boundary distinction, not the earlier timeout's
+precise cause.
+
+This successful predecessor probe does not substitute for exact-tree evidence
+after the streaming change. Its 35.35-second maximum size-planning request
+(four of 28 at least 15 seconds) is a material latency limitation. The ordinary
+preview-disabled server selects 30 seconds; this probe qualifies the selected
+deployed 50-second boundary only. Live GCS latency, separately capped replicas,
+concurrent owners, node contention, telemetry overhead and worst-case metadata
+distributions remain unqualified. A fresh independent verification engine is
+opened only after the foreground snapshot; its constructor can perform normal
+startup conditional writes. Its work is excluded from foreground counters.
+The Go soft target, observed cgroup high-water and hard limit remain distinct.

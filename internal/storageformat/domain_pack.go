@@ -80,7 +80,11 @@ func encodeValidatedDomainPagePack(pack DomainPagePack) ([]byte, error) {
 	return compressed, nil
 }
 
-func DecodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID string, expectedKind ConsistencyDomainKind, expectedPackID string) (outcome DomainPagePack, err error) {
+func DecodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID string, expectedKind ConsistencyDomainKind, expectedPackID string) (DomainPagePack, error) {
+	return decodeDomainPagePack(ctx, data, expectedDomainID, expectedKind, expectedPackID, nil, nil)
+}
+
+func decodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID string, expectedKind ConsistencyDomainKind, expectedPackID string, proof *DomainPagePackWireProof, ownedWire *[]byte) (outcome DomainPagePack, err error) {
 	if err := ctx.Err(); err != nil {
 		return DomainPagePack{}, domain.WrapError(domain.ErrorUnavailable, "consistency-domain pack decode canceled", err)
 	}
@@ -95,6 +99,16 @@ func DecodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID str
 	activity.Bytes(int64(len(data)), 0)
 	if len(data) <= len(domainPagePackMagic) || len(data) > MaxDomainPagePackBytes || !bytes.Equal(data[:len(domainPagePackMagic)], domainPagePackMagic) {
 		return DomainPagePack{}, domain.NewError(domain.ErrorInvalid, "invalid consistency-domain page pack envelope")
+	}
+	// An issuing call takes ownership only after admission and the wire bound,
+	// so queued readers do not allocate an additional compressed-body copy.
+	if ownedWire != nil {
+		data = bytes.Clone(data)
+	}
+	// The memo can only be issued by a complete strict decode of these exact
+	// owned bytes. Check it before expansion; a mismatch never falls back.
+	if proof != nil && !proof.matches(data, expectedDomainID, expectedKind, expectedPackID) {
+		return DomainPagePack{}, domain.NewError(domain.ErrorInvalid, "consistency-domain pack validation proof mismatch")
 	}
 	reader, err := gzip.NewReader(bytes.NewReader(data[len(domainPagePackMagic):]))
 	if err != nil {
@@ -129,15 +143,24 @@ func DecodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID str
 	if pack.DomainID != expectedDomainID || pack.Kind != expectedKind || pack.PackID != expectedPackID {
 		return DomainPagePack{}, domain.NewError(domain.ErrorInvalid, "consistency-domain page pack key binding mismatch")
 	}
-	if err := ValidateDomainPagePack(pack); err != nil {
-		return DomainPagePack{}, err
+	if proof == nil {
+		if err := ValidateDomainPagePack(pack); err != nil {
+			return DomainPagePack{}, err
+		}
+		canonical, err := encodeValidatedDomainPagePack(pack)
+		if err != nil || !bytes.Equal(canonical, data) {
+			return DomainPagePack{}, domain.NewError(domain.ErrorInvalid, "non-canonical consistency-domain page pack encoding")
+		}
 	}
-	canonical, err := encodeValidatedDomainPagePack(pack)
-	if err != nil || !bytes.Equal(canonical, data) {
-		return DomainPagePack{}, domain.NewError(domain.ErrorInvalid, "non-canonical consistency-domain page pack encoding")
-	}
+	// For proven wire, canonical spelling, member ordering, page validity and
+	// digests are deterministic properties already established for these exact
+	// SHA-256-bound bytes. Expansion, gzip integrity and fresh JSON parsing are
+	// still performed, and callers retain their per-use descriptor checks.
 	if err := ctx.Err(); err != nil {
 		return DomainPagePack{}, domain.WrapError(domain.ErrorUnavailable, "consistency-domain pack decode canceled", err)
+	}
+	if ownedWire != nil {
+		*ownedWire = data
 	}
 	return pack, nil
 }

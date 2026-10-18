@@ -42,7 +42,7 @@ func TestProviderBudgetStateStoreContract(t *testing.T) {
 	}
 	check := func(name string) {
 		t.Helper()
-		if report, err := ratchet.CheckExact(name, economics, []providerbudget.Role{providerbudget.RoleState}, ledger.Events()); err != nil {
+		if report, err := budgettest.CheckExact(t, ratchet, name, economics, []providerbudget.Role{providerbudget.RoleState}, ledger.Events()); err != nil {
 			t.Errorf("%s: %v; observed=%+v; events=%+v", name, err, report.Totals, ledger.Events())
 		}
 	}

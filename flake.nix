@@ -14,6 +14,10 @@
         "x86_64-linux"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
+      # These older guarantee tests also contain exact economics assertions.
+      # The inventory policy checks both this selection and its package roots.
+      providerBudgetTestPattern = "ProviderBudget|^TestConsistencyDomainCompactionPersistsValuesAndOutcomesWithoutClaimReads$|^TestNamespaceBatchTrashPublishesScaleEdgesThroughOneHead$|^TestNamespaceBatchRestorePublishesScaleEdgesThroughOneHead$|^TestUploadPlanningWarmRequestBudgetIsIndependentOfBatchCardinality$";
+      providerBudgetPackages = "./internal/portable ./internal/drive ./internal/identity ./internal/theme ./internal/httpapi ./internal/preview/...";
       goFor =
         pkgs:
         pkgs.go_1_26.overrideAttrs (_old: {
@@ -614,6 +618,8 @@
               in
               relative == "go.mod"
               || relative == "go.sum"
+              # Exact-budget inventory verifies the shared Nix gate selection.
+              || relative == "flake.nix"
               || relative == "cmd"
               || lib.hasPrefix "cmd/" relative
               || relative == "internal"
@@ -743,7 +749,7 @@
 
           test-provider-budget = goTask "endlessfs-test-provider-budget" ''
             go test ./internal/providerbudget ./internal/objectstore/budgettest ./internal/objectstore/gcs -count=1
-            go test ./internal/portable ./internal/drive ./internal/identity ./internal/theme ./internal/httpapi ./internal/preview/... -run 'ProviderBudget' -count=1
+            go test ${providerBudgetPackages} -run '${providerBudgetTestPattern}' -count=1
           '';
           test-migration = mkTask "endlessfs-test-migration" (goTools ++ [ pkgs.gawk ]) ''
             export CGO_ENABLED=0
@@ -988,6 +994,8 @@
             relative:
             relative == "go.mod"
             || relative == "go.sum"
+            # Exact-budget inventory verifies the shared Nix gate selection.
+            || relative == "flake.nix"
             || relative == "cmd"
             || lib.hasPrefix "cmd/" relative
             || relative == "internal"
@@ -1122,7 +1130,7 @@
           '' [ pkgs.gawk ];
           providerEconomicsCheck = goCheck "provider-economics" ''
             go test ./internal/providerbudget ./internal/objectstore/budgettest ./internal/objectstore/gcs -count=1
-            go test ./internal/portable ./internal/drive ./internal/preview/... -run 'ProviderBudget' -count=1
+            go test ${providerBudgetPackages} -run '${providerBudgetTestPattern}' -count=1
           '' [ ];
           e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
           coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];

@@ -791,7 +791,31 @@ A schema-011 packed head names one immutable pack containing the authenticated
 page records needed by that bounded snapshot. One request-local decode cache
 serves every lookup in the operation. Concurrent requests within one engine
 MAY share an in-flight authenticated immutable pack read bound to the complete
-domain key; they MUST NOT share mutable heads or cached failures. Pack expansion
+physical key, domain identity, domain kind and pack identity; they MUST NOT
+share mutable heads or cached failures. An engine MAY retain strictly verified
+compressed immutable wire bodies in an explicitly byte- and entry-bounded LRU.
+A successful strict provider read MAY issue an opaque, process-local memo of
+its complete canonical/member verification. That memo MUST bind the full
+SHA-256 hash and length of the exact owned wire, domain identity, kind and pack
+identity; its zero value MUST be invalid and its fields MUST NOT be caller
+constructible or durable authority. Ownership copying MUST occur inside the
+existing admission boundary before validation and hashing. A fresh session may
+reuse only those deterministic verification results after checking all memo
+bindings and exact wire equality, before expansion. It MUST still use bounded
+cancellable gzip integrity checks, fresh JSON-owned pages, complete pack
+membership and the existing per-use page digest/descriptor validation. A memo or
+wire mismatch MUST fail closed, evict the entry and never silently retry from
+the provider in that same call. The cache MUST belong to exactly one
+engine/backend, copy admitted provider buffers, admit only successful strict
+provider reads, and never treat residency or a memo as proof of provider
+presence for a conditional publication.
+Startup/migration verification and checkpoint closure/reachability verification
+MUST bypass idle cache bodies and in-flight ordinary cached reads. They MUST
+still reject missing or corrupt provider authority after an earlier warm read.
+The cache-owned wire bound does not bound active callers' pinned bodies,
+decoded pages, pack construction or total process memory. Cache eviction or a
+cold replica MAY cause fresh provider reads and MUST NOT change canonical bytes,
+commit/replay behavior or correctness. Pack expansion
 and verification MUST have cancellable process-wide admission so a request
 burst cannot multiply the expanded-pack working set without bound. Cancellation
 of one caller MUST NOT cancel an independent caller's successful read. A bounded materialized mutation writes

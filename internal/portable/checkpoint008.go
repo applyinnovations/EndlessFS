@@ -104,6 +104,7 @@ func (e *Engine) validateSchema009CheckpointClosure(ctx context.Context, freezeE
 }
 
 func (e *Engine) validateConsistencyDomainCheckpointClosure(ctx context.Context, freezeEpoch uint64, schema009 bool) error {
+	ctx = withoutMetadataPackCache(ctx)
 	catalogSnapshot, found, err := e.readDomainCatalogIfPresent(ctx)
 	if err != nil {
 		return err

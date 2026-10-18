@@ -88,7 +88,7 @@ func duplicateProjectionID008(owner domain.UserID) string {
 }
 
 func duplicateProjectionSession008(engine *Engine, owner domain.UserID, projectionID string) *consistencyDomainTreeSession {
-	session := newNamespaceProjectionTreeSession(newConsistencyDomainStore(engine.backend, engine.scheduler, engine.clock), owner, projectionID, storageformat.ProjectionDuplicates)
+	session := newNamespaceProjectionTreeSession(engine.stateDomainStore(), owner, projectionID, storageformat.ProjectionDuplicates)
 	session.enablePackedWrites(projectionID)
 	return session
 }

@@ -402,3 +402,313 @@ envelope failure; existing per-engine native concurrency does not establish
 cluster-wide fairness or a global concurrency ceiling. The 308.7 GiB customer
 payload is represented by tiny synthetic bodies for cardinality/correctness,
 not throughput equivalence.
+
+## Provider-efficiency continuation: bounded immutable wire reuse
+
+The first qualified corrective commit is
+`df80c15d7b6dd0e11ea9504cd1b4e084284446fd` (tree
+`ad23c449d0570459d3d9c401631c349f389295c5`). Its successful real browser journey
+still read 5,400,980,443 metadata bytes and wrote 348,964,171 metadata bytes in
+foreground recovery of 2,638 four-byte files. Bounded HTTP pages did not resolve
+that amplification. This continuation targets repeated immutable downloads;
+it does not claim to eliminate namespace/history-dependent work, decoding,
+publication bytes or per-file lease operations.
+
+### Comparisons and selected scope
+
+A shared, outside-release exploration measured all independent admission and
+completion maxima 100/250/1,000 with idle wire capacities 0/4/16/64 MiB. Planning
+remained at 100. All 72 namespace-only cells completed real four-byte transfers,
+with exact authority membership and sampled stored bytes checked: existing256 /
+remaining1,001 and existing7,966 / remaining300. Separate comparisons constructed
+256 and 7,966 **actual completed upload histories**, rather than merely seeding
+namespace entries. Every measured cell began with a cold engine coordinator after
+fixture construction. The same deterministic IDs, source paths, admission and
+completion policy, provider model and observation boundary were used within each
+comparison. No customer content was used.
+
+These are engine-level, eager full-page observations: they exclude browser
+arrival timing, its publication age timer, login and directory-refresh requests.
+Their in-process object store retains synthetic immutable history and therefore
+contributes to sampled heap. Allocation, peak heap and wall time are single-run
+observations, not provider latency, production RSS or acceptance ceilings.
+
+At admission100/completion100, the retained7,966 / remaining300 comparison was:
+
+| Idle wire capacity | Provider calls, including data | Metadata read bytes | Metadata write bytes | Strict pack decodes | Sampled peak Go heap bytes | Measured recovery microseconds |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Disabled | 1,459 | 253,306,094 | 16,662,415 | 221 | 753,177,464 | 18,631,295 |
+| 4 MiB | 1,447 | 234,371,493 | 16,662,415 | 221 | 784,910,544 | 20,562,507 |
+| 16 MiB | 1,438 | 221,211,287 | 16,662,415 | 221 | 785,802,480 | 19,009,296 |
+| 64 MiB | 1,372 | 147,100,642 | 16,662,415 | 221 | 874,098,088 | 18,677,853 |
+
+Each row transferred exactly300 payloads /1,200 bytes and independently verified
+8,266 authoritative files. The single failed provider GET per row is the same
+expected cold-projection miss. Four-MiB results from namespace-only fixtures
+would have overstated the benefit for retained history: those reads fell about
+77.6%, whereas actual retained7,966 history improved only7.5%. At64 MiB the latter
+read reduction was41.9%, with87 hits,122 misses and71 evictions. Requests fell87;
+modeled total cost fell3,334,000,000 to3,299,200,000 picoUSD. Unchanged per-file
+session/verification/lease calls dominate marginal request cost. No wall-time or
+strict-decoding improvement is claimed.
+
+The initial wire-only candidate retained at most64 MiB of copied verified
+compressed bodies and256 entries **per engine**, allocated on demand. The
+deployed settings observed in deployment PR131 are2 GiB memory limit and
+`GOMEMLIMIT=450MiB` per replica;64 MiB is about14% of that soft target. This is an
+explicit resource/read tradeoff, not a universal optimal cache size or a
+process-memory bound. The larger128/256-MiB history comparison both reached1,329 total calls and
+99,804,462 read bytes, with identical writes/221 decodes. Both retained exactly
+99,785,600 bytes in79 packs,130 hits and no evictions; all79 fetched immutable
+packs were fetched once. Thus128 reduced another32.15% of reads versus64, while
+256 provided no further wire benefit in this fixture. The128 configured bound
+is28.44% of the deployed450-MiB per-replica soft target; its observed retained
+wire was21.15%. This is a material memory/read frontier, not proof that64 or128
+is universally optimal. The selected implementation uses128 MiB /256 entries
+per engine: it reaches the measured no-repeat frontier in the retained-history
+comparison;256 provides no further read benefit there. The actual standard-runtime
+browser journey below passed before final qualification. A cold or evicting replica remains
+correct and may download the same pack again.
+
+Publication frequency was compared using total calls **and bytes**, independently
+of admission size. For namespace-only existing7,966/remaining300 at cache4 MiB,
+completion100→250 reduced state calls363→351 and writes2,709,528→2,273,771, but
+without the cache it increased reads17,710,557→26,294,136. Admission1,000 /
+completion1,000 at cache4 MiB read4,450,248 and wrote3,182,412 versus3,355,849 /
+2,087,713 for completion250 at the same admission maximum. A directory edit set
+of at least256 can select a full-tree rebuild; smaller mutations path-copy
+changed branches, so a blanket claim that every publication rewrites all N
+entries would be inaccurate. These measurements reject a blanket larger-page
+change in this slice. Production remains at100 items; increasing it also needs
+pre-mutation request/response envelope proofs for long/escaped resolved paths,
+partial results and the browser age guarantee. Existing post-mutation envelope
+checks are not such a proof.
+
+### Guarantee preservation
+
+| Guarantee | Implementation and independent evidence |
+| --- | --- |
+| Fresh authority and atomic visibility | Heads, gates, leases, native CAS versions and create-only exact-wire conflict checks still use the provider; the cache never proves publication presence. |
+| Immutable integrity and binding | Only successful strict provider decodes admit copied wire bodies and an opaque validation memo. Every hit verifies the full wire SHA-256, length and domain/kind/pack binding before expansion, then performs bounded gzip validation and fresh JSON decoding. The memo reuses deterministic canonical/member validation for the exact previously verified bytes. Per-use page digest and descriptor checks remain. In-flight keys bind all expected identities and distinguish maintenance reads. |
+| Corruption and cold recovery | Invalid cached wire fails closed and is evicted; provider faults are not admitted. Subsequent independent requests can retry. Ordinary verified immutable hits can survive external deletion/corruption; startup, checkpoint closure and reachability explicitly fetch provider authority and detect it. |
+| Freeze, checkpoint and GC | Startup enables idle caching only after initialization. Checkpoint verification bypasses idle cache and ordinary in-flight reads. GC retains fresh gate/LIST/version-conditional deletion. Warm corrupted and missing pack tests deny checkpoint; restored valid authority succeeds. |
+| Isolation and cancellation | Cache belongs to one engine/backend. Different expected identities cannot share an in-flight result. Cancelled leaders do not cancel healthy waiters; cancellation does not evict valid wire. |
+| Resource ownership | Independent byte and256-entry LRU bounds, copied provider buffers, exact eviction and oversize/disabled tests. Proof issuance takes its bounded wire copy inside the existing single decode-admission slot. Active requests may pin evicted wire and own decoded maps; this is not global RSS admission. |
+| Canonical bytes and replay | Whole-pack decoding and page residency semantics are retained; no staged/PUT bodies are admitted. A page-only cache was rejected as a drop-in because current child-hint reconstruction depends on full-pack residency and could alter canonical branch bytes. |
+
+The independent reviewer found no remaining cache correctness blocker. Targeted
+cache/concurrency tests passed before final qualification; exact-tree results
+belong to the final PR gate record. Sensitive coverage now includes the cache
+coordinator in the existing95% CAS/publication groups, without lowering a
+threshold. Cheaper provider vectors require a new append-only economics epoch;
+all historical ceilings remain immutable. Full numeric baseline/candidate vectors
+include request/response bytes even though the existing economics ratchet schema
+does not itself encode byte ceilings.
+
+Economics epoch020 (`020-bounded-immutable-pack-cache`) appends32 strictly
+cheaper rows after019. Its JSON SHA-256 is
+`4260a3bdc6f9c240e14f756140b6f7be4ddbd7549d42353fff71d4cd93e35dcd`.
+Independent review paired134 exported application vectors and reconciled6,498 aggregate,
+role, kind and subsystem numeric fields: zero increases, exact failure counts,
+32 strict /102 unchanged calibrated rows. All65 prior economics/migration
+fixtures remain byte-identical.
+This model measures provider operations, not codec CPU or production latency.
+
+The initial public-budget selection exported70 rows and missed four exact-budget
+owners whose names lacked `ProviderBudget`. Focused and complete unfiltered
+portable checks caught four cheaper calibrations: empty-trash1,024 (4→3 calls),
+incremental planning (7→5), sizes1,024 (4→2), and fingerprints1,024 (3→1).
+The unfiltered run completed2,242 passing tests/subtests with only those cheaper
+calibration failures. The expanded Go-AST inventory resolves26 application
+owners plus one synthetic ratchet-contract owner; the134 application rows are
+complete for these exact assertions, not a claim that all255 active/historical
+budget rows were remeasured. Eleven identical numeric-export test overlays are
+applied to the immutable baseline and candidate; fixtures/assertions stay intact.
+The32-row020 retains the original28 reviewed entries and adds only those four.
+Both the public and flake budget commands now share the package roots and test
+selection, including all four legacy owners. A policy test audits exact callers,
+helper reachability and selected package roots to prevent another silent omission.
+Its focused suite passed with26 application owners /six roots. Outside-tree
+negative controls removing the four legacy selections or the identity package
+both failed with the precise omitted owners. Unsupported method/function-value,
+cross-package and orphan helper forms fail closed; only the named synthetic
+ratchet contract and shared numeric-export helper are exempt.
+
+
+Comparative JSON provenance (outside-Git evidence retained with this session):
+
+- 72-cell namespace matrix SHA-256
+  `11633642a699e7987c852092352a54229b406c45390efece8725c2dea9ee2378`.
+- Retained256-history matrix SHA-256
+  `ded10c6d0adc6cd2261268062b4ccd73fc310838b8f3e404a827d825d098badf`.
+- Retained7,966-history0/4/16/64 matrix SHA-256
+  `ec6067c80caf919eb0678c990657d6594ce376fcde3d3e3e82d725712e4d8182`.
+
+Whole-lifecycle provider efficiency remains under qualification with open
+structural costs: repeated expansion/fresh decoding, immutable publication writes,
+retained-history/namespace-dependent reads, and one lease per admitted file.
+The four-per-file provider operation floor applies only under the unchanged
+lease/session/verification contract; it is not a universal lower bound for a
+future storage design. New layout, digest-aware diffing or replayable lease
+segments need separate canonical/recovery proofs and matched full-vector
+comparisons before claiming a further improvement.
+
+The first cache browser preflights stopped before foreground recovery on a test
+assumption, not an application400: `warm` on replica1 with a cold idle cache
+made5 provider calls, while its later warm query made2. The old assertion
+incorrectly demanded equal physical call counts across different cache heat.
+The replacement preserves both5-call ceilings and all cold/rebuilt ceilings,
+compares every ordered public decision field and ID across replicas/stages,
+forbids provider writes in warm stages, and adds an identical same-replica
+repeat that MUST read exactly the namespace and planning-projection heads once
+each. These failed probes are not successful upload acceptance evidence.
+
+Corrected wire-only64/128 browser stress probes then used the unchanged20-minute
+browser and12-minute recovery deadlines under `GOMEMLIMIT=450MiB`. Both failed
+after1,300 actual remaining files transferred; the64-MiB probe had published1,200
+with zero failed items. The128-MiB probe exhausted the browser context. Neither
+produced the success artifact. These probes run two engines and an in-memory
+provider retaining synthetic history in one Go process, whereas production has
+one engine per replica. Observed process high-water RSS was997,257,216 /
+1,125,208,064 bytes respectively; these include fixture/provider/runtime memory
+and do not measure isolated cache memory or a production replica. The failures
+show that reduced provider bytes alone did not establish successful recovery.
+
+This stress boundary includes two independent engine caches but one shared fake
+provider. `memory.Backend.Put` retains its own copy under each immutable key until
+explicit deletion; this browser lifecycle runs no GC/checkpoint. The successful
+earlier browser artifact records145 distinct large immutable writes totaling
+348,579,670 bytes (332.43 MiB) during foreground alone. Separate root-folder
+H=7,966 profiles attribute about146.42 MiB of sampled post-seed in-use heap to
+fake-provider Put storage, rising to161.15 MiB after300 remaining files. Those
+profiles have different folder geometry and do not establish the current
+browser's exact live inventory. Both caches may additionally retain256 MiB in
+aggregate; provider Get/Open and decoding allocate transient copies. These
+facts make the aggregate450-MiB stress materially different from one production
+engine using an external provider. They do not prove the live slowdown's cause
+or qualify production memory. Standard-runtime acceptance and this additional
+stress result must be reported separately, with unchanged deadlines in both.
+
+Profiling motivated an exact-wire validation memo rather than caching decoded
+mutable maps or weakening cold verification. The memo has private fields, an
+invalid zero value and no durable representation. Strict validation owns its
+wire copy before validation/hash, and only successful provider reads admit it.
+Mismatched wire, scope, kind or pack fails closed without a same-call fallback.
+Every new decode retains all pack members and owns fresh maps; page-only reuse
+would alter existing child-hint reconstruction semantics. Initial migration and
+checkpoint verification bypass both idle reuse and ordinary in-flight results.
+
+On the same valid36,903-byte synthetic metadata pack, the matched strict codec
+measured28.024ms /23,880,798 allocated bytes per operation; exact-wire reuse
+measured17.014ms /9,915,401 bytes. Three ordinary repeats measured9,915,407–
+9,915,438 bytes; three race repeats measured17,138,865–17,139,313 bytes. Separate
+warm-path guards round those observed upper values to the next whole MiB (10 /
+17 MiB); the older strict-decoder guards remain unchanged. Codec timings are
+microbenchmarks, not full recovery or production throughput evidence.
+
+Independent tests cover exact strict/proven equivalence, fresh-map isolation,
+zero/altered/wrong-binding proof denial, noncanonical/invalid-member/wire and
+expanded bounds, cancellation before/during/after admission, and concurrent
+callers. A queued4-MiB input allocated952 bytes while waiting for the single slot;
+an isolated pre-wait-copy control failed at4,195,896 bytes. Copy placement thus
+does not allocate another whole wire buffer per queued decoder. The focused
+proof and codec/cache race tests passed before final-tree qualification.
+
+The proof-based128-MiB aggregate450-MiB stress probe also FAILED the unchanged
+12-minute recovery deadline (1,071.43 seconds including setup). It transferred
+1,600 remaining files and published1,500; UI counts were9,466 complete /1,138
+current /zero failed, with Preparing90%. It produced no success artifact.
+Compared with the prior wire-only probes this is additional completed work, not
+successful end-to-end acceptance. The exact cause of aggregate memory pressure
+and the production one-engine/external-provider memory envelope remain open.
+Its raw log SHA-256 is
+`b759a915fe315fdf2870700c8f6c235922b3fabf34a9c562e6855271d352ecf0`.
+
+An independently profiled actual-byte H=7,966/R=300 comparison starts CPU and
+allocation observation after fixture construction and stops before final
+authority/download oracles. All three capacities transfer300 four-byte payloads
+and verify8,266 members. Complete provider vectors exactly match their earlier
+wire-only rows; the memo changes codec work, not provider semantics:
+
+| Capacity | Foreground allocated bytes | Sampled peak Go heap bytes | Decoder share of sampled CPU | Observed foreground seconds |
+| --- | ---: | ---: | ---: | ---: |
+| Disabled | 13,438,574,576 | 725,872,048 | 72.96% | 21.494 |
+| 64 MiB | 11,852,297,976 | 872,187,712 | 69.60% | 19.037 |
+| 128 MiB | 10,708,034,584 | 911,328,528 | 67.79% | 17.813 |
+
+At128 MiB, strict cold verification and proven decoding account for32.58% and
+30.01% of sampled CPU respectively, both subsets of the decoder share. Canonical
+pack re-encoding falls6.01→2.67 CPU seconds, while JSON unmarshalling remains
+6.66→6.65 seconds. Cold initial size planning still allocates roughly4.2–4.35 GB
+in every row. This identifies expansion/fresh JSON and projection construction
+as remaining costs, even when every fetched immutable pack is fetched once.
+There are221 pack-decode observer events in every row; that event count no
+longer means221 full strict canonical validations when memo reuse is enabled.
+Peak heap includes fixture history and the in-memory provider. Timings under
+host contention are observations, not production latency or browser acceptance.
+Evidence JSON SHA-256:
+`84e599c259f86657e08a3ea1a6dc529fcf9090a61c99dca3023733a053b466f4`.
+Compiled source manifest SHA-256:
+`b427c76c53aa0a154e851bcbfbd4a1ad90e0014a1590e26f7178558ecfe0ccf8`.
+The temporary experiment source was archived and removed before final freeze.
+
+### Complete standard-runtime recovery preflight
+
+The unchanged real-browser test PASSED with repository-standard runtime settings
+(no additional `GOMEMLIMIT` override), including cold/rebuilt/warm projection
+checks, reload/logout/passkey login/restore, reconnect, planning, admission,
+actual data transfer and terminal publication. All2,638 remaining four-byte
+files transferred exactly once. None of7,966 completed files were readmitted or
+retransferred. Independent authority membership, sampled stored bytes and
+durable history passed for all10,604 files. Preparing advanced75→100% with
+intermediate progress and at most71 rendered rows. The initial size body was
+248,587 bytes. Terminal pages were26×100 +1×38; maximum observed page3,878ms,
+zero pages at least15 seconds. Total observed test time535.75 seconds is a
+synthetic, uninstrumented observation, not production throughput.
+
+| Phase | State calls | File-control calls | Actual payloads | Metadata written bytes | Metadata read bytes | Actual control/PATCH/OPTIONS HTTP |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Restore/auth | 51 | 0 | 0 | 61,207 | 320,127 | 12/0/0 |
+| Foreground recovery | 4,374 | 5,276 | 2,638 | 342,215,399 | 2,697,963,746 | 138/2,638/2,638 |
+| Whole journey | 4,425 | 5,276 | 2,638 | 342,276,606 | 2,698,283,873 | 150/2,638/2,638 |
+
+Foreground requests were28 sizes,27 fingerprints,27 admissions,27 terminal
+pages,one directory batch and27 coalesced listings, with no scalar stat or
+legacy lifecycle routes. Foreground had zero failed provider operations;
+restore/auth retained its three expected failed lookups. Large immutable reads
+were984 requests /196 unique targets /2,694,948,388 bytes; writes were144 unique
+targets /341,831,299 bytes, with maximum read/write4,192,053 bytes. Repeated reads
+and substantial publication bytes therefore remain visible at full scale.
+
+The earlier qualified full browser observed5,327 foreground state calls,
+5,400,980,443 metadata read bytes and348,964,171 written bytes. Current observed
+read traffic is approximately half and state calls fall953. These browser
+fixtures use fresh identities/time and are not byte-identical causal comparisons;
+the fixed-input engine/full134-vector experiments isolate reuse effects. Existing
+full-browser cold/recovery ceilings remain preserved, while exact fixed-input
+provider rows tighten through020. Success-only preflight JSON SHA-256:
+`e9827e21714c8f9886c9b05c6ecf1518250040c4487df7a44112d89300c2fa4e`.
+This preflight is separate from both the failed aggregate450-MiB stress and
+the final exact-tree mandatory gates recorded in the PR. It does not qualify
+production one-engine memory, live-provider latency or308.7-GiB throughput.
+
+Economics comparison provenance includes134 paired application numeric rows,32
+with strictly cheaper calibrated vectors and102 with identical calibrated vectors. The existing
+schema encodes calls, costs and modeled latencies; full exported observations
+also retain bytes and failed outcomes. One unchanged migration row has
+pre-existing byte variability: old-source repeats wrote195,891–195,894 bytes
+and read1,084,038–1,084,044, with identical639 calls and14 expected failed GETs.
+The two optimization packs have identical decoded pages/values/digests; only
+physical pack IDs differ. `stageSchema008Domains009` constructs a domain catalog
+whose nested store defaults to system time, so the fixture's fixed clock does
+not determine preparation-time-bound pack IDs. An outside-tree diagnostic
+passing the fixed clock produced identical canonical key/body maps, ordered PUTs
+and complete vectors in eight repeats (195,894 written/1,084,044 read). This
+establishes the source of variation; it is not evidence of cache-induced writes.
+The stricter epoch covers only changed rows with paired nonworse full vectors.
+No claim that every unchanged row has identical byte counts is made, and no
+historical or byte ceiling is increased. Diagnostic proof SHA-256:
+`c69eaa92aa0ac7d7c48149aafba72d296e73f286fedec6796d87d55bdde93513`.
+
+The additional128/256-MiB frontier JSON SHA-256 is
+`4a5730687dda2f0b23be99adbbef9c2b829f7e24a354f8bd8597b8ed0e4417de`.

@@ -20,5 +20,17 @@ func checkGrowthBudget(t *testing.T, ratchet providerbudget.RatchetLedger, name 
 		return providerbudget.Report{}, err
 	}
 	t.Logf("GROWTH_CALIBRATION=%s", body)
+	totals, err := model.Estimate(events)
+	if err != nil {
+		return providerbudget.Report{}, err
+	}
+	vector, err := json.Marshal(struct {
+		Budget providerbudget.Budget `json:"budget"`
+		Totals providerbudget.Totals `json:"totals"`
+	}{Budget: budget, Totals: totals})
+	if err != nil {
+		return providerbudget.Report{}, err
+	}
+	t.Logf("PROVIDER_VECTOR=%s", vector)
 	return ratchet.CheckExact(name, model, roles, events)
 }

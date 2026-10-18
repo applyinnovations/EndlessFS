@@ -50,7 +50,7 @@ func TestProviderBudgetThemePreferenceWorkflows(t *testing.T) {
 	}
 	check := func(name string) {
 		t.Helper()
-		if report, checkErr := ratchet.CheckExact(name, economics, []providerbudget.Role{providerbudget.RoleState}, ledger.Events()); checkErr != nil {
+		if report, checkErr := budgettest.CheckExact(t, ratchet, name, economics, []providerbudget.Role{providerbudget.RoleState}, ledger.Events()); checkErr != nil {
 			t.Errorf("%s: %v; observed=%+v; events=%+v", name, checkErr, report.Totals, ledger.Events())
 		}
 		ledger.Reset()

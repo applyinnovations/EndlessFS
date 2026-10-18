@@ -7,3 +7,7 @@ package storageformat
 // allocation budget as a production memory estimate.
 const domainPackDecodeAllocationBudget = 56 << 20
 const domainPackAllocationMode = "race"
+
+// The same exact-wire reuse fixture measured 17,138,865–17,139,313 B/op in
+// three race runs. Round to the next whole MiB; this is not production RSS.
+const domainPackProvenDecodeAllocationBudget = 17 << 20

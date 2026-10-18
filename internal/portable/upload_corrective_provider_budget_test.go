@@ -82,6 +82,7 @@ func TestUploadPlanningProviderBudgetTenThousandExistingAndPlanningItems(t *test
 		t.Fatal(err)
 	}
 	cold := ledger.Events()
+	primeUploadPlanningWireRoots(t, ctx, engine, live.UserID())
 	ledger.Reset()
 	if _, err := engine.Files().PlanUploadSizes(ctx, live.UserID(), uploadSizePlanFixture(1)); err != nil {
 		t.Fatal(err)

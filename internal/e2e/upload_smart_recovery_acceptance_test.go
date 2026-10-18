@@ -1119,20 +1119,34 @@ func assertSmartRecoveryProjectionStates(t *testing.T, h *smartRecoveryHarness, 
 		items[index] = domain.UploadSizePlanItem{ID: fmt.Sprintf("probe-%d", index), Path: domain.MustParseUserPath("/" + smartRecoveryRelative(root, completed+index)), Size: 4}
 	}
 	counts := make(map[string]int)
-	for index, stage := range []string{"cold", "warm", "rebuilt", "warm-other-replica"} {
+	var expected []domain.UploadSizePlanDecision
+	// Projection readiness and process-local cache heat are distinct. The first
+	// query on replica1 has a ready projection but a cold immutable-wire cache;
+	// its later queries may fetch fewer packs without changing any decision.
+	for _, probe := range []struct {
+		stage   string
+		replica int
+	}{{"cold", 0}, {"warm", 1}, {"rebuilt", 0}, {"warm-other-replica", 1}, {"warm-repeat", 1}} {
+		stage := probe.stage
 		if stage == "rebuilt" {
 			deleteSmartRecoveryProjection(t, h, scope.UserID())
 		}
 		h.stateLedger.Reset()
 		h.fileLedger.Reset()
-		plan, err := h.engines[index%2].Files().PlanUploadSizes(context.Background(), scope.UserID(), domain.UploadSizePlanRequest{Items: items})
+		plan, err := h.engines[probe.replica].Files().PlanUploadSizes(context.Background(), scope.UserID(), domain.UploadSizePlanRequest{Items: items})
 		if err != nil || len(plan.Items) != remaining {
 			t.Fatalf("%s authoritative size planning: items=%d err=%v", stage, len(plan.Items), err)
 		}
-		for _, item := range plan.Items {
-			if !item.FingerprintRequired || item.TargetExists {
-				t.Fatalf("%s fixture did not force content comparison for absent target: %+v", stage, item)
+		for index, item := range plan.Items {
+			if item.ID != items[index].ID || !item.FingerprintRequired || item.TargetExists {
+				t.Fatalf("%s fixture did not force bound content comparison for absent target: %+v", stage, item)
 			}
+			if expected != nil && item != expected[index] {
+				t.Fatalf("%s replica changed authoritative planning decision at synthetic index%d", stage, index)
+			}
+		}
+		if expected == nil {
+			expected = append([]domain.UploadSizePlanDecision(nil), plan.Items...)
 		}
 		if len(h.fileLedger.Events()) != 0 {
 			t.Fatalf("%s planning accessed file provider", stage)
@@ -1141,13 +1155,42 @@ func assertSmartRecoveryProjectionStates(t *testing.T, h *smartRecoveryHarness, 
 			if event.Kind != providerbudget.RequestObjectGet && event.Kind != providerbudget.RequestObjectPut {
 				t.Fatalf("%s planning provider operation=%s", stage, event.Kind)
 			}
+			if strings.HasPrefix(stage, "warm") && event.Kind != providerbudget.RequestObjectGet {
+				t.Fatalf("%s ready projection unexpectedly mutated provider state", stage)
+			}
 		}
 		counts[stage] = len(h.stateLedger.Events())
+		if stage == "warm-repeat" {
+			projectionID := storageformat.Digest([]byte("endlessfs-upload-planning-projection-v1\x00" + scope.UserID().String()))
+			wanted := map[string]bool{
+				storageformat.DomainHeadKey(storageformat.DomainNamespace, scope.UserID().String()).String():                              false,
+				storageformat.ScopedProjectionHeadKey(scope.UserID().String(), storageformat.ProjectionDuplicates, projectionID).String(): false,
+			}
+			for _, event := range h.stateLedger.Events() {
+				key := event.Target
+				if seen, expected := wanted[key]; !expected || seen {
+					t.Fatal("hot planning did not read each expected authority head exactly once")
+				}
+				wanted[key] = true
+			}
+			for _, seen := range wanted {
+				if !seen {
+					t.Fatal("hot planning omitted a fresh authority head")
+				}
+			}
+		}
 	}
-	if counts["warm"] != counts["warm-other-replica"] || counts["warm"] >= counts["cold"] || counts["warm"] >= counts["rebuilt"] {
-		t.Fatalf("cold/rebuilt/warm provider consistency: %+v", counts)
+	for _, stage := range []string{"warm", "warm-other-replica"} {
+		if counts[stage] >= counts["cold"] || counts[stage] >= counts["rebuilt"] {
+			t.Fatalf("cold/rebuilt/warm provider consistency: %+v", counts)
+		}
 	}
-	for stage, maximum := range map[string]int{"cold": 8, "rebuilt": 10, "warm": 5, "warm-other-replica": 5} {
+	// A repeated query on the same replica still reads both mutable authority
+	// heads, but must not redownload already verified immutable packs.
+	if counts["warm-repeat"] != 2 {
+		t.Fatalf("hot immutable planning did not retain fresh authority reads: %+v", counts)
+	}
+	for stage, maximum := range map[string]int{"cold": 8, "rebuilt": 10, "warm": 5, "warm-other-replica": 5, "warm-repeat": 2} {
 		if counts[stage] > maximum {
 			t.Fatalf("%s real projection planning exceeded measured request budget: %d/%d", stage, counts[stage], maximum)
 		}

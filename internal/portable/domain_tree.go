@@ -101,14 +101,37 @@ func (session *consistencyDomainTreeSession) loadPack(ctx context.Context, packI
 	session.mu.Unlock()
 
 	key := session.packKey(packID)
-	pack, err := session.store.packReads.read(ctx, key, func() (map[string]storageformat.DomainPage, error) {
-		object, err := session.store.backend.Get(ctx, key)
+	cacheKey := consistencyDomainPackCacheKey{key: key, domainID: session.reference.ID, kind: session.reference.Kind, packID: packID}
+	pack, err := session.store.packReads.read(ctx, cacheKey, func() (map[string]storageformat.DomainPage, error) {
+		body, proof, cached := session.store.packReads.cachedBody(ctx, cacheKey)
+		var decoded storageformat.DomainPagePack
+		var err error
+		cacheable := false
+		if cached {
+			decoded, err = storageformat.DecodeProvenDomainPagePack(ctx, body, session.reference.ID, session.reference.Kind, packID, proof)
+		} else {
+			object, fetchErr := session.store.backend.Get(ctx, key)
+			if fetchErr != nil {
+				return nil, fetchErr
+			}
+			body = object.Body
+			cacheable = session.store.packReads.cacheable(ctx, len(body))
+			if cacheable {
+				decoded, body, proof, err = storageformat.DecodeDomainPagePackWithWireProof(ctx, body, session.reference.ID, session.reference.Kind, packID)
+			} else {
+				// Startup, maintenance and disabled/oversized caches still use
+				// complete fresh provider verification and issue no idle memo.
+				decoded, err = storageformat.DecodeDomainPagePack(ctx, body, session.reference.ID, session.reference.Kind, packID)
+			}
+		}
 		if err != nil {
+			if cached && errors.Is(err, domain.ErrInvalid) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				session.store.packReads.discardBody(cacheKey)
+			}
 			return nil, err
 		}
-		decoded, err := storageformat.DecodeDomainPagePack(ctx, object.Body, session.reference.ID, session.reference.Kind, packID)
-		if err != nil {
-			return nil, err
+		if cacheable {
+			session.store.packReads.retainBody(ctx, cacheKey, body, proof)
 		}
 		pages := make(map[string]storageformat.DomainPage, len(decoded.Pages))
 		for _, packed := range decoded.Pages {

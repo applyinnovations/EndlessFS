@@ -801,17 +801,23 @@ identity; its zero value MUST be invalid and its fields MUST NOT be caller
 constructible or durable authority. Ownership copying MUST occur inside the
 existing admission boundary before validation and hashing. A fresh session may
 reuse only those deterministic verification results after checking all memo
-bindings and exact wire equality, before expansion. It MUST still use bounded
+bindings and exact wire equality, before expansion. Except for the separately
+bounded decoder-result mechanism in [metadata decoder memo v1](metadata-decoder-memo-v1.md), it MUST still use bounded
 cancellable gzip integrity checks, fresh JSON-owned pages, complete pack
 membership and the existing per-use page digest/descriptor validation. A memo or
 wire mismatch MUST fail closed, evict the entry and never silently retry from
-the provider in that same call. The cache MUST belong to exactly one
+the provider in that same call. The compressed-body cache MUST belong to exactly one
 engine/backend, copy admitted provider buffers, admit only successful strict
 provider reads, and never treat residency or a memo as proof of provider
 presence for a conditional publication.
 Startup/migration verification and checkpoint closure/reachability verification
 MUST bypass idle cache bodies and in-flight ordinary cached reads. They MUST
 still reject missing or corrupt provider authority after an earlier warm read.
+The separate decoder-result memo may reuse a pure canonical decoding result only
+after each required fresh provider GET succeeds; it cannot replace or coalesce
+independent closure/reachability presence checks. Its mechanism and guarantee
+matrix are normative in the versioned document linked above. The strict codec
+reference API continues to perform fresh gzip/JSON and complete validation.
 The cache-owned wire bound does not bound active callers' pinned bodies,
 decoded pages, pack construction or total process memory. Cache eviction or a
 cold replica MAY cause fresh provider reads and MUST NOT change canonical bytes,

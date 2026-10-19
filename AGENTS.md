@@ -89,7 +89,7 @@ economics evidence, and migration design support a versioned specification.
 4. Compare credible alternatives far enough to measure their complete success, failure, recovery, maintenance, and scale behavior. Select by preserved guarantees and Pareto evidence, not by preference for the first design that passes.
 5. Implement the smallest coherent selected design. Do not force a local patch through an abstraction already proven unfit for the objective.
 6. Refactor or replace internal contracts without changing preserved behavior; update the applicable specification and migration design when the architecture changes.
-7. Run focused checks for the changed behavior, then `nix flake check --print-build-logs` before declaring the change complete.
+7. Before long acceptance work, include newly added source in the Git flake with `git add`, then run `nix run .#test-imports` to verify normal and race test imports against the actual retained offline vendor closure. During edits, use scoped pure functional checks with the persistent Go cache; see `docs/iteration-workflow.md`. Then run focused checks for the changed behavior and `nix flake check --print-build-logs` before declaring the change complete. The import preflight does not execute tests or replace acceptance evidence.
 8. Complete the local commit and push gate below before creating or updating a pull request; every required command must pass locally before CI is started.
 9. Record acceptance evidence, comparative provider economics, compatibility decisions, rejected alternatives, and remaining limitations in the release record/checklist as those artifacts are introduced.
 

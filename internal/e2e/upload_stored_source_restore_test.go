@@ -21,6 +21,7 @@ import (
 // It is separate from the aggregate538/338 nonempty-field counts in the earlier
 // concurrent diagnostic, which did not record message/code categories.
 func TestE2EUploadStoredSourceRestoreClearsObsoleteSourceRequiredBeforeSmartPlanning(t *testing.T) {
+	parallelE2EFixture(t)
 	for _, scenario := range []struct {
 		name    string
 		message string

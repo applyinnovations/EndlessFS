@@ -852,6 +852,25 @@ func (store *consistencyDomainStore) listSnapshot(ctx context.Context, reference
 }
 
 func (store *consistencyDomainStore) listAtHead(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead, prefix, after string, limit int) ([]storageformat.DomainEntry, error) {
+	return store.listAtHeadWithSession(ctx, reference, head, prefix, after, limit, nil)
+}
+
+// A fixed-head operation may reuse its already authenticated immutable pages.
+// This does not refresh a mutable head or establish durable presence for the
+// separate checkpoint reachability/inventory verification.
+func (store *consistencyDomainStore) listAtHeadWithSession(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead, prefix, after string, limit int, session *consistencyDomainTreeSession) ([]storageformat.DomainEntry, error) {
+	if session == nil {
+		session = newConsistencyDomainTreeSession(store, reference)
+	} else {
+		if session.store != store || session.reference != reference {
+			return nil, domain.NewError(domain.ErrorInvalid, "consistency-domain range session is misbound")
+		}
+		// Continuations may need no provider I/O. Observe cancellation even
+		// when every requested page or delta is already in this operation.
+		if err := ctx.Err(); err != nil {
+			return nil, domain.WrapError(domain.ErrorUnavailable, "consistency-domain range read canceled", err)
+		}
+	}
 	relevantDeltaChanges := 0
 	for _, delta := range head.Deltas {
 		for _, change := range delta.Changes {
@@ -860,7 +879,7 @@ func (store *consistencyDomainStore) listAtHead(ctx context.Context, reference c
 			}
 		}
 	}
-	base, err := newConsistencyDomainTreeSession(store, reference).collect(ctx, head.Base, prefix, after, limit+relevantDeltaChanges)
+	base, err := session.collect(ctx, head.Base, prefix, after, limit+relevantDeltaChanges)
 	if err != nil {
 		return nil, err
 	}

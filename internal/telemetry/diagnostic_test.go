@@ -129,7 +129,7 @@ func TestDiagnosticStagesReasonsAndCorrelationStayClosed(t *testing.T) {
 	observer := New(nil, slog.New(handler))
 	defer observer.Close()
 	observer.SetVersion("sentinel/private-build")
-	allowedStages := map[any]bool{"unknown": true, "request_validation": true, "namespace_read": true, "projection_build": true, "projection_publish": true, "target_lookup": true, "snapshot_check": true, "namespace_publish": true, "response_write": true, "metadata_admission": true}
+	allowedStages := map[any]bool{"unknown": true, "request_validation": true, "namespace_read": true, "projection_build": true, "projection_publish": true, "target_lookup": true, "snapshot_check": true, "namespace_publish": true, "response_write": true, "metadata_admission": true, "metadata_materialize": true}
 	allowedReasons := map[any]bool{"unknown": true, "validation": true, "corrupt_metadata": true, "pack_capacity": true, "pack_collision": true, "snapshot_stale": true, "provider_failure": true, "canceled": true, "internal": true, "deadline": true, "transport_failure": true}
 	var baseline map[string]bool
 	for value := range 256 {

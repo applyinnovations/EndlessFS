@@ -16,6 +16,7 @@ import (
 )
 
 func TestE2ELostUploadResponseFinalizesEmptyAndChunkedObjectsOnce(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -69,6 +70,7 @@ func TestE2ELostUploadResponseFinalizesEmptyAndChunkedObjectsOnce(t *testing.T) 
 }
 
 func TestE2EAutomaticRetryResumesOriginalBatchSession(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}

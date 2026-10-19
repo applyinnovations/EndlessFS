@@ -60,6 +60,7 @@ func TestVirtualAuthenticatorUsesPlatformTransport(t *testing.T) {
 }
 
 func TestE2EUploadPlannerHashesMD5AndCRC32CInOneWorkerPass(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
 	}
@@ -103,6 +104,7 @@ func TestE2EUploadPlannerHashesMD5AndCRC32CInOneWorkerPass(t *testing.T) {
 }
 
 func TestE2ERestoringTenThousandTransfersDoesNotBlockWorkspaceOrPollUploads(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
 	}
@@ -181,6 +183,7 @@ func TestE2ERestoringTenThousandTransfersDoesNotBlockWorkspaceOrPollUploads(t *t
 }
 
 func TestE2EUpstreamGCSWorkerPoolUploadsOneHundredFilesAndCoalescesRefresh(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
 	}
@@ -290,6 +293,7 @@ func TestE2EUpstreamGCSWorkerPoolUploadsOneHundredFilesAndCoalescesRefresh(t *te
 }
 
 func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
 	}
@@ -1427,6 +1431,7 @@ func claimConcurrentBrowserPreview(t *testing.T, harness harness, path domain.Us
 }
 
 func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
 	}
@@ -1915,6 +1920,7 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 }
 
 func TestE2EMediaBrowserIsAvailableWithoutGeneratedPreviews(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("set ENDLESSFS_RUN_E2E=1; the Nix test-e2e task does this")
 	}

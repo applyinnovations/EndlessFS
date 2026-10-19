@@ -17,8 +17,14 @@ import (
 )
 
 func TestUploadBatchLargeMetadataAdmission(t *testing.T) {
+	finishPhase := startIterationPhase(t, iterationFixtureWait, [4]*providerbudget.Ledger{})
 	parallelCorrectiveHeavyFixture(t)
+	finishPhase(true)
+	finishPhase = startIterationPhase(t, iterationFixtureSetup, [4]*providerbudget.Ledger{})
 	fixture := newUploadBatchScaleFixture(t, 0x67584930)
+	finishPhase(true)
+	sourceLedgers := [4]*providerbudget.Ledger{fixture.stateLedger, fixture.fileLedger, nil, nil}
+	finishPhase = startIterationPhase(t, iterationInputSetup, sourceLedgers)
 	ctx := context.Background()
 	parent := ""
 	for range 12 {
@@ -41,14 +47,18 @@ func TestUploadBatchLargeMetadataAdmission(t *testing.T) {
 	if err != nil || len(wire) >= 1<<20 {
 		t.Fatalf("compact control request = %d bytes, %v", len(wire), err)
 	}
+	finishPhase(true)
 	fixture.stateLedger.Reset()
 	fixture.fileLedger.Reset()
+	finishPhase = startIterationPhase(t, iterationAdmission, sourceLedgers)
 	capabilities, err := fixture.engine.Files().CreateUploadBatch(ctx, fixture.scope, requests)
 	if err != nil || len(capabilities) != len(requests) {
 		t.Fatalf("CreateUploadBatch() = %d capabilities, %v; want %d", len(capabilities), err, len(requests))
 	}
 	headKey := storageformat.DomainHeadKey(storageformat.DomainNamespace, fixture.scope.UserID().String()).String()
 	admissionState, admissionFiles := fixture.stateLedger.Events(), fixture.fileLedger.Events()
+	finishPhase(true)
+	finishPhase = startIterationPhase(t, iterationAdmissionOracle, sourceLedgers)
 	reference := uploadDomainReference(fixture.scope.UserID())
 	store := fixture.engine.stateDomainStore()
 	head, err := store.loadHead(ctx, reference)
@@ -144,6 +154,8 @@ func TestUploadBatchLargeMetadataAdmission(t *testing.T) {
 		}
 		t.Logf("large metadata admission %s economics: %+v", role, totals)
 	}
+	finishPhase(true)
+	finishPhase = startIterationPhase(t, iterationColdIntentOracle, sourceLedgers)
 	// Reopen without the admission engine's page/pack caches. Authenticate every
 	// record through its persisted intent key at the independently loaded head.
 	reader, err := Open(ctx, Options{
@@ -175,7 +187,9 @@ func TestUploadBatchLargeMetadataAdmission(t *testing.T) {
 		}
 		seenIDs[record.UploadID] = true
 	}
+	finishPhase(true)
 	fixture.fileLedger.Reset()
+	finishPhase = startIterationPhase(t, iterationAdmissionReplay, sourceLedgers)
 	replayed, err := reader.Files().CreateUploadBatch(ctx, fixture.scope, requests)
 	if err != nil || len(replayed) != len(capabilities) {
 		t.Fatalf("replay = %d capabilities, %v", len(replayed), err)
@@ -197,5 +211,6 @@ func TestUploadBatchLargeMetadataAdmission(t *testing.T) {
 	// Restore the admitted input after the negative probe; reuse this exact
 	// already-verified fixture for canonical multi-pack checkpoint portability.
 	requests[0].Size--
+	finishPhase(true)
 	reviewLargeMetadataCheckpointRawCopy(t, fixture, requests, capabilities)
 }

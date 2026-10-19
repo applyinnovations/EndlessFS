@@ -17,14 +17,17 @@ import (
 )
 
 func TestE2EUploadPreparingCreditsCompletedSiblingsAndReconnectsExpiredPage(t *testing.T) {
+	parallelE2EFixture(t)
 	runPreparingExpiredRecovery(t, 0)
 }
 
 func TestE2EUploadExpiredRetryWaitsForDurableIdentity(t *testing.T) {
+	parallelE2EFixture(t)
 	runPreparingExpiredRecovery(t, 1)
 }
 
 func TestE2EUploadExpiredRetryWaitsForDurableAdmissionKey(t *testing.T) {
+	parallelE2EFixture(t)
 	runPreparingExpiredRecovery(t, 2)
 }
 

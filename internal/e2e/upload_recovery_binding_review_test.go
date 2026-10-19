@@ -17,6 +17,7 @@ import (
 // Matching controls prove the fixture can complete, including a real one-byte
 // browser fetch; mismatched nested IDs must stop before consuming that result.
 func TestE2EUploadRecoveryRejectsMisboundNestedIDsBeforeProgressOrData(t *testing.T) {
+	parallelE2EFixture(t)
 	requireSmartRecoveryE2E(t)
 	for _, nested := range []string{"status", "capability"} {
 		for _, valid := range []bool{true, false} {

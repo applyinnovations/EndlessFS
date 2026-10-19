@@ -31,6 +31,7 @@ type responseCapacityBackend struct {
 }
 
 func TestE2EUploadResponseCapacityTerminalAttemptCanBeCleared(t *testing.T) {
+	parallelE2EFixture(t)
 	requireSmartRecoveryE2E(t)
 	var admissions atomic.Int64
 	writes := &smartRecoveryWrites{byIndex: make(map[int]int)}
@@ -122,6 +123,7 @@ func (backend recordedResponseCapacityBackend) BeginUpload(ctx context.Context, 
 }
 
 func TestE2EUploadResponseCapacityCancelsDeferredReplyForReplacedAttempt(t *testing.T) {
+	parallelE2EFixture(t)
 	requireSmartRecoveryE2E(t)
 	type admissionItem struct {
 		domain.UploadAdmissionResult
@@ -375,6 +377,7 @@ func TestE2EUploadResponseCapacityCancelsDeferredReplyForReplacedAttempt(t *test
 }
 
 func TestE2EUploadResponseCapacityKeepsAdmissionAndRecoversOnlyDeferred(t *testing.T) {
+	parallelE2EFixture(t)
 	for _, fixture := range []struct {
 		name       string
 		padding    int

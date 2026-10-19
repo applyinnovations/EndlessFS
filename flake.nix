@@ -27,6 +27,116 @@
             hash = "sha256-lzXX3Ntls10/pXfwQGRzfAO4nPGitx5uaf4vPG+f1Mo=";
           };
         });
+      # Disposable compiler artifacts only. No application source or test run
+      # enters this seed; import preflight remains an independent fail-fast gate.
+      dependencyCompileCacheFor =
+        pkgs: moduleClosure:
+        let
+          go = goFor pkgs;
+          goMod = builtins.path {
+            path = ./go.mod;
+            name = "endlessfs-go.mod";
+          };
+          goSum = builtins.path {
+            path = ./go.sum;
+            name = "endlessfs-go.sum";
+          };
+          helper = builtins.path {
+            path = ./tools/cache-seed/main.go;
+            name = "endlessfs-cache-seed.go";
+          };
+        in
+        pkgs.runCommand "endlessfs-dependency-compile-cache-v3"
+          {
+            nativeBuildInputs = [
+              go
+              pkgs.stdenv.cc
+            ];
+          }
+          ''
+            export GOCACHE="$TMPDIR/go-cache"
+            export GOMODCACHE="$TMPDIR/go-mod-cache"
+            export GOENV=off GOWORK=off GOTOOLCHAIN=local
+            export GOPROXY=off GOSUMDB=off GOFLAGS=-mod=vendor
+            mkdir -p source
+            # Go's module-index action keys include source file mtimes. Keep
+            # the immutable inputs' timestamps instead of build-time copies.
+            # Timestamps-only avoids preserving foreign ownership or modes.
+            ${pkgs.coreutils}/bin/cp --preserve=timestamps ${goMod} source/go.mod
+            ${pkgs.coreutils}/bin/cp --preserve=timestamps ${goSum} source/go.sum
+            ${pkgs.coreutils}/bin/cp --preserve=timestamps -R ${moduleClosure} source/vendor
+            chmod -R u+w source
+            cd source
+            CGO_ENABLED=0 go build -p "''${NIX_BUILD_CORES:-1}" std
+            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              CGO_ENABLED=0 go build -p "''${NIX_BUILD_CORES:-1}" ./vendor/...
+            ''}
+            CGO_ENABLED=1 go build -p "''${NIX_BUILD_CORES:-1}" -race std
+            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              CGO_ENABLED=1 go build -p "''${NIX_BUILD_CORES:-1}" -race ./vendor/...
+            ''}
+
+            # All Go commands finish before the pinned metadata normalizer.
+            # This helper has no application imports and uses the same compiler.
+            mkdir -p "$out/bin"
+            CGO_ENABLED=0 go build -o "$out/bin/cache-seed" ${helper}
+            "$out/bin/cache-seed" normalize "$GOCACHE"
+            cp -R "$GOCACHE" "$out/cache"
+            printf '%s\n' ${
+              pkgs.lib.escapeShellArg (
+                builtins.toJSON {
+                  schema = 1;
+                  compiler = toString go;
+                  nativeCompiler = toString pkgs.stdenv.cc;
+                  vendor = toString moduleClosure;
+                  vendorCompiled = pkgs.stdenv.hostPlatform.isLinux;
+                  goMod = toString goMod;
+                  goSum = toString goSum;
+                  helper = toString helper;
+                  normal = {
+                    cgo = 0;
+                    flags = [ "-mod=vendor" ];
+                  };
+                  race = {
+                    cgo = 1;
+                    flags = [
+                      "-mod=vendor"
+                      "-race"
+                    ];
+                  };
+                  actionMetadata = "go1.26-v1-175bytes-time-zero";
+                  sourceCopy = "preserve-retained-input-timestamps";
+                  installation = "private-copy-close-atomic-link-noreplace-v2";
+                }
+              )
+            } > "$out/seed-inputs.json"
+          '';
+      installDependencyCompileCache = seed: scratch: ''
+        # Retain the caller's existing GOCACHE and its warm application
+        # entries. Atomically publish complete private copies without replace;
+        # never hardlink the source, chmod warm files, or write through the store.
+        if ! endlessfs_seed_cache="$(go env GOCACHE 2>/dev/null)"; then
+          endlessfs_seed_cache="lookup_failed"
+        fi
+        if [[ "$endlessfs_seed_cache" == /* ]]; then
+          # No stamp: Go may trim individual entries between invocations.
+          # The Go installer preserves existing files and executable bits.
+          if ! ${seed}/bin/cache-seed install ${seed}/cache "$endlessfs_seed_cache"; then
+            # Seeding is optional. Do not chmod, repair or reuse a rejected
+            # destination; run every original check in private fresh scratch.
+            endlessfs_fresh_cache="$(mktemp -d "${scratch}/endlessfs-fresh-compile.XXXXXX")"
+            export GOCACHE="$endlessfs_fresh_cache"
+            echo "dependency compilation seed: unavailable_fresh_compilation"
+          fi
+        elif [[ "$endlessfs_seed_cache" == "lookup_failed" ]]; then
+          endlessfs_fresh_cache="$(mktemp -d "${scratch}/endlessfs-fresh-compile.XXXXXX")"
+          export GOCACHE="$endlessfs_fresh_cache"
+          echo "dependency compilation seed: lookup_failed_fresh_compilation"
+        else
+          # In particular, preserve an explicitly disabled GOCACHE=off.
+          echo "dependency compilation seed: skipped_disabled_or_nonabsolute_cache"
+        fi
+      '';
       vulndbFor =
         pkgs:
         pkgs.runCommand "endlessfs-go-vulnerability-database" { nativeBuildInputs = [ (goFor pkgs) ]; } ''
@@ -345,6 +455,7 @@
             };
 
           endlessfs = lib.makeOverridable mkEndlessFS { };
+          dependencyCompileCache = dependencyCompileCacheFor pkgs endlessfs.goModules;
 
           linuxArchitecture = if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "amd64";
           linuxSystem = if pkgs.stdenv.hostPlatform.isAarch64 then "aarch64-linux" else "x86_64-linux";
@@ -593,6 +704,7 @@
         in
         {
           default = endlessfs;
+          dependency-compile-cache = dependencyCompileCache;
           inherit container release;
           container-images = container;
           release-images = release;
@@ -751,22 +863,26 @@
             go test ./internal/providerbudget ./internal/objectstore/budgettest ./internal/objectstore/gcs -count=1
             go test ${providerBudgetPackages} -run '${providerBudgetTestPattern}' -count=1
           '';
-          test-migration = mkTask "endlessfs-test-migration" (goTools ++ [ pkgs.gawk ]) ''
+          test-migration = mkTask "endlessfs-test-migration" (goTools ++ [ pkgs.nix ]) ''
             export CGO_ENABLED=0
             export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
             export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
-            candidate="''${1:-}"
-            if [ -n "$candidate" ]; then
-              export ENDLESSFS_MIGRATION_CANDIDATE_RELEASE="$candidate"
+            if [ "$#" -gt 1 ]; then
+              echo "test-migration accepts one optional candidate release" >&2
+              exit 1
             fi
-            profile="$(mktemp "''${TMPDIR:-/tmp}/endlessfs-migration-coverage.XXXXXX")"
-            trap 'rm -f "$profile"' EXIT
-            # Run both owning packages in full. A name regex previously omitted
-            # migration implementations and semantic startup tests while still
-            # reporting a passing percentage over a partial production set.
-            go test -timeout=30m ./internal/portable ./cmd/endlessfs -count=1 \
-              -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
-            gawk -v only_group=migration -f tools/coverage.awk "$profile"
+            export ENDLESSFS_MIGRATION_CANDIDATE_RELEASE="''${1:-''${ENDLESSFS_MIGRATION_CANDIDATE_RELEASE:-}}"
+            ${self.apps.${system}.test-imports.program}
+            # Consume the same complete hermetic execution as the flake check.
+            # The explicit candidate string is a derivation input; arbitrary
+            # inherited build/test flags cannot satisfy this canonical gate.
+            # A successful immutable result can be reused, not relabeled fresh.
+            exec nix build --impure --no-link --print-build-logs --expr '
+              let f = builtins.getFlake "${self.outPath}";
+              in f.checks.${system}.migration.overrideAttrs (_: {
+                ENDLESSFS_MIGRATION_CANDIDATE_RELEASE = builtins.getEnv "ENDLESSFS_MIGRATION_CANDIDATE_RELEASE";
+              })
+            '
           '';
           test-replica = goTask "endlessfs-test-replica" ''
             exec go test ./internal/portable ./internal/objectstore/gcs \
@@ -832,6 +948,7 @@
                 cd "$coverage_root/source"
                 export GOFLAGS=-mod=vendor
                 profile="$coverage_root/endlessfs-coverage.out"
+                ${installDependencyCompileCache packages.dependency-compile-cache "$coverage_root"}
                 go test -timeout=30m ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
                 if [ -n "''${ENDLESSFS_COVERAGE_PROFILE:-}" ]; then
                   install -m 0644 "$profile" "$ENDLESSFS_COVERAGE_PROFILE"
@@ -925,7 +1042,19 @@
             pkgs.jq
           ] (dependencyPolicyCommand packages.default.goModules);
 
-          pr-check = mkTask "endlessfs-pr-check" qualityTools ''
+          test-imports = mkTask "endlessfs-test-imports" [ pkgs.nix pkgs.git ] ''
+            if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+              untracked_go="$(git ls-files --others --exclude-standard -- '*.go')"
+              if [ -n "$untracked_go" ]; then
+                echo "Stage newly added Go source before the Git-flake import preflight." >&2
+                exit 1
+              fi
+            fi
+            exec nix build '.#checks.${system}.test-imports' --no-link --print-build-logs "$@"
+          '';
+
+          pr-check = mkTask "endlessfs-pr-check" (qualityTools ++ [ pkgs.nix ]) ''
+            ${self.apps.${system}.test-imports.program}
             export CGO_ENABLED=0
             unformatted="$(gofmt -l .)"
             if [ -n "$unformatted" ]; then
@@ -1115,6 +1244,9 @@
                 cp -R ${self.packages.${system}.default.goModules} source/vendor
                 cd source
                 export GOFLAGS=-mod=vendor
+                ${lib.optionalString (name != "test-imports") (
+                  installDependencyCompileCache self.packages.${system}.dependency-compile-cache "$TMPDIR"
+                )}
                 ${command}
                 touch "$out"
               '';
@@ -1122,12 +1254,24 @@
             name: command: tools:
             goCheckWithSource name testSource command tools;
           testSuite = goCheck "tests" "go test -timeout=30m ./..." [ ];
-          migrationCheck = goCheck "migration" ''
-            profile="$TMPDIR/migration-coverage.out"
-            go test -timeout=30m ./internal/portable ./cmd/endlessfs -count=1 \
-              -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
-            gawk -v only_group=migration -f tools/coverage.awk "$profile"
-          '' [ pkgs.gawk ];
+          testImportCheck = goCheck "test-imports" ''
+            # Resolve actual retained test imports before any expensive test.
+            # A host module cache must not hide a missing vendored subpackage.
+            export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local GOWORK=off
+            CGO_ENABLED=0 go list -deps -test ./... >/dev/null
+            CGO_ENABLED=1 go list -race -deps -test ./... >/dev/null
+            echo "retained normal/race test imports: ok (no tests executed)"
+          '' [ pkgs.stdenv.cc ];
+          migrationCheck =
+            (goCheck "migration" ''
+              profile="$TMPDIR/migration-coverage.out"
+              go test -timeout=30m ./internal/portable ./cmd/endlessfs -count=1 \
+                -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
+              gawk -v only_group=migration -f tools/coverage.awk "$profile"
+            '' [ pkgs.gawk ]).overrideAttrs
+              (_: {
+                ENDLESSFS_MIGRATION_CANDIDATE_RELEASE = "";
+              });
           providerEconomicsCheck = goCheck "provider-economics" ''
             go test ./internal/providerbudget ./internal/objectstore/budgettest ./internal/objectstore/gcs -count=1
             go test ${providerBudgetPackages} -run '${providerBudgetTestPattern}' -count=1
@@ -1163,13 +1307,21 @@
                 done
                 for program in \
                   ${self.apps.${system}.test.program} \
-                  ${self.apps.${system}.test-migration.program} \
                   ${self.apps.${system}.test-coverage.program}; do
                   rg --fixed-strings --quiet 'go test -timeout=30m' "$program" || {
                     echo "long-running Go test gate must use the explicit 30-minute process deadline: $program" >&2
                     exit 1
                   }
                 done
+                # Migration's public command now consumes the exact check, so
+                # validate both that binding and the check's actual build code.
+                migration_program=${self.apps.${system}.test-migration.program}
+                rg --fixed-strings --quiet 'f.checks.${system}.migration.overrideAttrs' "$migration_program"
+                rg --fixed-strings --quiet 'ENDLESSFS_MIGRATION_CANDIDATE_RELEASE = builtins.getEnv "ENDLESSFS_MIGRATION_CANDIDATE_RELEASE";' "$migration_program"
+                printf '%s\n' ${lib.escapeShellArg migrationCheck.buildCommand} > migration-build.sh
+                rg --fixed-strings --quiet 'go test -timeout=30m ./internal/portable ./cmd/endlessfs -count=1' migration-build.sh
+                rg --fixed-strings --quiet -- '-covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"' migration-build.sh
+                rg --fixed-strings --quiet 'gawk -v only_group=migration -f tools/coverage.awk "$profile"' migration-build.sh
                 race_program=${self.apps.${system}.test-race.program}
                 for required in \
                   "portable_migration_tests='^TestMigration'" \
@@ -1311,6 +1463,7 @@
           pipeline-policy = pipelinePolicyCheck;
 
           tests = testSuite;
+          test-imports = testImportCheck;
           integration = testSuite;
           contract = testSuite;
           migration = migrationCheck;

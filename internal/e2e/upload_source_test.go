@@ -16,6 +16,7 @@ import (
 )
 
 func TestE2EUploadSourceBufferBudgetAndCancellation(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -63,6 +64,7 @@ func TestE2EUploadSourceBufferBudgetAndCancellation(t *testing.T) {
 }
 
 func TestE2EUploadStalledSourceDoesNotBlockVerifiedFiles(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -120,6 +122,7 @@ func TestE2EUploadStalledSourceDoesNotBlockVerifiedFiles(t *testing.T) {
 }
 
 func TestE2EUploadSourceReadFailureReleasesBudgetAndRequestsReconnection(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -155,6 +158,7 @@ func TestE2EUploadSourceReadFailureReleasesBudgetAndRequestsReconnection(t *test
 }
 
 func TestE2EUploadSourceBackpressureRemainsResponsiveAndCompletes(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -207,6 +211,7 @@ func TestE2EUploadSourceBackpressureRemainsResponsiveAndCompletes(t *testing.T) 
 }
 
 func TestE2EUploadVerifiedFilesPublishWhileOtherAcknowledgementsContinue(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}

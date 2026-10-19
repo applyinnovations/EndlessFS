@@ -36,6 +36,7 @@ import (
 // produced by the application. The injected denial prevents three accepted
 // capabilities from reaching the browser; their data has never been sent.
 func TestE2ESmartRecoveryPersistsPartialUploadAcrossRefreshAndLogin(t *testing.T) {
+	parallelE2EFixture(t)
 	requireSmartRecoveryE2E(t)
 	for _, projection := range []string{"cold", "rebuilt", "warm"} {
 		t.Run(projection, func(t *testing.T) { runSmartRecoveryPartialUpload(t, projection) })
@@ -160,6 +161,7 @@ func runSmartRecoveryPartialUpload(t *testing.T, projection string) {
 }
 
 func TestE2ESmartRecoveryResumesOnlyUnconfirmedBytesAfterRefreshLogin(t *testing.T) {
+	parallelE2EFixture(t)
 	requireSmartRecoveryE2E(t)
 	const firstChunk = 8 << 20
 	body := bytes.Repeat([]byte{'q'}, firstChunk+17)
@@ -288,6 +290,7 @@ func TestE2ESmartRecoveryResumesOnlyUnconfirmedBytesAfterRefreshLogin(t *testing
 // source is ambiguous by size but differs by content, forcing local hashing,
 // exact planning, admission, real provider data transfer and verified completion.
 func TestE2ESmartRecoveryProductionCardinalityWarmTransfersOnlyRemainingFiles(t *testing.T) {
+	parallelE2EFixture(t)
 	requireSmartRecoveryE2E(t)
 	testStarted := time.Now()
 	const total, completed, remaining = 10_604, 7_966, 2_638

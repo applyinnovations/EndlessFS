@@ -21,6 +21,7 @@ const (
 	NamespacePublish
 	ResponseWrite
 	MetadataAdmission
+	MetadataMaterialize
 )
 
 type Reason uint8
@@ -39,7 +40,7 @@ const (
 	TransportFailure
 )
 
-var stageNames = [...]string{"unknown", "request_validation", "namespace_read", "projection_build", "projection_publish", "target_lookup", "snapshot_check", "namespace_publish", "response_write", "metadata_admission"}
+var stageNames = [...]string{"unknown", "request_validation", "namespace_read", "projection_build", "projection_publish", "target_lookup", "snapshot_check", "namespace_publish", "response_write", "metadata_admission", "metadata_materialize"}
 var reasonNames = [...]string{"unknown", "validation", "corrupt_metadata", "pack_capacity", "pack_collision", "snapshot_stale", "provider_failure", "canceled", "internal", "deadline", "transport_failure"}
 
 type diagnosticError struct {

@@ -108,7 +108,7 @@ func (session *consistencyDomainTreeSession) loadPack(ctx context.Context, packI
 		var err error
 		cacheable := false
 		if cached {
-			decoded, err = storageformat.DecodeProvenDomainPagePack(ctx, body, session.reference.ID, session.reference.Kind, packID, proof)
+			decoded, err = storageformat.DecodeProvenDomainPagePackWithDecodedMemo(ctx, body, session.reference.ID, session.reference.Kind, packID, proof)
 		} else {
 			object, fetchErr := session.store.backend.Get(ctx, key)
 			if fetchErr != nil {
@@ -117,11 +117,12 @@ func (session *consistencyDomainTreeSession) loadPack(ctx context.Context, packI
 			body = object.Body
 			cacheable = session.store.packReads.cacheable(ctx, len(body))
 			if cacheable {
-				decoded, body, proof, err = storageformat.DecodeDomainPagePackWithWireProof(ctx, body, session.reference.ID, session.reference.Kind, packID)
+				decoded, body, proof, err = storageformat.DecodeDomainPagePackWithDecodedMemo(ctx, body, session.reference.ID, session.reference.Kind, packID)
 			} else {
-				// Startup, maintenance and disabled/oversized caches still use
-				// complete fresh provider verification and issue no idle memo.
-				decoded, err = storageformat.DecodeDomainPagePack(ctx, body, session.reference.ID, session.reference.Kind, packID)
+				// This branch still performs the actual fresh GET above and
+				// admits no idle wire/proof. Only the pure exact-wire decoder
+				// result may be reused; it cannot prove provider presence.
+				decoded, _, _, err = storageformat.DecodeDomainPagePackWithDecodedMemo(ctx, body, session.reference.ID, session.reference.Kind, packID)
 			}
 		}
 		if err != nil {

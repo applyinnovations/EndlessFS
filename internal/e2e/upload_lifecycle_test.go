@@ -50,6 +50,7 @@ func readUploadCompletionActionPage(t *testing.T, r *http.Request) []domain.Uplo
 }
 
 func TestE2EUploadAdmissionIgnoresReplyForReplacedAttempt(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -173,6 +174,7 @@ func TestE2EUploadAdmissionIgnoresReplyForReplacedAttempt(t *testing.T) {
 }
 
 func TestE2EUploadActionsRetryOnlyRejectedFinalizationWithoutResendingData(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -293,6 +295,7 @@ func expiredRecoveryPage(t *testing.T, w http.ResponseWriter, r *http.Request) {
 }
 
 func TestE2EUploadRecoveryRejectsChangedReconnectedSourceBeforeData(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -344,6 +347,7 @@ func TestE2EUploadRecoveryRejectsChangedReconnectedSourceBeforeData(t *testing.T
 }
 
 func TestE2EUploadRecoveryRequestBudgetAndBoundedRendering(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -388,6 +392,7 @@ func TestE2EUploadRecoveryRequestBudgetAndBoundedRendering(t *testing.T) {
 }
 
 func TestE2EUploadRecoveryCancelledItemCannotBeResurrectedBySharedPage(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}

@@ -23,6 +23,7 @@ import (
 )
 
 func TestE2EUploadAdmissionWaitsForNamespaceTurnWithoutBlockingData(t *testing.T) {
+	parallelE2EFixture(t)
 	requireSmartRecoveryE2E(t)
 	planStarted, planRelease := make(chan struct{}), make(chan struct{})
 	actionStarted, actionRelease := make(chan struct{}), make(chan struct{})
@@ -156,6 +157,7 @@ func TestE2EUploadAdmissionWaitsForNamespaceTurnWithoutBlockingData(t *testing.T
 }
 
 func TestE2EQueuedUploadAdmissionPreservesCancellationAndReleasesTurn(t *testing.T) {
+	parallelE2EFixture(t)
 	requireSmartRecoveryE2E(t)
 	for _, mode := range []string{"cancel-all", "cancel-one", "logout"} {
 		t.Run(mode, func(t *testing.T) {

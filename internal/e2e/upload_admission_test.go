@@ -25,6 +25,7 @@ import (
 )
 
 func TestE2EUploadIndependentAdmissionRetriesOnlyFailedItem(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("Nix test-e2e enables Chromium")
 	}
@@ -107,6 +108,7 @@ func TestE2EUploadIndependentAdmissionRetriesOnlyFailedItem(t *testing.T) {
 }
 
 func TestE2EUploadIndependentAdmissionReloadsAfterLostReply(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("Nix test-e2e enables Chromium")
 	}
@@ -222,10 +224,12 @@ func TestE2EUploadIndependentAdmissionReloadsAfterLostReply(t *testing.T) {
 }
 
 func TestE2EUploadIndependentAdmissionRetriesRollingRouteGap(t *testing.T) {
+	parallelE2EFixture(t)
 	runAdmissionTransientReply(t, http.StatusMethodNotAllowed, 3)
 }
 
 func TestE2EUploadIndependentAdmissionCoalescesPageRetries(t *testing.T) {
+	parallelE2EFixture(t)
 	runAdmissionTransientReply(t, http.StatusServiceUnavailable, 100)
 }
 
@@ -310,6 +314,7 @@ func runAdmissionTransientReply(t *testing.T, status, count int) {
 }
 
 func TestE2EUploadIndependentAdmissionMultiplePagesPreserveEveryItem(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("Nix test-e2e enables Chromium")
 	}
@@ -388,6 +393,7 @@ func TestE2EUploadIndependentAdmissionMultiplePagesPreserveEveryItem(t *testing.
 }
 
 func TestE2EUploadLegacyAdmissionLedgerRetainsExactEnvelope(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("Nix test-e2e enables Chromium")
 	}
@@ -469,6 +475,7 @@ func TestE2EUploadLegacyAdmissionLedgerRetainsExactEnvelope(t *testing.T) {
 }
 
 func TestE2EUploadIndependentAdmissionExplicitReplanRenewsOnlyRejectedAttempt(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("Nix test-e2e enables Chromium")
 	}

@@ -67,6 +67,7 @@ const (
 	WireUnknown
 	DirectoryPreparation
 	MetadataPackAdmission
+	MetadataPackMaterialize
 	operationCount
 )
 
@@ -143,6 +144,7 @@ var operationNames = [...]string{
 	"provider.http.unknown",
 	"directory.prepare",
 	"metadata.pack.admission",
+	"metadata.pack.materialize",
 }
 var roleNames = [...]string{
 	"application",

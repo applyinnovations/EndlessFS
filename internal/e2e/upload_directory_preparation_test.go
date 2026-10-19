@@ -22,6 +22,7 @@ import (
 )
 
 func TestE2EUploadDirectoryPreparationPagesOverlapIndependentSiblings(t *testing.T) {
+	parallelE2EFixture(t)
 	requireSmartRecoveryE2E(t)
 	const count = 450 // 901 selected directories: root, siblings and their children.
 	var calls, active, peak atomic.Int64
@@ -160,6 +161,7 @@ func TestE2EUploadDirectoryPreparationPagesOverlapIndependentSiblings(t *testing
 }
 
 func TestE2EUploadDirectoryPreparationReplaysOneBoundedPage(t *testing.T) {
+	parallelE2EFixture(t)
 	requireSmartRecoveryE2E(t)
 	for _, mode := range []string{"rolling-route-gap", "lost-success", "exhausted-route-gap"} {
 		t.Run(mode, func(t *testing.T) {
@@ -250,6 +252,7 @@ func TestE2EUploadDirectoryPreparationReplaysOneBoundedPage(t *testing.T) {
 }
 
 func TestE2EUploadDirectoryPreparationCancellationReleasesNamespaceQueue(t *testing.T) {
+	parallelE2EFixture(t)
 	requireSmartRecoveryE2E(t)
 	for _, mode := range []string{"backoff-logout", "inflight-logout", "backoff-cancel", "backoff-queued-empty-logout"} {
 		t.Run(mode, func(t *testing.T) {

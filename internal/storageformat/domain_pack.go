@@ -119,6 +119,18 @@ func DecodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID str
 }
 
 func decodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID string, expectedKind ConsistencyDomainKind, expectedPackID string, proof *DomainPagePackWireProof, ownedWire *[]byte) (outcome DomainPagePack, err error) {
+	release, err := admitDomainPagePackDecode(ctx)
+	if err != nil {
+		return DomainPagePack{}, err
+	}
+	defer release()
+	return decodeDomainPagePackAdmitted(ctx, data, expectedDomainID, expectedKind, expectedPackID, proof, ownedWire)
+}
+
+// Only package-owned decoding/materialization wrappers call this helper and
+// defer the returned release. The process-wide single slot and closed
+// admission telemetry remain identical for strict and snapshot-backed callers.
+func admitDomainPagePackDecode(ctx context.Context) (func(), error) {
 	_, admission := telemetry.Start(ctx, telemetry.MetadataPackAdmission, telemetry.State)
 	admissionFailure := func(cause error) error {
 		reason := telemetry.ContextCanceled
@@ -130,15 +142,20 @@ func decodeDomainPagePack(ctx context.Context, data []byte, expectedDomainID str
 		return err
 	}
 	if err := ctx.Err(); err != nil {
-		return DomainPagePack{}, admissionFailure(err)
+		return nil, admissionFailure(err)
 	}
 	select {
 	case domainPagePackDecodeSlot <- struct{}{}:
-		defer func() { <-domainPagePackDecodeSlot }()
 		admission.End(nil)
+		return func() { <-domainPagePackDecodeSlot }, nil
 	case <-ctx.Done():
-		return DomainPagePack{}, admissionFailure(ctx.Err())
+		return nil, admissionFailure(ctx.Err())
 	}
+}
+
+// The caller must hold domainPagePackDecodeSlot. The original strict decoder
+// continues to enter here without a decoded memo; its validation is unchanged.
+func decodeDomainPagePackAdmitted(ctx context.Context, data []byte, expectedDomainID string, expectedKind ConsistencyDomainKind, expectedPackID string, proof *DomainPagePackWireProof, ownedWire *[]byte) (outcome DomainPagePack, err error) {
 	_, activity := telemetry.Start(ctx, telemetry.MetadataPackDecode, telemetry.State)
 	defer telemetry.Finish(activity, &err)
 	activity.Bytes(int64(len(data)), 0)

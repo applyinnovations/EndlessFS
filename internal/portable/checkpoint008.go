@@ -162,7 +162,7 @@ func (e *Engine) validateConsistencyDomainClosureForSchema(ctx context.Context, 
 		}
 	}
 	if reference.Kind != storageformat.DomainNamespace {
-		return e.validateKnownControlDomainValuesForSchema(ctx, reference, head, schema009)
+		return session.validateKnownControlDomainValuesForSchema(ctx, head, schema009)
 	}
 	owner, err := domain.ParseUserID(reference.ID)
 	if err != nil {
@@ -198,7 +198,7 @@ func (e *Engine) validateConsistencyDomainClosureForSchema(ctx context.Context, 
 	if err := e.validateNamespaceOutcomeClosureForSchema(ctx, session, head.Outcomes, schema009); err != nil {
 		return err
 	}
-	return e.validateKnownControlDomainValuesForSchema(ctx, reference, head, schema009)
+	return session.validateKnownControlDomainValuesForSchema(ctx, head, schema009)
 }
 
 func (e *Engine) validateKnownControlDomainValues(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead) error {
@@ -207,6 +207,17 @@ func (e *Engine) validateKnownControlDomainValues(ctx context.Context, reference
 
 func (e *Engine) validateKnownControlDomainValuesForSchema(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead, schema009 bool) error {
 	session := newConsistencyDomainTreeSession(e.stateDomainStore(), reference)
+	return session.validateKnownControlDomainValuesForSchema(ctx, head, schema009)
+}
+
+// The full closure walk has already strictly read every Base pack in this
+// operation. Reuse that same session for typed pagination and cross-references,
+// which access only this fixed Base and its inline deltas. A standalone call
+// above still starts a fresh session; the subsequent checkpoint reachability
+// and inventory proof independently rereads durable authority without idle
+// caches. Reuse adds no decoded-pack retention set to the full closure walk.
+func (session *consistencyDomainTreeSession) validateKnownControlDomainValuesForSchema(ctx context.Context, head storageformat.DomainHead, schema009 bool) error {
+	reference, store := session.reference, session.store
 	var namespaceOwner domain.UserID
 	if reference.Kind == storageformat.DomainNamespace {
 		var err error
@@ -217,7 +228,7 @@ func (e *Engine) validateKnownControlDomainValuesForSchema(ctx context.Context, 
 	}
 	after := ""
 	for {
-		values, err := e.stateDomainStore().listAtHead(ctx, reference, head, "", after, domainPageMaximumItems)
+		values, err := store.listAtHeadWithSession(ctx, reference, head, "", after, domainPageMaximumItems, session)
 		if err != nil {
 			return err
 		}
@@ -236,7 +247,7 @@ func (e *Engine) validateKnownControlDomainValuesForSchema(ctx context.Context, 
 					if err := decodeCanonicalValue(value.Value, &record); err != nil || storageformat.ValidatePortableUploadIdempotency(record) != nil || record.OwnerID != reference.ID || value.Key != "upload-idempotency/"+record.KeyDigest {
 						return domain.NewError(domain.ErrorInvalid, "invalid portable upload idempotency in checkpoint closure")
 					}
-					upload, found, err := e.stateDomainStore().lookupAtHeadWithSession(ctx, reference, head, uploadRecordKey(record.UploadID), session)
+					upload, found, err := store.lookupAtHeadWithSession(ctx, reference, head, uploadRecordKey(record.UploadID), session)
 					if err != nil {
 						return err
 					}
@@ -253,7 +264,7 @@ func (e *Engine) validateKnownControlDomainValuesForSchema(ctx context.Context, 
 					}
 					for index := uint64(0); index < abort.Count; index++ {
 						uploadID := uploadBatchMemberID(abort.BatchID, index)
-						upload, found, err := e.stateDomainStore().lookupAtHeadWithSession(ctx, reference, head, uploadRecordKey(uploadID), session)
+						upload, found, err := store.lookupAtHeadWithSession(ctx, reference, head, uploadRecordKey(uploadID), session)
 						if err != nil {
 							return err
 						}

@@ -37,6 +37,8 @@ func reviewLargeMetadataCheckpointRawCopy(t *testing.T, f uploadBatchScaleFixtur
 	// No capability expiry or receipt-retention clock is advanced for this proof.
 	cancellation := domain.AbortUploadBatchRequest{UploadIDs: ids, IdempotencyKey: "closure-checkpoint-terminal-records"}
 	f.fileLedger.Reset()
+	sourceLedgers := [4]*providerbudget.Ledger{f.stateLedger, f.fileLedger, nil, nil}
+	finishPhase := startIterationPhase(t, iterationTerminalization, sourceLedgers)
 	if err := f.engine.Files().AbortUploadBatch(ctx, f.scope, cancellation); err != nil {
 		t.Fatalf("materialize terminal application records: %v", err)
 	}
@@ -49,11 +51,17 @@ func reviewLargeMetadataCheckpointRawCopy(t *testing.T, f uploadBatchScaleFixtur
 			}
 		}
 	}
+	finishPhase(true)
+	finishPhase = startIterationPhase(t, iterationSourceIntentOracle, sourceLedgers)
 	terminalProofs := closureCheckpointReviewTerminalIntents(t, f.engine, f.scope, requests, capabilities, nil)
+	finishPhase(true)
+	finishPhase = startIterationPhase(t, iterationCheckpoint, sourceLedgers)
 	checkpoint, err := f.engine.CreateCheckpoint(ctx, "closure-real-multipack-copy")
 	if err != nil {
 		t.Fatalf("canonical application closure rejected terminal multi-pack authority: %v", err)
 	}
+	finishPhase(true)
+	finishPhase = startIterationPhase(t, iterationFrozenAuthorityOracle, sourceLedgers)
 	frozen, err := f.engine.stateDomainStore().loadHead(ctx, reference)
 	if err != nil || !frozen.head.Frozen {
 		t.Fatalf("checkpoint did not freeze owner authority: %v", err)
@@ -76,6 +84,9 @@ func reviewLargeMetadataCheckpointRawCopy(t *testing.T, f uploadBatchScaleFixtur
 	stateLedger, fileLedger := providerbudget.NewLedger(), providerbudget.NewLedger()
 	stateCopy := budgettest.Wrap(providerbudget.RoleState, stateBase, stateLedger)
 	fileCopy := budgettest.Wrap(providerbudget.RoleFile, fileBase, fileLedger)
+	finishPhase(true)
+	allLedgers := [4]*providerbudget.Ledger{f.stateLedger, f.fileLedger, stateLedger, fileLedger}
+	finishPhase = startIterationPhase(t, iterationRawCopy, allLedgers)
 	if _, err := stateCopy.Put(ctx, objectstore.MustKey("synthetic/native-version-shift"), []byte("shift"), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
 		t.Fatal(err)
 	}
@@ -136,13 +147,17 @@ func reviewLargeMetadataCheckpointRawCopy(t *testing.T, f uploadBatchScaleFixtur
 	if sourceHead.Version == targetHead.Version {
 		t.Fatal("raw copy did not shift native authority-head version")
 	}
+	finishPhase(true)
 	writer := WriterConfiguration{WriterSetID: "upload-scale", ConfigurationDigest: "upload-scale-v1", KeyringIdentifiers: []string{"key"}}
 	stateLedger.Reset()
 	fileLedger.Reset()
+	finishPhase = startIterationPhase(t, iterationSplitVerification, allLedgers)
 	if err := VerifyCheckpointReadOnlyWithFileBackend(ctx, stateCopy, fileCopy, writer, checkpoint.CheckpointID); err != nil {
 		t.Fatalf("read-only verification of split-backend raw copy: %v", err)
 	}
 	closureCheckpointReviewReadOnlyEvents(t, stateLedger.Events(), fileLedger.Events())
+	finishPhase(true)
+	finishPhase = startIterationPhase(t, iterationOpenCopy, allLedgers)
 	copied, err := Open(ctx, Options{
 		Backend: stateCopy, FileBackend: fileCopy, Clock: f.engine.clock,
 		IDs: domain.NewIDGenerator(&deterministicScaleReader{state: 0x67584931}), Writer: writer,
@@ -151,6 +166,8 @@ func reviewLargeMetadataCheckpointRawCopy(t *testing.T, f uploadBatchScaleFixtur
 	if err != nil {
 		t.Fatalf("open raw-copied canonical application authority: %v", err)
 	}
+	finishPhase(true)
+	finishPhase = startIterationPhase(t, iterationWarmChildRemoval, allLedgers)
 
 	// This is a child pack excluded from ALL three immediate root pack IDs.
 	// Warm the exact authenticated child descriptor, remove durable authority,
@@ -167,14 +184,18 @@ func reviewLargeMetadataCheckpointRawCopy(t *testing.T, f uploadBatchScaleFixtur
 	if err := stateCopy.Delete(ctx, missingKey, objectstore.DeleteCondition{Version: original.Version}); err != nil {
 		t.Fatal(err)
 	}
+	finishPhase(true)
 	stateLedger.Reset()
 	fileLedger.Reset()
+	finishPhase = startIterationPhase(t, iterationWarmChildControl, allLedgers)
 	if _, err := newConsistencyDomainTreeSession(store, reference).readPage(ctx, laterPage); err != nil {
 		t.Fatalf("ordinary fresh request did not prove the deleted child pack was warm: %v", err)
 	}
 	if len(stateLedger.Events()) != 0 || len(fileLedger.Events()) != 0 {
 		t.Fatal("warm child control issued provider work instead of using verified idle cache")
 	}
+	finishPhase(true)
+	finishPhase = startIterationPhase(t, iterationMissingChildVerification, allLedgers)
 	if err := copied.VerifyCheckpoint(ctx, checkpoint.CheckpointID); err == nil {
 		t.Fatal("warm idle cache hid missing non-root canonical checkpoint authority")
 	}
@@ -188,12 +209,16 @@ func reviewLargeMetadataCheckpointRawCopy(t *testing.T, f uploadBatchScaleFixtur
 		t.Fatal("checkpoint denial did not directly read the missing non-root pack")
 	}
 	closureCheckpointReviewReadOnlyEvents(t, stateLedger.Events(), fileLedger.Events())
+	finishPhase(true)
 	stateLedger.Reset()
 	fileLedger.Reset()
+	finishPhase = startIterationPhase(t, iterationIndependentMissingChildVerification, allLedgers)
 	if err := VerifyCheckpointReadOnlyWithFileBackend(ctx, stateCopy, fileCopy, writer, checkpoint.CheckpointID); err == nil {
 		t.Fatal("independent read-only verifier accepted the missing non-root pack")
 	}
 	closureCheckpointReviewReadOnlyEvents(t, stateLedger.Events(), fileLedger.Events())
+	finishPhase(true)
+	finishPhase = startIterationPhase(t, iterationRestoreClosedGate, allLedgers)
 	restoredVersion, err := stateCopy.Put(ctx, missingKey, original.Body, objectstore.PutCondition{Mode: objectstore.PutCreateOnly})
 	if err != nil {
 		t.Fatal(err)
@@ -205,8 +230,10 @@ func reviewLargeMetadataCheckpointRawCopy(t *testing.T, f uploadBatchScaleFixtur
 	if err != nil || gate.Mode != storageformat.GateClosed || gate.CheckpointID != checkpoint.CheckpointID || gate.Epoch != checkpoint.GateEpoch {
 		t.Fatalf("restored authority is not bound to its closed checkpoint gate: %v", err)
 	}
+	finishPhase(true)
 	stateLedger.Reset()
 	fileLedger.Reset()
+	finishPhase = startIterationPhase(t, iterationOpenWrites, allLedgers)
 	if err := copied.OpenWrites(ctx, checkpoint.CheckpointID); err != nil {
 		t.Fatalf("reopen verified raw copy: %v", err)
 	}
@@ -226,7 +253,11 @@ func reviewLargeMetadataCheckpointRawCopy(t *testing.T, f uploadBatchScaleFixtur
 	if !openingPut || err != nil || gate.Mode != storageformat.GateOpen || gate.CheckpointID != "" || gate.Epoch != checkpoint.GateEpoch+1 {
 		t.Fatalf("verified restoration did not reopen the canonical gate: successful_put=%t err=%v", openingPut, err)
 	}
+	finishPhase(true)
+	finishPhase = startIterationPhase(t, iterationCopiedIntentOracle, allLedgers)
 	closureCheckpointReviewTerminalIntents(t, copied, f.scope, requests, capabilities, terminalProofs)
+	finishPhase(true)
+	finishPhase = startIterationPhase(t, iterationCopiedReceiptOracle, allLedgers)
 	copiedView, err := newNamespaceStore(copied).loadView(ctx, f.scope.UserID(), "")
 	if err != nil {
 		t.Fatal(err)
@@ -239,8 +270,10 @@ func reviewLargeMetadataCheckpointRawCopy(t *testing.T, f uploadBatchScaleFixtur
 	if err != nil {
 		t.Fatal(err)
 	}
+	finishPhase(true)
 	stateLedger.Reset()
 	fileLedger.Reset()
+	finishPhase = startIterationPhase(t, iterationCopiedReplayOracle, allLedgers)
 	if err := copied.Files().AbortUploadBatch(ctx, f.scope, cancellation); err != nil {
 		t.Fatalf("retained public cancellation replay after raw copy: %v", err)
 	}
@@ -258,6 +291,7 @@ func reviewLargeMetadataCheckpointRawCopy(t *testing.T, f uploadBatchScaleFixtur
 	if err != nil || afterReplay.Version != beforeReplay.Version {
 		t.Fatalf("terminal replay or changed-intent denial republished owner authority: %v", err)
 	}
+	finishPhase(true)
 	t.Logf("canonical raw-copy closure: intents=%d frozen_reachable_packs=%d inventoried_authority_packs=%d terminal_receipts=1 missing_nonroot_denials=2", len(requests), len(packIDs), len(inventoryPacks))
 }
 

@@ -772,7 +772,7 @@ func newSmartRecoveryBrowser(t *testing.T) *testBrowser {
 			authenticationLog.requestFinished(failed.RequestID)
 		}
 	})
-	if err := chromedp.Run(ctx, network.Enable(), runtime.Enable(), emulation.SetDeviceMetricsOverride(800, 600, 1, false), chromedp.Navigate("about:blank"), cdpwebauthn.Enable(), chromedp.ActionFunc(func(ctx context.Context) error { _, err := addVirtualAuthenticator(ctx); return err })); err != nil {
+	if err := chromedp.Run(ctx, network.Enable(), runtime.Enable(), emulation.SetDeviceMetricsOverride(800, 600, 1, false), navigateLoopbackBrowser("about:blank"), cdpwebauthn.Enable(), chromedp.ActionFunc(func(ctx context.Context) error { _, err := addVirtualAuthenticator(ctx); return err })); err != nil {
 		t.Fatal(err)
 	}
 	return client
@@ -806,7 +806,7 @@ func refreshAndLoginSmartRecovery(t *testing.T, client *testBrowser, total int) 
 	authenticationLog := client.ctx.Value(smartRecoveryAuthenticationLogKey{}).(*smartRecoveryAuthenticationLog)
 	authenticationStart := authenticationLog.position()
 	var previousTimeOrigin float64
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(`performance.timeOrigin`, &previousTimeOrigin), chromedp.Reload()); err != nil {
+	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(`performance.timeOrigin`, &previousTimeOrigin), reloadLoopbackBrowser()); err != nil {
 		t.Fatalf("refresh command failed: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	refreshed := fmt.Sprintf(`performance.timeOrigin>%.6f&&document.readyState==='complete'&&document.querySelector('#loading-view').hidden&&!document.querySelector('#authenticated-view').hidden&&document.querySelector('#auth-view').hidden&&document.querySelector('#app').dataset.state==='authenticated'`, previousTimeOrigin)

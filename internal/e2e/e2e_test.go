@@ -66,7 +66,7 @@ func TestE2EUploadPlannerHashesMD5AndCRC32CInOneWorkerPass(t *testing.T) {
 	}
 	harness := newHarness(t)
 	client := newTestBrowser(t)
-	if err := chromedp.Run(client.ctx, chromedp.Navigate(harness.origin+"/")); err != nil {
+	if err := chromedp.Run(client.ctx, navigateLoopbackBrowser(harness.origin+"/")); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitFor(client.ctx, `typeof window.__endlessfsUploadPlannerTest === "object"`, 5*time.Second); err != nil {
@@ -154,7 +154,7 @@ func TestE2ERestoringTenThousandTransfersDoesNotBlockWorkspaceOrPollUploads(t *t
 
 	requestStart := len(client.requestSnapshot())
 	started := time.Now()
-	if err := chromedp.Run(client.ctx, chromedp.Navigate(harness.origin+"/")); err != nil {
+	if err := chromedp.Run(client.ctx, navigateLoopbackBrowser(harness.origin+"/")); err != nil {
 		t.Fatalf("reload massive transfer ledger: %v", err)
 	}
 	if err := waitFor(client.ctx, `document.querySelector("#loading-view").hidden && !document.querySelector("#authenticated-view").hidden`, 5*time.Second); err != nil {
@@ -191,7 +191,7 @@ func TestE2EUpstreamGCSWorkerPoolUploadsOneHundredFilesAndCoalescesRefresh(t *te
 	harness := newHarnessWithDataPlaneWrapper(t, false, uploadGate.wrap)
 	t.Cleanup(uploadGate.releaseAll)
 	client := newTestBrowser(t)
-	if err := chromedp.Run(client.ctx, chromedp.Navigate(harness.origin+"/")); err != nil {
+	if err := chromedp.Run(client.ctx, navigateLoopbackBrowser(harness.origin+"/")); err != nil {
 		t.Fatalf("open browser shell: %v", err)
 	}
 	if err := waitFor(client.ctx, `typeof window.__endlessfsUploadWorkerPoolTest === "object"`, 5*time.Second); err != nil {
@@ -368,7 +368,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	var authenticatorID cdpwebauthn.AuthenticatorID
 	// The first Run owns the browser allocation and therefore uses the parent
 	// context; cancelling a derived first-run context would terminate Chrome.
-	if err := chromedp.Run(ctx, network.Enable(), runtime.Enable(), cdplog.Enable(), chromedp.Navigate(harness.origin+"/bootstrap")); err != nil {
+	if err := chromedp.Run(ctx, network.Enable(), runtime.Enable(), cdplog.Enable(), navigateLoopbackBrowser(harness.origin+"/bootstrap")); err != nil {
 		t.Fatalf("launch browser: %v", err)
 	}
 	if err := runStage(ctx, 10*time.Second,
@@ -468,7 +468,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 			}).observe({type: "layout-shift", buffered: true});
 		`).Do(ctx)
 		return err
-	}), chromedp.Reload(), chromedp.WaitVisible("#drive-view", chromedp.ByQuery)); err != nil {
+	}), reloadLoopbackBrowser(), chromedp.WaitVisible("#drive-view", chromedp.ByQuery)); err != nil {
 		t.Fatalf("reload authenticated workspace for layout-shift proof: %v", err)
 	}
 	if err := waitFor(ctx, `document.querySelector("#loading-view").hidden && document.querySelector("#file-rows").dataset.itemCount !== undefined`, 10*time.Second); err != nil {
@@ -518,7 +518,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := waitFor(ctx, `document.querySelector("#preview-dialog").open && new URL(location.href).searchParams.get("file") === "/browser-proof.txt" && !new URL(location.href).searchParams.has("page")`, 5*time.Second); err != nil {
 		t.Fatalf("file preview did not enter canonical URL state: %v (%s)", err, browserStatus(ctx))
 	}
-	if err := chromedp.Run(ctx, chromedp.Reload()); err != nil {
+	if err := chromedp.Run(ctx, reloadLoopbackBrowser()); err != nil {
 		t.Fatalf("reload file preview URL state: %v", err)
 	}
 	if err := waitFor(ctx, `document.querySelector("#preview-dialog").open && document.querySelector("#preview-metadata").textContent.includes("/browser-proof.txt")`, 10*time.Second); err != nil {
@@ -694,7 +694,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	folderRequestStart := len(requestedURLs)
 	mu.Unlock()
 	if err := chromedp.Run(ctx,
-		chromedp.Navigate(harness.origin+"/"),
+		navigateLoopbackBrowser(harness.origin+"/"),
 		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
 		chromedp.Evaluate(`(() => {
 			window.__endlessfsTransferCountBeforeFolder = Number(document.querySelector("[data-transfer-count='all']")?.textContent.match(/\d+/)?.[0] || 0);
@@ -846,7 +846,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 
 	mediaPath := writeMediaFixture(t, "media-proof.png", 96, 48)
 	if err := chromedp.Run(ctx,
-		chromedp.Navigate(harness.origin+"/"),
+		navigateLoopbackBrowser(harness.origin+"/"),
 		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
 		chromedp.SetUploadFiles("#upload-input", []string{mediaPath}, chromedp.ByQuery),
 	); err != nil {
@@ -969,7 +969,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	}
 	harness.corruptPreview.Store(true)
 	if err := chromedp.Run(ctx,
-		chromedp.Navigate(harness.origin+"/"),
+		navigateLoopbackBrowser(harness.origin+"/"),
 		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
 		chromedp.Evaluate(`document.querySelector("#file-view-grid").click()`, nil),
 	); err != nil {
@@ -988,7 +988,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	directoryRequestsBeforeScale := countRequestPath(requestedURLs, "/api/v1/files")
 	mu.Unlock()
 	if err := chromedp.Run(ctx,
-		chromedp.Navigate(harness.origin+"/"),
+		navigateLoopbackBrowser(harness.origin+"/"),
 		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
 		chromedp.Evaluate(`document.querySelector("#file-view-grid").click()`, nil),
 	); err != nil {
@@ -1163,7 +1163,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	})()`, 10*time.Second); err != nil {
 		t.Fatalf("remaining items did not open the filtered detail view: %v (%s)", err, browserStatus(ctx))
 	}
-	if err := chromedp.Run(ctx, chromedp.Reload()); err != nil {
+	if err := chromedp.Run(ctx, reloadLoopbackBrowser()); err != nil {
 		t.Fatalf("reload remaining-items URL state: %v", err)
 	}
 	if err := waitFor(ctx, `document.querySelector("#app").dataset.state === "authenticated" && document.querySelector("#loading-view").hidden && document.querySelector("#file-view-list").checked && Number(document.querySelector("#filter-max-size").value) > 0 && document.querySelector("#file-sort").value === "size:desc" && !document.querySelector("#metadata-filters").closest("details").open && document.querySelector("#breadcrumbs").textContent.trim() === "Files"`, 10*time.Second); err != nil {
@@ -1224,7 +1224,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	var focusID string
 	if err := chromedp.Run(ctx,
 		emulation.SetDeviceMetricsOverride(320, 720, 1, false),
-		chromedp.Navigate(harness.origin+"/"),
+		navigateLoopbackBrowser(harness.origin+"/"),
 		chromedp.WaitVisible("#drive-view", chromedp.ByQuery),
 		chromedp.Evaluate(`document.documentElement.scrollWidth <= 320`, &fitsMobile),
 		chromedp.Evaluate(`Array.from(document.querySelectorAll("button:not([hidden])")).every((node) => (node.textContent || node.getAttribute("aria-label") || "").trim().length > 0)`, &namedControls),
@@ -1473,7 +1473,7 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 
 	member := newTestBrowser(t)
 	if err := chromedp.Run(member.ctx,
-		chromedp.Navigate(inviteLink),
+		navigateLoopbackBrowser(inviteLink),
 		chromedp.WaitVisible("#registration-view", chromedp.ByQuery),
 		chromedp.SendKeys("#display-name", "Invited Member"+kb.Tab+kb.Enter, chromedp.ByQuery),
 	); err != nil {
@@ -1600,7 +1600,7 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	if err := waitFor(member.ctx, `document.documentElement.dataset.theme === "endlessfs-light" && document.querySelector("#safe-theme").checked && new URL(location.href).searchParams.get("safe-theme") === "1"`, 10*time.Second); err != nil {
 		t.Fatalf("safe theme did not survive route navigation: %v (%s)", err, browserStatus(member.ctx))
 	}
-	if err := chromedp.Run(member.ctx, chromedp.Reload(), chromedp.WaitVisible("#settings-view", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(member.ctx, reloadLoopbackBrowser(), chromedp.WaitVisible("#settings-view", chromedp.ByQuery)); err != nil {
 		t.Fatalf("reload safe-theme settings: %v", err)
 	}
 	if err := waitFor(member.ctx, `document.documentElement.dataset.theme === "endlessfs-light" && document.querySelector("#safe-theme").checked`, 10*time.Second); err != nil {
@@ -1709,7 +1709,7 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 		t.Fatalf("read member share: %v", err)
 	}
 
-	if err := chromedp.Run(admin.ctx, chromedp.Navigate(harness.origin+"/admin"), chromedp.WaitVisible("#admin-view", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(admin.ctx, navigateLoopbackBrowser(harness.origin+"/admin"), chromedp.WaitVisible("#admin-view", chromedp.ByQuery)); err != nil {
 		t.Fatalf("open user administration: %v", err)
 	}
 	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list tr")).some((node) => node.textContent.includes("Renamed Member"))`, 10*time.Second); err != nil {
@@ -1793,14 +1793,14 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list tr")).some((node) => node.textContent.includes("Renamed Member") && node.textContent.includes("disabled"))`, 10*time.Second); err != nil {
 		t.Fatalf("wait for disabled user: %v", err)
 	}
-	if err := chromedp.Run(admin.ctx, chromedp.Navigate(shareLink)); err != nil {
+	if err := chromedp.Run(admin.ctx, navigateLoopbackBrowser(shareLink)); err != nil {
 		t.Fatalf("open disabled-owner share: %v", err)
 	}
 	if err := waitFor(admin.ctx, `document.querySelector("#drive-state").textContent.includes("unavailable")`, 10*time.Second); err != nil {
 		t.Fatalf("disabled owner share was not denied: %v (%s)", err, browserStatus(admin.ctx))
 	}
 
-	if err := chromedp.Run(admin.ctx, chromedp.Navigate(harness.origin+"/admin"), chromedp.WaitVisible("#admin-view", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(admin.ctx, navigateLoopbackBrowser(harness.origin+"/admin"), chromedp.WaitVisible("#admin-view", chromedp.ByQuery)); err != nil {
 		t.Fatalf("return to administration: %v", err)
 	}
 	if err := waitFor(admin.ctx, `Array.from(document.querySelectorAll("#user-list tr")).some((node) => node.textContent.includes("Renamed Member"))`, 10*time.Second); err != nil {
@@ -1827,7 +1827,7 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	}
 
 	if err := chromedp.Run(member.ctx,
-		chromedp.Navigate(recoveryLink),
+		navigateLoopbackBrowser(recoveryLink),
 		chromedp.WaitVisible("#registration-view", chromedp.ByQuery),
 		chromedp.Focus("#registration-form button", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter),
 	); err != nil {
@@ -1858,7 +1858,7 @@ func TestE2EInviteSettingsAdminRecoveryAndShareRevocation(t *testing.T) {
 	if err := waitFor(member.ctx, `document.querySelector("#share-list").textContent.includes("Revoked")`, 10*time.Second); err != nil {
 		t.Fatalf("wait for share revocation: %v", err)
 	}
-	if err := chromedp.Run(admin.ctx, chromedp.Navigate(shareLink)); err != nil {
+	if err := chromedp.Run(admin.ctx, navigateLoopbackBrowser(shareLink)); err != nil {
 		t.Fatalf("reopen revoked share: %v", err)
 	}
 	if err := waitFor(admin.ctx, `document.querySelector("#drive-state").textContent.includes("unavailable")`, 10*time.Second); err != nil {
@@ -2064,6 +2064,41 @@ type testBrowser struct {
 	requests []string
 }
 
+// These fixtures talk to real loopback servers. A network namespace can have
+// working loopback while Chromium infers offline from its absent external
+// interfaces. Declare the connectivity signal independently of host interfaces;
+// tests can still change it through CDP and all HTTP traffic remains real.
+func loopbackNetworkState(offline bool) *network.OverrideNetworkStateParams {
+	// Chromium151 clears an online override for 0/-1/-1. A positive metadata
+	// RTT keeps the signal override active; this command does not shape HTTP.
+	// https://github.com/chromium/chromium/blob/151.0.7922.137/third_party/blink/renderer/core/inspector/inspector_network_agent.cc#L693-L713
+	return network.OverrideNetworkState(offline, 1, -1, -1)
+}
+
+// A fresh document can replace its renderer process. Restore the declared
+// fixture signal after every real navigation, before testing application work.
+func navigateLoopbackBrowser(url string) chromedp.Action {
+	return chromedp.Tasks{chromedp.Navigate(url), loopbackBrowserOnline()}
+}
+
+func reloadLoopbackBrowser() chromedp.Action {
+	return chromedp.Tasks{chromedp.Reload(), loopbackBrowserOnline()}
+}
+
+func loopbackBrowserOnline() chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		if err := loopbackNetworkState(false).Do(bounded); err != nil {
+			return fmt.Errorf("loopback_state_override: %w", err)
+		}
+		if err := waitFor(bounded, `navigator.onLine===true`, 5*time.Second); err != nil {
+			return fmt.Errorf("loopback_state_observation: %w", err)
+		}
+		return nil
+	})
+}
+
 func newTestBrowser(t *testing.T) *testBrowser {
 	t.Helper()
 	profile := t.TempDir()
@@ -2097,7 +2132,7 @@ func newTestBrowser(t *testing.T) *testBrowser {
 		}
 	})
 	if err := chromedp.Run(ctx,
-		network.Enable(), runtime.Enable(), emulation.SetDeviceMetricsOverride(800, 600, 1, false), chromedp.Navigate("about:blank"), cdpwebauthn.Enable(),
+		network.Enable(), runtime.Enable(), emulation.SetDeviceMetricsOverride(800, 600, 1, false), navigateLoopbackBrowser("about:blank"), cdpwebauthn.Enable(),
 		chromedp.ActionFunc(func(actionContext context.Context) error {
 			_, err := addVirtualAuthenticator(actionContext)
 			return err
@@ -2128,7 +2163,7 @@ func (browserClient *testBrowser) assertNoExternalRequests(t *testing.T, harness
 func bootstrapBrowser(t *testing.T, client *testBrowser, harness harness) {
 	t.Helper()
 	if err := chromedp.Run(client.ctx,
-		chromedp.Navigate(harness.origin+"/bootstrap"), chromedp.WaitVisible("#registration-view", chromedp.ByQuery),
+		navigateLoopbackBrowser(harness.origin+"/bootstrap"), chromedp.WaitVisible("#registration-view", chromedp.ByQuery),
 		bootstrapKeyboardActions(harness.bootstrapToken),
 	); err != nil {
 		t.Fatalf("bootstrap browser: %v", err)

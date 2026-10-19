@@ -223,7 +223,7 @@ func TestBrowserFixturePoolConcurrentHighWaterIsExactlyClosedLimit(t *testing.T)
 	}
 }
 
-// This inventory binds the54 existing browser entry points. Adding/removing a
+// This inventory binds every browser entry point. Adding/removing a
 // test is a deliberate inventory update, never a silent selection change.
 var scheduledE2EInventory = []string{
 	"TestE2EAutomaticRetryResumesOriginalBatchSession",
@@ -263,6 +263,7 @@ var scheduledE2EInventory = []string{
 	"TestE2EUploadIndependentAdmissionRetriesRollingRouteGap",
 	"TestE2EUploadLayoutKeepsColumnsErrorsAndActionsReadable",
 	"TestE2EUploadLegacyAdmissionLedgerRetainsExactEnvelope",
+	"TestE2EUploadLoopbackConnectivitySignalPausesAndResumesSmartPlanning",
 	"TestE2EUploadPlannerHashesMD5AndCRC32CInOneWorkerPass",
 	"TestE2EUploadPreparingCreditsCompletedSiblingsAndReconnectsExpiredPage",
 	"TestE2EUploadRecoveryCancelledItemCannotBeResurrectedBySharedPage",

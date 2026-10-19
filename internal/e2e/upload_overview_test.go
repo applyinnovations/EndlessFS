@@ -110,7 +110,7 @@ func TestE2ELatestUploadProgressExcludesFailedHistory(t *testing.T) {
 	wait(`document.querySelector('[data-transfer-count="failed"]').textContent === '(1)' && document.querySelector('[data-transfer-count="all"]').textContent === '(3)' && !document.querySelector('#clear-failed-transfers').disabled`)
 	// The cohort is derived from the existing durable group, not a process-only
 	// marker that disappears on reload. Earlier failures remain recoverable.
-	if err := chromedp.Run(client.ctx, chromedp.Reload()); err != nil {
+	if err := chromedp.Run(client.ctx, reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	wait(`document.querySelector('[data-transfer-count="all"]').textContent === '(3)'`)
@@ -307,7 +307,7 @@ func testLostCompletionReplayOrder(t *testing.T, omitOrdinal bool) {
 			t.Fatal(err)
 		}
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Reload()); err != nil {
+	if err := chromedp.Run(client.ctx, reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(2)' && document.querySelector('[data-transfer-count="failed"]').textContent === '(0)'`, 10*time.Second); err != nil {

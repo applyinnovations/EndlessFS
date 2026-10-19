@@ -112,7 +112,7 @@ func TestE2EClearFailedUploadsCleansSessionsAndPreservesCompletedFiles(t *testin
 	// A just-completed retained row may still have a pending local ledger
 	// write; allow its idempotent completion replay through the real server.
 	failCompletion.Store(false)
-	if err := chromedp.Run(client.ctx, chromedp.Reload()); err != nil {
+	if err := chromedp.Run(client.ctx, reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	wait(`document.querySelector('[data-transfer-count="all"]').textContent === '(1)' && document.querySelector('#file-rows').textContent.includes('preserved.txt')`)
@@ -166,7 +166,7 @@ func TestE2EClearFailedHistoryPreservesMixedGroupsAndOtherOwners(t *testing.T) {
 		await new Promise((resolve, reject) => {transaction.oncomplete = resolve; transaction.onerror = () => reject(transaction.error);});
 		database.close(); return true;
 	})()`, accounts[0].UserID.String())
-	if err := chromedp.Run(client.ctx, chromedp.Evaluate(script, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), chromedp.Reload()); err != nil {
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(script, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(4)' && document.querySelector('[data-transfer-count="failed"]').textContent === '(2)'`, 10*time.Second); err != nil {
@@ -190,7 +190,7 @@ func TestE2EClearFailedHistoryPreservesMixedGroupsAndOtherOwners(t *testing.T) {
 	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(2)'`, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Reload()); err != nil {
+	if err := chromedp.Run(client.ctx, reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(2)' && document.querySelector('[data-transfer-count="failed"]').textContent === '(0)' && document.querySelector('[data-transfer-count="current"]').textContent === '(1)'`, 10*time.Second); err != nil {
@@ -338,7 +338,7 @@ func TestE2ERetryFailedFinalizationAfterReloadDoesNotRequireSource(t *testing.T)
 		}};
 		await new Promise((resolve, reject) => {transaction.oncomplete = resolve; transaction.onerror = () => reject(transaction.error);});
 		return true;
-	})()`, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), chromedp.Reload()); err != nil {
+	})()`, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent === '(1)' && document.querySelector('[aria-label="Retry upload retry-finalization.txt"]') !== null`, 10*time.Second); err != nil {

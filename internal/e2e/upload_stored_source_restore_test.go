@@ -93,7 +93,7 @@ func testStoredSourceRestoreClearsObsoleteSourceRequired(t *testing.T, currentMe
 	requestStart := len(client.requestSnapshot())
 	hold.Store(true)
 	var priorTimeOrigin float64
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(`performance.timeOrigin`, &priorTimeOrigin), chromedp.Reload()); err != nil {
+	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(`performance.timeOrigin`, &priorTimeOrigin), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	ready := fmt.Sprintf(`performance.timeOrigin>%.6f&&document.readyState==='complete'&&document.querySelector('#loading-view').hidden&&!document.querySelector('#authenticated-view').hidden&&document.querySelector('#auth-view').hidden&&document.querySelector('#app').dataset.state==='authenticated'`, priorTimeOrigin)

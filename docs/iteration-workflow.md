@@ -66,6 +66,64 @@ as well as compiler hits. Source timestamp preservation is required for seed
 reproducibility. Qualify the actual seed with a real Nix rebuild after helper or
 input changes, rather than inferring reproducibility from a successful build.
 
+Local Linux-amd64 users can explicitly select the closed canonical functional
+coverage profile:
+
+```text
+ENDLESSFS_LOCAL_FUNCTIONAL_CACHE=1 nix run .#test-coverage
+```
+
+Stage the intended source first. Before starting a producer, the consumer
+compares the complete working tree and index with the immutable selected Nix
+source. Extra ignored/untracked inputs, unsafe ownership or paths, and
+unsupported arguments, environment or evidence selectors take the original
+fresh path. Once realization starts, build/validation failures or subsequent
+source drift fail the command; they never trigger a second fresh run.
+
+The eligible local consumer uses the locked util-linux launcher in a private
+user, PID and proc namespace, preserving the caller's numeric UID and GID.
+It validates that isolation before a bounded, message-framed READY/CONTINUE
+handshake. Only a fully reaped rejection before any CONTINUE attempt can
+select the fresh path. Cancellation, uncertain startup and every failure after
+that boundary fail closed. The launcher forwards signals and kills remaining
+namespace children on exit. Network, clocks, cgroups and resource limits are
+unchanged. This prevents unrelated host processes with unreadable metadata
+from making the consumer's cleanup observation incomplete. Every process
+inside the private scope still needs the exact owned scratch marker; denied
+reads, incomplete scans and forced cleanup cannot earn natural-zero success.
+Orphans are reaped at serial command boundaries after the direct child wait.
+The producer retains the ordinary Nix sandbox and its original ownership
+observer. Diagnostics distinguish complete observations from default zero
+counts and publish only closed scan stages and reason codes.
+
+The helper emits bounded diagnostics with closed stage, command and result
+codes before removing private scratch. Records include durations, capture and
+cleanup status, plus bounded numeric helper source locations. A failed Go run
+can report hashes of known source-owned packages and test roots; dynamic
+subtest names and raw output remain private. Diagnostics are not receipts and
+cannot turn a failed producer into a reusable result.
+
+A missing artifact executes the complete original coverage workload, including
+`-count=1` and real browser tests. Changes to declared source, tests, assets,
+fixtures, dependencies, tools, flags or policy select a new complete artifact.
+Go-tool telemetry mode is off only in fresh private homes; application
+observability is unchanged.
+A reused result prints `REUSED` with its original producer timestamps. Every
+consumption freshly derives the canonical package/test inventory and rechecks
+the artifact, coverage profile and current coverage policy. The original
+aggregate Go profile can exceed 64 MiB because `-coverpkg=./...` repeats blocks
+across test packages; its complete bytes are bounded at 128 MiB and are never
+truncated or rewritten. Repository, sensitive-package and migration coverage
+floors remain 85%, 95% and 98%. Supported
+`ENDLESSFS_COVERAGE_PROFILE` export copies the validated normal profile; the
+destination is output-only and must be an absolute owned path outside source.
+
+Reused functional evidence is not a fresh browser, resource, physical-replica
+or CI run. CI keeps the original fresh coverage path; the separate online
+security review and all required gate commands remain unchanged. Nix owns
+artifact publication, reuse and garbage collection; there is no extra cache
+service or result-expiration framework. Unsupported modes use the fresh path.
+
 `nix run .#test-migration` realizes the same complete, unfiltered migration
 check as the flake; an optional candidate release remains a declared derivation
 input. Its coverage minimum and fixture matrix are unchanged. Browser fixture
@@ -73,3 +131,15 @@ concurrency defaults to two, with bounded modes one and four available through
 `ENDLESSFS_E2E_PARALLELISM` for controlled comparison. Fixture scheduling
 does not reduce any test body, assertion or deadline. Report shared-host load
 and actual peak memory when comparing modes.
+
+Browser fixtures declare an online connectivity signal through native CDP
+after every real navigation and reload, since Chromium's override belongs to
+the renderer process and a new document can replace it. The signal uses a reported
+1 ms RTT to keep the override active; zero RTT with unspecified throughput
+clears it in the pinned browser. This metadata does not add HTTP latency.
+An isolated network namespace can provide working
+loopback HTTP while Chromium infers offline from absent external interfaces.
+This declaration does not emulate successful requests or enable external
+networking. A native offline/online signal regression verifies pending smart
+uploads, real requests and bytes, completion, and restoration after reload.
+It qualifies browser connectivity signaling, not a transport outage.

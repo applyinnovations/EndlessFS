@@ -182,7 +182,7 @@ func TestE2EUploadIndependentAdmissionReloadsAfterLostReply(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("independent admission was not dispatched")
 	}
-	if err := chromedp.Run(c.ctx, chromedp.Reload()); err != nil {
+	if err := chromedp.Run(c.ctx, reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(3)'`, 10*time.Second); err != nil {
@@ -434,7 +434,7 @@ func TestE2EUploadLegacyAdmissionLedgerRetainsExactEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	seed := fmt.Sprintf(`(async()=>{const ownerID=%q,key=%q;const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('endlessfs-transfer-ledger-v1');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});const tx=db.transaction(['items','groups'],'readwrite');const ids=[];for(let i=0;i<2;i++){const id='legacy-browser-item-'+i;ids.push(id);const name='source-'+i+'.bin';tx.objectStore('items').put({key:ownerID+':'+id,ownerID,id,groupID:'legacy-admission-group',name,relativePath:'legacy-admission/'+name,relativeDirectory:'legacy-admission',directory:'/legacy-admission',baseDirectory:'/',size:3,mediaType:'application/octet-stream',state:'failed',confirmed:0,uploadID:'',admissionBatchKey:key,admissionBatchIndex:i,admissionBatchCount:2,strategy:'keep-both',planPhase:'done',createdAt:1,error:'Reconnect source.'})}tx.objectStore('groups').put({key:ownerID+':legacy-admission-group',ownerID,id:'legacy-admission-group',name:'Legacy admission',transferIDs:ids,directories:['legacy-admission'],baseDirectory:'/',totalSize:6,state:'failed',discoveryDone:true,strategy:'keep-both',createdAt:1});await new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)});db.close();})()`, accounts[0].UserID.String(), key)
-	if err := chromedp.Run(c.ctx, chromedp.Evaluate(seed, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), chromedp.Reload()); err != nil {
+	if err := chromedp.Run(c.ctx, chromedp.Evaluate(seed, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(2)'`, 10*time.Second); err != nil {

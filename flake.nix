@@ -165,6 +165,30 @@
             makeWrapper ${pkgs.chromium}/bin/chromium "$out/bin/chrome-headless-shell" \
               --set FONTCONFIG_FILE ${fontConfig}
           '';
+      coverageSourceFor =
+        pkgs:
+        let
+          lib = pkgs.lib;
+          relativePath = path: lib.removePrefix (toString ./. + "/") (toString path);
+        in
+        lib.cleanSourceWith {
+          src = ./.;
+          filter =
+            path: _type:
+            let
+              relative = relativePath path;
+            in
+            relative == "go.mod"
+            || relative == "go.sum"
+            # Exact-budget inventory verifies the shared Nix gate selection.
+            || relative == "flake.nix"
+            || relative == "cmd"
+            || lib.hasPrefix "cmd/" relative
+            || relative == "internal"
+            || lib.hasPrefix "internal/" relative
+            || relative == "tools"
+            || lib.hasPrefix "tools/" relative;
+        };
       containerTransportPolicyFor =
         pkgs:
         pkgs.writeText "endlessfs-container-transport-policy.json" ''
@@ -456,6 +480,14 @@
 
           endlessfs = lib.makeOverridable mkEndlessFS { };
           dependencyCompileCache = dependencyCompileCacheFor pkgs endlessfs.goModules;
+          functionalCoverage = import ./tools/functionalcoverage/default.nix {
+            inherit pkgs go;
+            fullSource = self.outPath;
+            coverageSource = coverageSourceFor pkgs;
+            vendor = endlessfs.goModules;
+            seed = dependencyCompileCache;
+            browser = headlessBrowserFor pkgs;
+          };
 
           linuxArchitecture = if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "amd64";
           linuxSystem = if pkgs.stdenv.hostPlatform.isAarch64 then "aarch64-linux" else "x86_64-linux";
@@ -709,6 +741,9 @@
           container-images = container;
           release-images = release;
         }
+        // lib.optionalAttrs (system == "x86_64-linux") {
+          local-functional-coverage = functionalCoverage.producer;
+        }
       );
 
       apps = forAllSystems (
@@ -720,24 +755,48 @@
           packages = self.packages.${system};
           headlessBrowser = headlessBrowserFor pkgs;
           containerTransportPolicy = containerTransportPolicyFor pkgs;
-          relativePath = path: lib.removePrefix (toString ./. + "/") (toString path);
-          coverageSource = lib.cleanSourceWith {
-            src = ./.;
-            filter =
-              path: _type:
-              let
-                relative = relativePath path;
-              in
-              relative == "go.mod"
-              || relative == "go.sum"
-              # Exact-budget inventory verifies the shared Nix gate selection.
-              || relative == "flake.nix"
-              || relative == "cmd"
-              || lib.hasPrefix "cmd/" relative
-              || relative == "internal"
-              || lib.hasPrefix "internal/" relative
-              || relative == "tools"
-              || lib.hasPrefix "tools/" relative;
+          coverageSource = coverageSourceFor pkgs;
+          coverageText = ''
+            export CGO_ENABLED=0
+            export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
+            export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
+            export ENDLESSFS_RUN_E2E=1
+            ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
+              export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
+            ''}
+            coverage_root="$(mktemp -d "''${TMPDIR:-/tmp}/endlessfs-coverage.XXXXXX")"
+            cleanup() {
+              chmod -R u+w "$coverage_root"
+              rm -rf "$coverage_root"
+            }
+            trap cleanup EXIT
+            cp -R ${coverageSource} "$coverage_root/source"
+            chmod -R u+w "$coverage_root/source"
+            cp -R ${packages.default.goModules} "$coverage_root/source/vendor"
+            cd "$coverage_root/source"
+            export GOFLAGS=-mod=vendor
+            profile="$coverage_root/endlessfs-coverage.out"
+            ${installDependencyCompileCache packages.dependency-compile-cache "$coverage_root"}
+            go test -timeout=30m ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
+            if [ -n "''${ENDLESSFS_COVERAGE_PROFILE:-}" ]; then
+              install -m 0644 "$profile" "$ENDLESSFS_COVERAGE_PROFILE"
+            fi
+            gawk -f tools/coverage.awk "$profile"
+          '';
+          legacyCoverage = pkgs.writeShellApplication {
+            name = "endlessfs-test-coverage-fresh";
+            runtimeInputs =
+              goTools ++ [ pkgs.gawk ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ];
+            text = coverageText;
+          };
+          functionalCoverage = import ./tools/functionalcoverage/default.nix {
+            inherit pkgs go;
+            fullSource = self.outPath;
+            inherit coverageSource;
+            vendor = packages.default.goModules;
+            seed = packages.dependency-compile-cache;
+            browser = headlessBrowser;
           };
           goTools = [
             go
@@ -927,34 +986,27 @@
           test-coverage =
             mkTask "endlessfs-test-coverage"
               (goTools ++ [ pkgs.gawk ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
-              ''
-                export CGO_ENABLED=0
-                export ENDLESSFS_INTERNAL_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
-                export ENDLESSFS_TEST_RAW_DECODER=${pkgs.libraw}/bin/dcraw_emu
-                export ENDLESSFS_RUN_E2E=1
-                ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-                  export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
-                  export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
-                ''}
-                coverage_root="$(mktemp -d "''${TMPDIR:-/tmp}/endlessfs-coverage.XXXXXX")"
-                cleanup() {
-                  chmod -R u+w "$coverage_root"
-                  rm -rf "$coverage_root"
-                }
-                trap cleanup EXIT
-                cp -R ${coverageSource} "$coverage_root/source"
-                chmod -R u+w "$coverage_root/source"
-                cp -R ${packages.default.goModules} "$coverage_root/source/vendor"
-                cd "$coverage_root/source"
-                export GOFLAGS=-mod=vendor
-                profile="$coverage_root/endlessfs-coverage.out"
-                ${installDependencyCompileCache packages.dependency-compile-cache "$coverage_root"}
-                go test -timeout=30m ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile="$profile"
-                if [ -n "''${ENDLESSFS_COVERAGE_PROFILE:-}" ]; then
-                  install -m 0644 "$profile" "$ENDLESSFS_COVERAGE_PROFILE"
-                fi
-                gawk -f tools/coverage.awk "$profile"
-              '';
+              (
+                (lib.optionalString (system == "x86_64-linux") ''
+                  if [ "''${ENDLESSFS_LOCAL_FUNCTIONAL_CACHE:-}" = 1 ]; then
+                    exec ${pkgs.nix}/bin/nix run --offline --no-write-lock-file \
+                      "path:${self.outPath}#apps.${system}.local-functional-coverage-consumer" -- "$@"
+                  fi
+                '')
+                + coverageText
+              );
+
+          local-functional-coverage-consumer =
+            if system == "x86_64-linux" then
+              {
+                type = "app";
+                program = "${functionalCoverage.consumer "${legacyCoverage}/bin/endlessfs-test-coverage-fresh"}/bin/endlessfs-local-functional-coverage-consumer";
+              }
+            else
+              {
+                type = "app";
+                program = "${legacyCoverage}/bin/endlessfs-test-coverage-fresh";
+              };
 
           test-race = mkTask "endlessfs-test-race" (goTools ++ [ pkgs.stdenv.cc ]) ''
             export CGO_ENABLED=1

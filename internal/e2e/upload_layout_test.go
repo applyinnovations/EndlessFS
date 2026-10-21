@@ -18,6 +18,7 @@ import (
 )
 
 func TestE2EUploadLayoutKeepsColumnsErrorsAndActionsReadable(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -176,7 +177,7 @@ func testUploadLayout(t *testing.T, themeName string) {
 		transaction.objectStore('groups').put({key: ownerID + ':layout-group', ownerID, id: 'layout-group', name: 'Interrupted folder', transferIDs: ids, directories: [], baseDirectory: '/', totalSize: 12000, state: 'failed', discoveryDone: true, strategy: 'keep-both', createdAt: 1, error: %q});
 		await new Promise((resolve, reject) => { transaction.oncomplete = resolve; transaction.onerror = () => reject(transaction.error); }); database.close(); return true;
 	})()`, accounts[0].UserID.String(), "Upload interrupted. Reconnect source and retry. Reference: layout-error-reference-abcdefghijklmnopqrstuvwxyz.")
-	if err := chromedp.Run(client.ctx, chromedp.Evaluate(seed, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), chromedp.Reload()); err != nil {
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(seed, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent === '(120)'`, 10*time.Second); err != nil {

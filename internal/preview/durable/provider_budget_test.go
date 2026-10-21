@@ -53,7 +53,7 @@ func TestProviderBudgetDurablePreviewStore(t *testing.T) {
 		if len(roles) == 0 {
 			roles = []providerbudget.Role{providerbudget.RolePreviewArtifact}
 		}
-		if report, err := ratchet.CheckExact(name, model, roles, ledger.Events()); err != nil {
+		if report, err := budgettest.CheckExact(t, ratchet, name, model, roles, ledger.Events()); err != nil {
 			t.Errorf("%s: %v; observed=%+v; events=%+v", name, err, report.Totals, ledger.Events())
 		}
 		ledger.Reset()

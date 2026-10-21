@@ -17,12 +17,12 @@ function belongs(file, group) {
   if (group == "path") return index(file, "/internal/domain/") > 0
   if (group == "token") return index(file, "/internal/secret/") > 0
   if (group == "capability") return file ~ /\/internal\/provider\/memory\/(transfer|upload_admission).go$/ || file ~ /\/internal\/portable\/(transfers([0-9][0-9][0-9])?|upload_actions|upload_lifecycle|upload_admission)\.go$/ || file ~ /\/internal\/objectstore\/gcs\/transfers.go$/
-  if (group == "state-CAS") return (index(file, "/internal/state/") > 0 && index(file, "/internal/state/statecontract/") == 0) || file ~ /\/internal\/portable\/(state|domain_store|domain_tree|domain_tree_stream).go$/
+  if (group == "state-CAS") return (index(file, "/internal/state/") > 0 && index(file, "/internal/state/statecontract/") == 0) || file ~ /\/internal\/portable\/(state|domain_store|domain_tree|domain_tree_stream|domain_repack|domain_pack_reads).go$/
   if (group == "scope-mapping") return index(file, "/internal/provider/memory/") > 0 || file ~ /\/internal\/portable\/(state|runtime008).go$/
   if (group == "canonical-format-key-version-checkpoint") return index(file, "/internal/storageformat/") > 0 || file ~ /\/internal\/portable\/(engine|checkpoint|checkpoint008|checkpoint_reachability|checkpoint_visit_set).go$/
   if (group == "gate-catalog-domain-freeze") return file ~ /\/internal\/portable\/(gate|domain_catalog|checkpoint008).go$/
-  if (group == "domain-publication-lost-success") return file ~ /\/internal\/portable\/(domain_store|domain_tree|domain_tree_stream).go$/
-  if (group == "namespace-tree") return file ~ /\/internal\/portable\/(runtime008|namespace_store|namespace_batch|namespace_trash|namespace_projection).go$/
+  if (group == "domain-publication-lost-success") return file ~ /\/internal\/portable\/(domain_store|domain_tree|domain_tree_stream|domain_repack|domain_pack_reads).go$/
+  if (group == "namespace-tree") return file ~ /\/internal\/portable\/(runtime008|namespace_store|namespace_batch|namespace_trash|namespace_projection|directory_preparation).go$/
   if (group == "gcs-transport") return index(file, "/internal/objectstore/gcs/") > 0
   if (group == "theme-validation") return index(file, "/internal/theme/") > 0
   if (group == "configuration") return index(file, "/internal/config/") > 0

@@ -59,6 +59,27 @@ var regionalStandardFlatUploadLifecycleBudgets []byte
 //go:embed economics/budgets-upload-admission-regional-standard-flat-2026-10.json
 var regionalStandardFlatUploadAdmissionBudgets []byte
 
+//go:embed economics/budgets-upload-corrective-regional-standard-flat-2026-10.json
+var regionalStandardFlatUploadCorrectiveBudgets []byte
+
+//go:embed economics/budgets-prepared-mutation-regional-standard-flat-2026-10.json
+var regionalStandardFlatPreparedMutationBudgets []byte
+
+//go:embed economics/budgets-derived-view-corrective-regional-standard-flat-2026-10.json
+var regionalStandardFlatDerivedViewCorrectiveBudgets []byte
+
+//go:embed economics/budgets-maintenance-corrective-regional-standard-flat-2026-10.json
+var regionalStandardFlatMaintenanceCorrectiveBudgets []byte
+
+//go:embed economics/budgets-immutable-pack-cache-regional-standard-flat-2026-10.json
+var regionalStandardFlatImmutablePackCacheBudgets []byte
+
+// Reuse of one validated checkpoint operation removes repeated GETs; later
+// independent reachability reads retain their actual provider-presence checks.
+//
+//go:embed economics/budgets-checkpoint-session-regional-standard-flat-2026-10.json
+var regionalStandardFlatCheckpointSessionBudgets []byte
+
 // RegionalStandardFlatEconomics returns the reviewed provider model used by
 // deterministic request-budget tests. It performs no network access.
 func RegionalStandardFlatEconomics() (providerbudget.Model, error) {
@@ -87,6 +108,12 @@ func RegionalStandardFlatBudgetRatchet() (providerbudget.RatchetLedger, error) {
 		regionalStandardFlatUploadPipelineBudgets,
 		regionalStandardFlatUploadLifecycleBudgets,
 		regionalStandardFlatUploadAdmissionBudgets,
+		regionalStandardFlatUploadCorrectiveBudgets,
+		regionalStandardFlatPreparedMutationBudgets,
+		regionalStandardFlatDerivedViewCorrectiveBudgets,
+		regionalStandardFlatMaintenanceCorrectiveBudgets,
+		regionalStandardFlatImmutablePackCacheBudgets,
+		regionalStandardFlatCheckpointSessionBudgets,
 	} {
 		ledger, err = providerbudget.AppendRatchetDelta(ledger, delta)
 		if err != nil {

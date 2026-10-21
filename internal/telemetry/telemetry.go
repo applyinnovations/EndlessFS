@@ -65,6 +65,9 @@ const (
 	WireUploadData
 	WireDownloadData
 	WireUnknown
+	DirectoryPreparation
+	MetadataPackAdmission
+	MetadataPackMaterialize
 	operationCount
 )
 
@@ -139,6 +142,9 @@ var operationNames = [...]string{
 	"provider.http.upload.data",
 	"provider.http.download.data",
 	"provider.http.unknown",
+	"directory.prepare",
+	"metadata.pack.admission",
+	"metadata.pack.materialize",
 }
 var roleNames = [...]string{
 	"application",
@@ -209,6 +215,7 @@ var routes = [...]string{
 	"POST /api/v1/duplicates/directories/reconciliation-preview",
 	"POST /api/v1/duplicates/directories/reconcile",
 	"POST /api/v1/directories",
+	"POST /api/v1/directories/prepare",
 	"POST /api/v1/uploads",
 	"POST /api/v1/uploads/batch",
 	"POST /api/v1/uploads/batch/admit",
@@ -289,16 +296,25 @@ type lifecycleEvent struct {
 	result    Result
 	seconds   float64
 	traceID   string
+	requestID string
+	stage     Stage
+	reason    Reason
 }
 type Activity struct {
-	observer  *Observer
-	operation Operation
-	role      Role
-	route     int
-	started   time.Time
-	span      trace.Span
-	ctx       context.Context
-	ended     atomic.Bool
+	observer        *Observer
+	operation       Operation
+	role            Role
+	route           int
+	started         time.Time
+	span            trace.Span
+	ctx             context.Context
+	ended           atomic.Bool
+	diagnosticMu    sync.Mutex
+	stage           Stage
+	reason          Reason
+	problemRecorded bool
+	transportFailed bool
+	problemResult   Result
 }
 type contextKey struct{}
 type roleKey struct{}
@@ -326,7 +342,7 @@ func (observer *Observer) logEvents() {
 		case <-observer.stopEvents:
 			return
 		case event := <-observer.events:
-			observer.logger.Info("operation_completed", "operation", operationNames[event.operation], "role", roleNames[event.role], "result", resultNames[event.result], "durationSeconds", event.seconds, "traceID", event.traceID)
+			observer.logger.Info("operation_completed", "operation", operationNames[event.operation], "role", roleNames[event.role], "result", resultNames[event.result], "durationSeconds", event.seconds, "traceID", event.traceID, "requestID", event.requestID, "stage", stageNames[event.stage], "reason", reasonNames[event.reason], "build", safeVersion(observer.version))
 		}
 	}
 }
@@ -353,6 +369,9 @@ func Start(ctx context.Context, operation Operation, role Role) (context.Context
 		ctx, activity.span = observer.tracer.Start(ctx, operationNames[operation], trace.WithSpanKind(kind), trace.WithAttributes(attribute.String("operation", operationNames[operation]), attribute.String("role", roleNames[role])))
 	}
 	activity.ctx = ctx
+	if operation == HTTP {
+		ctx = context.WithValue(ctx, httpActivityKey{}, activity)
+	}
 	ctx = context.WithValue(ctx, roleKey{}, role)
 	observer.mu.Lock()
 	observer.metrics[operation][role].Active++
@@ -410,7 +429,10 @@ func Classify(err error) Result {
 		return Internal
 	}
 }
-func (activity *Activity) End(err error) { activity.EndResult(Classify(err)) }
+func (activity *Activity) End(err error) {
+	activity.diagnosis(err, false)
+	activity.EndResult(Classify(err))
+}
 
 // Finish is called directly by defer with a named return error. It preserves
 // panic behavior while recording its coarse class rather than raw panic data.
@@ -437,6 +459,12 @@ func (activity *Activity) EndResult(result Result) {
 	if result >= resultCount {
 		result = Internal
 	}
+	activity.diagnosticMu.Lock()
+	stage, reason := activity.stage, activity.reason
+	if activity.problemRecorded && result != Panicked {
+		result = activity.problemResult
+	}
+	activity.diagnosticMu.Unlock()
 	elapsed := time.Since(activity.started).Seconds()
 	observer := activity.observer
 	observer.mu.Lock()
@@ -449,6 +477,9 @@ func (activity *Activity) EndResult(result Result) {
 	observer.mu.Unlock()
 	if activity.span != nil {
 		activity.span.SetAttributes(attribute.String("result", resultNames[result]))
+		if stage != StageUnknown || reason != ReasonUnknown {
+			activity.span.SetAttributes(attribute.String("stage", stageNames[stage]), attribute.String("reason", reasonNames[reason]))
+		}
 		if result != Success {
 			activity.span.SetStatus(codes.Error, resultNames[result])
 		}
@@ -456,8 +487,9 @@ func (activity *Activity) EndResult(result Result) {
 	}
 	// Lifecycle errors are safe and useful; provider successes remain metrics/
 	// traces rather than creating one log record per storage call.
-	if observer.logger != nil && (activity.operation >= UploadSizes && activity.operation <= PreviewPersist || result != Success) {
-		event := lifecycleEvent{activity.operation, activity.role, result, elapsed, TraceID(activity.ctx)}
+	if observer.logger != nil && (activity.operation >= UploadSizes && activity.operation <= PreviewPersist || activity.operation == DirectoryPreparation || result != Success) {
+		requestID, _ := activity.ctx.Value(requestCorrelationKey{}).(string)
+		event := lifecycleEvent{operation: activity.operation, role: activity.role, result: result, seconds: elapsed, traceID: TraceID(activity.ctx), requestID: requestID, stage: stage, reason: reason}
 		select {
 		case <-observer.stopEvents:
 			observer.LogDropped.Add(1)

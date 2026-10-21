@@ -67,6 +67,21 @@ func assertDerivedPlanningEvents(t *testing.T, events []providerbudget.Event) pr
 	return metrics
 }
 
+func primeUploadPlanningWireRoots(t *testing.T, ctx context.Context, engine *Engine, owner domain.UserID) {
+	t.Helper()
+	// A successful build has not read its published packs. Authenticate those
+	// roots without encoding a cursor or consuming the fixture's ID stream.
+	projection, err := engine.Files().uploadPlanningProjection008(ctx, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := warmUploadPlanningRoots008(ctx,
+		uploadPlanningRoot008{projection.view.session, projection.view.roots[domain.AreaLive].Children},
+		uploadPlanningRoot008{projection.session, projection.root}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUploadPlanningWarmRequestBudgetIsIndependentOfBatchCardinality(t *testing.T) {
 	ctx := telemetry.Context(context.Background(), telemetry.New(nil, nil))
 	ledger := providerbudget.NewLedger()
@@ -81,6 +96,7 @@ func TestUploadPlanningWarmRequestBudgetIsIndependentOfBatchCardinality(t *testi
 	coldMetrics := assertDerivedPlanningEvents(t, ledger.Events())
 	coldEvents := ledger.Events()
 
+	primeUploadPlanningWireRoots(t, ctx, engine, live.UserID())
 	ledger.Reset()
 	oneSize, err := engine.Files().PlanUploadSizes(ctx, live.UserID(), uploadSizePlanFixture(1))
 	if err != nil {

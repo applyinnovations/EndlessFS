@@ -48,6 +48,7 @@ type Factory func(t *testing.T) Harness
 
 func Run(t *testing.T, factory Factory) {
 	t.Helper()
+	runDirectoryPreparation(t, factory)
 	runUploadLifecycle(t, factory)
 	t.Run("transfer completion and scoped session resume", func(t *testing.T) {
 		harness := factory(t)

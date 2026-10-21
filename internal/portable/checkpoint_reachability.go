@@ -345,6 +345,7 @@ func (e *Engine) collectSchema008CheckpointReachability(ctx context.Context) (*c
 }
 
 func (e *Engine) collectConsistencyDomainCheckpointReachability(ctx context.Context, schema009 bool) (*checkpointReachabilityStream, error) {
+	ctx = withoutMetadataPackCache(ctx)
 	collector, err := newCheckpointReachabilityCollector()
 	if err != nil {
 		return nil, err

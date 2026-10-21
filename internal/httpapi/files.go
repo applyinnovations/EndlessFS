@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/drive"
 	"github.com/applyinnovations/endlessfs/internal/secret"
+	"github.com/applyinnovations/endlessfs/internal/telemetry"
 	webassets "github.com/applyinnovations/endlessfs/internal/web"
 )
 
@@ -26,6 +28,7 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/duplicates/directories/reconciliation-preview", api.previewDuplicateReconciliation)
 	mux.HandleFunc("POST /api/v1/duplicates/directories/reconcile", api.applyDuplicateReconciliation)
 	mux.HandleFunc("POST /api/v1/directories", api.createDirectory)
+	mux.HandleFunc("POST /api/v1/directories/prepare", api.prepareDirectories)
 	mux.HandleFunc("POST /api/v1/uploads", api.createUpload)
 	mux.HandleFunc("POST /api/v1/uploads/batch", api.createUploadBatch)
 	mux.HandleFunc("POST /api/v1/uploads/batch/admit", api.admitUploads)
@@ -58,6 +61,54 @@ func (api *identityAPI) driveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/public/shares/{token}/stat", api.publicShareStat)
 	mux.HandleFunc("POST /api/v1/public/shares/{token}/downloads", api.publicShareDownload)
 	mux.HandleFunc("GET /s/{token}", api.publicShareShell)
+}
+
+func (api *identityAPI) prepareDirectories(w http.ResponseWriter, r *http.Request) {
+	current, ok := api.mutation(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Paths []domain.UserPath `json:"paths"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if err := domain.ValidateDirectoryPreparationPaths(request.Paths); err != nil {
+		writeProblem(w, r, telemetry.Diagnostic(err, telemetry.RequestValidation, telemetry.Validation))
+		return
+	}
+	encode := func(items []domain.DirectoryPreparationResult) ([]byte, error) {
+		var buffer bytes.Buffer
+		encoder := json.NewEncoder(&buffer)
+		encoder.SetEscapeHTML(false)
+		err := encoder.Encode(map[string]any{"directories": items})
+		return buffer.Bytes(), err
+	}
+	// Prove the largest result envelope fits before any directory is created.
+	// Browser JSON and this encoder preserve HTML characters consistently.
+	worst := make([]domain.DirectoryPreparationResult, len(request.Paths))
+	for index, path := range request.Paths {
+		worst[index] = domain.DirectoryPreparationResult{Index: index, Path: path, ErrorCode: domain.ErrorPreconditionFailed, Retryable: true}
+	}
+	if body, err := encode(worst); err != nil || len(body) > maxControlBodyBytes {
+		writeProblem(w, r, telemetry.Diagnostic(domain.NewError(domain.ErrorInvalid, "directory preparation response cannot fit"), telemetry.RequestValidation, telemetry.Validation))
+		return
+	}
+	items, err := api.drive.PrepareDirectories(r.Context(), current.Record.UserID, request.Paths)
+	if err != nil {
+		writeProblem(w, r, err)
+		return
+	}
+	body, err := encode(items)
+	if err != nil || len(body) > 1<<20 {
+		writeProblem(w, r, domain.NewError(domain.ErrorUnavailable, "directory preparation response exceeds bound"))
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 func (api *identityAPI) planUploadSizes(w http.ResponseWriter, r *http.Request) {
@@ -676,15 +727,18 @@ func (api *identityAPI) uploadActions(w http.ResponseWriter, r *http.Request) {
 			items[index].RequestID = requestID(r)
 		}
 	}
-	writeUploadLifecyclePage(w, r, items)
+	writeUploadActionPage(w, r, items)
 }
 
 // Recovery pages are deliberately smaller than atomic bulk publication. Bound
 // encoded capabilities and paths as well as item count before writing headers.
 func writeUploadLifecyclePage(w http.ResponseWriter, r *http.Request, items any) {
 	w.Header().Set("Cache-Control", "no-store")
-	body, err := json.Marshal(map[string]any{"uploads": items})
-	if err != nil || len(body) > 1<<20 {
+	body, overflow, err := encodeUploadRecoveryPage(items)
+	if err == nil && overflow {
+		body, err = encodeCompactUploadRecoveryPage(items, requestID(r))
+	}
+	if err != nil || len(body) > maxControlBodyBytes {
 		writeProblem(w, r, domain.NewError(domain.ErrorUnavailable, "upload recovery response exceeds its safe bound"))
 		return
 	}

@@ -27,6 +27,13 @@ type Storage interface {
 	GetOperation(context.Context, domain.UserID, domain.OperationID) (domain.Operation, error)
 }
 
+// DirectoryPreparationStorage shares one namespace snapshot and coalesces
+// eligible directory creation through one conditional visibility point.
+// Retries revalidate every path; an existing file is never replaced.
+type DirectoryPreparationStorage interface {
+	PrepareDirectories(context.Context, domain.Scope, []domain.UserPath) ([]domain.DirectoryPreparationResult, error)
+}
+
 // TrashStorage keeps trash placement and original-location metadata inside the
 // owner namespace authority. Implementations publish each action through one
 // namespace visibility point; no separate application-state transaction is

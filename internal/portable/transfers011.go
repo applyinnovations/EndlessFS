@@ -215,9 +215,27 @@ func (s *FileStore) completeUploadBatch011(ctx context.Context, scope domain.Sco
 }
 
 func (s *FileStore) completeUploadBatchProven(ctx context.Context, scope domain.Scope, request domain.CompleteUploadBatchRequest, proofs map[string]uploadCompletionProof) (domain.CompleteUploadBatchResult, error) {
+	return s.completeUploadBatchWithReceipt(ctx, scope, request, proofs, false)
+}
+
+func (s *FileStore) completeUploadActionsProven(ctx context.Context, scope domain.Scope, request domain.CompleteUploadBatchRequest, proofs map[string]uploadCompletionProof) (domain.CompleteUploadBatchResult, error) {
+	return s.completeUploadBatchWithReceipt(ctx, scope, request, proofs, true)
+}
+
+// Private action receipts have a separate cryptographic key namespace. Public
+// legacy callers can choose the same idempotency text without consuming an
+// opaque record-only receipt through their recognized-result replay contract.
+func independentUploadActionTransactionID(action, legacyID string) string {
+	return storageformat.Digest([]byte("endlessfs-independent-upload-action-v1\x00" + action + "\x00" + legacyID))
+}
+
+func (s *FileStore) completeUploadBatchWithReceipt(ctx context.Context, scope domain.Scope, request domain.CompleteUploadBatchRequest, proofs map[string]uploadCompletionProof, recordReceipts bool) (domain.CompleteUploadBatchResult, error) {
 	transactionID, fingerprint, err := normalizePortableUploadCompletionBatch(scope.UserID(), request)
 	if err != nil {
 		return domain.CompleteUploadBatchResult{}, err
+	}
+	if recordReceipts {
+		transactionID = independentUploadActionTransactionID("complete", transactionID)
 	}
 	store := newNamespaceStore(s.engine)
 	items := make([]portableUploadTransactionItem, len(request.Items))
@@ -226,36 +244,59 @@ func (s *FileStore) completeUploadBatchProven(ctx context.Context, scope domain.
 		if loadErr != nil {
 			return nil, false, loadErr
 		}
-		if replay, replayErr := store.operationReplay(ctx, view, transactionID, fingerprint); replayErr != nil {
-			return nil, false, replayErr
-		} else if replay != nil {
-			if replay.UploadBatch == nil || replay.UploadBatch.TransactionID != transactionID || replay.UploadBatch.ItemCount != uint64(len(items)) || replay.UploadBatch.State != "completed" {
-				return nil, false, domain.NewError(domain.ErrorInvalid, "invalid upload completion batch outcome")
-			}
-			for index, requested := range request.Items {
-				record, value, recordErr := s.portableUploadAtView(ctx, view, scope.UserID(), string(requested.UploadID))
-				if recordErr != nil {
-					return nil, false, recordErr
+		if !recordReceipts {
+			if replay, replayErr := store.operationReplay(ctx, view, transactionID, fingerprint); replayErr != nil {
+				return nil, false, replayErr
+			} else if replay != nil {
+				if replay.UploadBatch == nil || replay.UploadBatch.TransactionID != transactionID || replay.UploadBatch.ItemCount != uint64(len(items)) || replay.UploadBatch.State != "completed" {
+					return nil, false, domain.NewError(domain.ErrorInvalid, "invalid upload completion batch outcome")
 				}
-				if record.Completion == nil {
-					return nil, false, domain.NewError(domain.ErrorInvalid, "completed upload is missing its portable result")
+				for index, requested := range request.Items {
+					record, value, recordErr := s.portableUploadAtView(ctx, view, scope.UserID(), string(requested.UploadID))
+					if recordErr != nil {
+						return nil, false, recordErr
+					}
+					if record.Completion == nil {
+						return nil, false, domain.NewError(domain.ErrorInvalid, "completed upload is missing its portable result")
+					}
+					items[index] = portableUploadTransactionItem{uploadID: string(requested.UploadID), crc32c: requested.CRC32C, record: record, value: value, md5: record.Completion.MD5}
 				}
-				items[index] = portableUploadTransactionItem{uploadID: string(requested.UploadID), crc32c: requested.CRC32C, record: record, value: value, md5: record.Completion.MD5}
+				return view, true, nil
 			}
-			return view, true, nil
 		}
+		terminal := 0
 		for index, requested := range request.Items {
 			record, value, recordErr := s.portableUploadAtView(ctx, view, scope.UserID(), string(requested.UploadID))
 			if recordErr != nil {
 				return nil, false, recordErr
 			}
-			if record.Area != areaName(scope.Area()) || record.State != storageformat.UploadActive && record.State != storageformat.UploadInitializing || !s.engine.clock.Now().Before(record.ExpiresAt) {
+			if record.Area != areaName(scope.Area()) {
+				if recordReceipts {
+					return nil, false, domain.NewError(domain.ErrorNotFound, "upload does not exist")
+				}
+				return nil, false, domain.NewError(domain.ErrorConflict, "upload completion contains an inactive upload")
+			}
+			if recordReceipts && record.State == storageformat.UploadCompleted {
+				if record.Completion == nil || record.Completion.CRC32C != requested.CRC32C {
+					return nil, false, domain.NewError(domain.ErrorConflict, "completed checksum differs")
+				}
+				items[index] = portableUploadTransactionItem{uploadID: string(requested.UploadID), crc32c: requested.CRC32C, record: record, value: value, md5: record.Completion.MD5}
+				terminal++
+				continue
+			}
+			if record.State != storageformat.UploadActive && record.State != storageformat.UploadInitializing || !s.engine.clock.Now().Before(record.ExpiresAt) {
 				return nil, false, domain.NewError(domain.ErrorConflict, "upload completion contains an inactive upload")
 			}
 			items[index] = portableUploadTransactionItem{uploadID: string(requested.UploadID), crc32c: requested.CRC32C, record: record, value: value}
 			if proof, found := proofs[string(requested.UploadID)]; found && proof.version == value.LogicalVersion && proof.crc32c == requested.CRC32C {
 				items[index].md5, items[index].verified = proof.md5, true
 			}
+		}
+		if terminal == len(items) {
+			return view, true, nil
+		}
+		if terminal > 0 {
+			return nil, false, domain.NewError(domain.ErrorConflict, "upload completion changed concurrently")
 		}
 		return view, false, nil
 	}
@@ -414,7 +455,11 @@ func (s *FileStore) completeUploadBatchProven(ctx context.Context, scope domain.
 		if err := store.propagate(ctx, view, frames, changes, modifiedAt); err != nil {
 			return domain.CompleteUploadBatchResult{}, err
 		}
-		_, err = store.commitMaterializedWithAdditionalChanges(ctx, view, transactionID, fingerprint, changes, additional, storageformat.NamespaceMutationResult{UploadBatch: &storageformat.NamespaceUploadBatchResult{TransactionID: transactionID, ItemCount: uint64(len(items)), State: "completed"}})
+		if recordReceipts {
+			err = store.commitMaterializedRecords(ctx, view, transactionID, fingerprint, changes, additional)
+		} else {
+			_, err = store.commitMaterializedWithAdditionalChanges(ctx, view, transactionID, fingerprint, changes, additional, storageformat.NamespaceMutationResult{UploadBatch: &storageformat.NamespaceUploadBatchResult{TransactionID: transactionID, ItemCount: uint64(len(items)), State: "completed"}})
+		}
 		if err == nil {
 			if err := s.engine.step(ctx, StepUploadBatchCompletionPublished); err != nil {
 				return domain.CompleteUploadBatchResult{}, err
@@ -581,9 +626,23 @@ func (s *FileStore) abortUploadBatch011(ctx context.Context, scope domain.Scope,
 }
 
 func (s *FileStore) abortUploadBatchProven(ctx context.Context, scope domain.Scope, request domain.AbortUploadBatchRequest, proofs map[string]uploadCancellationProof) error {
+	return s.abortUploadBatchWithReceipt(ctx, scope, request, proofs, false)
+}
+
+func (s *FileStore) abortUploadActionsProven(ctx context.Context, scope domain.Scope, request domain.AbortUploadBatchRequest, proofs map[string]uploadCancellationProof) error {
+	return s.abortUploadBatchWithReceipt(ctx, scope, request, proofs, true)
+}
+
+func (s *FileStore) abortUploadBatchWithReceipt(ctx context.Context, scope domain.Scope, request domain.AbortUploadBatchRequest, proofs map[string]uploadCancellationProof, recordReceipts bool) error {
 	transactionID, fingerprint, err := normalizePortableUploadAbortBatch(scope.UserID(), request)
 	if err != nil {
 		return err
+	}
+	if recordReceipts {
+		if request.BatchID != "" {
+			return domain.NewError(domain.ErrorInvalid, "independent cancellation cannot publish a batch overlay")
+		}
+		transactionID = independentUploadActionTransactionID("cancel", transactionID)
 	}
 	store := newNamespaceStore(s.engine)
 	items := make([]portableUploadTransactionItem, len(request.UploadIDs))
@@ -592,26 +651,45 @@ func (s *FileStore) abortUploadBatchProven(ctx context.Context, scope domain.Sco
 		if loadErr != nil {
 			return nil, false, loadErr
 		}
-		if replay, replayErr := store.operationReplay(ctx, view, transactionID, fingerprint); replayErr != nil {
-			return nil, false, replayErr
-		} else if replay != nil {
-			if replay.UploadBatch == nil || replay.UploadBatch.TransactionID != transactionID || replay.UploadBatch.ItemCount != uint64(len(items)) || replay.UploadBatch.State != "aborted" {
-				return nil, false, domain.NewError(domain.ErrorInvalid, "invalid upload cancellation batch outcome")
+		if !recordReceipts {
+			if replay, replayErr := store.operationReplay(ctx, view, transactionID, fingerprint); replayErr != nil {
+				return nil, false, replayErr
+			} else if replay != nil {
+				if replay.UploadBatch == nil || replay.UploadBatch.TransactionID != transactionID || replay.UploadBatch.ItemCount != uint64(len(items)) || replay.UploadBatch.State != "aborted" {
+					return nil, false, domain.NewError(domain.ErrorInvalid, "invalid upload cancellation batch outcome")
+				}
+				return view, true, nil
 			}
-			return view, true, nil
 		}
+		terminal := 0
 		for index, uploadID := range request.UploadIDs {
 			record, value, recordErr := s.portableUploadAtView(ctx, view, scope.UserID(), string(uploadID))
 			if recordErr != nil {
 				return nil, false, recordErr
 			}
-			if record.Area != areaName(scope.Area()) || record.State == storageformat.UploadCompleted || record.State == storageformat.UploadAborted {
+			if record.Area != areaName(scope.Area()) {
+				if recordReceipts {
+					return nil, false, domain.NewError(domain.ErrorNotFound, "upload does not exist")
+				}
+				return nil, false, domain.NewError(domain.ErrorConflict, "upload cancellation contains a terminal upload")
+			}
+			if recordReceipts && record.State == storageformat.UploadAborted {
+				terminal++
+				continue
+			}
+			if record.State == storageformat.UploadCompleted || record.State == storageformat.UploadAborted {
 				return nil, false, domain.NewError(domain.ErrorConflict, "upload cancellation contains a terminal upload")
 			}
 			if request.BatchID != "" && (record.Batch == nil || record.Batch.BatchID != request.BatchID || record.Batch.Count != uint64(len(request.UploadIDs))) {
 				return nil, false, domain.NewError(domain.ErrorConflict, "upload cancellation does not match one complete admitted batch")
 			}
 			items[index] = portableUploadTransactionItem{uploadID: string(uploadID), record: record, value: value}
+		}
+		if terminal == len(items) {
+			return view, true, nil
+		}
+		if terminal > 0 {
+			return nil, false, domain.NewError(domain.ErrorConflict, "upload cancellation changed concurrently")
 		}
 		return view, false, nil
 	}
@@ -771,12 +849,16 @@ func (s *FileStore) abortUploadBatchProven(ctx context.Context, scope domain.Sco
 			}
 			changes = append(changes, consistencyDomainChange{Key: uploadRecordKey(item.uploadID), Require: domainValuePresent, ExpectedVersion: item.value.LogicalVersion, Value: body})
 		}
-		resultBody, encodeErr := storageformat.EncodeCanonical(storageformat.NamespaceMutationResult{
-			SchemaVersion: 1, RequestFingerprint: fingerprint,
-			UploadBatch: &storageformat.NamespaceUploadBatchResult{TransactionID: transactionID, ItemCount: uint64(len(items)), State: "aborted"},
-		})
-		if encodeErr != nil {
-			return encodeErr
+		var resultBody []byte
+		if !recordReceipts {
+			var encodeErr error
+			resultBody, encodeErr = storageformat.EncodeCanonical(storageformat.NamespaceMutationResult{
+				SchemaVersion: 1, RequestFingerprint: fingerprint,
+				UploadBatch: &storageformat.NamespaceUploadBatchResult{TransactionID: transactionID, ItemCount: uint64(len(items)), State: "aborted"},
+			})
+			if encodeErr != nil {
+				return encodeErr
+			}
 		}
 		_, err = s.engine.stateDomainStore().mutateMaterializedPrepared(ctx, uploadDomainReference(scope.UserID()), consistencyDomainMutation{ID: transactionID, Changes: changes, Result: resultBody}, view.headSnapshot, view.session)
 		if err == nil {

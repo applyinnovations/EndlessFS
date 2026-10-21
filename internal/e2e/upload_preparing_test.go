@@ -17,14 +17,17 @@ import (
 )
 
 func TestE2EUploadPreparingCreditsCompletedSiblingsAndReconnectsExpiredPage(t *testing.T) {
+	parallelE2EFixture(t)
 	runPreparingExpiredRecovery(t, 0)
 }
 
 func TestE2EUploadExpiredRetryWaitsForDurableIdentity(t *testing.T) {
+	parallelE2EFixture(t)
 	runPreparingExpiredRecovery(t, 1)
 }
 
 func TestE2EUploadExpiredRetryWaitsForDurableAdmissionKey(t *testing.T) {
+	parallelE2EFixture(t)
 	runPreparingExpiredRecovery(t, 2)
 }
 
@@ -93,7 +96,7 @@ func runPreparingExpiredRecovery(t *testing.T, rejectStage int) {
 		tx.objectStore('groups').put({key:ownerID+':preparing-group',ownerID,id:'preparing-group',name:'Reconnect folder',transferIDs:ids,directories:['reconnect-folder'],baseDirectory:'/',totalSize:30,state:'queued',discoveryDone:true,strategy:'keep-both',createdAt:1,error:'Too many attempts. Wait briefly and try again. Reference: historical-reference.'});
 		await new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)});db.close();return true;
 	})()`, accounts[0].UserID.String())
-	if err := chromedp.Run(client.ctx, chromedp.Evaluate(seed, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), chromedp.Reload()); err != nil {
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(seed, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(7)'`, 10*time.Second); err != nil {
@@ -139,7 +142,7 @@ func runPreparingExpiredRecovery(t *testing.T, rejectStage int) {
 				t.Fatalf("admitted after failed identity persistence: %s", request)
 			}
 		}
-		if err := chromedp.Run(client.ctx, chromedp.Reload()); err != nil {
+		if err := chromedp.Run(client.ctx, reloadLoopbackBrowser()); err != nil {
 			t.Fatal(err)
 		}
 		if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(10)' && document.querySelector('[data-transfer-count="complete"]').textContent==='(7)'`, 5*time.Second); err != nil {

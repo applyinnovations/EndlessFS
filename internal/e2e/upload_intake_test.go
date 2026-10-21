@@ -15,6 +15,7 @@ import (
 // This uses Chromium's actual drag data store. The older synthetic drop test
 // leaves its JavaScript object readable forever and skips production options.
 func TestE2EProductionFolderDropRetainsSourcesAcrossUploadOptions(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}

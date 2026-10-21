@@ -158,6 +158,9 @@ func Open(ctx context.Context, options Options) (*Engine, error) {
 	if err := engine.initialize(ctx); err != nil {
 		return nil, err
 	}
+	// Startup/migration verification always reads provider authority directly.
+	// The ordinary runtime's optional immutable cache is enabled only afterward.
+	engine.packReads = newConsistencyDomainPackReads(metadataPackCacheMaximumBytes)
 	return engine, nil
 }
 

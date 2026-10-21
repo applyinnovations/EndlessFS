@@ -275,7 +275,7 @@ func (s *FileStore) UploadActions(ctx context.Context, scope domain.Scope, reque
 					items[offset] = domain.CompleteUploadBatchItem{UploadID: requested[index].UploadID, CRC32C: item.crc32c}
 					completionProofs[item.uploadID] = uploadCompletionProof{version: item.value.LogicalVersion, crc32c: item.crc32c, md5: item.md5}
 				}
-				published, err := s.completeUploadBatchProven(ctx, scope, domain.CompleteUploadBatchRequest{Items: items, IdempotencyKey: key}, completionProofs)
+				published, err := s.completeUploadActionsProven(ctx, scope, domain.CompleteUploadBatchRequest{Items: items, IdempotencyKey: key}, completionProofs)
 				applyErr, entries = err, published.Entries
 			} else {
 				ids := make([]domain.UploadID, len(eligible))
@@ -284,7 +284,7 @@ func (s *FileStore) UploadActions(ctx context.Context, scope domain.Scope, reque
 					ids[offset] = requested[index].UploadID
 					cancellationProofs[item.uploadID] = uploadCancellationProof{version: item.value.LogicalVersion, lease: leases[index]}
 				}
-				applyErr = s.abortUploadBatchProven(ctx, scope, domain.AbortUploadBatchRequest{UploadIDs: ids, IdempotencyKey: key}, cancellationProofs)
+				applyErr = s.abortUploadActionsProven(ctx, scope, domain.AbortUploadBatchRequest{UploadIDs: ids, IdempotencyKey: key}, cancellationProofs)
 			}
 			for offset, index := range eligible {
 				result := &results[index]

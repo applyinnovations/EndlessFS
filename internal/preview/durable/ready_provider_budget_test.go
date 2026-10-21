@@ -164,7 +164,7 @@ func TestProviderBudgetVisiblePreviewWindowUsesOneReadyCatalogRead(t *testing.T)
 		t.Fatal(err)
 	}
 	events := append(append([]providerbudget.Event(nil), stateEvents...), dataEvents...)
-	if report, checkErr := ratchet.CheckExact("preview-ready-window-32-schema-011", model, []providerbudget.Role{providerbudget.RolePreviewState, providerbudget.RolePreviewArtifact}, events); checkErr != nil {
+	if report, checkErr := budgettest.CheckExact(t, ratchet, "preview-ready-window-32-schema-011", model, []providerbudget.Role{providerbudget.RolePreviewState, providerbudget.RolePreviewArtifact}, events); checkErr != nil {
 		t.Errorf("preview-ready-window-32-schema-011: %v; observed=%+v", checkErr, report.Totals)
 	}
 	t.Logf("provider-scale-observed operation=visible-grid-preview-resolution preview-state=%d direct-downloads=%d subtotal=%d", len(stateEvents), len(dataEvents), len(stateEvents)+len(dataEvents))

@@ -22,7 +22,35 @@ import (
 	"github.com/chromedp/chromedp/kb"
 )
 
+func readUploadCompletionActionPage(t *testing.T, r *http.Request) []domain.UploadActionItem {
+	t.Helper()
+	encoded, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Error(err)
+		return nil
+	}
+	r.Body = io.NopCloser(bytes.NewReader(encoded))
+	r.ContentLength = int64(len(encoded))
+	var body struct {
+		Items []domain.UploadActionItem `json:"items"`
+	}
+	if err := json.Unmarshal(encoded, &body); err != nil {
+		t.Error(err)
+		return nil
+	}
+	if len(body.Items) < 1 || len(body.Items) > 100 {
+		t.Errorf("unbounded terminal action page: %d", len(body.Items))
+	}
+	for _, item := range body.Items {
+		if item.Action != "complete" || item.UploadID == "" || item.CRC32C == "" {
+			t.Errorf("incomplete completion action fixture: %+v", item)
+		}
+	}
+	return body.Items
+}
+
 func TestE2EUploadAdmissionIgnoresReplyForReplacedAttempt(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -146,15 +174,17 @@ func TestE2EUploadAdmissionIgnoresReplyForReplacedAttempt(t *testing.T) {
 }
 
 func TestE2EUploadActionsRetryOnlyRejectedFinalizationWithoutResendingData(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
-	var calls atomic.Int64
+	var calls, rejectedChecksums, legacyCompletions atomic.Int64
 	var mu sync.Mutex
 	var pages [][]domain.UploadID
 	h := newPortableHarnessWithControlPlaneWrapper(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/api/v1/uploads/batch/complete" {
+				legacyCompletions.Add(1)
 				w.Header().Set("Content-Type", "application/problem+json")
 				w.WriteHeader(http.StatusConflict)
 				_, _ = w.Write([]byte(`{"status":409,"code":"conflict"}`))
@@ -168,6 +198,10 @@ func TestE2EUploadActionsRetryOnlyRejectedFinalizationWithoutResendingData(t *te
 					t.Error(err)
 					return
 				}
+				if len(body.Items) < 1 || len(body.Items) > 100 {
+					t.Errorf("unbounded completion action page: %d", len(body.Items))
+					return
+				}
 				ids := make([]domain.UploadID, len(body.Items))
 				for i, item := range body.Items {
 					ids[i] = item.UploadID
@@ -177,6 +211,7 @@ func TestE2EUploadActionsRetryOnlyRejectedFinalizationWithoutResendingData(t *te
 				mu.Unlock()
 				if calls.Add(1) == 1 {
 					body.Items[0].CRC32C = objectstore.FingerprintFor([]byte("wrong")).CRC32C
+					rejectedChecksums.Add(1)
 				}
 				encoded, _ := json.Marshal(body)
 				r.Body = io.NopCloser(bytes.NewReader(encoded))
@@ -233,6 +268,9 @@ func TestE2EUploadActionsRetryOnlyRejectedFinalizationWithoutResendingData(t *te
 	if afterWrites != writes || len(pages) != 2 || len(pages[0]) != 3 || len(pages[1]) != 1 || pages[1][0] != pages[0][0] {
 		t.Fatalf("retry repeated successful work: writes=%d=>%d pages=%+v", writes, afterWrites, pages)
 	}
+	if calls.Load() != 2 || rejectedChecksums.Load() != 1 || legacyCompletions.Load() != 0 {
+		t.Fatalf("fresh action rejection/retry was not exercised exactly: calls=%d injections=%d legacy=%d", calls.Load(), rejectedChecksums.Load(), legacyCompletions.Load())
+	}
 	client.assertNoExternalRequests(t, h)
 }
 
@@ -257,6 +295,7 @@ func expiredRecoveryPage(t *testing.T, w http.ResponseWriter, r *http.Request) {
 }
 
 func TestE2EUploadRecoveryRejectsChangedReconnectedSourceBeforeData(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -289,7 +328,7 @@ func TestE2EUploadRecoveryRejectsChangedReconnectedSourceBeforeData(t *testing.T
 	}
 	original := objectstore.FingerprintFor([]byte("abc"))
 	seed := fmt.Sprintf(`(async()=>{const ownerID=%q;const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('endlessfs-transfer-ledger-v1');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});const tx=db.transaction(['items'],'readwrite');tx.objectStore('items').put({key:ownerID+':source-mismatch',ownerID,id:'source-mismatch',groupID:'',name:'source.bin',relativePath:'source.bin',directory:'/',baseDirectory:'/',size:3,lastModified:%d,state:'needs-source',confirmed:0,uploadID:'old-source',strategy:'keep-both',planPhase:'done',md5:%q,crc32c:%q,createdAt:1});await new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)});db.close();return true})()`, accounts[0].UserID.String(), info.ModTime().UnixMilli(), original.MD5, original.CRC32C)
-	if err := chromedp.Run(client.ctx, chromedp.Evaluate(seed, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), chromedp.Reload()); err != nil {
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(seed, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(1)'`, 10*time.Second); err != nil {
@@ -308,6 +347,7 @@ func TestE2EUploadRecoveryRejectsChangedReconnectedSourceBeforeData(t *testing.T
 }
 
 func TestE2EUploadRecoveryRequestBudgetAndBoundedRendering(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -352,6 +392,7 @@ func TestE2EUploadRecoveryRequestBudgetAndBoundedRendering(t *testing.T) {
 }
 
 func TestE2EUploadRecoveryCancelledItemCannotBeResurrectedBySharedPage(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}

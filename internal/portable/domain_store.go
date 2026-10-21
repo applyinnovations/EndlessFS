@@ -253,7 +253,19 @@ func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, referen
 	if err := validateConsistencyDomainRef(reference); err != nil {
 		return consistencyDomainOutcome{}, err
 	}
-	if mutation.RetainUntil.IsZero() {
+	prepared := false
+	if preparedSession != nil {
+		preparedSession.mu.RLock()
+		prepared = !preparedSession.preparedAt.IsZero()
+		preparedSession.mu.RUnlock()
+	}
+	if prepared {
+		_, deadline, preparationErr := preparedSession.preparation(mutation.RetainUntil)
+		if preparationErr != nil {
+			return consistencyDomainOutcome{}, preparationErr
+		}
+		mutation.RetainUntil = deadline
+	} else if mutation.RetainUntil.IsZero() {
 		mutation.RetainUntil = store.clock.Now().UTC().Add(terminalOperationRetention)
 	} else {
 		mutation.RetainUntil = mutation.RetainUntil.UTC()
@@ -366,6 +378,11 @@ func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, referen
 		if err := store.step(ctx, StepDomainBeforeHeadCommit); err != nil {
 			return consistencyDomainOutcome{}, err
 		}
+		if prepared {
+			if _, _, err := preparedSession.preparation(mutation.RetainUntil); err != nil {
+				return consistencyDomainOutcome{}, err
+			}
+		}
 		_, putErr := store.backend.Put(ctx, headKey, headBody, condition)
 		if putErr == nil {
 			if err := store.step(ctx, StepDomainAfterHeadCommit); err != nil {
@@ -422,23 +439,27 @@ func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, referen
 func (store *consistencyDomainStore) mutateMaterializedPrepared(ctx context.Context, reference consistencyDomainRef, mutation consistencyDomainMutation, snapshot *consistencyDomainHeadSnapshot, session *consistencyDomainTreeSession) (outcome consistencyDomainOutcome, err error) {
 	ctx, activity := telemetry.Start(ctx, telemetry.DomainCommit, telemetry.State)
 	defer telemetry.Finish(activity, &err)
+	defer func() { err = planningDiagnostic(err, telemetry.NamespacePublish) }()
 	if err := validateConsistencyDomainRef(reference); err != nil || snapshot == nil || session == nil || !snapshot.exists || !snapshot.head.Registered || snapshot.head.DomainID != reference.ID || snapshot.head.Kind != reference.Kind {
 		if err != nil {
 			return consistencyDomainOutcome{}, err
 		}
 		return consistencyDomainOutcome{}, domain.NewError(domain.ErrorInvalid, "materialized consistency-domain mutation requires a bound live snapshot")
 	}
-	// Some namespace callers have already staged child pages whose descriptors
-	// are embedded in mutation values. A fresh session cannot reconstruct those
-	// opaque references. Upload admission stages only the changes supplied here.
+	// Retain pre-staged dependencies whose descriptors may occur inside opaque
+	// values. If the combined pack exceeds its encoding bound, publish these
+	// exact pages under their original ID before repacking the state roots.
 	session.mu.RLock()
-	canRetryUnpacked := len(session.pendingPack) == 0
-	session.mu.RUnlock()
-	if mutation.RetainUntil.IsZero() {
-		mutation.RetainUntil = store.clock.Now().UTC().Add(terminalOperationRetention)
-	} else {
-		mutation.RetainUntil = mutation.RetainUntil.UTC()
+	preparedPages := make(map[string]storageformat.DomainPage, len(session.pendingPack))
+	for digest, page := range session.pendingPack {
+		preparedPages[digest] = page
 	}
+	session.mu.RUnlock()
+	now, deadline, err := session.preparation(mutation.RetainUntil)
+	if err != nil {
+		return consistencyDomainOutcome{}, err
+	}
+	mutation.RetainUntil = deadline
 	normalized, fingerprint, err := normalizeMaterializedConsistencyDomainMutation(mutation)
 	if err != nil {
 		return consistencyDomainOutcome{}, err
@@ -468,7 +489,6 @@ func (store *consistencyDomainStore) mutateMaterializedPrepared(ctx context.Cont
 		return consistencyDomainOutcome{}, err
 	}
 
-	now := store.clock.Now().UTC()
 	latest := make(map[string]storageformat.DomainChange)
 	outcomes := make(map[string]storageformat.DomainChange, len(snapshot.head.Deltas)+1)
 	expiries := make(map[string]storageformat.DomainChange, len(snapshot.head.Deltas)+1)
@@ -523,18 +543,23 @@ func (store *consistencyDomainStore) mutateMaterializedPrepared(ctx context.Cont
 		return consistencyDomainOutcome{}, err
 	}
 	if err := session.flushPack(ctx); err != nil {
-		if canRetryUnpacked && errors.Is(err, storageformat.ErrDomainPagePackTooLarge) {
-			// Packing is optional. Rebuild from the same authenticated snapshot
-			// with ordinary immutable pages, so every descriptor names bytes
-			// actually published before the one conditional head replacement.
-			// Keep the mutation identity, preconditions and expected revision;
-			// a concurrent writer or freeze must still defeat this snapshot.
-			unpacked := newConsistencyDomainTreeSession(store, reference)
-			return store.mutateMaterializedPrepared(ctx, reference, mutation, snapshot, unpacked)
+		if !errors.Is(err, storageformat.ErrDomainPagePackTooLarge) {
+			return consistencyDomainOutcome{}, err
 		}
-		return consistencyDomainOutcome{}, err
+		roots, packErr := publishBoundedMaterializedPacks(ctx, session, preparedPages, []storageformat.DomainTreeRoot{next.Base, next.Outcomes, next.OutcomeExpiry})
+		if packErr != nil {
+			return consistencyDomainOutcome{}, packErr
+		}
+		next.Base, next.Outcomes, next.OutcomeExpiry = roots[0], roots[1], roots[2]
+		body, err = store.encodeHead(key, *snapshot, next)
+		if err != nil {
+			return consistencyDomainOutcome{}, err
+		}
 	}
 	if err := store.step(ctx, StepDomainBeforeHeadCommit); err != nil {
+		return consistencyDomainOutcome{}, err
+	}
+	if _, _, err := session.preparation(mutation.RetainUntil); err != nil {
 		return consistencyDomainOutcome{}, err
 	}
 	_, putErr := store.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: snapshot.object.Version})
@@ -827,6 +852,25 @@ func (store *consistencyDomainStore) listSnapshot(ctx context.Context, reference
 }
 
 func (store *consistencyDomainStore) listAtHead(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead, prefix, after string, limit int) ([]storageformat.DomainEntry, error) {
+	return store.listAtHeadWithSession(ctx, reference, head, prefix, after, limit, nil)
+}
+
+// A fixed-head operation may reuse its already authenticated immutable pages.
+// This does not refresh a mutable head or establish durable presence for the
+// separate checkpoint reachability/inventory verification.
+func (store *consistencyDomainStore) listAtHeadWithSession(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead, prefix, after string, limit int, session *consistencyDomainTreeSession) ([]storageformat.DomainEntry, error) {
+	if session == nil {
+		session = newConsistencyDomainTreeSession(store, reference)
+	} else {
+		if session.store != store || session.reference != reference {
+			return nil, domain.NewError(domain.ErrorInvalid, "consistency-domain range session is misbound")
+		}
+		// Continuations may need no provider I/O. Observe cancellation even
+		// when every requested page or delta is already in this operation.
+		if err := ctx.Err(); err != nil {
+			return nil, domain.WrapError(domain.ErrorUnavailable, "consistency-domain range read canceled", err)
+		}
+	}
 	relevantDeltaChanges := 0
 	for _, delta := range head.Deltas {
 		for _, change := range delta.Changes {
@@ -835,7 +879,7 @@ func (store *consistencyDomainStore) listAtHead(ctx context.Context, reference c
 			}
 		}
 	}
-	base, err := newConsistencyDomainTreeSession(store, reference).collect(ctx, head.Base, prefix, after, limit+relevantDeltaChanges)
+	base, err := session.collect(ctx, head.Base, prefix, after, limit+relevantDeltaChanges)
 	if err != nil {
 		return nil, err
 	}
@@ -911,10 +955,18 @@ func (store *consistencyDomainStore) compactSnapshot(ctx context.Context, refere
 	if !snapshot.exists || len(snapshot.head.Deltas) == 0 && snapshot.head.OutcomeExpiry.Digest == "" {
 		return nil
 	}
+	session := newConsistencyDomainTreeSession(store, reference)
+	session.enablePackedWrites(snapshot.envelope.LogicalVersion)
+	if err := session.bindPreparedMutation("compact:"+snapshot.envelope.LogicalVersion, time.Time{}); err != nil {
+		return err
+	}
+	now, _, err := session.preparation(time.Time{})
+	if err != nil {
+		return err
+	}
 	latest := make(map[string]storageformat.DomainChange)
 	outcomes := make(map[string]storageformat.DomainChange, len(snapshot.head.Deltas))
 	expiries := make(map[string]storageformat.DomainChange, len(snapshot.head.Deltas))
-	now := store.clock.Now().UTC()
 	for _, delta := range snapshot.head.Deltas {
 		for _, change := range delta.Changes {
 			latest[change.Key] = change
@@ -936,8 +988,6 @@ func (store *consistencyDomainStore) compactSnapshot(ctx context.Context, refere
 		changes = append(changes, change)
 	}
 	sort.Slice(changes, func(left, right int) bool { return changes[left].Key < changes[right].Key })
-	session := newConsistencyDomainTreeSession(store, reference)
-	session.enablePackedWrites(snapshot.envelope.LogicalVersion)
 	root, err := session.apply(ctx, snapshot.head.Base, changes)
 	if err != nil {
 		return err
@@ -961,6 +1011,9 @@ func (store *consistencyDomainStore) compactSnapshot(ctx context.Context, refere
 		return err
 	}
 	if err := session.flushPack(ctx); err != nil {
+		return err
+	}
+	if _, _, err := session.preparation(time.Time{}); err != nil {
 		return err
 	}
 	_, err = store.backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: snapshot.object.Version})

@@ -13,14 +13,14 @@
 
   // Count the exact serialized UTF-8 envelope and each item once. File count
   // alone cannot bound long paths, escaping, tokens, or logical versions.
-  function* uploadControlBatches(items, describe, field = "items", envelope = {}) {
+  function* uploadControlBatches(items, describe, field = "items", envelope = {}, maximumItems = uploadPlanningBatchSize) {
     const emptyBytes = uploadControlEncoder.encode(JSON.stringify({ ...envelope, [field]: [] })).byteLength;
     let batch = [];
     let bytes = emptyBytes;
     for (const item of items) {
       const itemBytes = uploadControlEncoder.encode(JSON.stringify(describe(item))).byteLength;
       if (emptyBytes + itemBytes > uploadControlBodyBytes) throw new Error("An upload item exceeds the control request limit.");
-      if (batch.length && (batch.length === uploadPlanningBatchSize || bytes + 1 + itemBytes > uploadControlBodyBytes)) {
+      if (batch.length && (batch.length === maximumItems || bytes + 1 + itemBytes > uploadControlBodyBytes)) {
         yield batch;
         batch = [];
         bytes = emptyBytes;
@@ -278,7 +278,7 @@
     }
     const activeReuse = reuse.filter(({ transfer }) => !transfer.cancelRequested);
     if (activeReuse.length) {
-      await Promise.all(activeReuse.map(({ transfer }) => ensureTransferDirectories(transfer)));
+      await Promise.all(activeReuse.map(({ transfer }) => ensureTransferDirectories(transfer, signal)));
       for (const batch of uploadControlBatches(activeReuse, uploadReuseItem)) {
         const reuseKey = `${batch[0].transfer.id}-content-reuse`;
         await api("/api/v1/files/copy", {
@@ -328,10 +328,10 @@
     state.uploadPlanRetryTimers.delete(key);
     const controller = new AbortController();
     state.transferPlanControllers.set(key, controller);
-    if (group) { group.state = "preparing"; group.error = ""; persistTransferGroup(group); }
+    if (group) { group.state = "preparing"; preserveTransferError(group); persistTransferGroup(group); }
     try {
       if (group && !group.cancelled) await prepareTransferGroup(group);
-      for (const batch of uploadControlBatches(pending, uploadSizePlanItem)) {
+      for (const batch of uploadControlBatches(pending.filter((transfer) => transfer.state !== "failed"), uploadSizePlanItem)) {
         const planned = await withUploadNamespaceTurn(() => planUploadSizeBatch(batch, controller.signal));
         await pipelineUploadFingerprints(planned.exact, group, controller.signal);
       }

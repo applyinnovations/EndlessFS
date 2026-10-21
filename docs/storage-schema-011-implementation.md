@@ -1,7 +1,9 @@
 # Storage schema 011: bounded provider mutation architecture
 
-**Status:** implemented and locally qualified when the complete pull-request
-gate is green. The first declared release boundary is v0.7.0.
+**Status:** historical schema-011 implementation and modeled-budget record.
+The first declared release boundary is v0.7.0. Current corrective upload readiness
+requires the complete [R1–R8 release checklist](upload-recovery-release-checklist.md);
+this record is not successful whole-lifecycle acceptance.
 
 ## Outcome
 
@@ -12,8 +14,9 @@ longer rewrites and rereads a multi-page state tree. Stored file objects remain
 immutable at their original provider keys; namespace mutation never reads,
 copies, rewrites, relocates, or deletes their bytes.
 
-The table below composes the exact executable provider budgets with the one
-session-authentication read made by the HTTP route. Costs use the checked-in GCS
+The retained comparison below composes fixed-fixture provider budgets with the
+session-authentication read made by the HTTP route. Its original planning rows
+are modeled estimates with the coverage limitation stated below. Costs use the checked-in GCS
 Regional Standard flat-namespace price fixture. Latencies are conservative
 modeled values, not a Google SLA.
 
@@ -36,6 +39,17 @@ modeled values, not a Google SLA.
 | Sweep 128 unreachable checkpoint objects | 163 | 131 | $0.0000058 | 0.270 s |
 | Compact a 300-item state domain | 15 | 5 | $0.0000112 | 0.356 s |
 
+The original executable planning budget seeds **256 existing files** and
+compares one versus **1,024 query items**. Its historical 10,000-item table labels
+do not establish a 10,000-file metadata workload or whole-upload success.
+`TestUploadPlanningProviderBudgetTenThousandExistingAndPlanningItems` separately
+seeds 10,000 existing files and compares one versus 10,000 queries. The corrective
+browser acceptance also uses 10,604 files, 7,966 already completed and 2,638 actual
+remaining transfers. Current counts, bytes, profiles and limitations are in the
+[corrective acceptance record](upload-recovery-corrective-acceptance.md), rather
+than implied by this historical table. All operation counts here depend on the
+recorded fixture's metadata fitting its selected layout.
+
 The 10,000 upload workflows retain exactly one unavoidable provider operation
 for each actual object or upload session. The remaining fourteen requests are
 one authenticated control-plane operation and thirteen state operations. A
@@ -43,24 +57,28 @@ dormant 10,000-record browser transfer ledger performs zero provider requests.
 
 ## Packed consistency-domain publication
 
-A schema-011 domain head can reference one immutable `DomainPagePack`. The pack
-contains canonical page records sorted by digest, uses deterministic gzip, and
+A schema-011 domain head can reference immutable roots spanning one or more
+bounded `DomainPagePack` objects. Each pack contains canonical page records
+sorted by digest, uses deterministic gzip, and
 is bounded to 4 MiB compressed and 32 MiB expanded. Readers authenticate the
 head, the pack key binding, every contained page digest, the canonical encoding,
-and the requested logical root. A mutation loads the head and its pack once,
-changes the materialized pages, writes one new content-addressed pack, and
-publishes one conditional head replacement. The head CAS is the sole visibility
+and the requested logical root. A request-local cache serves page lookups. A
+mutation prepares one pack when its staged closure fits, otherwise deterministic
+bounded groups, then publishes one conditional head replacement. The head CAS is the sole visibility
 point.
 
 Pack identity includes the complete mutation binding before the first page is
 written. Two mutations that happen to share an early page therefore cannot
 alias a pack whose later pages differ. Corrupt, oversized, non-canonical,
-misbound, missing, or digest-inconsistent packs fail closed. Large domains that
-do not fit the bounded pack continue to use authenticated copy-on-write pages;
-the optimization is an encoding choice, not a weakening of the domain contract.
+misbound, missing, or digest-inconsistent packs fail closed. Larger staged
+closures validate original digests and repeated descriptors, bind stable groups
+to the complete immutable input and a versioned layout policy, and check every
+final group before any new-layout PUT. Prior packed/unpacked references and
+opaque prepared dependencies retain their authenticated identities. The format,
+canonical key grammar, conditional commit, replay and freeze contracts remain.
 
-For a 10,000-root namespace mutation the raw storage operation is two reads and
-two writes. The composed HTTP route adds one authentication read. A directory
+For the retained 10,000-root fixture that fits one pack, the raw storage operation
+is two reads and two writes. The composed HTTP route adds one authentication read. A directory
 move retains the immutable child root, so moving a directory with one descendant
 or one million descendants performs the same metadata operation. Replay reads
 the retained compact outcome and reconstructs uniform item success instead of

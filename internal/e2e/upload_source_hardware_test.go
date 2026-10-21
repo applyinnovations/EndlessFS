@@ -23,6 +23,7 @@ import (
 // The local sink streams and attests every byte without retaining photo bodies.
 // It qualifies source orchestration, not live-provider publication or throughput.
 func TestE2EUploadSourceHardwareQualification(t *testing.T) {
+	parallelE2EFixture(t)
 	directory := os.Getenv("ENDLESSFS_SOURCE_QUALIFICATION_DIRECTORY")
 	if directory == "" {
 		t.Skip("explicit hardware source qualification was not requested")
@@ -102,7 +103,7 @@ func TestE2EUploadSourceHardwareQualification(t *testing.T) {
 				})
 			})
 			client := newTestBrowser(t)
-			if err := chromedp.Run(client.ctx, chromedp.Navigate(h.origin), chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
+			if err := chromedp.Run(client.ctx, navigateLoopbackBrowser(h.origin), chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
 				t.Fatal(err)
 			}
 			if err := waitFor(client.ctx, `typeof window.__endlessfsUploadSourceTest === 'object'`, 5*time.Second); err != nil {

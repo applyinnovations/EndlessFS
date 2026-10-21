@@ -617,7 +617,7 @@ base64url(
 
 To mutate schema-009-or-later same-domain authority, the portable engine MUST read the canonical consistency-domain head together with its request-local backend-native version, validate logical preconditions against the authenticated head and referenced immutable pages or page pack, prepare changed immutable metadata, and conditionally publish the next head against that native version. It then discards the native version. The committed delta or compacted outcome binds the complete normalized intent fingerprint and result. A retry reads canonical authority and returns that result; it never assumes native identifiers survive.
 
-Schema 011 MAY encode the pages required by one bounded domain snapshot in one deterministic content-addressed pack. A pack MUST be no larger than 4 MiB compressed or 32 MiB after bounded expansion; MUST bind the domain ID, domain kind, pack ID, sorted page digests, and canonical page bodies; and MUST authenticate every page exactly as the unpacked representation does. The pack ID MUST bind the complete mutation identity before any page is written, so two mutations sharing an early page cannot alias divergent later pages. Missing, oversized, non-canonical, corrupt, misbound, or digest-inconsistent packs fail closed. Domains that do not fit the pack envelope retain immutable copy-on-write pages. Encoding choice never changes the one-head-CAS visibility, replay, fencing, checkpoint, or raw-copy contract.
+Schema 011 MAY encode the reachable staged pages required by a domain snapshot in one or more deterministically identified immutable packs. Each pack MUST be no larger than 4 MiB compressed or 32 MiB after bounded expansion; MUST bind the domain ID, domain kind, pack ID, sorted page digests, and canonical page bodies; and MUST authenticate every page exactly as the unpacked representation does. The pack ID MUST bind the complete mutation identity before any page is written, so two mutations sharing an early page cannot alias divergent later pages. Missing, oversized, non-canonical, corrupt, misbound, or digest-inconsistent packs fail closed. Writers may structurally share prior packed or unpacked immutable subtrees; readers retain both representations. Encoding choice never changes the one-head-CAS visibility, replay, fencing, checkpoint, or raw-copy contract.
 
 The domain revision and captured native head condition fence an ordinary schema-009-or-later writer. A visible same-domain commit increments the contiguous portable domain revision and uses the current request-local native condition on the same head object. Mutation, transition preparation/finalization, or freeze changes that head before a paused writer can publish, so the paused writer's conditional commit fails. Historical portable operation fences remain decode-only migration input and do not justify a runtime lease or admission object around an ordinary mutation.
 
@@ -787,15 +787,46 @@ rewrite only changed leaf/ancestor paths and structurally share unchanged
 subtrees. Independent immutable page writes use a bounded concurrency of 32;
 only the later head CAS publishes them.
 
-A schema-011 packed head names one immutable pack containing the authenticated
-page records needed by that bounded snapshot. One request-local decode cache
+A schema-011 packed head names immutable roots whose authenticated page records
+may span multiple bounded packs. One request-local decode cache
 serves every lookup in the operation. Concurrent requests within one engine
 MAY share an in-flight authenticated immutable pack read bound to the complete
-domain key; they MUST NOT share mutable heads or cached failures. Pack expansion
+physical key, domain identity, domain kind and pack identity; they MUST NOT
+share mutable heads or cached failures. An engine MAY retain strictly verified
+compressed immutable wire bodies in an explicitly byte- and entry-bounded LRU.
+A successful strict provider read MAY issue an opaque, process-local memo of
+its complete canonical/member verification. That memo MUST bind the full
+SHA-256 hash and length of the exact owned wire, domain identity, kind and pack
+identity; its zero value MUST be invalid and its fields MUST NOT be caller
+constructible or durable authority. Ownership copying MUST occur inside the
+existing admission boundary before validation and hashing. A fresh session may
+reuse only those deterministic verification results after checking all memo
+bindings and exact wire equality, before expansion. Except for the separately
+bounded decoder-result mechanism in [metadata decoder memo v1](metadata-decoder-memo-v1.md), it MUST still use bounded
+cancellable gzip integrity checks, fresh JSON-owned pages, complete pack
+membership and the existing per-use page digest/descriptor validation. A memo or
+wire mismatch MUST fail closed, evict the entry and never silently retry from
+the provider in that same call. The compressed-body cache MUST belong to exactly one
+engine/backend, copy admitted provider buffers, admit only successful strict
+provider reads, and never treat residency or a memo as proof of provider
+presence for a conditional publication.
+Startup/migration verification and checkpoint closure/reachability verification
+MUST bypass idle cache bodies and in-flight ordinary cached reads. They MUST
+still reject missing or corrupt provider authority after an earlier warm read.
+The separate decoder-result memo may reuse a pure canonical decoding result only
+after each required fresh provider GET succeeds; it cannot replace or coalesce
+independent closure/reachability presence checks. Its mechanism and guarantee
+matrix are normative in the versioned document linked above. The strict codec
+reference API continues to perform fresh gzip/JSON and complete validation.
+The cache-owned wire bound does not bound active callers' pinned bodies,
+decoded pages, pack construction or total process memory. Cache eviction or a
+cold replica MAY cause fresh provider reads and MUST NOT change canonical bytes,
+commit/replay behavior or correctness. Pack expansion
 and verification MUST have cancellable process-wide admission so a request
 burst cannot multiply the expanded-pack working set without bound. Cancellation
-of one caller MUST NOT cancel an independent caller's successful read. A bounded materialized mutation writes
-one successor pack and one conditional head; it MUST NOT retain one provider
+of one caller MUST NOT cancel an independent caller's successful read. A materialized mutation writes
+one successor pack when its staged closure fits, otherwise multiple bounded
+packs before the same single conditional head; it MUST NOT retain one provider
 object or one outcome row per selected logical item. Uniform batch results are
 reconstructed from the fingerprint-bound compact transaction descriptor.
 
@@ -888,7 +919,7 @@ the `008 -> 009` checkpoint proves the replacement closure. Completed
 checkpoint inventory pages are durable checkpoint metadata and MUST be copied
 and verified with their root.
 
-Mutation outcomes and idempotency bindings remain replayable for 30 days; Trash retention is separate and indefinite until the owner permanently deletes it. Outcome expiry is itself authenticated by each domain's expiry tree. After a schema-011 checkpoint is published under the closed gate, its authenticated inventory is the immutable mark set for one checkpoint-bound garbage-collection session. Discovery writes a deterministic portable garbage plan with at most 128 entries per page and authenticates the complete plan before the first deletion. The session stores only its checkpoint/gate/inventory/plan binding and sweep position. It sweeps only explicitly recognized domain pages, packs, or inert heads, resolved transition records, rebuildable projections, transient leases/progress, state-query snapshots, and unreachable immutable blobs. It never opens a file body. Every deletion is conditional on the native version from the frozen discovery/listing result, and the closed gate is revalidated immediately before destructive work. Independent deletes use bounded concurrency; one durable cursor publication makes the page restartable. Unknown reserved objects are never deletion-eligible. Writes reopen only after the exact terminal session and checkpoint are reverified. Completed predecessor GC sessions and marks remain excluded durable compatibility residue while a supported predecessor sweeper could still exist; deleting them earlier can make a lagging sweeper unsafe. Forged or stale sessions, a changed gate/checkpoint binding, corrupt/cyclic/missing plan pages, contradictory aggregates, ambiguous reachability, unordered entries, changed native versions, or misplaced objects fail closed.
+Mutation outcomes and idempotency bindings remain replayable for 30 days; Trash retention is separate and indefinite until the owner permanently deletes it. An authoritative prepared mutation binds its exact UTC preparation time, expiry-pruning cutoff and replay deadline before staging immutable pages; the default 30-day duration begins at this binding. A declared explicit deadline cannot change after preparation. These byte-affecting inputs participate in physical pack identity. A stale preparation fails before work and before publication, without weakening strict immutable-byte equality or its original conditional head commit. Same-pack child negative hints may be omitted because fetching their parent already authenticates that full pack; cross-pack hints and complete child descriptor validation remain. Internal materialized upload phase receipts may omit an unused duplicate result while retaining their full fingerprint, revision and expiry; public replay remains bound to authenticated upload/idempotency/lease records. Their compact IDs preserve all SHA-256 bits and phase separation; predecessor receipt IDs/results remain readable. Independent terminal actions may use their validated per-file terminal records as the exact replay result and omit an unused generic materialized result. Their transaction identities MUST be cryptographically separated from public legacy batch identities, and the public legacy recognized-result protocol remains unchanged. Completed replay MUST validate owner/area, terminal state and exact CRC32C before returning the original entry, even after session expiry. Only a materialized mutation may use this record-only result path; ordinary deltas continue to require recognized results. Outcome expiry is itself authenticated by each domain's expiry tree. After a schema-011 checkpoint is published under the closed gate, its authenticated inventory is the immutable mark set for one checkpoint-bound garbage-collection session. Discovery writes a deterministic portable garbage plan with at most 128 entries per page and authenticates the complete plan before the first deletion. The session stores only its checkpoint/gate/inventory/plan binding and sweep position. It sweeps only explicitly recognized domain pages, packs, or inert heads, resolved transition records, rebuildable projections, transient leases/progress, state-query snapshots, and unreachable immutable blobs. It never opens a file body. Every deletion is conditional on the native version from the frozen discovery/listing result, and the closed gate is revalidated immediately before destructive work. Independent deletes use bounded concurrency; one durable cursor publication makes the page restartable. Unknown reserved objects are never deletion-eligible. Writes reopen only after the exact terminal session and checkpoint are reverified. Completed predecessor GC sessions and marks remain excluded durable compatibility residue while a supported predecessor sweeper could still exist; deleting them earlier can make a lagging sweeper unsafe. Forged or stale sessions, a changed gate/checkpoint binding, corrupt/cyclic/missing plan pages, contradictory aggregates, ambiguous reachability, unordered entries, changed native versions, or misplaced objects fail closed.
 
 ### 9.2 Multi-replica conditional publication, freeze, and recovery
 
@@ -1455,6 +1486,33 @@ Requirements:
   is non-authoritative, never part of a portability checkpoint, and introduces
   no storage-schema epoch. Concurrent builders publish it with native CAS and
   never move its source revision backward.
+- Projection construction MUST discard unreachable intermediate pages before
+  publication and bind physical pack identities to the complete source/build
+  intent. A valid final closure that exceeds one pack is published through
+  multiple bounded packs before the original conditional head update. The
+  existing canonical page validation, digest/reference checks, 4 MiB encoded
+  and 32 MiB expanded pack limits remain mandatory. Capacity recovery MUST NOT
+  reinterpret corruption, a physical identity collision or a provider failure
+  as permission to bypass validation. Materialized authoritative roots preserve
+  opaque prepared-child descriptors and the same single head commit point.
+- Multi-pack closure construction MUST validate every collected staged page
+  against its original digest and every incoming staged descriptor, including
+  repeated references, before assigning successor identities. It MUST own
+  mutable page data and preserve opaque values and authenticated prior refs.
+  Final identities bind the complete immutable source/mutation/preparation
+  input, ordered roots and reachable original pages, an explicit layout-policy
+  version and each group's stable original range. Every byte-affecting policy
+  change requires a distinct layout identity. Map order, cache residency,
+  provider presence, scheduling and cancellation MUST NOT choose final bytes.
+  Only actual typed capacity failures may deterministically refine groups;
+  no monotonic compressed-size assumption or validation bypass is permitted.
+  All final groups MUST fit and validate before any pack in that new layout is
+  PUT, and existing create-only/exact-byte collision checks remain mandatory.
+  Original-ID opaque prepared dependencies may already have been flushed;
+  failure may leave them unreachable but MUST NOT publish partial authority.
+  Cancellation is checked after encoding and before each publication. This
+  changes layout policy within existing pack-v1/page representations, not the
+  schema epoch, reader contract, canonical key grammar or sole head-CAS visibility.
 - The size response carries an encrypted, owner-bound, expiring token that pins
   both the derived projection and its exact immutable namespace root. The exact
   phase fails with a conflict if the namespace changed, causing a safe replan;
@@ -1488,6 +1546,27 @@ Requirements:
   per-file rates. Initial tiny samples remain provisional, numeric estimates
   use a stable display cadence, and stale acknowledgements suppress numerical
   ETA. Preparation is an operational phase, not a blocking ETA calculation.
+- Initial selection, reconnect, retry and reload MUST retain the completed
+  members' share of whole-folder preparation. Repreparing unfinished members
+  advances only the remaining share. A new attempt clears its obsolete current
+  error while preserving bounded useful history. A directory failure MUST NOT
+  change completed or cancelled members, or block independent valid siblings.
+- `POST /api/v1/directories/prepare` accepts 1–100 unique live virtual paths and
+  returns ordered index/path-bound outcomes. Existing directories are ready;
+  files are never replaced. Missing unselected parents and file ancestors fail
+  only the affected selected subtree. Eligible creations publish together at
+  the owner namespace head; interrupted or uncertain publication is safely
+  repeatable by revalidating current state. Authoritative metadata corruption,
+  provider-read failure or uncertain head publication fails the envelope rather
+  than inventing per-item success. Parent dependencies may order related pages,
+  but independent sibling pages MUST NOT be serialized. The browser coalesces
+  directory checks and creations, with at most four active 100-item pages and
+  exact 1 MiB request/response bounds checked before mutation.
+  Transient envelope failures and a rolling-replica route gap replay the same
+  page under the existing bounded retry policy and server backoff. Backoff
+  holds no HTTP slot. Cancellation and logout abort active requests, timers,
+  dependency waits and queued group preparation before another namespace turn
+  can begin. Shared paths remain useful to other interested consumers.
 - Upload control requests MUST satisfy their route item bound (100 for independent
   admission/lifecycle/actions, 10,000 for legacy batches) and the exact
   1 MiB serialized UTF-8 body bound, including paths, escaping, tokens, and
@@ -1497,6 +1576,10 @@ Requirements:
   reuse mutations change its namespace root. Drag sources are captured during
   the drop event before an asynchronous upload-options dialog can make the
   browser's drag data store unreadable.
+- Fresh independently admitted uploads complete through independent terminal
+  action pages of at most 100 items. A persisted legacy completion cohort keeps
+  its original ordered membership and idempotency key across ambiguous replay;
+  a refresh MUST NOT silently split or replace that existing intent.
 - Failed upload history offers accessible clear actions for one item, the
   failed members of a folder, and all failed items. Clear first revokes allocated
   unfinished sessions through the owner-scoped control plane; a verified
@@ -1666,6 +1749,7 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 | GET | `/api/v1/files/storage-map` | Return the bounded, snapshot-checked two-level hierarchy for the authenticated owner's storage map. |
 | GET | `/api/v1/files/stat` | Stat one virtual path. |
 | POST | `/api/v1/directories` | Create an empty directory. |
+| POST | `/api/v1/directories/prepare` | Ensure a bounded selection of destination directories with per-item path outcomes. |
 | POST | `/api/v1/uploads` | Create one upload capability. |
 | POST | `/api/v1/uploads/batch` | Create up to 10,000 destination-bound upload capabilities with safe batch recovery bindings. |
 | POST | `/api/v1/uploads/batch/admit` | Admit 1–100 independent attempts with stable per-item intent receipts and bounded partial outcomes. |
@@ -1690,6 +1774,27 @@ WebAuthn request/response payloads follow the selected library and WebAuthn JSON
 | POST | `/api/v1/trash/empty` | Confirmed empty-trash operation. |
 
 The browser sends virtual paths only. Any JSON field resembling a provider key, bucket, owner prefix, or arbitrary capability URL is rejected.
+
+Independent admission, lifecycle, and action replies retain every ordered item
+correlation within the 1 MiB response bound. Ordinary replies retain their full
+representation. When repeated display details exceed that bound, an item with
+`detailsOmitted: true` may omit its status path and an action's entry detail;
+operational status fields, outcomes, and complete usable capabilities remain.
+Clients already know their requested destinations and can fetch entry details
+separately when needed. Capabilities MUST NOT be truncated or modified to fit.
+If complete capabilities exceed the page bound, successful siblings retain
+theirs. Deferred admission items retain their accepted outcome and upload ID
+with `capacityDeferred: true` and `nextAction: "resume"`; clients persist that
+attempt and resume it rather than repeating admission. Deferred lifecycle items
+use `nextAction: "smaller_page"`; clients halve only the unresolved cohort,
+without spending a transient-failure retry. A capability that cannot fit even
+alone in an actual lifecycle/resume reply produces `detailsUnavailable: true`, `errorKind: "unavailable"`,
+`retryable: false`, and `nextAction: "attention"`, retaining its upload ID and
+request correlation so the existing attempt can be inspected or cancelled.
+No deferred or terminal representation changes authoritative expiry, receipt,
+publication, or file-byte semantics.
+An independently rejected unknown action uses the bounded action marker
+`invalid`; its index and upload ID retain request correlation.
 
 The browser uses the maximum 1,000-entry page for virtualized live, Trash, and
 public-share browsing. A terminal operation or batch result is authoritative and
@@ -2172,6 +2277,15 @@ be recorded as an evidence gap rather than replaced with a guessed diagnosis.
   NOT export capability URLs, query strings, object keys, tokens, headers, file
   names, or raw exception text. HTTP instrumentation uses route templates and
   coarse result classes rather than raw request targets.
+- Failure boundaries retain safe closed stage and reason codes alongside the
+  operation, result class, duration and build identity. Structured lifecycle
+  logs may correlate a validated bounded request reference with trace/span IDs;
+  request references MUST NOT become metric labels. HTTP problem responses
+  retain the internal classification without exporting the underlying error
+  text, paths, filenames, owner identifiers, storage keys, credentials,
+  capabilities or request bodies. Nested operations and cancelled contexts
+  MUST NOT erase a recorded diagnosis. Diagnostic cardinality and redaction
+  require denial tests, including collector failure and concurrent requests.
 - Profiling captures code locations and aggregate CPU, allocation, live-heap,
   or contention samples. It MUST NOT export raw heap dumps, file buffers,
   process environments, command lines, or user-derived profile labels. Diagnostic
@@ -2910,8 +3024,8 @@ An implementation agent should keep this checklist current and attach test names
   blob, verify provider-attested metadata, and publish the reference only
   through the owner namespace-head commit; historical staging is decode-only
   migration compatibility.
-- [x] Schema-011 upload batches publish up to 10,000 owner-scoped intents in one
-  bounded pack while independent provider sessions use 100-worker concurrency;
+- [x] Schema-011 upload batches publish up to 10,000 owner-scoped intents through
+  bounded immutable packs and one owner head CAS, while independent provider sessions use 100-worker concurrency;
   completion/cancellation restart at authenticated 1,000-item boundaries and
   the shared provider contract proves replay and failed-batch residue denial.
 - [x] Two-to-eight-replica deterministic crash schedules cover head reads,

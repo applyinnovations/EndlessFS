@@ -2,11 +2,16 @@
 package httpapi
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/auth"
@@ -156,7 +161,9 @@ func securityHeaders(next http.Handler, secure bool, dataOrigin, previewOrigin s
 
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status      int
+	ctx         context.Context
+	observation *responseObservation
 }
 
 func (recorder *statusRecorder) WriteHeader(status int) {
@@ -171,18 +178,118 @@ func (recorder *statusRecorder) Write(body []byte) (int, error) {
 	if recorder.status == 0 {
 		recorder.status = http.StatusOK
 	}
-	return recorder.ResponseWriter.Write(body)
+	n, err := recorder.ResponseWriter.Write(body)
+	observed := err
+	if observed == nil && n < len(body) {
+		observed = io.ErrShortWrite
+	}
+	recorder.recordWriteFailure(observed)
+	return n, err
 }
 
 func (recorder *statusRecorder) Unwrap() http.ResponseWriter {
 	return recorder.ResponseWriter
 }
 
+// responseObservation is shared by the request log and HTTP activity. Flush
+// happens once after a normal handler return, before either observation ends.
+// It surfaces buffered-body errors; net/http still owns terminal chunks,
+// trailers and connection completion after this boundary.
+type responseObservation struct {
+	flushOnce   sync.Once
+	mu          sync.Mutex
+	hijacked    bool
+	writeFailed bool
+	writeResult telemetry.Result
+}
+type responseObservationKey struct{}
+
+func withResponseObservation(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(responseObservationKey{}).(*responseObservation); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, responseObservationKey{}, &responseObservation{})
+}
+
+func newStatusRecorder(writer http.ResponseWriter, ctx context.Context) *statusRecorder {
+	observation, _ := ctx.Value(responseObservationKey{}).(*responseObservation)
+	return &statusRecorder{ResponseWriter: writer, ctx: ctx, observation: observation}
+}
+
+func (recorder *statusRecorder) responseObservation() *responseObservation {
+	if recorder.observation == nil {
+		recorder.observation = &responseObservation{}
+	}
+	return recorder.observation
+}
+func (recorder *statusRecorder) recordWriteFailure(err error) {
+	if err == nil {
+		return
+	}
+	observation := recorder.responseObservation()
+	observation.mu.Lock()
+	defer observation.mu.Unlock()
+	if !observation.writeFailed {
+		observation.writeResult = telemetry.RecordResponseWrite(recorder.ctx, err)
+		observation.writeFailed = true
+	}
+}
+func (recorder *statusRecorder) transportOutcome() (bool, telemetry.Result) {
+	observation := recorder.responseObservation()
+	observation.mu.Lock()
+	defer observation.mu.Unlock()
+	return observation.writeFailed, observation.writeResult
+}
+func (recorder *statusRecorder) finishResponse() {
+	observation := recorder.responseObservation()
+	observation.flushOnce.Do(func() {
+		observation.mu.Lock()
+		hijacked := observation.hijacked
+		observation.mu.Unlock()
+		if hijacked {
+			return
+		}
+		if err := http.NewResponseController(recorder.ResponseWriter).Flush(); !errors.Is(err, http.ErrNotSupported) {
+			recorder.recordWriteFailure(err)
+		}
+	})
+}
+
+// Preserve hijack capability only when an underlying writer supports it.
+// Successful hijack releases net/http's response buffer, so it must never be
+// flushed by normal completion observation afterward.
+type hijackingStatusRecorder struct{ *statusRecorder }
+
+func (recorder *hijackingStatusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	connection, buffer, err := http.NewResponseController(recorder.ResponseWriter).Hijack()
+	if err == nil {
+		observation := recorder.responseObservation()
+		observation.mu.Lock()
+		observation.hijacked = true
+		observation.mu.Unlock()
+	}
+	return connection, buffer, err
+}
+func (recorder *statusRecorder) writer() http.ResponseWriter {
+	for writer := recorder.ResponseWriter; ; {
+		if _, ok := writer.(http.Hijacker); ok {
+			return &hijackingStatusRecorder{recorder}
+		}
+		if unwrapper, ok := writer.(interface{ Unwrap() http.ResponseWriter }); ok {
+			writer = unwrapper.Unwrap()
+			continue
+		}
+		return recorder
+	}
+}
+
 func requestLogMiddleware(next http.Handler, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
-		recorder := &statusRecorder{ResponseWriter: w}
-		next.ServeHTTP(recorder, r)
+		r = r.WithContext(withResponseObservation(r.Context()))
+		recorder := newStatusRecorder(w, r.Context())
+		next.ServeHTTP(recorder.writer(), r)
+		recorder.finishResponse()
 		status := recorder.status
 		if status == 0 {
 			status = http.StatusOK
@@ -191,14 +298,28 @@ func requestLogMiddleware(next http.Handler, logger *slog.Logger) http.Handler {
 		if route == "" {
 			route = "unmatched"
 		}
-		logger.InfoContext(r.Context(), "request_completed",
+		result := resultClass(status)
+		attributes := []any{}
+		if failed, writeResult := recorder.transportOutcome(); failed {
+			reason := "transport_failure"
+			result = "unavailable"
+			switch writeResult {
+			case telemetry.Timeout:
+				result, reason = "timeout", "deadline"
+			case telemetry.Canceled:
+				result, reason = "canceled", "canceled"
+			}
+			attributes = append(attributes, "stage", "response_write", "reason", reason)
+		}
+		attributes = append(attributes,
 			"traceID", telemetry.TraceID(r.Context()),
 			"requestID", requestID(r),
 			"route", route,
 			"status", status,
-			"result", resultClass(status),
+			"result", result,
 			"duration", time.Since(started),
 		)
+		logger.InfoContext(r.Context(), "request_completed", attributes...)
 	})
 }
 

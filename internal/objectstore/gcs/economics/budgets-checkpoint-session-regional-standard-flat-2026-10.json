@@ -1,0 +1,101 @@
+{
+  "budgets": [
+    {
+      "name": "maintenance-migration-008-to-012-minimal-fixture",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 633,
+        "costPicoUSD": 1026800000,
+        "p50Micros": 14543089,
+        "p95Micros": 44222089,
+        "p99Micros": 109492089,
+        "criticalP50Micros": 14143089,
+        "criticalP95Micros": 43022089,
+        "criticalP99Micros": 106492089
+      },
+      "roles": {
+        "file": {
+          "requests": 32,
+          "costPicoUSD": 49600000,
+          "p50Micros": 720000,
+          "p95Micros": 2240000,
+          "p99Micros": 5600000
+        },
+        "state": {
+          "requests": 601,
+          "costPicoUSD": 977200000,
+          "p50Micros": 13823089,
+          "p95Micros": 41982089,
+          "p99Micros": 103892089
+        }
+      }
+    },
+    {
+      "name": "maintenance-migration-application-complete-pending-cleanup-schema-012",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 267,
+        "costPicoUSD": 358200000,
+        "p50Micros": 6099775,
+        "p95Micros": 18444775,
+        "p99Micros": 45604775,
+        "criticalP50Micros": 6099775,
+        "criticalP95Micros": 18444775,
+        "criticalP99Micros": 45604775
+      },
+      "roles": {
+        "file": {
+          "requests": 13,
+          "costPicoUSD": 23200000,
+          "p50Micros": 300000,
+          "p95Micros": 940000,
+          "p99Micros": 2350000
+        },
+        "state": {
+          "requests": 254,
+          "costPicoUSD": 335000000,
+          "p50Micros": 5799775,
+          "p95Micros": 17504775,
+          "p99Micros": 43254775
+        }
+      }
+    },
+    {
+      "name": "maintenance-migration-application-complete-interrupted-cleanup-schema-012",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 266,
+        "costPicoUSD": 358200000,
+        "p50Micros": 6079774,
+        "p95Micros": 18384774,
+        "p99Micros": 45454774,
+        "criticalP50Micros": 6079774,
+        "criticalP95Micros": 18384774,
+        "criticalP99Micros": 45454774
+      },
+      "roles": {
+        "file": {
+          "requests": 13,
+          "costPicoUSD": 23200000,
+          "p50Micros": 300000,
+          "p95Micros": 940000,
+          "p99Micros": 2350000
+        },
+        "state": {
+          "requests": 253,
+          "costPicoUSD": 335000000,
+          "p50Micros": 5779774,
+          "p95Micros": 17444774,
+          "p99Micros": 43104774
+        }
+      }
+    }
+  ],
+  "id": "021-checkpoint-operation-session-reuse",
+  "profile": "regional-standard-flat",
+  "provider": "gcs",
+  "schemaVersion": 1
+}

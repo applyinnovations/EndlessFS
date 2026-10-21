@@ -47,7 +47,7 @@ func TestProviderBudgetDuplicateReconciliationWorkflows(t *testing.T) {
 	check := func(name string) {
 		t.Helper()
 		events := append(stateLedger.Events(), fileLedger.Events()...)
-		if report, err := ratchet.CheckExact(name, economics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, events); err != nil {
+		if report, err := budgettest.CheckExact(t, ratchet, name, economics, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, events); err != nil {
 			t.Errorf("%s: %v; observed=%+v; events=%+v", name, err, report.Totals, events)
 		}
 		stateLedger.Reset()

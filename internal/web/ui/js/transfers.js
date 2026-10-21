@@ -39,9 +39,20 @@
     value.errorCode = "";
   }
   function beginTransferAttempt(transfer, restartExpired = false) {
+    transfer.directoryPreparationController?.abort();
     preserveTransferError(transfer);
     const group = state.transferGroups.get(transfer.groupID);
-    if (group) { preserveTransferError(group); scheduleTransferGroupPersistence(group); }
+    if (group) {
+      preserveTransferError(group);
+      // An explicit retry revalidates its destination ancestry. Another tab
+      // or replica may have moved/deleted a previously prepared directory.
+      let path = transfer.baseDirectory;
+      for (const component of (transfer.relativeDirectory || "").split("/").filter(Boolean)) {
+        path = joinPath(path, component);
+        group.preparedDirectories?.delete(path);
+      }
+      scheduleTransferGroupPersistence(group);
+    }
     transfer.attemptGeneration = (transfer.attemptGeneration || 0) + 1;
     transfer.retryCount = 0;
     transfer.nextRetryAt = 0;
@@ -52,6 +63,19 @@
   }
 
   const uploadLifecyclePageSize = 100;
+
+  function uploadNamespaceMutation(path, options, prepareBody = null) {
+    const owner = state.user?.userID;
+    return withUploadNamespaceTurn(() => {
+      if (owner !== state.user?.userID || options.signal?.aborted) throw new DOMException("Upload request suspended", "AbortError");
+      if (prepareBody) {
+        const body = prepareBody();
+        if (!body) return null;
+        return api(path, { ...options, body });
+      }
+      return api(path, options);
+    });
+  }
   let uploadLifecycleQueue = [];
   let uploadLifecycleActive = false;
   let activeUploadLifecyclePage = null;
@@ -65,7 +89,7 @@
     const owner = state.user?.userID;
     const signal = transfer.controller?.signal;
     return new Promise((resolve, reject) => {
-      const job = { transfer, uploadID, generation, owner, resume, signal, resolve, reject, settled: false, page: null };
+      const job = { transfer, uploadID, generation, owner, resume, signal, resolve, reject, settled: false, page: null, capacityLimit: uploadLifecyclePageSize };
       job.finish = (error, item) => {
         if (job.settled) return;
         job.settled = true;
@@ -84,7 +108,10 @@
   }
   async function flushUploadLifecycle() {
     if (uploadLifecycleActive) return;
-    uploadLifecycleQueue = uploadLifecycleQueue.filter((job) => !job.settled);
+    uploadLifecycleQueue = uploadLifecycleQueue.filter((job) => {
+      if (!job.settled && (job.transfer.cleared || job.owner !== state.user?.userID || job.uploadID !== job.transfer.uploadID || job.generation !== (job.transfer.attemptGeneration || 0))) job.abort();
+      return !job.settled;
+    });
     if (!uploadLifecycleQueue.length) return;
     if (Date.now() < uploadLifecycleRetryAt) {
       if (!uploadLifecycleRetryTimer) uploadLifecycleRetryTimer = window.setTimeout(() => { uploadLifecycleRetryTimer = 0; flushUploadLifecycle(); }, uploadLifecycleRetryAt - Date.now());
@@ -92,7 +119,8 @@
     }
     uploadLifecycleActive = true;
     const resume = uploadLifecycleQueue[0].resume;
-    const jobs = uploadLifecycleQueue.filter((job) => job.resume === resume).slice(0, uploadLifecyclePageSize);
+    const capacityLimit = uploadLifecycleQueue[0].capacityLimit;
+    const jobs = uploadLifecycleQueue.filter((job) => job.resume === resume && job.capacityLimit === capacityLimit).slice(0, capacityLimit);
     const selected = new Set(jobs);
     uploadLifecycleQueue = uploadLifecycleQueue.filter((job) => !selected.has(job));
     const page = { jobs, controller: new AbortController() };
@@ -106,7 +134,19 @@
         if (job.settled) continue;
         if (job.transfer.cleared || job.owner !== state.user?.userID || job.uploadID !== job.transfer.uploadID || job.generation !== (job.transfer.attemptGeneration || 0)) { job.abort(); continue; }
         const item = response.uploads[index];
-        if (item?.index !== index || item.uploadID !== job.uploadID) { job.finish(new TypeError("Upload recovery returned a misbound item.")); continue; }
+        if (item?.index !== index || item.uploadID !== job.uploadID || item.status && item.status.uploadID !== job.uploadID || item.capability && item.capability.uploadID !== job.uploadID) { job.finish(new TypeError("Upload recovery returned a misbound item.")); continue; }
+        if (item.capacityDeferred) {
+          if (jobs.length < 2 || item.nextAction !== "smaller_page" || item.errorKind || item.capability || !item.status || item.status.uploadID !== job.uploadID) {
+            job.finish(new TypeError("Upload recovery returned an invalid capacity deferral.")); continue;
+          }
+          // This is response partitioning, not a failed transfer attempt.
+          // Keep the exact durable upload and promise while halving its next
+          // cohort; even a page containing only deferrals terminates at one.
+          job.capacityLimit = Math.max(1, Math.floor(jobs.length / 2));
+          job.page = null;
+          uploadLifecycleQueue.push(job);
+          continue;
+        }
         job.finish(null, item);
       }
     } catch (error) {
@@ -123,6 +163,7 @@
     const status = ({ invalid: 400, unauthenticated: 401, unauthorized: 403, not_found: 404, conflict: 409, precondition_failed: 412, rate_limited: 429, unavailable: 503 })[item.errorKind] || 500;
     const error = new APIError(new Response(null, { status }), { title: "Upload recovery needs attention", code: item.errorKind, requestID: item.requestID });
     error.batchErrorKind = item.errorKind || "internal";
+    if (typeof item.retryable === "boolean") error.batchRetryable = item.retryable;
     return error;
   }
 
@@ -552,6 +593,14 @@
     // Terminal failures require an explicit retry or clear action, including
     // failed finalization with an available source or a retained checksum.
     if (["complete", "cancelled", "failed"].includes(transfer.state)) return;
+	// A permission-granted stored handle has satisfied the old source request.
+	// Clear that obsolete code before the first smart-planning response; keep
+	// useful bounded history and leave unrelated failures for their own checks.
+	if (transfer.file instanceof File && transfer.errorCode === "source_required") {
+	  preserveTransferError(transfer);
+	  transfer.error = "";
+	  transfer.errorCode = "";
+	}
 	if (transfer.awaitingCompletion && transfer.uploadID && transfer.crc32c) {
 	  transfer.state = "uploading";
 	  transfer.completionReadyAt = uploadMeasurementNow();
@@ -909,58 +958,164 @@
     }
   }
 
-  async function ensureDirectory(path, owner = state.user?.userID) {
-    const key = `${owner}:${path}`;
-    const assertOwner = () => { if (owner !== state.user?.userID) throw new DOMException("Upload owner changed", "AbortError"); };
-    assertOwner();
-    let pending = state.directoryPromises.get(key);
-    if (pending) return pending;
-    pending = (async () => {
-      try {
-        const existing = await api(`/api/v1/files/stat?path=${encodeURIComponent(path)}`);
-        if (existing.kind !== "directory") throw new Error("An upload folder path is already a file.");
-        return;
-      } catch (error) {
-        if (!(error instanceof APIError) || error.status !== 404) throw error;
-      }
-      try {
-        assertOwner();
-        await api("/api/v1/directories", { method: "POST", body: { path, conflict: "fail" } });
-      } catch (error) {
-        if (!(error instanceof APIError) || error.status !== 409) throw error;
-        assertOwner();
-        const existing = await api(`/api/v1/files/stat?path=${encodeURIComponent(path)}`);
-        if (existing.kind !== "directory") throw error;
-      }
-    })();
-    state.directoryPromises.set(key, pending);
-    try { await pending; assertOwner(); }
-    finally { if (state.directoryPromises.get(key) === pending) state.directoryPromises.delete(key); }
+  let directoryPreparationQueue = [];
+  let directoryPreparationScheduled = false;
+  const directoryPreparationActive = new Set();
+  const directoryPreparationEntries = new Map();
+
+  function directoryPreparationWait(promise, signal) {
+    if (!signal) return promise;
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(new DOMException("Folder preparation cancelled", "AbortError"));
+      if (signal.aborted) { abort(); return; }
+      signal.addEventListener("abort", abort, { once: true });
+      promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    });
   }
 
-  async function ensureDirectories(baseDirectory, relativeDirectory, preparedDirectories = null) {
+  function directoryPreparationNeeded(entry) {
+    return entry.owner === state.user?.userID && [...entry.signals].some((signal) => !signal?.aborted);
+  }
+
+  function ensureDirectory(path, owner = state.user?.userID, signal = null) {
+    const key = `${owner}:${path}`;
+    if (owner !== state.user?.userID || signal?.aborted) return Promise.reject(new DOMException("Upload preparation changed", "AbortError"));
+    let entry = directoryPreparationEntries.get(key);
+    if (!entry || entry.page?.controller.signal.aborted) {
+      let resolve, reject;
+      const promise = new Promise((success, failure) => { resolve = success; reject = failure; });
+      entry = { owner, path, key, promise, resolve, reject, signals: new Set(), cleanup: [] };
+      state.directoryPromises.set(key, promise);
+      directoryPreparationEntries.set(key, entry);
+      directoryPreparationQueue.push(entry);
+      if (!directoryPreparationScheduled) {
+        directoryPreparationScheduled = true;
+        queueMicrotask(flushDirectoryPreparation);
+      }
+    }
+    if (!entry.signals.has(signal)) {
+      entry.signals.add(signal);
+      if (signal) {
+        const abort = () => { if (entry.page?.entries.every((item) => !directoryPreparationNeeded(item))) entry.page.controller.abort(); };
+        signal.addEventListener("abort", abort, { once: true });
+        entry.cleanup.push(() => signal.removeEventListener("abort", abort));
+      }
+    }
+    return directoryPreparationWait(entry.promise, signal);
+  }
+
+  async function flushDirectoryPreparation() {
+    directoryPreparationScheduled = false;
+    const entries = directoryPreparationQueue.splice(0).sort((left, right) => left.path.split("/").length - right.path.split("/").length || left.path.localeCompare(right.path));
+    const settle = (entry, error = null) => {
+      if (state.directoryPromises.get(entry.key) === entry.promise) state.directoryPromises.delete(entry.key);
+      if (directoryPreparationEntries.get(entry.key) === entry) directoryPreparationEntries.delete(entry.key);
+      for (const cleanup of entry.cleanup) cleanup();
+      if (error) entry.reject(error); else entry.resolve();
+    };
+    let pages;
+    try { pages = [...uploadControlBatches(entries, (entry) => entry.path, "paths", {}, 100)]; }
+    catch (error) { for (const entry of entries) settle(entry, error); return; }
+    await Promise.all(pages.map(async (page) => {
+      let release;
+      let slot;
+      const controller = new AbortController();
+      uploadActionControllers.add(controller);
+      try {
+        const flight = { entries: page, controller };
+        for (const entry of page) entry.page = flight;
+        if (page.every((entry) => !directoryPreparationNeeded(entry))) controller.abort();
+        const members = new Set(page.map((entry) => entry.promise));
+        const dependencies = new Set();
+        for (const entry of page) {
+          const parts = entry.path.split("/");
+          for (let end = 2; end < parts.length; end++) {
+            const parent = state.directoryPromises.get(`${entry.owner}:${parts.slice(0, end).join("/")}`);
+            if (parent && !members.has(parent)) dependencies.add(parent);
+          }
+        }
+        // Parents in earlier pages settle first; independent pages overlap.
+        // A rejected parent does not revoke unrelated siblings in this page.
+        await directoryPreparationWait(Promise.allSettled(dependencies), controller.signal);
+        let response;
+        for (let failures = 0; ; failures++) {
+          if (controller.signal.aborted) throw new DOMException("Folder preparation cancelled", "AbortError");
+          if (page.some((entry) => entry.owner !== state.user?.userID)) throw new DOMException("Upload owner changed", "AbortError");
+          while (directoryPreparationActive.size >= 4) await directoryPreparationWait(Promise.race(directoryPreparationActive), controller.signal);
+          slot = new Promise((resolve) => { release = resolve; });
+          directoryPreparationActive.add(slot);
+          let retryError;
+          try {
+            if (page.some((entry) => entry.owner !== state.user?.userID)) throw new DOMException("Upload owner changed", "AbortError");
+            response = await api("/api/v1/directories/prepare", { method: "POST", signal: controller.signal, body: { paths: page.map((entry) => entry.path) } });
+            break;
+          } catch (error) {
+            const rollingRoute = error instanceof APIError && error.status === 405;
+            if (!navigator.onLine || failures >= transferRetryLimit || !rollingRoute && !transferFailureIsRetryable(error)) throw error;
+            retryError = error;
+          } finally {
+            directoryPreparationActive.delete(slot);
+            release();
+            slot = null;
+          }
+          // Ensure revalidates every replay, including a lost success. Backoff
+          // holds no HTTP slot, so another owner's pages can make progress.
+          await wait(Math.max(retryError.retryAfterMs || 0, transferRetryDelay({ retryCount: failures + 1 })), controller.signal);
+        }
+        if (page.some((entry) => entry.owner !== state.user?.userID)) throw new DOMException("Upload owner changed", "AbortError");
+        const results = response?.directories;
+        if (!Array.isArray(results) || results.length !== page.length || results.some((item, index) => item.index !== index || item.path !== page[index].path || typeof item.ready !== "boolean" || item.ready && item.errorCode || !item.ready && !item.errorCode)) throw new TypeError("Folder preparation returned misbound outcomes.");
+        for (const [index, entry] of page.entries()) settle(entry, results[index].ready ? null : uploadLifecycleError({ errorKind: results[index].errorCode }));
+      } catch (error) { for (const entry of page) settle(entry, error); }
+      finally { if (slot) { directoryPreparationActive.delete(slot); release(); } uploadActionControllers.delete(controller); }
+    }));
+  }
+
+  async function ensureDirectories(baseDirectory, relativeDirectory, preparedDirectories = null, signal = null) {
     const owner = state.user?.userID;
     if (!relativeDirectory) return;
     let current = baseDirectory;
+    const pending = [];
     for (const component of relativeDirectory.split("/")) {
       current = joinPath(current, component);
       if (preparedDirectories && preparedDirectories.has(current)) continue;
-      await ensureDirectory(current, owner);
-      if (preparedDirectories) preparedDirectories.add(current);
+      const path = current;
+      pending.push(ensureDirectory(path, owner, signal).then(() => { if (preparedDirectories && !signal?.aborted) preparedDirectories.add(path); }));
+    }
+    await Promise.all(pending);
+  }
+
+  async function ensureTransferDirectories(transfer, signal = transfer.controller?.signal) {
+    const group = transfer.groupID ? state.transferGroups.get(transfer.groupID) : null;
+    if (group && !(group.preparedDirectories instanceof Set)) group.preparedDirectories = new Set();
+    const controller = new AbortController();
+    transfer.directoryPreparationController = controller;
+    const abort = () => controller.abort();
+    if (signal?.aborted) controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    try { await ensureDirectories(transfer.baseDirectory, transfer.relativeDirectory, group ? group.preparedDirectories : null, controller.signal); }
+    finally {
+      signal?.removeEventListener("abort", abort);
+      if (transfer.directoryPreparationController === controller) transfer.directoryPreparationController = null;
     }
   }
 
-  async function ensureTransferDirectories(transfer) {
-    const group = transfer.groupID ? state.transferGroups.get(transfer.groupID) : null;
-    if (group && !(group.preparedDirectories instanceof Set)) group.preparedDirectories = new Set();
-    await ensureDirectories(transfer.baseDirectory, transfer.relativeDirectory, group ? group.preparedDirectories : null);
-  }
-
   function prepareTransferGroup(group) {
-    return withUploadNamespaceTurn(() => group.cancelled ? undefined : prepareTransferGroupDirectories(group));
+    const owner = state.user?.userID;
+    group.directoryPreparationController?.abort();
+    const controller = new AbortController();
+    group.directoryPreparationController = controller;
+    uploadActionControllers.add(controller);
+    return withUploadNamespaceTurn(() => {
+      if (controller.signal.aborted || group.cancelled || owner !== state.user?.userID || state.transferGroups.get(group.id) !== group) return;
+      return prepareTransferGroupDirectories(group, controller);
+    }).finally(() => {
+      uploadActionControllers.delete(controller);
+      if (group.directoryPreparationController === controller) group.directoryPreparationController = null;
+    });
   }
 
-  async function prepareTransferGroupDirectories(group) {
+  async function prepareTransferGroupDirectories(group, controller) {
     group.cancelled = false;
     group.state = "preparing";
     preserveTransferError(group);
@@ -968,10 +1123,16 @@
     renderTransfers();
     try {
       const directories = [...group.directories].sort((left, right) => left.split("/").length - right.split("/").length || left.localeCompare(right));
-      for (const relativeDirectory of directories) {
-        if (!(group.preparedDirectories instanceof Set)) group.preparedDirectories = new Set();
-        await ensureDirectories(group.baseDirectory, relativeDirectory, group.preparedDirectories);
-        if (group.cancelled) return;
+      if (!(group.preparedDirectories instanceof Set)) group.preparedDirectories = new Set();
+      const results = await Promise.allSettled(directories.map((relativeDirectory) => ensureDirectories(group.baseDirectory, relativeDirectory, group.preparedDirectories, controller.signal)));
+      if (controller.signal.aborted) return;
+      for (const [index, result] of results.entries()) if (result.status === "rejected") {
+        const failedPath = joinPath(group.baseDirectory, directories[index]);
+        for (const transfer of state.transfers) if (transfer.groupID === group.id && !["complete", "cancelled", "failed"].includes(transfer.state)
+          && (transfer.directory === failedPath || transfer.directory.startsWith(`${failedPath}/`))) {
+          transitionTransfer(transfer, "failed", friendlyError(result.reason, "Folder preparation failed."));
+        }
+        if (!group.transferIDs.length) throw result.reason;
       }
       if (group.cancelled) return;
       group.state = group.transferIDs.length ? "queued" : "complete";
@@ -979,12 +1140,10 @@
       if (!group.transferIDs.length && state.currentDirectory === group.baseDirectory) loadDirectory(group.baseDirectory);
       pumpTransfers();
     } catch (error) {
+      if (controller.signal.aborted) return;
       group.state = "failed";
       group.error = friendlyError(error, "Folder preparation failed.");
-      for (const transfer of state.transfers.filter((item) => item.groupID === group.id)) {
-        transfer.state = "failed";
-        transfer.error = group.error;
-      }
+      for (const transfer of state.transfers.filter((item) => item.groupID === group.id && !["complete", "cancelled", "failed"].includes(item.state))) transitionTransfer(transfer, "failed", group.error);
       group.failureAnnounced = true;
       announce(`${group.name} failed to upload.`, true);
     }
@@ -1330,10 +1489,13 @@
     try {
       await Promise.all(transfers.map(waitForTransferIdentity));
       if (owner !== state.user?.userID || controller.signal.aborted) return;
-      await Promise.all(transfers.filter(current).map(ensureTransferDirectories));
+      await Promise.all(transfers.filter(current).map(async (transfer) => {
+        try { await ensureTransferDirectories(transfer, controller.signal); }
+        catch (error) { if (current(transfer)) failUploadPreparation(transfer, error); }
+      }));
       const intents = new Map();
       for (const transfer of transfers.filter(current)) {
-        if (transfer.cancelRequested) continue;
+        if (transfer.cancelRequested || transfer.state !== "preparing") continue;
         transfer.admissionProtocol = "independent";
         transfer.durableAdmissionRequired = true;
         transfer.admissionIntent ||= uploadInitializationRequest(transfer, true);
@@ -1346,13 +1508,19 @@
       // the POST. Capability persistence may fail later: replay still finds
       // the same server receipt, including already completed siblings.
       if (!await persistTransferItems([...intents.keys()])) throw uploadIdentityPersistenceError();
-      const pending = [...intents.keys()].filter((transfer) => current(transfer) && !transfer.cancelRequested);
+      let pending = [...intents.keys()].filter((transfer) => current(transfer) && !transfer.cancelRequested);
       if (!pending.length || owner !== state.user?.userID || controller.signal.aborted) return;
-      const response = await api("/api/v1/uploads/batch/admit", {
+      const response = await uploadNamespaceMutation("/api/v1/uploads/batch/admit", {
         method: "POST", signal: controller.signal,
-        body: { uploads: pending.map((transfer) => intents.get(transfer)) },
+      }, () => {
+        // Only independent item receipts permit changing membership. Select
+        // live consumers after the namespace wait and bind replies to that
+        // exact page; legacy persisted cohorts keep their original envelope.
+        pending = pending.filter((transfer) => current(transfer) && !transfer.cancelRequested && transfer.state === "preparing");
+        return pending.length ? { uploads: pending.map((transfer) => intents.get(transfer)) } : null;
       });
       if (owner !== state.user?.userID || controller.signal.aborted) return;
+      if (!pending.length) return;
       const results = response && Array.isArray(response.uploads) ? response.uploads : [];
       if (results.length !== pending.length || results.some((result, index) => result?.index !== index || result.id !== intents.get(pending[index]).idempotencyKey
         || result.capability && result.capability.uploadID !== result.uploadID
@@ -1361,7 +1529,7 @@
       for (const [index, transfer] of pending.entries()) {
         const result = results[index];
         if (!current(transfer) || transfer.cancelRequested || transfer.state === "cancelled") {
-          if (result.capability?.uploadID) abandoned.push(result.capability.uploadID);
+          if (["accepted", "already_accepted"].includes(result.outcome) && result.uploadID) abandoned.push(result.uploadID);
           continue;
         }
         if (result.outcome === "completed" && result.status?.state === "completed") {
@@ -1374,7 +1542,14 @@
           failUploadPreparation(transfer, error);
           continue;
         }
-        if (result.errorKind || !["accepted", "already_accepted"].includes(result.outcome) || !result.uploadID || !result.capability && !result.status?.dataComplete) {
+        const accepted = ["accepted", "already_accepted"].includes(result.outcome) && result.uploadID;
+        const capacityDeferred = result.capacityDeferred === true && result.nextAction === "resume" && !result.capability && result.status;
+        if (accepted && (capacityDeferred || result.detailsUnavailable === true)) {
+          // Admission already succeeded. Persist its identity even if its
+          // opaque capability needs a smaller resume response or attention.
+          transfer.uploadID = result.uploadID; transfer.durableAdmissionRequired = false;
+        }
+        if (result.errorKind || !accepted || !result.capability && !result.status?.dataComplete && !capacityDeferred) {
           const error = result.errorKind ? uploadLifecycleError(result) : uploadBatchItemError("internal");
           failUploadPreparation(transfer, error);
           continue;
@@ -1389,7 +1564,7 @@
       }
       deferAdmissionRetries(pending.filter(current));
       if (abandoned.length && owner === state.user?.userID && !controller.signal.aborted) {
-        await api("/api/v1/uploads/batch", { method: "DELETE", signal: controller.signal,
+        await uploadNamespaceMutation("/api/v1/uploads/batch", { method: "DELETE", signal: controller.signal,
           headers: { "Idempotency-Key": idempotencyKey() }, body: { uploadIDs: abandoned } }).catch(() => {});
       }
       if (owner === state.user?.userID) await persistTransferItems(pending.filter(current));
@@ -1421,7 +1596,7 @@
     try {
       await Promise.all(transfers.map(waitForTransferIdentity));
       if (owner !== state.user?.userID || controller.signal.aborted) return;
-      if (!existingKey) await Promise.all(transfers.filter(current).map(ensureTransferDirectories));
+      if (!existingKey) await Promise.all(transfers.filter(current).map((transfer) => ensureTransferDirectories(transfer, controller.signal)));
       if (owner !== state.user?.userID || controller.signal.aborted) return;
       const pending = existingKey ? transfers : transfers.filter((transfer) => current(transfer) && transfer.state === "preparing" && !transfer.cancelRequested);
       if (!pending.length) return;
@@ -1446,7 +1621,7 @@
         if (durableAdmissionRequired && !saved) throw uploadIdentityPersistenceError();
       }
       if (owner !== state.user?.userID || controller.signal.aborted) return;
-      const response = await api("/api/v1/uploads/batch", {
+      const response = await uploadNamespaceMutation("/api/v1/uploads/batch", {
         method: "POST", signal: controller.signal,
         headers: { "Idempotency-Key": batchKey }, body,
       });
@@ -1483,7 +1658,7 @@
       // arrived. Dispose only those old sessions under the original owner.
       deferAdmissionRetries(pending.filter(current));
       if (abandoned.length && owner === state.user?.userID && !controller.signal.aborted) {
-        await api("/api/v1/uploads/batch", { method: "DELETE", signal: controller.signal,
+        await uploadNamespaceMutation("/api/v1/uploads/batch", { method: "DELETE", signal: controller.signal,
           headers: { "Idempotency-Key": `${batchKey}-stale-cancel` }, body: { uploadIDs: abandoned } }).catch(() => {});
       }
       if (owner === state.user?.userID) await persistTransferItems(pending.filter(current));
@@ -1521,6 +1696,7 @@
   }
 
   function transferFailureIsRetryable(error) {
+    if (error?.batchRetryable === false) return false;
     if (!navigator.onLine) return true;
     if (error instanceof APIError) return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500;
     if (error && ["rate_limited", "unavailable", "internal"].includes(error.batchErrorKind)) return true;
@@ -1633,7 +1809,7 @@
           setPreparationState(transfer, "directories");
 		  await ensureTransferDirectories(transfer);
           setPreparationState(transfer, "sessions");
-		  capability = await api("/api/v1/uploads", { method: "POST", headers: { "Idempotency-Key": transfer.id }, body: uploadInitializationRequest(transfer), signal: transfer.controller.signal });
+		  capability = await uploadNamespaceMutation("/api/v1/uploads", { method: "POST", headers: { "Idempotency-Key": transfer.id }, body: uploadInitializationRequest(transfer), signal: transfer.controller.signal });
 		}
       }
       if (owner !== state.user?.userID || localID !== transfer.id || generation !== (transfer.attemptGeneration || 0) || transfer.controller?.signal.aborted) throw new DOMException("Upload attempt replaced", "AbortError");
@@ -1674,6 +1850,10 @@
       transfer.retryCount = 0;
       transfer.nextRetryAt = 0;
 	  transfer.awaitingCompletion = true;
+	  // Fresh independent attempts retain per-upload terminal receipts and
+	  // finalize in the same bounded pages as admission/recovery. Previously
+	  // persisted atomic cohorts retain their exact key and membership.
+	  if (transfer.admissionProtocol === "independent" && !transfer.completionBatchKey) transfer.completionProtocol = "actions";
 	  transfer.completionReadyAt = uploadMeasurementNow();
 	  transfer.error = "";
 	  transfer.speedBps = 0;
@@ -1728,6 +1908,7 @@
 
   const uploadActionControllers = new Set();
   function suspendUploadControl() {
+    for (const group of state.transferGroups.values()) group.directoryPreparationController?.abort();
     for (const job of uploadLifecycleQueue) job.abort();
     uploadLifecycleQueue = [];
     if (activeUploadLifecyclePage) {
@@ -1818,7 +1999,8 @@
 	  const readyAt = state.transfers.filter((transfer) => transfer.awaitingCompletion && !transfer.cancelRequested).reduce((oldest, transfer) => Math.min(oldest, transfer.completionReadyAt ?? uploadMeasurementNow()), Infinity);
 	  // Age verified work independently of other files' acknowledgements, and
 	  // flush at one existing durable progress segment. Short bursts coalesce.
-	  if (state.activeTransfers !== 0 && readyCount < 1000 && uploadMeasurementNow() - readyAt < 15000 && uploadMeasurementNow() - lastUploadAcknowledgementAt < 15000) return;
+	  const readyPageSize = state.transfers.some((transfer) => transfer.awaitingCompletion && transfer.completionProtocol === "actions") ? uploadLifecyclePageSize : 1000;
+	  if (state.activeTransfers !== 0 && readyCount < readyPageSize && uploadMeasurementNow() - readyAt < 15000 && uploadMeasurementNow() - lastUploadAcknowledgementAt < 15000) return;
 	  const transfers = completionCandidates();
 	  if (!transfers.length) return;
 	  state.uploadCompletionActive = true;
@@ -1976,6 +2158,7 @@
 
   async function cancelTransfer(transfer) {
     transfer.cancelRequested = true;
+    transfer.directoryPreparationController?.abort();
     cancelUploadFingerprint(transfer);
     if (!transfer.groupID) state.transferPlanControllers.get(transfer.id)?.abort();
     if (!transfer.groupID) window.clearTimeout(state.uploadPlanRetryTimers.get(transfer.id));
@@ -1989,7 +2172,7 @@
 	  const current = () => owner === state.user?.userID && generation === transfer.attemptGeneration && uploadID === transfer.uploadID && !transfer.cleared;
 	  const body = { uploadIDs: [transfer.uploadID] };
 	  if (transfer.batchID && transfer.batchCount === 1) body.batchID = transfer.batchID;
-	  try { await api("/api/v1/uploads/batch", { method: "DELETE", headers: { "Idempotency-Key": `${transfer.id}-cancel` }, body }); if (current()) { transfer.pendingAction = ""; queueTransferPersistence(transfer); } }
+	  try { await uploadNamespaceMutation("/api/v1/uploads/batch", { method: "DELETE", headers: { "Idempotency-Key": `${transfer.id}-cancel` }, body }); if (current()) { transfer.pendingAction = ""; queueTransferPersistence(transfer); } }
       catch { if (current()) await retryPendingCancellation([transfer]); }
     }
     rebuildTransferProjection();
@@ -2015,7 +2198,7 @@
         const body = { uploadIDs: batch.map((transfer) => transfer.uploadID) };
         if (wholeBatch && batch.length === members.length) body.batchID = batchID;
         try {
-          await api("/api/v1/uploads/batch", {
+          await uploadNamespaceMutation("/api/v1/uploads/batch", {
             method: "DELETE", headers: { "Idempotency-Key": `${batch[0].id}-clear-failed` },
             body,
           });
@@ -2033,7 +2216,7 @@
           }));
           const unfinished = batch.filter((transfer, index) => statuses[index] && !["completed", "aborted"].includes(statuses[index].state));
           if (unfinished.length) {
-            await api("/api/v1/uploads/batch", {
+            await uploadNamespaceMutation("/api/v1/uploads/batch", {
               method: "DELETE", headers: { "Idempotency-Key": `${batch[0].id}-clear-failed-remainder` },
               body: { uploadIDs: unfinished.map((transfer) => transfer.uploadID) },
             });
@@ -2137,6 +2320,7 @@
   async function cancelTransferGroup(group) {
     group.cancelled = true;
     group.state = "cancelled";
+    group.directoryPreparationController?.abort();
     state.transferPlanControllers.get(group.id)?.abort();
     window.clearTimeout(state.uploadPlanRetryTimers.get(group.id));
     state.uploadPlanRetryTimers.delete(group.id);
@@ -2144,6 +2328,7 @@
 	const cancellableUploads = [];
     for (const transfer of cancelled) {
       transfer.cancelRequested = true;
+      transfer.directoryPreparationController?.abort();
       cancelUploadFingerprint(transfer);
       if (transfer.controller) transfer.controller.abort();
       transfer.attemptGeneration = (transfer.attemptGeneration || 0) + 1;
@@ -2174,7 +2359,7 @@
 		const completeBatch = batchID !== "legacy" && count === transfers.length && indices.size === count
 		  && transfers.every((transfer) => transfer.batchID === batchID && transfer.batchCount === count && transfer.batchIndex >= 0 && transfer.batchIndex < count);
 		if (completeBatch) body.batchID = batchID;
-		try { await api("/api/v1/uploads/batch", { method: "DELETE", headers: { "Idempotency-Key": `${group.id}-cancel-${index}` }, body }); for (const transfer of current()) { transfer.pendingAction = ""; queueTransferPersistence(transfer); } }
+		try { await uploadNamespaceMutation("/api/v1/uploads/batch", { method: "DELETE", headers: { "Idempotency-Key": `${group.id}-cancel-${index}` }, body }); for (const transfer of current()) { transfer.pendingAction = ""; queueTransferPersistence(transfer); } }
         catch { const pending = current(); if (pending.length) await retryPendingCancellation(pending); }
 	  }
 	}

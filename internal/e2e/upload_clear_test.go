@@ -20,23 +20,26 @@ import (
 )
 
 func TestE2EClearFailedUploadsCleansSessionsAndPreservesCompletedFiles(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
 	var failCompletion, failCleanup atomic.Bool
-	var cleanups atomic.Int64
+	var cleanups, rejectedCompletions, deniedCleanups atomic.Int64
 	harness := newPortableHarnessWithControlPlaneWrapper(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/api/v1/uploads/batch" && r.Method == http.MethodDelete {
 				cleanups.Add(1)
 				if failCleanup.Load() {
+					deniedCleanups.Add(1)
 					w.Header().Set("Content-Type", "application/problem+json")
 					w.WriteHeader(http.StatusForbidden)
 					_, _ = w.Write([]byte(`{"status":403,"code":"forbidden","detail":"Cleanup denied"}`))
 					return
 				}
 			}
-			if r.URL.Path == "/api/v1/uploads/batch/complete" && failCompletion.Load() {
+			if r.URL.Path == "/api/v1/uploads/batch/actions" && r.Method == http.MethodPost && failCompletion.Load() {
+				rejectedCompletions.Add(int64(len(readUploadCompletionActionPage(t, r))))
 				w.Header().Set("Content-Type", "application/problem+json")
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"status":400,"code":"invalid_request","detail":"Injected terminal completion failure"}`))
@@ -109,7 +112,7 @@ func TestE2EClearFailedUploadsCleansSessionsAndPreservesCompletedFiles(t *testin
 	// A just-completed retained row may still have a pending local ledger
 	// write; allow its idempotent completion replay through the real server.
 	failCompletion.Store(false)
-	if err := chromedp.Run(client.ctx, chromedp.Reload()); err != nil {
+	if err := chromedp.Run(client.ctx, reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	wait(`document.querySelector('[data-transfer-count="all"]').textContent === '(1)' && document.querySelector('#file-rows').textContent.includes('preserved.txt')`)
@@ -117,10 +120,17 @@ func TestE2EClearFailedUploadsCleansSessionsAndPreservesCompletedFiles(t *testin
 	if cleanups.Load() < 4 {
 		t.Fatalf("unfinished sessions were not cleaned up: %d requests", cleanups.Load())
 	}
+	if rejectedCompletions.Load() != 5 || deniedCleanups.Load() != 1 {
+		t.Fatalf("required fault injections did not run: rejected completions=%d denied cleanups=%d", rejectedCompletions.Load(), deniedCleanups.Load())
+	}
+	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/complete"); got != 0 {
+		t.Fatalf("fresh independent uploads used %d legacy cohort completions", got)
+	}
 	client.assertNoExternalRequests(t, harness)
 }
 
 func TestE2EClearFailedHistoryPreservesMixedGroupsAndOtherOwners(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
@@ -156,7 +166,7 @@ func TestE2EClearFailedHistoryPreservesMixedGroupsAndOtherOwners(t *testing.T) {
 		await new Promise((resolve, reject) => {transaction.oncomplete = resolve; transaction.onerror = () => reject(transaction.error);});
 		database.close(); return true;
 	})()`, accounts[0].UserID.String())
-	if err := chromedp.Run(client.ctx, chromedp.Evaluate(script, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), chromedp.Reload()); err != nil {
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(script, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(4)' && document.querySelector('[data-transfer-count="failed"]').textContent === '(2)'`, 10*time.Second); err != nil {
@@ -180,7 +190,7 @@ func TestE2EClearFailedHistoryPreservesMixedGroupsAndOtherOwners(t *testing.T) {
 	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(2)'`, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Reload()); err != nil {
+	if err := chromedp.Run(client.ctx, reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(2)' && document.querySelector('[data-transfer-count="failed"]').textContent === '(0)' && document.querySelector('[data-transfer-count="current"]').textContent === '(1)'`, 10*time.Second); err != nil {
@@ -201,20 +211,24 @@ func TestE2EClearFailedHistoryPreservesMixedGroupsAndOtherOwners(t *testing.T) {
 }
 
 func TestE2EClearFailedUploadAfterLostCompletionPreservesPublishedFile(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
+	var lostCompletions atomic.Int64
 	harness := newPortableHarnessWithControlPlaneWrapper(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/api/v1/uploads/batch/complete" {
+			if r.URL.Path != "/api/v1/uploads/batch/actions" || r.Method != http.MethodPost {
 				next.ServeHTTP(w, r)
 				return
 			}
+			readUploadCompletionActionPage(t, r)
 			recorder := httptest.NewRecorder()
 			next.ServeHTTP(recorder, r)
 			if recorder.Code != http.StatusOK {
 				t.Errorf("real completion = %d", recorder.Code)
 			}
+			lostCompletions.Add(1)
 			w.Header().Set("Content-Type", "application/problem+json")
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"status":400,"code":"invalid_request"}`))
@@ -268,20 +282,27 @@ func TestE2EClearFailedUploadAfterLostCompletionPreservesPublishedFile(t *testin
 	if lookups != 1 || countExactRequest(client.requestSnapshot(), "DELETE /api/v1/uploads/batch") != 1 {
 		t.Fatalf("terminal verification: lookups=%d, requests=%v", lookups, client.requestSnapshot())
 	}
+	if lostCompletions.Load() != 1 || countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/complete") != 0 {
+		t.Fatalf("lost-success injection did not cover the fresh terminal protocol: lost=%d requests=%v", lostCompletions.Load(), client.requestSnapshot())
+	}
 }
 
 func TestE2ERetryFailedFinalizationAfterReloadDoesNotRequireSource(t *testing.T) {
+	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
 		t.Skip("the Nix test-e2e task enables Chromium qualification")
 	}
 	var completions atomic.Int64
 	harness := newPortableHarnessWithControlPlaneWrapper(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/api/v1/uploads/batch/complete" && r.Method == http.MethodPost && completions.Add(1) == 1 {
-				w.Header().Set("Content-Type", "application/problem+json")
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"status":400,"code":"invalid_request"}`))
-				return
+			if r.URL.Path == "/api/v1/uploads/batch/actions" && r.Method == http.MethodPost {
+				readUploadCompletionActionPage(t, r)
+				if completions.Add(1) == 1 {
+					w.Header().Set("Content-Type", "application/problem+json")
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"status":400,"code":"invalid_request"}`))
+					return
+				}
 			}
 			next.ServeHTTP(w, r)
 		})
@@ -317,7 +338,7 @@ func TestE2ERetryFailedFinalizationAfterReloadDoesNotRequireSource(t *testing.T)
 		}};
 		await new Promise((resolve, reject) => {transaction.oncomplete = resolve; transaction.onerror = () => reject(transaction.error);});
 		return true;
-	})()`, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), chromedp.Reload()); err != nil {
+	})()`, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent === '(1)' && document.querySelector('[aria-label="Retry upload retry-finalization.txt"]') !== null`, 10*time.Second); err != nil {
@@ -337,5 +358,14 @@ func TestE2ERetryFailedFinalizationAfterReloadDoesNotRequireSource(t *testing.T)
 	}
 	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/admit"); got != 1 {
 		t.Fatalf("finalization retry initialized %d upload sessions", got)
+	}
+	var writes int
+	for _, request := range client.requestSnapshot() {
+		if strings.HasPrefix(request, "PATCH /cap/upload/") {
+			writes++
+		}
+	}
+	if writes != 1 || countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/complete") != 0 {
+		t.Fatalf("source-free retry repeated data or used a fresh legacy cohort: writes=%d requests=%v", writes, client.requestSnapshot())
 	}
 }

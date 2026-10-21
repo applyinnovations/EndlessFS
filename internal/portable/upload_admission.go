@@ -2,6 +2,8 @@ package portable
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"sort"
 	"strings"
@@ -12,6 +14,16 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
+
+// uploadPhaseMutationID names only an internal materialized phase receipt.
+// Public upload/batch IDs and idempotency keys remain unchanged. Phase replay
+// uses authenticated records/leases, including predecessors' verbose receipts.
+// Phase/domain separation is inside the hashed preimage; the opaque stored
+// representation needs only the complete 256-bit digest.
+func uploadPhaseMutationID(phase, fingerprint string) string {
+	digest := sha256.Sum256([]byte("endlessfs-upload-phase-v1\x00" + phase + "\x00" + fingerprint))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
 
 // Admission phases are separate modeled waves: a lease write depends on its
 // native begin, and resume depends on progress. Legacy traces are unchanged.
@@ -249,7 +261,6 @@ func (s *FileStore) admissionIntents(ctx context.Context, scope domain.Scope, re
 		}
 		changes := make([]consistencyDomainChange, 0, len(requests)*2)
 		bindings := make([]string, 0, len(requests))
-		firstID := ""
 		destinations := make(map[string]bool)
 		for i, request := range requests {
 			if results[i].Outcome != "" {
@@ -292,24 +303,19 @@ func (s *FileStore) admissionIntents(ctx context.Context, scope domain.Scope, re
 			changes = append(changes, consistencyDomainChange{Key: uploadRecordKey(id), Require: domainValueAbsent, Value: recordBody}, consistencyDomainChange{Key: uploadIdempotencyKey(request.IdempotencyKey), Require: domainValueAbsent, Value: receiptBody})
 			records[i] = admissionRecord{record: record, fresh: true}
 			bindings = append(bindings, request.IdempotencyKey+"\x00"+fingerprints[i])
-			if firstID == "" {
-				firstID = id
-			}
 		}
 		if len(changes) == 0 {
 			return records, nil
 		}
 		sort.Strings(bindings)
 		fingerprint := namespaceRequestFingerprint("upload-admission", strings.Join(bindings, "\x00"))
-		body, err := storageformat.EncodeCanonical(storageformat.NamespaceMutationResult{SchemaVersion: 1, RequestFingerprint: fingerprint, Upload: &storageformat.NamespaceUploadMutationResult{UploadID: firstID, State: "initializing"}})
-		if err != nil {
-			return nil, err
-		}
-		id := "upload-admission:" + fingerprint
+		id := uploadPhaseMutationID("ui", fingerprint)
 		if err := view.bindMutation(id, fingerprint); err != nil {
 			return nil, err
 		}
-		_, err = s.engine.stateDomainStore().mutateMaterializedPrepared(ctx, uploadDomainReference(scope.UserID()), consistencyDomainMutation{ID: id, Changes: changes, Result: body}, view.headSnapshot, view.session)
+		// API replay is reconstructed from the authenticated upload/idempotency
+		// records and native lease, not a duplicate phase result in this receipt.
+		_, err = s.engine.stateDomainStore().mutateMaterializedPrepared(ctx, uploadDomainReference(scope.UserID()), consistencyDomainMutation{ID: id, Changes: changes}, view.headSnapshot, view.session)
 		if err == nil {
 			return records, nil
 		}
@@ -339,7 +345,6 @@ func (s *FileStore) activateAdmissionPage(ctx context.Context, scope domain.Scop
 		}
 		changes := make([]consistencyDomainChange, 0, len(records))
 		bindings := make([]string, 0, len(records))
-		firstID := ""
 		ready := make([]int, 0, len(records))
 		for i, item := range records {
 			if item.record.UploadID == "" || results[i].Outcome != "" {
@@ -366,22 +371,17 @@ func (s *FileStore) activateAdmissionPage(ctx context.Context, scope domain.Scop
 			}
 			changes = append(changes, consistencyDomainChange{Key: uploadRecordKey(record.UploadID), Require: domainValuePresent, ExpectedVersion: value.LogicalVersion, Value: body})
 			bindings = append(bindings, record.UploadID+"\x00"+string(value.LogicalVersion))
-			if firstID == "" {
-				firstID = record.UploadID
-			}
 		}
 		if len(changes) > 0 {
 			sort.Strings(bindings)
 			fingerprint := namespaceRequestFingerprint("upload-admission-activate", strings.Join(bindings, "\x00"))
-			body, err := storageformat.EncodeCanonical(storageformat.NamespaceMutationResult{SchemaVersion: 1, RequestFingerprint: fingerprint, Upload: &storageformat.NamespaceUploadMutationResult{UploadID: firstID, State: "active"}})
-			if err != nil {
-				return err
-			}
-			id := "upload-admission-activate:" + fingerprint
+			id := uploadPhaseMutationID("ua", fingerprint)
 			if err := view.bindMutation(id, fingerprint); err != nil {
 				return err
 			}
-			_, err = s.engine.stateDomainStore().mutateMaterializedPrepared(ctx, uploadDomainReference(scope.UserID()), consistencyDomainMutation{ID: id, Changes: changes, Result: body}, view.headSnapshot, view.session)
+			// Active record publication is the replay oracle; no caller consumes
+			// an additional materialized phase result.
+			_, err = s.engine.stateDomainStore().mutateMaterializedPrepared(ctx, uploadDomainReference(scope.UserID()), consistencyDomainMutation{ID: id, Changes: changes}, view.headSnapshot, view.session)
 			if err != nil {
 				if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrPreconditionFailed) || errors.Is(err, domain.ErrUnavailable) {
 					continue

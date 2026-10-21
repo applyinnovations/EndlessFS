@@ -20,7 +20,7 @@ func TestMetadataPackSharedReadCancellationAndRetry(t *testing.T) {
 			defer cancel()
 			leader := make(chan error, 1)
 			go func() {
-				_, err := reads.read(leaderCtx, key, func() (map[string]storageformat.DomainPage, error) {
+				_, err := reads.read(leaderCtx, consistencyDomainPackCacheKey{key: key}, func() (map[string]storageformat.DomainPage, error) {
 					close(started)
 					select {
 					case <-leaderCtx.Done():
@@ -38,7 +38,7 @@ func TestMetadataPackSharedReadCancellationAndRetry(t *testing.T) {
 			waiting := &packReadWaitingContext{Context: waiterCtx, ready: ready}
 			waiter := make(chan error, 1)
 			go func() {
-				pages, err := reads.read(waiting, key, func() (map[string]storageformat.DomainPage, error) {
+				pages, err := reads.read(waiting, consistencyDomainPackCacheKey{key: key}, func() (map[string]storageformat.DomainPage, error) {
 					return map[string]storageformat.DomainPage{"valid": {}}, nil
 				})
 				if err == nil && len(pages) != 1 {
@@ -77,13 +77,13 @@ func TestMetadataPackReadScopeErrorsAndNoIdleCache(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	key := storageformat.DomainPagePackKey(storageformat.DomainNamespace, "owner-a", storageformat.Digest([]byte("pack")))
-	if _, err := reads.read(ctx, key, func() (map[string]storageformat.DomainPage, error) { t.Fatal("canceled fetch ran"); return nil, nil }); !errors.Is(err, context.Canceled) {
+	if _, err := reads.read(ctx, consistencyDomainPackCacheKey{key: key}, func() (map[string]storageformat.DomainPage, error) { t.Fatal("canceled fetch ran"); return nil, nil }); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled: %v", err)
 	}
 	started, release := make(chan struct{}), make(chan struct{})
 	finished := make(chan error, 1)
 	go func() {
-		_, err := reads.read(context.Background(), key, func() (map[string]storageformat.DomainPage, error) {
+		_, err := reads.read(context.Background(), consistencyDomainPackCacheKey{key: key}, func() (map[string]storageformat.DomainPage, error) {
 			close(started)
 			<-release
 			return nil, domain.ErrInvalid
@@ -96,7 +96,7 @@ func TestMetadataPackReadScopeErrorsAndNoIdleCache(t *testing.T) {
 		storageformat.DomainPagePackKey(storageformat.DomainOwnerControl, "owner-a", storageformat.Digest([]byte("pack"))),
 		storageformat.DomainPagePackKey(storageformat.DomainNamespace, "owner-a", storageformat.Digest([]byte("other-pack"))),
 	} {
-		if _, err := reads.read(context.Background(), other, func() (map[string]storageformat.DomainPage, error) { return nil, nil }); err != nil {
+		if _, err := reads.read(context.Background(), consistencyDomainPackCacheKey{key: other}, func() (map[string]storageformat.DomainPage, error) { return nil, nil }); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -104,7 +104,7 @@ func TestMetadataPackReadScopeErrorsAndNoIdleCache(t *testing.T) {
 	waiting := &packReadWaitingContext{Context: context.Background(), ready: ready}
 	waiter := make(chan error, 1)
 	go func() {
-		_, err := reads.read(waiting, key, func() (map[string]storageformat.DomainPage, error) {
+		_, err := reads.read(waiting, consistencyDomainPackCacheKey{key: key}, func() (map[string]storageformat.DomainPage, error) {
 			t.Error("duplicate corrupt fetch")
 			return nil, nil
 		})
@@ -120,7 +120,7 @@ func TestMetadataPackReadScopeErrorsAndNoIdleCache(t *testing.T) {
 	}
 	for range 2 {
 		called := false
-		_, err := reads.read(context.Background(), key, func() (map[string]storageformat.DomainPage, error) { called = true; return nil, nil })
+		_, err := reads.read(context.Background(), consistencyDomainPackCacheKey{key: key}, func() (map[string]storageformat.DomainPage, error) { called = true; return nil, nil })
 		if err != nil || !called {
 			t.Fatalf("idle pack or error cached: %v", err)
 		}

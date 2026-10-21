@@ -81,6 +81,7 @@ func TestProviderBudgetCatalogCoversApplicationContractsAndRatchets(t *testing.T
 			"CreateUploadBatch": "transfer/create-upload-batch",
 		}},
 		{name: "provider.UploadAdmissionStorage", typeOf: reflect.TypeOf((*provider.UploadAdmissionStorage)(nil)).Elem(), methods: map[string]string{"AdmitUploads": "transfer/upload-admission"}},
+		{name: "provider.DirectoryPreparationStorage", typeOf: reflect.TypeOf((*provider.DirectoryPreparationStorage)(nil)).Elem(), methods: map[string]string{"PrepareDirectories": "namespace/prepare-directories"}},
 		{name: "provider.UploadLifecycleStorage", typeOf: reflect.TypeOf((*provider.UploadLifecycleStorage)(nil)).Elem(), methods: map[string]string{"UploadLifecycle": "transfer/upload-lifecycle-resume"}},
 		{name: "provider.UploadActionStorage", typeOf: reflect.TypeOf((*provider.UploadActionStorage)(nil)).Elem(), methods: map[string]string{"UploadActions": "transfer/upload-actions"}},
 		{name: "provider.DuplicateStorage", typeOf: reflect.TypeOf((*provider.DuplicateStorage)(nil)).Elem(), methods: map[string]string{

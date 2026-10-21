@@ -21,10 +21,10 @@
       goFor =
         pkgs:
         pkgs.go_1_26.overrideAttrs (_old: {
-          version = "1.26.9";
+          version = "1.26.10";
           src = pkgs.fetchurl {
-            url = "https://go.dev/dl/go1.26.9.src.tar.gz";
-            hash = "sha256-lzXX3Ntls10/pXfwQGRzfAO4nPGitx5uaf4vPG+f1Mo=";
+            url = "https://go.dev/dl/go1.26.10.src.tar.gz";
+            hash = "sha256-/WPog7ovK/ypPBZGsx6+9j4rHk0rMXyXidl2po2B828=";
           };
         });
       # Disposable compiler artifacts only. No application source or test run

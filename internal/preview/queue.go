@@ -445,7 +445,28 @@ func itemKey(job thumbnailJob) state.Key { return thumbnailKey("job", job.ID) }
 
 func (s *Service) finishThumbnail(ctx context.Context, claim thumbnailClaim, result ItemResult, workErr error) error {
 	for range 16 {
-		job, value, err := s.loadThumbnail(ctx, claim.job.ID)
+		var laneValue state.Value
+		var value state.Value
+		var job thumbnailJob
+		var err error
+		batched := false
+		if reader, ok := s.state.(interface {
+			GetMany(context.Context, []state.Key) ([]state.Value, error)
+		}); ok {
+			values, readErr := reader.GetMany(ctx, []state.Key{itemKey(claim.job), claim.laneKey})
+			if readErr == nil {
+				if len(values) != 2 {
+					return domain.NewError(domain.ErrorInternal, "invalid thumbnail completion batch")
+				}
+				job, value, err = decodeThumbnail(claim.job.ID, values[0])
+				laneValue, batched = values[1], true
+			} else if !errors.Is(readErr, domain.ErrNotFound) {
+				return readErr
+			}
+		}
+		if !batched {
+			job, value, err = s.loadThumbnail(ctx, claim.job.ID)
+		}
 		if errors.Is(err, domain.ErrNotFound) {
 			return nil
 		}
@@ -455,9 +476,11 @@ func (s *Service) finishThumbnail(ctx context.Context, claim thumbnailClaim, res
 		if job.Epoch != claim.job.Epoch || job.LeaseID != claim.job.LeaseID {
 			return nil
 		}
-		laneValue, err := s.state.Get(ctx, claim.laneKey)
-		if err != nil {
-			return err
+		if !batched {
+			laneValue, err = s.state.Get(ctx, claim.laneKey)
+			if err != nil {
+				return err
+			}
 		}
 		var lane thumbnailLane
 		if state.DecodeJSON(laneValue.Data, &lane) != nil || lane.SchemaVersion != 1 {

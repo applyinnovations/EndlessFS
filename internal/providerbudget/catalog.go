@@ -315,7 +315,7 @@ func ProductionWorkloads() []ProductionWorkload {
 		workload("identity/authentication-verify", "identity", "identity-authentication-verify-schema-011"),
 		workload("identity/current-user", "identity", "identity-current-user-schema-011"),
 		workload("identity/update-profile", "identity", "identity-update-profile-schema-011"),
-		workload("identity/list-passkeys", "identity", "identity-list-passkeys-schema-011"),
+		workload("identity/list-passkeys", "identity", "identity-list-passkeys-schema-011", "identity-read-eight-passkeys-scalar-schema-013", "identity-read-eight-passkeys-batch-schema-013"),
 		workload("identity/add-passkey-options", "identity", "identity-add-passkey-options-schema-011"),
 		workload("identity/add-passkey-verify", "identity", "identity-add-passkey-verify-schema-011"),
 		workload("identity/remove-passkey", "identity", "identity-remove-passkey-schema-011"),

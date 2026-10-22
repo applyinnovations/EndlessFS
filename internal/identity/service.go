@@ -359,12 +359,8 @@ func (s *Service) VerifyAuthentication(ctx context.Context, ceremonyID string, b
 	if err != nil {
 		return auth.IssuedSession{}, err
 	}
-	account, accountVersion, err := s.repository.Account(ctx, result.UserID)
-	if err != nil || account.Status != model.AccountEnabled {
-		return auth.IssuedSession{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
-	}
-	stored, credentialVersion, err := s.repository.Credential(ctx, result.UserID, result.Credential.CredentialID)
-	if err != nil || stored.UserID != result.UserID {
+	account, accountVersion, stored, credentialVersion, err := s.repository.accountAndCredential(ctx, result.UserID, result.Credential.CredentialID)
+	if err != nil || account.Status != model.AccountEnabled || account.UserID != result.UserID || stored.UserID != result.UserID {
 		return auth.IssuedSession{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
 	}
 	stored.SignCount = result.Credential.SignCount
@@ -452,22 +448,10 @@ func (s *Service) resolveDiscoverable(ctx context.Context) auth.UserResolver {
 		if err != nil {
 			return auth.User{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
 		}
-		credential, _, err := s.repository.CredentialByRawID(ctx, userID, rawCredentialID)
-		if err != nil || credential.UserID != userID {
-			return auth.User{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
-		}
-		account, _, err := s.repository.Account(ctx, userID)
-		if err != nil || account.Status != model.AccountEnabled {
-			return auth.User{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
-		}
-		profile, _, err := s.repository.Profile(ctx, userID)
+		user, err := s.repository.discoverableUser(ctx, userID, base64.RawURLEncoding.EncodeToString(rawCredentialID))
 		if err != nil {
 			return auth.User{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
 		}
-		credentials, err := s.repository.Credentials(ctx, userID)
-		if err != nil {
-			return auth.User{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
-		}
-		return auth.User{ID: userID, DisplayName: profile.DisplayName, Credentials: credentials}, nil
+		return user, nil
 	}
 }

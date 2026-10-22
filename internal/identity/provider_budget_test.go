@@ -3,21 +3,80 @@ package identity
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/auth"
 	"github.com/applyinnovations/endlessfs/internal/domain"
+	"github.com/applyinnovations/endlessfs/internal/model"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
 	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/secret"
+	"github.com/applyinnovations/endlessfs/internal/state"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
+
+// Scalar reads retain the pre-batching call graph as an instrumented control.
+// Both cases use the real portable engine, identical records, and warm caches.
+func TestProviderBudgetIdentityCredentialReadBatch(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		t.Run(fmt.Sprint(batch), func(t *testing.T) {
+			ledger := providerbudget.NewLedger()
+			backend := budgettest.WrapClassified(providerbudget.RoleState, objectmemory.New(), ledger, func(_ providerbudget.RequestKind, target string) string {
+				return storageformat.ClassifyEconomicsTarget(target)
+			})
+			engine, err := portable.Open(t.Context(), portable.Options{Backend: backend, FileBackend: objectmemory.New(), Clock: domain.NewFixedClock(identityEpoch), IDs: domain.NewIDGenerator(&deterministicReader{next: 1}), LeaseTTL: time.Minute, CursorKey: bytes.Repeat([]byte{0x63}, 32), Writer: portable.WriterConfiguration{WriterSetID: "identity-batch-budget", ConfigurationDigest: "identity-batch-budget-v1", KeyringIdentifiers: []string{"budget-key"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			repository := NewRepository(engine)
+			owner := userID(t, 0x51)
+			index := model.CredentialIndex{SchemaVersion: model.SchemaVersion, UserID: owner}
+			for i := range 8 {
+				id := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("credential-%04d", i)))
+				index.CredentialIDs = append(index.CredentialIDs, id)
+				if err := repository.CreateCredential(t.Context(), model.Credential{SchemaVersion: model.SchemaVersion, UserID: owner, CredentialID: id, PublicKey: "AQ", CreatedAt: identityEpoch, LastUsedAt: identityEpoch}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := repository.CreateCredentialIndex(t.Context(), index); err != nil {
+				t.Fatal(err)
+			}
+			if !batch {
+				repository.store = struct{ state.Store }{engine}
+			}
+			if _, err := repository.Credentials(t.Context(), owner); err != nil {
+				t.Fatal(err)
+			}
+			ledger.Reset()
+			if credentials, err := repository.Credentials(t.Context(), owner); err != nil || len(credentials) != 8 {
+				t.Fatalf("credentials=%d error=%v", len(credentials), err)
+			}
+			model, err := gcs.RegionalStandardFlatEconomics()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ratchet, err := gcs.RegionalStandardFlatBudgetRatchet()
+			if err != nil {
+				t.Fatal(err)
+			}
+			name := "identity-read-eight-passkeys-scalar-schema-013"
+			if batch {
+				name = "identity-read-eight-passkeys-batch-schema-013"
+			}
+			if _, err := budgettest.CheckExact(t, ratchet, name, model, []providerbudget.Role{providerbudget.RoleState}, ledger.Events()); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
 
 // TestProviderBudgetIdentityMutationWorkflows measures the real identity and
 // session use cases, not synthetic object-store calls. The exact ratchets make

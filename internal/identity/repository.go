@@ -166,15 +166,107 @@ func (r *Repository) Credentials(ctx context.Context, userID domain.UserID) ([]m
 	if err != nil {
 		return nil, err
 	}
+	return r.indexedCredentials(ctx, userID, index)
+}
+
+func (r *Repository) indexedCredentials(ctx context.Context, userID domain.UserID, index model.CredentialIndex) ([]model.Credential, error) {
 	owned := make([]model.Credential, 0, len(index.CredentialIDs))
-	for _, credentialID := range index.CredentialIDs {
-		credential, _, err := r.Credential(ctx, userID, credentialID)
-		if err != nil || credential.UserID != userID {
+	for offset := 0; offset < len(index.CredentialIDs); offset += 1000 {
+		// Match the portable GetMany bound. At the state-record limit this
+		// adds at most 64 MiB of raw values, independent of total passkeys.
+		ids := index.CredentialIDs[offset:min(offset+1000, len(index.CredentialIDs))]
+		keys := make([]state.Key, len(ids))
+		for i, credentialID := range ids {
+			keys[i] = credentialKey(userID, credentialID)
+		}
+		values, err := r.readRecordValues(ctx, keys)
+		if err != nil {
 			return nil, domain.NewError(domain.ErrorInternal, "credential index is inconsistent")
 		}
-		owned = append(owned, credential)
+		for _, value := range values {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			var credential model.Credential
+			if state.DecodeJSON(value.Data, &credential) != nil || credential.UserID != userID {
+				return nil, domain.NewError(domain.ErrorInternal, "credential index is inconsistent")
+			}
+			owned = append(owned, credential)
+		}
 	}
 	return owned, nil
+}
+
+// readRecordValues is only used for caller-selected keys in one owner domain.
+// A supported batch's error is authoritative; it never falls back to separate
+// reads that could turn unavailable/corrupt authority into a different result.
+func (r *Repository) readRecordValues(ctx context.Context, keys []state.Key) ([]state.Value, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if reader, ok := r.store.(stateMultiReader); ok {
+		values, err := reader.GetMany(ctx, keys)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if len(values) != len(keys) {
+			return nil, domain.NewError(domain.ErrorInvalid, "state multi-read returned an invalid result count")
+		}
+		return values, nil
+	}
+	values := make([]state.Value, len(keys))
+	for i, key := range keys {
+		value, err := r.store.Get(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		values[i] = value
+	}
+	return values, nil
+}
+
+func (r *Repository) accountAndCredential(ctx context.Context, owner domain.UserID, credentialID string) (model.Account, state.Version, model.Credential, state.Version, error) {
+	values, err := r.readRecordValues(ctx, []state.Key{state.MustKey(state.NamespaceAccounts, owner.String()), credentialKey(owner, credentialID)})
+	if err != nil {
+		return model.Account{}, "", model.Credential{}, "", err
+	}
+	var account model.Account
+	if err := state.DecodeJSON(values[0].Data, &account); err != nil {
+		return model.Account{}, "", model.Credential{}, "", err
+	}
+	var credential model.Credential
+	if err := state.DecodeJSON(values[1].Data, &credential); err != nil {
+		return model.Account{}, "", model.Credential{}, "", err
+	}
+	return account, values[0].Version, credential, values[1].Version, nil
+}
+
+func (r *Repository) discoverableUser(ctx context.Context, owner domain.UserID, credentialID string) (auth.User, error) {
+	values, err := r.readRecordValues(ctx, []state.Key{
+		credentialKey(owner, credentialID), state.MustKey(state.NamespaceAccounts, owner.String()),
+		state.MustKey(state.NamespaceUsers, owner.String()), credentialIndexKey(owner),
+	})
+	if err != nil {
+		return auth.User{}, err
+	}
+	var credential model.Credential
+	var account model.Account
+	var profile model.Profile
+	var index model.CredentialIndex
+	if state.DecodeJSON(values[0].Data, &credential) != nil || state.DecodeJSON(values[1].Data, &account) != nil || state.DecodeJSON(values[2].Data, &profile) != nil || state.DecodeJSON(values[3].Data, &index) != nil {
+		return auth.User{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
+	}
+	if credential.UserID != owner || account.UserID != owner || profile.UserID != owner || index.UserID != owner || account.Status != model.AccountEnabled {
+		return auth.User{}, domain.NewError(domain.ErrorUnauthenticated, "authentication failed")
+	}
+	credentials, err := r.indexedCredentials(ctx, owner, index)
+	if err != nil {
+		return auth.User{}, err
+	}
+	return auth.User{ID: owner, DisplayName: profile.DisplayName, Credentials: credentials}, nil
 }
 
 func credentialIndexKey(userID domain.UserID) state.Key {

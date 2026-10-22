@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "id": "023-same-domain-batch-reads",
+  "provider": "gcs",
+  "profile": "regional-standard-flat",
+  "budgets": [
+    {
+      "name": "thumbnail-queue-state-drain-64-schema-013",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 592,
+        "costPicoUSD": 862400000,
+        "p50Micros": 13971795,
+        "p95Micros": 41059795,
+        "p99Micros": 100699795,
+        "criticalP50Micros": 13971795,
+        "criticalP95Micros": 41059795,
+        "criticalP99Micros": 100699795
+      },
+      "roles": {
+        "state": {
+          "requests": 592,
+          "costPicoUSD": 862400000,
+          "p50Micros": 13971795,
+          "p95Micros": 41059795,
+          "p99Micros": 100699795
+        }
+      }
+    },
+    {
+      "name": "identity-authentication-verify-schema-011",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 16,
+        "costPicoUSD": 34000000,
+        "p50Micros": 370729,
+        "p95Micros": 1130729,
+        "p99Micros": 2800729,
+        "criticalP50Micros": 370729,
+        "criticalP95Micros": 1130729,
+        "criticalP99Micros": 2800729
+      },
+      "roles": {
+        "state": {
+          "requests": 16,
+          "costPicoUSD": 34000000,
+          "p50Micros": 370729,
+          "p95Micros": 1130729,
+          "p99Micros": 2800729
+        }
+      }
+    },
+    {
+      "name": "identity-read-eight-passkeys-scalar-schema-013",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 9,
+        "costPicoUSD": 3600000,
+        "p50Micros": 198639,
+        "p95Micros": 585639,
+        "p99Micros": 1440639,
+        "criticalP50Micros": 198639,
+        "criticalP95Micros": 585639,
+        "criticalP99Micros": 1440639
+      },
+      "roles": {
+        "state": {
+          "requests": 9,
+          "costPicoUSD": 3600000,
+          "p50Micros": 198639,
+          "p95Micros": 585639,
+          "p99Micros": 1440639
+        }
+      }
+    },
+    {
+      "name": "identity-read-eight-passkeys-batch-schema-013",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 2,
+        "costPicoUSD": 800000,
+        "p50Micros": 44142,
+        "p95Micros": 130142,
+        "p99Micros": 320142,
+        "criticalP50Micros": 44142,
+        "criticalP95Micros": 130142,
+        "criticalP99Micros": 320142
+      },
+      "roles": {
+        "state": {
+          "requests": 2,
+          "costPicoUSD": 800000,
+          "p50Micros": 44142,
+          "p95Micros": 130142,
+          "p99Micros": 320142
+        }
+      }
+    }
+  ]
+}

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,9 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
 	"github.com/applyinnovations/endlessfs/internal/portable"
+	"github.com/applyinnovations/endlessfs/internal/preview"
+	"github.com/applyinnovations/endlessfs/internal/preview/imagegen"
+	previewmemory "github.com/applyinnovations/endlessfs/internal/preview/memory"
 	"github.com/applyinnovations/endlessfs/internal/secret"
 	"github.com/applyinnovations/endlessfs/internal/state"
 )
@@ -231,6 +235,32 @@ func buildCurrentSchemaMigrationFixture(t *testing.T, commit, schema string, see
 	if _, err := engine.Create(ctx, preference, []byte("enabled")); err != nil {
 		t.Fatal(err)
 	}
+	if slices.Contains(writer.RequiredFeatures, "generated-previews-v1") {
+		path := domain.MustParseUserPath("/queued-image.webp")
+		body := preview.OnePixelWebP()
+		uploadCurrentSchemaFixtureMedia(t, server.Client(), engine.Files(), live, path, body, "image/webp")
+		entry, err := engine.Files().Stat(ctx, live, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		previewStore, err := previewmemory.New(previewmemory.Options{Clock: clock, IDs: domain.NewIDGenerator(bytes.NewReader(applicationMigrationBytes(seed+2, 1<<20))), Key: runtimeTestConfig(t).SessionSecret})
+		if err != nil {
+			t.Fatal(err)
+		}
+		previewServer := httptest.NewServer(previewStore)
+		t.Cleanup(previewServer.Close)
+		if err := previewStore.SetDataPlaneBaseURL(previewServer.URL); err != nil {
+			t.Fatal(err)
+		}
+		service, err := preview.NewService(preview.Options{Automatic: true, ApplicationState: engine, Resolutions: []int{256, 1600}}, engine.Files(), previewStore, []preview.Generator{imagegen.New(imagegen.Options{})}, server.Client(), domain.NewIDGenerator(bytes.NewReader(applicationMigrationBytes(seed+3, 1<<20))), clock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := service.Resolve(ctx, user, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: path, Version: entry.Version, Variant: 256}, {Path: path, Version: entry.Version, Variant: 1600}}})
+		if err != nil || len(response.Items) != 2 || response.Items[0].State != preview.StateQueued || response.Items[1].State != preview.StateQueued {
+			t.Fatalf("fixture did not persist both thumbnail variants: %+v %v", response, err)
+		}
+	}
 	return applicationMigrationFixture{
 		SchemaVersion: 1, SourceRelease: schema, SourceCommit: commit, CreatedAt: createdAt,
 		UserID: user.String(), StateObjects: stateBackend.Export(), FileObjects: fileBackend.Export(),
@@ -247,8 +277,12 @@ func stateKeyForFixture(t *testing.T, namespace, part string) state.Key {
 }
 
 func uploadCurrentSchemaFixtureFile(t *testing.T, client *http.Client, files *portable.FileStore, scope domain.Scope, path domain.UserPath, body []byte) {
+	uploadCurrentSchemaFixtureMedia(t, client, files, scope, path, body, "application/octet-stream")
+}
+
+func uploadCurrentSchemaFixtureMedia(t *testing.T, client *http.Client, files *portable.FileStore, scope domain.Scope, path domain.UserPath, body []byte, mediaType string) {
 	t.Helper()
-	capability, err := files.CreateUpload(context.Background(), scope, domain.CreateUploadRequest{Path: path, Size: int64(len(body)), MediaType: "application/octet-stream", Conflict: domain.ConflictFail, IdempotencyKey: "fixture-upload-" + path.Name() + fmt.Sprint(len(path.String()))})
+	capability, err := files.CreateUpload(context.Background(), scope, domain.CreateUploadRequest{Path: path, Size: int64(len(body)), MediaType: mediaType, Conflict: domain.ConflictFail, IdempotencyKey: "fixture-upload-" + path.Name() + fmt.Sprint(len(path.String()))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +302,7 @@ func uploadCurrentSchemaFixtureFile(t *testing.T, client *http.Client, files *po
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		t.Fatalf("fixture upload status = %d", response.StatusCode)
 	}
-	if _, err := files.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(body)), MediaType: "application/octet-stream"}); err != nil {
+	if _, err := files.CompleteUpload(context.Background(), scope, domain.CompleteUploadRequest{UploadID: capability.UploadID, Path: path, Size: int64(len(body)), MediaType: mediaType}); err != nil {
 		t.Fatal(err)
 	}
 }

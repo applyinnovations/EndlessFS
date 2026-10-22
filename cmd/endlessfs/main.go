@@ -331,6 +331,10 @@ func run(ctx context.Context, logger *slog.Logger, cfg config.Config) error {
 
 	applicationHandler := httpapi.NewCompleteApplicationWithLogger(cfg, version, identityService, sessions, driveService, logger, themeManager)
 	if previewService != nil {
+		workerCtx, stopWorkers := context.WithCancel(ctx)
+		workersDone := make(chan struct{})
+		go func() { defer close(workersDone); previewService.Run(workerCtx) }()
+		defer func() { stopWorkers(); <-workersDone }()
 		applicationHandler = httpapi.NewCompleteApplicationWithPreviewAndLogger(cfg, version, identityService, sessions, driveService, previewService, logger, themeManager)
 	}
 	if cfg.LocalFixture {

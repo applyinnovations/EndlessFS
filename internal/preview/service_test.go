@@ -68,7 +68,7 @@ func TestResolveAutomaticPolicyIncludesExactAgeAndSizeBoundaries(t *testing.T) {
 	maximum = entry.Size
 	env.clock.Advance(maximumAge)
 	before := env.source.Instrumentation()
-	result, err := env.service.Resolve(context.Background(), env.owner, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: entry.Path, Version: entry.Version, Variant: 256}}})
+	result, err := resolveAfterWork(t, env, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: entry.Path, Version: entry.Version, Variant: 256}}})
 	if err != nil || result.Items[0].State != preview.StateReady {
 		t.Fatalf("exact policy boundary Resolve() = %+v, %v", result, err)
 	}
@@ -81,7 +81,7 @@ func TestResolveAutomaticPolicyIncludesExactAgeAndSizeBoundaries(t *testing.T) {
 func TestResolveGeneratesOnceAndRenameReusesArtifact(t *testing.T) {
 	env := newPreviewEnvironment(t, preview.Options{Automatic: true})
 	entry := env.uploadImage(t, "/photo.png", 32, 16)
-	first, err := env.service.Resolve(context.Background(), env.owner, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: entry.Path, Version: entry.Version, Variant: 256}}})
+	first, err := resolveAfterWork(t, env, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: entry.Path, Version: entry.Version, Variant: 256}}})
 	if err != nil || first.Items[0].State != preview.StateReady || first.Items[0].Artifact.Width != 32 || first.Items[0].Artifact.Height != 16 {
 		t.Fatalf("first Resolve() = %+v, %v", first, err)
 	}
@@ -97,7 +97,7 @@ func TestResolveGeneratesOnceAndRenameReusesArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := env.service.Resolve(context.Background(), env.owner, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: renamed.Path, Version: renamed.Version, Variant: 256}}})
+	second, err := resolveAfterWork(t, env, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: renamed.Path, Version: renamed.Version, Variant: 256}}})
 	if err != nil || second.Items[0].State != preview.StateReady {
 		t.Fatalf("renamed Resolve() = %+v, %v", second, err)
 	}
@@ -134,16 +134,22 @@ func TestResolveCoalescesConcurrentGeneration(t *testing.T) {
 		}
 	}
 	for result := range results {
-		if len(result.Items) != 1 || result.Items[0].State != preview.StateReady {
+		if len(result.Items) != 1 || result.Items[0].State != preview.StateQueued {
 			t.Fatalf("concurrent Resolve() = %+v", result)
 		}
 	}
+	if env.generator.Calls() != 0 {
+		t.Fatalf("concurrent generator calls = %d, want 0", env.generator.Calls())
+	}
+	if worked, err := env.service.WorkOne(t.Context()); err != nil || !worked {
+		t.Fatalf("queued generation: %v %v", worked, err)
+	}
 	if env.generator.Calls() != 1 {
-		t.Fatalf("concurrent generator calls = %d, want 1", env.generator.Calls())
+		t.Fatalf("generator calls=%d, want 1", env.generator.Calls())
 	}
 }
 
-func TestResolveBoundsAutomaticGenerationWorkPerBatch(t *testing.T) {
+func TestResolveAcknowledgesEveryAutomaticThumbnailWithoutDecoding(t *testing.T) {
 	env := newPreviewEnvironment(t, preview.Options{Automatic: true})
 	items := make([]preview.ItemRequest, 0, preview.MaxResolveItems)
 	for index := range preview.MaxResolveItems {
@@ -163,19 +169,17 @@ func TestResolveBoundsAutomaticGenerationWorkPerBatch(t *testing.T) {
 	if got := after.ProviderCalls[providermemory.OperationStat] - before.ProviderCalls[providermemory.OperationStat]; got != 0 {
 		t.Fatalf("visible batch source stats = %d, want 0", got)
 	}
-	ready, missing := 0, 0
+	queued := 0
 	for _, item := range result.Items {
 		switch item.State {
-		case preview.StateReady:
-			ready++
-		case preview.StateMissing:
-			missing++
+		case preview.StateQueued:
+			queued++
 		default:
 			t.Fatalf("bounded Resolve() item = %+v", item)
 		}
 	}
-	if ready != 1 || missing != preview.MaxResolveItems-1 || env.generator.Calls() != 1 {
-		t.Fatalf("bounded Resolve() ready=%d missing=%d generator calls=%d", ready, missing, env.generator.Calls())
+	if queued != preview.MaxResolveItems || env.generator.Calls() != 0 {
+		t.Fatalf("Resolve() queued=%d generator calls=%d", queued, env.generator.Calls())
 	}
 }
 
@@ -329,7 +333,7 @@ func TestGenerateDistinctReplicaOperationsConvergeOnSharedClaim(t *testing.T) {
 func TestResolveReflinkCopyReusesArtifactAndReplacementDoesNot(t *testing.T) {
 	env := newPreviewEnvironment(t, preview.Options{Automatic: true})
 	original := env.uploadImage(t, "/identity.png", 12, 6)
-	first, err := env.service.Resolve(context.Background(), env.owner, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: original.Path, Version: original.Version, Variant: 256}}})
+	first, err := resolveAfterWork(t, env, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: original.Path, Version: original.Version, Variant: 256}}})
 	if err != nil || first.Items[0].State != preview.StateReady {
 		t.Fatalf("original Resolve() = %+v, %v", first, err)
 	}
@@ -341,13 +345,13 @@ func TestResolveReflinkCopyReusesArtifactAndReplacementDoesNot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	copyResult, err := env.service.Resolve(context.Background(), env.owner, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: copied.Path, Version: copied.Version, Variant: 256}}})
+	copyResult, err := resolveAfterWork(t, env, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: copied.Path, Version: copied.Version, Variant: 256}}})
 	if err != nil || copyResult.Items[0].State != preview.StateReady || copyResult.Items[0].Artifact.GenerationID != first.Items[0].Artifact.GenerationID {
 		t.Fatalf("copied Resolve() = %+v, %v", copyResult, err)
 	}
 	replacementData := encodePreviewPNG(t, 6, 12)
 	replacement := env.uploadBytesWithConflict(t, original.Path.String(), replacementData, "image/png", domain.ConflictReplace, original.Version)
-	replacementResult, err := env.service.Resolve(context.Background(), env.owner, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: replacement.Path, Version: replacement.Version, Variant: 256}}})
+	replacementResult, err := resolveAfterWork(t, env, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: replacement.Path, Version: replacement.Version, Variant: 256}}})
 	if err != nil || replacementResult.Items[0].State != preview.StateReady || replacementResult.Items[0].Artifact.GenerationID == first.Items[0].Artifact.GenerationID {
 		t.Fatalf("replacement Resolve() = %+v, %v", replacementResult, err)
 	}
@@ -705,8 +709,32 @@ func previewBearer(fill byte) string {
 }
 func previewDeterministicBytes(size int) []byte {
 	value := make([]byte, size)
+	seed := uint64(0x92746153)
 	for index := range value {
-		value[index] = byte(index*17 + 3)
+		seed ^= seed << 13
+		seed ^= seed >> 7
+		seed ^= seed << 17
+		value[index] = byte(seed)
 	}
 	return value
+}
+
+// Existing artifact/content-policy proofs explicitly advance the asynchronous
+// worker; queue admission and scheduling are tested independently above.
+func resolveAfterWork(t *testing.T, env previewEnvironment, request preview.ResolveRequest) (preview.ResolveResponse, error) {
+	t.Helper()
+	response, err := env.service.Resolve(t.Context(), env.owner, request)
+	if err != nil {
+		return response, err
+	}
+	for _, item := range response.Items {
+		if item.State == preview.StateQueued || item.State == preview.StateGenerating {
+			if worked, workErr := env.service.WorkOne(t.Context()); workErr != nil {
+				return response, workErr
+			} else if !worked {
+				return response, fmt.Errorf("expected queued work")
+			}
+		}
+	}
+	return env.service.Resolve(t.Context(), env.owner, request)
 }

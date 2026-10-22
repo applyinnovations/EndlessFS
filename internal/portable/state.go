@@ -166,7 +166,7 @@ func encodeStateValue009(key state.Key, data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	recordType, err := stateRecordType009(namespace, parts)
+	recordType, err := stateRecordType(namespace, parts)
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +178,7 @@ func decodeStateValue009(key state.Key, data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	recordType, err := stateRecordType009(namespace, parts)
+	recordType, err := stateRecordType(namespace, parts)
 	if err != nil {
 		return nil, err
 	}
@@ -663,4 +663,19 @@ func parseExistingStateKey(value string) (state.Key, error) {
 		return state.Key{}, domain.NewError(domain.ErrorInvalid, "invalid stored state key")
 	}
 	return key, nil
+}
+
+// The historical schema-009 decoder stays frozen for adjacent migrations.
+func stateRecordType(namespace state.Namespace, parts []string) (string, error) {
+	if namespace == state.NamespaceOperations && len(parts) > 1 && parts[0] == "admin" {
+		switch parts[1] {
+		case "thumbnail-job":
+			return "thumbnail-job-v1", nil
+		case "thumbnail-recent", "thumbnail-oldest", "thumbnail-terminal":
+			return "thumbnail-index-v1", nil
+		case "thumbnail-lane":
+			return "thumbnail-worker-lane-v1", nil
+		}
+	}
+	return stateRecordType009(namespace, parts)
 }

@@ -1,0 +1,264 @@
+{
+  "schemaVersion": 1,
+  "id": "022-durable-thumbnail-state",
+  "provider": "gcs",
+  "profile": "regional-standard-flat",
+  "budgets": [
+    {
+      "name": "maintenance-checkpoint-minimal-schema-013",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 29,
+        "costPicoUSD": 80600000,
+        "p50Micros": 723118,
+        "p95Micros": 2270118,
+        "p99Micros": 5640118,
+        "criticalP50Micros": 723118,
+        "criticalP95Micros": 2270118,
+        "criticalP99Micros": 5640118
+      },
+      "roles": {
+        "file": {
+          "requests": 2,
+          "costPicoUSD": 10000000,
+          "p50Micros": 60000,
+          "p95Micros": 200000,
+          "p99Micros": 500000
+        },
+        "state": {
+          "requests": 27,
+          "costPicoUSD": 70600000,
+          "p50Micros": 663118,
+          "p95Micros": 2070118,
+          "p99Micros": 5140118
+        }
+      }
+    },
+    {
+      "name": "maintenance-migration-008-to-013-minimal-fixture",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 757,
+        "costPicoUSD": 1186800000,
+        "p50Micros": 17369569,
+        "p95Micros": 52764569,
+        "p99Micros": 130614569,
+        "criticalP50Micros": 16969569,
+        "criticalP95Micros": 51564569,
+        "criticalP99Micros": 127614569
+      },
+      "roles": {
+        "file": {
+          "requests": 42,
+          "costPicoUSD": 62800000,
+          "p50Micros": 940000,
+          "p95Micros": 2920000,
+          "p99Micros": 7300000
+        },
+        "state": {
+          "requests": 715,
+          "costPicoUSD": 1124000000,
+          "p50Micros": 16429569,
+          "p95Micros": 49844569,
+          "p99Micros": 123314569
+        }
+      }
+    },
+    {
+      "name": "maintenance-migration-application-complete-interrupted-cleanup-schema-013",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 390,
+        "costPicoUSD": 527400000,
+        "p50Micros": 8920111,
+        "p95Micros": 26977111,
+        "p99Micros": 66697111,
+        "criticalP50Micros": 8920111,
+        "criticalP95Micros": 26977111,
+        "criticalP99Micros": 66697111
+      },
+      "roles": {
+        "file": {
+          "requests": 19,
+          "costPicoUSD": 34800000,
+          "p50Micros": 440000,
+          "p95Micros": 1380000,
+          "p99Micros": 3450000
+        },
+        "state": {
+          "requests": 371,
+          "costPicoUSD": 492600000,
+          "p50Micros": 8480111,
+          "p95Micros": 25597111,
+          "p99Micros": 63247111
+        }
+      }
+    },
+    {
+      "name": "maintenance-migration-application-complete-pending-cleanup-schema-013",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 391,
+        "costPicoUSD": 527400000,
+        "p50Micros": 8940112,
+        "p95Micros": 27037112,
+        "p99Micros": 66847112,
+        "criticalP50Micros": 8940112,
+        "criticalP95Micros": 27037112,
+        "criticalP99Micros": 66847112
+      },
+      "roles": {
+        "file": {
+          "requests": 19,
+          "costPicoUSD": 34800000,
+          "p50Micros": 440000,
+          "p95Micros": 1380000,
+          "p99Micros": 3450000
+        },
+        "state": {
+          "requests": 372,
+          "costPicoUSD": 492600000,
+          "p50Micros": 8500112,
+          "p95Micros": 25657112,
+          "p99Micros": 63397112
+        }
+      }
+    },
+    {
+      "name": "maintenance-startup-warm-schema-013",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 10,
+        "costPicoUSD": 17800000,
+        "p50Micros": 229083,
+        "p95Micros": 695083,
+        "p99Micros": 1720083,
+        "criticalP50Micros": 229083,
+        "criticalP95Micros": 695083,
+        "criticalP99Micros": 1720083
+      },
+      "roles": {
+        "file": {
+          "requests": 0,
+          "costPicoUSD": 0,
+          "p50Micros": 0,
+          "p95Micros": 0,
+          "p99Micros": 0
+        },
+        "state": {
+          "requests": 10,
+          "costPicoUSD": 17800000,
+          "p50Micros": 229083,
+          "p95Micros": 695083,
+          "p99Micros": 1720083
+        }
+      }
+    },
+    {
+      "name": "thumbnail-queue-state-admit-64-schema-013",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 71,
+        "costPicoUSD": 46800000,
+        "p50Micros": 1575378,
+        "p95Micros": 4676378,
+        "p99Micros": 11521378,
+        "criticalP50Micros": 1575378,
+        "criticalP95Micros": 4676378,
+        "criticalP99Micros": 11521378
+      },
+      "roles": {
+        "state": {
+          "requests": 71,
+          "costPicoUSD": 46800000,
+          "p50Micros": 1575378,
+          "p95Micros": 4676378,
+          "p99Micros": 11521378
+        }
+      }
+    },
+    {
+      "name": "thumbnail-queue-state-drain-64-schema-013",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 656,
+        "costPicoUSD": 888000000,
+        "p50Micros": 15437498,
+        "p95Micros": 45277498,
+        "p99Micros": 110997498,
+        "criticalP50Micros": 15437498,
+        "criticalP95Micros": 45277498,
+        "criticalP99Micros": 110997498
+      },
+      "roles": {
+        "state": {
+          "requests": 656,
+          "costPicoUSD": 888000000,
+          "p50Micros": 15437498,
+          "p95Micros": 45277498,
+          "p99Micros": 110997498
+        }
+      }
+    },
+    {
+      "name": "thumbnail-queue-state-ready-64-schema-013",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 0,
+        "costPicoUSD": 0,
+        "p50Micros": 0,
+        "p95Micros": 0,
+        "p99Micros": 0
+      },
+      "roles": {
+        "state": {
+          "requests": 0,
+          "costPicoUSD": 0,
+          "p50Micros": 0,
+          "p95Micros": 0,
+          "p99Micros": 0
+        }
+      }
+    },
+    {
+      "name": "thumbnail-queue-state-refresh-64-schema-013",
+      "provider": "gcs",
+      "profile": "regional-standard-flat",
+      "maximum": {
+        "requests": 3,
+        "costPicoUSD": 5800000,
+        "p50Micros": 74590,
+        "p95Micros": 215590,
+        "p99Micros": 525590,
+        "criticalP50Micros": 74590,
+        "criticalP95Micros": 215590,
+        "criticalP99Micros": 525590
+      },
+      "roles": {
+        "state": {
+          "requests": 3,
+          "costPicoUSD": 5800000,
+          "p50Micros": 74590,
+          "p95Micros": 215590,
+          "p99Micros": 525590
+        }
+      }
+    }
+  ],
+  "retiredBudgets": [
+    "maintenance-checkpoint-minimal-schema-012",
+    "maintenance-migration-008-to-012-minimal-fixture",
+    "maintenance-migration-application-complete-interrupted-cleanup-schema-012",
+    "maintenance-migration-application-complete-pending-cleanup-schema-012",
+    "maintenance-startup-warm-schema-011"
+  ],
+  "retirementEvidence": "docs/v1.1-media-preview-specification.md: Schema 013 preserves previous records and adds the independently verified adjacent metadata-conservation/checkpoint edge; predecessor fixtures and zero original-body reads remain required. Current warm startup/checkpoint request counts and costs are unchanged; feature-marker byte deltas and the additional migration edge are measured separately."
+}

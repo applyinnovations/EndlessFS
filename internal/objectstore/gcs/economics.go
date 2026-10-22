@@ -80,6 +80,9 @@ var regionalStandardFlatImmutablePackCacheBudgets []byte
 //go:embed economics/budgets-checkpoint-session-regional-standard-flat-2026-10.json
 var regionalStandardFlatCheckpointSessionBudgets []byte
 
+//go:embed economics/budgets-schema-013-regional-standard-flat-2026-10.json
+var regionalStandardFlatSchema013Budgets []byte
+
 // RegionalStandardFlatEconomics returns the reviewed provider model used by
 // deterministic request-budget tests. It performs no network access.
 func RegionalStandardFlatEconomics() (providerbudget.Model, error) {
@@ -114,6 +117,7 @@ func RegionalStandardFlatBudgetRatchet() (providerbudget.RatchetLedger, error) {
 		regionalStandardFlatMaintenanceCorrectiveBudgets,
 		regionalStandardFlatImmutablePackCacheBudgets,
 		regionalStandardFlatCheckpointSessionBudgets,
+		regionalStandardFlatSchema013Budgets,
 	} {
 		ledger, err = providerbudget.AppendRatchetDelta(ledger, delta)
 		if err != nil {

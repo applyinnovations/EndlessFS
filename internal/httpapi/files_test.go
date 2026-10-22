@@ -426,6 +426,15 @@ func TestIntegrationGeneratedPreviewResolveRegenerateAndAuthorization(t *testing
 	if resolved.Code != http.StatusOK {
 		t.Fatalf("resolve = %d %s", resolved.Code, resolved.Body.String())
 	}
+	var acknowledged preview.ResolveResponse
+	decodeResponse(t, resolved, &acknowledged)
+	if len(acknowledged.Items) != 1 || acknowledged.Items[0].State != preview.StateQueued || acknowledged.Items[0].Capability != nil {
+		t.Fatalf("resolve did not acknowledge queued work: %+v", acknowledged)
+	}
+	if worked, err := env.previews.WorkOne(t.Context()); err != nil || !worked {
+		t.Fatalf("thumbnail worker: %v %v", worked, err)
+	}
+	resolved = performRequest(t, env.handler, http.MethodPost, "/api/v1/previews/resolve", origin, string(body), cookies, driveMutationHeaders(env.csrf.Value, ""))
 	if csp := resolved.Header().Get("Content-Security-Policy"); env.previewOrigin == env.data.URL || !strings.Contains(csp, env.data.URL) || !strings.Contains(csp, env.previewOrigin) {
 		t.Fatalf("preview CSP origins = %q, source=%q preview=%q", csp, env.data.URL, env.previewOrigin)
 	}

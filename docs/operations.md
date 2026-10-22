@@ -64,16 +64,18 @@ immutable pages and unrelated domains continue immediately.
 
 Startup detects one exact epoch in the append-only storage-schema ledger and
 executes every remaining adjacent transformation in order. The current ledger
-contains schemas 001 through 012. Schema 010 adds a verified authority-
+contains schemas 001 through 013. Schema 010 adds a verified authority-
 conservation boundary to the schema-009 typed transactional-state runtime;
 schema 011 adds bounded packed-domain publication and upload transactions;
-schema 012 separates independent upload-admission identities. A
+schema 012 separates independent upload-admission identities; schema 013 adds
+durable thumbnail jobs. A
 schema-001 bucket therefore runs
-`001 -> 002 -> 003 -> 004 -> 005 -> 006 -> 007 -> 008 -> 009 -> 010 -> 011 -> 012`;
+`001 -> 002 -> 003 -> 004 -> 005 -> 006 -> 007 -> 008 -> 009 -> 010 -> 011 -> 012 -> 013`;
 schema 003 runs the suffix beginning `003 -> 004`; schema 008 runs
-`008 -> 009 -> 010 -> 011 -> 012`; schema 009 runs `009 -> 010 -> 011 -> 012`;
-schema 010 runs `010 -> 011 -> 012`; schema 011 runs `011 -> 012`; and current
-schema-012 state performs no migration. No operator
+`008 -> 009 -> 010 -> 011 -> 012 -> 013`; schema 009 runs
+`009 -> 010 -> 011 -> 012 -> 013`; schema 010 runs `010 -> 011 -> 012 -> 013`;
+schema 011 runs `011 -> 012 -> 013`; schema 012 runs `012 -> 013`; and current
+schema-013 state performs no migration. No operator
 migration command or bucket edit is required. Unknown or contradictory epoch
 markers fail closed.
 
@@ -127,6 +129,31 @@ pages remain valid inputs and the first relevant schema-011 mutation publishes
 their packed successor. The same edge activates compact 10,000-item upload
 transactions; transient sealed provider leases and progress records remain
 excluded from authoritative checkpoints.
+
+The `012 -> 013` edge is feature-only and authenticates the complete frozen
+state closure before enabling `durable-thumbnail-queue-v1`. It preserves all
+existing file and application records. Thumbnail jobs, priority indexes and
+shared worker lanes use the existing state backend; no new service, credential
+or environment variable is required. Queued work survives replica replacement;
+expired leases recover automatically. Existing preview concurrency controls the
+shared background worker limit. Terminal failures retain their status for the
+existing operation-retention window before incremental cleanup. See the
+[media-preview specification](v1.1-media-preview-specification.md) for priority,
+retry and viewer/grid variant behavior.
+
+For a schema-012 deployment, use a coordinated maintenance rollout: drain
+traffic and active transfer capabilities, stop every predecessor writer
+(including both replicas), then start the schema-013 binaries. New replicas
+can converge through the shared migration, keeping liveness available and
+readiness false until startup completes. The new feature binding rejects a
+predecessor binary at startup; it does not make an already-running old pod's
+readiness probe continuously check schema compatibility. Do not retain an old
+pod in traffic while a new pod migrates and reopens writes. Once migration has
+begun, recover forward with schema-013 code rather than blindly undoing the
+deployment. After schema-013 activation, a schema-012 binary cannot open the
+storage set. Returning to it would require a separately planned, consistent
+pre-upgrade storage restore with every writer stopped and explicit handling of
+any subsequent writes; changing only the image or feature markers is unsafe.
 
 The `003 -> 004` graph walk persists authenticated transform and verification marks for each completed directory. Every mark is tied to the exact migration checkpoint, parent/root/manifest logical versions, parent entry, aggregates, and content summary. The process holds only the active ancestor stack; after restart, a valid completed mark skips that entire subtree. Several replicas may advance the same deterministic walk through CAS. Stale, forged, misplaced, corrupt, or contradictory marks fail closed and marks are removed only after the independent verification phase succeeds. Provider-ordered scope discovery retains one owner/area at a time. Transforming a historical page manifest retains at most that one legacy directory while deriving its differently ordered persistent indexes; current-index verification and CAS-winner reconciliation are page-bounded.
 

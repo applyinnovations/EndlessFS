@@ -294,6 +294,7 @@ func ProductionWorkloads() []ProductionWorkload {
 		workload("preview/read", "preview", "preview-read"),
 		workload("preview/create-download", "preview", "preview-create-download"),
 		workload("preview/resolve-ready", "preview", "preview-resolve-ready", "preview-ready-window-32-schema-011"),
+		workload("preview/queue-state", "preview", "thumbnail-queue-state-admit-64-schema-013", "thumbnail-queue-state-refresh-64-schema-013", "thumbnail-queue-state-drain-64-schema-013", "thumbnail-queue-state-ready-64-schema-013"),
 		workload("preview/record-ready", "preview", "preview-record-ready"),
 		workload("preview/create-known-download", "preview", "preview-create-known-download"),
 
@@ -340,16 +341,16 @@ func ProductionWorkloads() []ProductionWorkload {
 		workload("theme/get", "preference", "theme-get-default-schema-011"),
 		workload("theme/set", "preference", "theme-set-create-schema-011", "theme-set-update-schema-011"),
 
-		workload("maintenance/startup", "maintenance", "maintenance-startup-warm-schema-011"),
+		workload("maintenance/startup", "maintenance", "maintenance-startup-warm-schema-013"),
 		workload("maintenance/gate-status", "maintenance", "maintenance-gate-status-schema-011"),
-		workload("maintenance/checkpoint", "maintenance", "maintenance-checkpoint-minimal-schema-012", "maintenance-checkpoint-garbage-128-schema-012"),
+		workload("maintenance/checkpoint", "maintenance", "maintenance-checkpoint-minimal-schema-013", "maintenance-checkpoint-garbage-128-schema-012"),
 		workload("maintenance/verify-checkpoint", "maintenance", "maintenance-verify-checkpoint-minimal-schema-012"),
 		workload("maintenance/visit-checkpoint", "maintenance", "maintenance-visit-checkpoint-minimal-schema-011"),
 		workload("maintenance/open-writes", "maintenance", "maintenance-open-writes-schema-012"),
 		workload("maintenance/compaction", "maintenance", "maintenance-domain-compaction-300-schema-011"),
 		workload("maintenance/recovery", "maintenance", "maintenance-transition-recovery-schema-011"),
 		workload("maintenance/derived-view-rebuild", "maintenance", "maintenance-derived-view-rebuild-schema-011"),
-		workload("maintenance/migration", "maintenance", "maintenance-migration-008-to-012-minimal-fixture", "maintenance-migration-application-complete-pending-cleanup-schema-012", "maintenance-migration-application-complete-interrupted-cleanup-schema-012"),
+		workload("maintenance/migration", "maintenance", "maintenance-migration-008-to-013-minimal-fixture", "maintenance-migration-application-complete-pending-cleanup-schema-013", "maintenance-migration-application-complete-interrupted-cleanup-schema-013"),
 	}
 	return append([]ProductionWorkload(nil), workloads...)
 }
@@ -434,7 +435,7 @@ func ProductionProviderRoutes() []ProductionRoute {
 		route("GET /api/v1/public/shares/{token}/stat", "share authority plus namespace target", "share/public-stat"),
 		route("POST /api/v1/public/shares/{token}/downloads", "share authority plus capability", "share/public-download"),
 
-		route("POST /api/v1/previews/resolve", "one to 64 items", "session/authenticate", "namespace/stat", "preview/latest", "preview/create-download"),
+		route("POST /api/v1/previews/resolve", "one to 64 items", "session/authenticate", "namespace/stat", "preview/latest", "preview/create-download", "preview/queue-state"),
 		route("POST /api/v1/previews/generations", "one durable operation", "session/authenticate", "namespace/stat", "state/mutate", "preview/claim", "preview/commit"),
 		route("GET /api/v1/previews/operations/{operationID}", "one operation", "session/authenticate", "state/get", "preview/latest", "preview/create-download"),
 		protected("GET /api/v1/me/preferences/theme", "theme/get"),

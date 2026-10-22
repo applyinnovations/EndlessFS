@@ -862,7 +862,7 @@ func TestE2EBrowserBootstrapLoginDriveShareAndTrash(t *testing.T) {
 	if err := chromedp.Run(ctx, chromedp.Focus("#file-view-grid", chromedp.ByQuery), chromedp.KeyEvent(" ")); err != nil {
 		t.Fatalf("switch to media grid: %v", err)
 	}
-	if err := waitFor(ctx, `document.querySelector(".media-frame[data-path='/media-proof.png']").dataset.previewState === "generating"`, 15*time.Second); err != nil {
+	if err := waitFor(ctx, `["queued", "generating"].includes(document.querySelector(".media-frame[data-path='/media-proof.png']").dataset.previewState)`, 15*time.Second); err != nil {
 		t.Fatalf("wait for contending grid generation: %v (%s)", err, browserStatus(ctx))
 	}
 	if err := harness.previewStore.Commit(context.Background(), gridBinding, gridClaim, gridArtifact); err != nil {
@@ -2292,6 +2292,7 @@ type harness struct {
 	files          provider.Storage
 	previewStore   *previewmemory.Store
 	corruptPreview *atomic.Bool
+	previewGate    *previewResponseGate
 	clock          domain.Clock
 }
 
@@ -2412,6 +2413,7 @@ func newHarnessWithStorage(t *testing.T, withPreviews, localFixture, portableSto
 		t.Fatal(err)
 	}
 	corruptPreview := &atomic.Bool{}
+	previewGate := newPreviewResponseGate()
 	driveService, err := drive.NewService(driveStorage, store, repository, ids, clock, sessionKey, origin, dataOrigin, 1<<20)
 	if err != nil {
 		t.Fatal(err)
@@ -2433,6 +2435,10 @@ func newHarnessWithStorage(t *testing.T, withPreviews, localFixture, portableSto
 		if serviceErr != nil {
 			t.Fatal(serviceErr)
 		}
+		workerCtx, stopWorkers := context.WithCancel(context.Background())
+		workersDone := make(chan struct{})
+		go func() { defer close(workersDone); previewService.Run(workerCtx) }()
+		t.Cleanup(func() { stopWorkers(); <-workersDone })
 		controlHandler = httpapi.NewCompleteApplicationWithPreview(cfg, "e2e", identityService, sessions, driveService, previewService, themeManager)
 	}
 	if controlWrap != nil {
@@ -2453,6 +2459,9 @@ func newHarnessWithStorage(t *testing.T, withPreviews, localFixture, portableSto
 			}
 		}
 		body := append([]byte(nil), response.Body.Bytes()...)
+		if response.Code == http.StatusOK && strings.HasPrefix(request.URL.Path, "/cap/preview/") {
+			previewGate.wait(request)
+		}
 		if corruptPreview.Load() && response.Code == http.StatusOK && strings.HasPrefix(request.URL.Path, "/cap/preview/") && len(body) > 12 {
 			body[len(body)-1] ^= 0xff
 		}
@@ -2477,7 +2486,7 @@ func newHarnessWithStorage(t *testing.T, withPreviews, localFixture, portableSto
 	})
 	return harness{
 		origin: origin, dataOrigin: dataOrigin, previewOrigin: previewOrigin, bootstrapToken: bootstrapToken,
-		repository: repository, storage: storage, files: driveStorage, previewStore: previewStore, corruptPreview: corruptPreview, clock: clock,
+		repository: repository, storage: storage, files: driveStorage, previewStore: previewStore, corruptPreview: corruptPreview, previewGate: previewGate, clock: clock,
 	}
 }
 

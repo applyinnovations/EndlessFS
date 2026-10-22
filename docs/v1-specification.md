@@ -888,6 +888,14 @@ Each adjacent transform automatically closes and drains the canonical write gate
 
 Schema 010 and every later epoch MUST register a pre-activation authority verifier in its immutable ledger edge. The central writer-set activation path MUST execute that verifier while the gate and target domains remain frozen and MUST reject an absent or failing verifier. An edge implementation returning success or writing target feature markers is insufficient. For schema 010, the verifier independently reloads the durable conservation proof and proves the complete source-to-receipt-to-target relation. Future edges MUST provide an equivalently complete proof for every authoritative family they can change; a sampled count, successful decode, or engine-open check is not a conservation proof.
 
+Schema 013 adds the `durable-thumbnail-queue-v1` required feature and typed
+application-state records for thumbnail jobs, ordering indexes and global worker
+lanes. Its feature-only adjacent migration MUST authenticate the complete frozen
+authority closure before activation and MUST preserve all predecessor values.
+Queue behavior and tenant/content/variant identity are defined by the v1.1
+media-preview specification. Queue state participates in ordinary checkpoints
+and raw-copy portability; generated artifact bytes remain disposable.
+
 Schema 011 changes no predecessor application value. Its verifier MUST
 nevertheless authenticate the complete current typed-domain catalog, heads,
 pages, namespace closure, and checkpoint binding while its own gate is closed;

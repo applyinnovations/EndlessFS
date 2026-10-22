@@ -436,6 +436,22 @@ func TestApplicationWriterProfilesOpenSchema012Fixtures(t *testing.T) {
 	}
 }
 
+func TestApplicationWriterProfilesOpenSchema013Fixtures(t *testing.T) {
+	for _, profile := range []struct {
+		name      string
+		fixture   string
+		configure func(*config.Config)
+		wantSize  int64
+	}{
+		{name: "preview-disabled", fixture: "schema-013-application-disabled.json", configure: func(*config.Config) {}, wantSize: 18},
+		{name: "preview-gcs", fixture: "schema-013-application-gcs.json", configure: configureSchema005PreviewProfile, wantSize: 90},
+	} {
+		t.Run(profile.name, func(t *testing.T) {
+			testApplicationWriterProfileMigration(t, profile.fixture, "schema-013", "40d381ed977085b703bb177744c14d2c846493a2", profile.wantSize, profile.configure)
+		})
+	}
+}
+
 func testApplicationWriterProfileMigration(t *testing.T, fixtureName, sourceRelease, sourceCommit string, wantSize int64, configure func(*config.Config)) {
 	t.Helper()
 	body, err := os.ReadFile("../../internal/portable/testdata/migrations/" + fixtureName)
@@ -484,8 +500,11 @@ func testApplicationWriterProfileMigration(t *testing.T, fixtureName, sourceRele
 	live, _ := domain.NewScope(user, domain.AreaLive)
 	root, err := engine.Files().Stat(context.Background(), live, domain.MustParseUserPath("/"))
 	wantFiles := int64(2)
-	if sourceRelease == "schema-004" || sourceRelease == "v0.2.0" || sourceRelease == "v0.3.0" || sourceRelease == "schema-007" || sourceRelease == "schema-008" || sourceRelease == "schema-009" || sourceRelease == "schema-010" || sourceRelease == "schema-011" || sourceRelease == "schema-012" {
+	if sourceRelease == "schema-004" || sourceRelease == "v0.2.0" || sourceRelease == "v0.3.0" || sourceRelease == "schema-007" || sourceRelease == "schema-008" || sourceRelease == "schema-009" || sourceRelease == "schema-010" || sourceRelease == "schema-011" || sourceRelease == "schema-012" || sourceRelease == "schema-013" {
 		wantFiles = 3
+	}
+	if sourceRelease == "schema-013" && cfg.PreviewProvider == "gcs" {
+		wantFiles = 4
 	}
 	if err != nil || root.Size != wantSize || root.FileCount != wantFiles {
 		t.Fatalf("migrated application root = %+v, %v; want %d bytes/%d files", root, err, wantSize, wantFiles)

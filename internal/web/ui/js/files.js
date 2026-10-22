@@ -738,6 +738,7 @@
 			const frame = connectedGridFrame(entry.path);
 			const known = state.previewStates.get(entry.path);
 			if (frame && known?.version && (known.version !== frame.entry.version || known.variant !== previewVariant(frame.getBoundingClientRect().width || 96))) queueGridPreview(frame.entry, frame);
+			else if (frame && ["queued", "generating"].includes(known?.state) && !state.previewRetryTimers.has(entry.path) && !state.previewQueued.has(entry.path)) scheduleGridPreviewRetry(frame.entry, frame);
 		}
 		state.previewActive = 0;
 		pumpPreviewQueue();

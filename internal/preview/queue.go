@@ -103,6 +103,10 @@ func (s *Service) loadThumbnail(ctx context.Context, id string) (thumbnailJob, s
 	if err != nil {
 		return thumbnailJob{}, value, err
 	}
+	return decodeThumbnail(id, value)
+}
+
+func decodeThumbnail(id string, value state.Value) (thumbnailJob, state.Value, error) {
 	var job thumbnailJob
 	if state.DecodeJSON(value.Data, &job) != nil || !job.valid() || job.ID != id {
 		return thumbnailJob{}, value, domain.NewError(domain.ErrorInvalid, "invalid thumbnail job")
@@ -141,12 +145,40 @@ func (s *Service) enqueueThumbnails(ctx context.Context, requests []thumbnailReq
 			ids = append(ids, id)
 		}
 		sort.Strings(ids)
+		// The existing portable multi-reader shares one authenticated domain
+		// snapshot for a warm batch. A cold/partial batch uses exact gets;
+		// unavailable or invalid state never falls back to presumed absence.
+		batchValues := make(map[string]state.Value, len(ids))
+		if reader, ok := s.state.(interface {
+			GetMany(context.Context, []state.Key) ([]state.Value, error)
+		}); ok {
+			keys := make([]state.Key, len(ids))
+			for i, id := range ids {
+				keys[i] = thumbnailKey("job", id)
+			}
+			values, err := reader.GetMany(ctx, keys)
+			if err == nil {
+				if len(values) != len(ids) {
+					return nil, domain.NewError(domain.ErrorInternal, "invalid thumbnail state batch")
+				}
+				for i, id := range ids {
+					batchValues[id] = values[i]
+				}
+			} else if !errors.Is(err, domain.ErrNotFound) {
+				return nil, err
+			}
+		}
 		statuses := make(map[string]State, len(unique))
 		changes := make([]state.Change, 0, len(unique)*3)
 		intent := []string{now.Format(time.RFC3339Nano)}
 		for _, id := range ids {
 			request := unique[id]
-			previous, value, err := s.loadThumbnail(ctx, id)
+			previous, value, err := thumbnailJob{}, state.Value{}, error(nil)
+			if batchValue, found := batchValues[id]; found {
+				previous, value, err = decodeThumbnail(id, batchValue)
+			} else {
+				previous, value, err = s.loadThumbnail(ctx, id)
+			}
 			if err != nil && !errors.Is(err, domain.ErrNotFound) {
 				return nil, err
 			}

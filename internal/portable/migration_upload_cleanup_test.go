@@ -48,9 +48,9 @@ func TestProviderBudgetMigrationPendingCleanup(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			name := "maintenance-migration-application-complete-pending-cleanup-schema-012"
+			name := "maintenance-migration-application-complete-pending-cleanup-schema-013"
 			if family.producer == "v0.7.1-interrupted" {
-				name = "maintenance-migration-application-complete-interrupted-cleanup-schema-012"
+				name = "maintenance-migration-application-complete-interrupted-cleanup-schema-013"
 			}
 			events := append(stateLedger.Events(), fileLedger.Events()...)
 			budget, err := providerbudget.Calibrate(name, model, []providerbudget.Role{providerbudget.RoleState, providerbudget.RoleFile}, events)

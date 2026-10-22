@@ -109,6 +109,49 @@ func TestThumbnailQueueCompletionFailuresPreserveClaim(t *testing.T) {
 	}
 }
 
+func TestThumbnailQueueStaleCompletionCannotReleaseReplacedLane(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(map[bool]string{false: "successor-lease", true: "corrupt-lane"}[corrupt], func(t *testing.T) {
+			s, binding, item, clock := queueTestService(t)
+			if _, err := s.enqueueThumbnail(t.Context(), binding, item); err != nil {
+				t.Fatal(err)
+			}
+			claim, found, err := s.claimThumbnail(t.Context())
+			if err != nil || !found {
+				t.Fatalf("initial claim: %v %v", found, err)
+			}
+			laneValue, err := s.state.Get(t.Context(), claim.laneKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			successor, err := s.ids.OpaqueID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			lane := thumbnailLane{SchemaVersion: 1, Claims: 2, LeaseID: successor, LeaseExpiresAt: clock.Now().Add(s.options.OperationTimeout)}
+			if corrupt {
+				lane.SchemaVersion = 99
+			}
+			body, _ := state.EncodeJSON(lane)
+			if _, err := s.state.Mutate(t.Context(), state.Mutation{ID: "replace-thumbnail-lane", RetainUntil: clock.Now().Add(s.options.OperationRetention), Changes: []state.Change{{Key: claim.laneKey, Requirement: state.RequirementPresent, ExpectedVersion: laneValue.Version, Data: body}}}); err != nil {
+				t.Fatal(err)
+			}
+			err = s.finishThumbnail(t.Context(), claim, ItemResult{State: StateReady}, nil)
+			if corrupt && !errors.Is(err, domain.ErrInvalid) || !corrupt && err != nil {
+				t.Fatalf("stale completion: %v", err)
+			}
+			job, _, err := s.loadThumbnail(t.Context(), claim.job.ID)
+			if err != nil || job.State != StateGenerating || job.LeaseID != claim.job.LeaseID {
+				t.Fatalf("stale completion consumed the job: %+v %v", job, err)
+			}
+			current, err := s.state.Get(t.Context(), claim.laneKey)
+			if err != nil || string(current.Data) != string(body) {
+				t.Fatalf("stale completion released a replaced lane: %v", err)
+			}
+		})
+	}
+}
+
 func TestThumbnailQueueCleanupFailuresPreserveRetainedFailure(t *testing.T) {
 	for _, boundary := range []string{"job-read", "index-read", "write", "conflict"} {
 		t.Run(boundary, func(t *testing.T) {
@@ -305,4 +348,45 @@ func TestThumbnailQueueSourceFailureLeavesRetryAndDisabledWorkerDoesNoWork(t *te
 		t.Fatalf("disabled worker ran: %v %v", worked, err)
 	}
 	s.Run(t.Context())
+}
+
+type queueBatchReader struct {
+	state.AtomicStore
+	values []state.Value
+	err    error
+}
+
+func (s queueBatchReader) GetMany(context.Context, []state.Key) ([]state.Value, error) {
+	return s.values, s.err
+}
+
+func TestThumbnailQueueBatchReadFailuresNeverBecomeAbsence(t *testing.T) {
+	for _, kind := range []string{"unavailable", "shape", "corrupt", "cold"} {
+		t.Run(kind, func(t *testing.T) {
+			s, binding, item, _ := queueTestService(t)
+			reader := queueBatchReader{AtomicStore: s.state}
+			switch kind {
+			case "unavailable":
+				reader.err = domain.ErrUnavailable
+			case "corrupt":
+				reader.values = []state.Value{{Data: []byte(`{}`), Version: "v1"}}
+			case "cold":
+				reader.err = domain.ErrNotFound
+			}
+			s.state = reader
+			got, err := s.enqueueThumbnail(t.Context(), binding, item)
+			if kind == "cold" {
+				if err != nil || got != StateQueued {
+					t.Fatalf("cold batch did not use exact lookup: %s %v", got, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("%s batch admitted unknown state", kind)
+			}
+			if _, _, readErr := s.loadThumbnail(t.Context(), thumbnailID(binding)); !errors.Is(readErr, domain.ErrNotFound) {
+				t.Fatalf("failed batch published a job: %v", readErr)
+			}
+		})
+	}
 }

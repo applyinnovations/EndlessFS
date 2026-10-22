@@ -208,6 +208,13 @@ func TestIntegrationGeneratedPreviewReadsPortableGCSSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolved, err := service.Resolve(context.Background(), owner, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: path, Version: entry.Version, Variant: 256}}})
+	if err != nil || len(resolved.Items) != 1 || resolved.Items[0].State != preview.StateQueued || resolved.Items[0].Capability != nil {
+		t.Fatalf("GCS-backed preview acknowledgement = %+v, %v", resolved, err)
+	}
+	if worked, err := service.WorkOne(t.Context()); err != nil || !worked {
+		t.Fatalf("GCS-backed preview worker = %v, %v", worked, err)
+	}
+	resolved, err = service.Resolve(context.Background(), owner, preview.ResolveRequest{Items: []preview.ItemRequest{{Path: path, Version: entry.Version, Variant: 256}}})
 	if err != nil || len(resolved.Items) != 1 || resolved.Items[0].State != preview.StateReady || resolved.Items[0].Capability == nil {
 		t.Fatalf("GCS-backed preview resolve = %+v, %v", resolved, err)
 	}

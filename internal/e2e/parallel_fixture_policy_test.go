@@ -246,6 +246,7 @@ var scheduledE2EInventory = []string{
 	"TestE2ESmartRecoveryPersistsPartialUploadAcrossRefreshAndLogin",
 	"TestE2ESmartRecoveryProductionCardinalityWarmTransfersOnlyRemainingFiles",
 	"TestE2ESmartRecoveryResumesOnlyUnconfirmedBytesAfterRefreshLogin",
+	"TestE2EThumbnailQueueProgressesAcrossRerenderWithoutRefresh",
 	"TestE2EUploadActionsRetryOnlyRejectedFinalizationWithoutResendingData",
 	"TestE2EUploadAdmissionIgnoresReplyForReplacedAttempt",
 	"TestE2EUploadAdmissionWaitsForNamespaceTurnWithoutBlockingData",

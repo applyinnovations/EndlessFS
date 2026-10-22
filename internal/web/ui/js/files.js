@@ -17,7 +17,7 @@
   const browserViewValues = new Set(["list", "grid", "storage"]);
   const browserKindValues = new Set(["", "directory", "file"]);
   const browserMediaValues = new Set(["", "image", "video", "pdf", "audio", "document", "archive", "unknown"]);
-  const browserPreviewValues = new Set(["", "ready", "missing", "ineligible", "unsupported", "unavailable"]);
+  const browserPreviewValues = new Set(["", "ready", "queued", "generating", "missing", "ineligible", "unsupported", "unavailable"]);
   const browserStateParameterNames = ["path", "search", "sort", "view", "page", "file", "kind", "media", "min", "max", "after", "before", "preview", "filters"];
 
   function singleURLParameter(params, name) {
@@ -696,8 +696,16 @@
   }
 
   function queueGridPreview(entry, frame) {
-    const known = state.previewStates.get(entry.path);
-    if (!previewEligible(entry) || (known && known.state !== "ready" && known.state !== "generating") || state.previewQueued.has(entry.path) || state.previewResolving.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
+    let known = state.previewStates.get(entry.path);
+    const variant = previewVariant(frame.getBoundingClientRect().width || 96);
+    if (known && (known.version !== entry.version || known.variant !== variant)) {
+      const previous = state.previewObjectURLs.get(entry.path);
+      if (previous) URL.revokeObjectURL(previous);
+      state.previewObjectURLs.delete(entry.path);
+      state.previewStates.delete(entry.path);
+      known = null;
+    }
+    if (!previewEligible(entry) || (known && !["ready", "queued", "generating"].includes(known.state)) || state.previewQueued.has(entry.path) || state.previewResolving.has(entry.path) || state.previewControllers.has(entry.path) || state.previewObjectURLs.has(entry.path)) return;
     state.previewQueued.add(entry.path);
     state.previewQueue.push({ entry, frame });
 	if (!state.previewPumpScheduled) {
@@ -715,7 +723,8 @@
 	while (batch.length < 64 && state.previewQueue.length) {
 		const queued = state.previewQueue.shift();
 		state.previewQueued.delete(queued.entry.path);
-		if (queued.frame.isConnected) batch.push(queued);
+		const frame = connectedGridFrame(queued.entry.path);
+		if (frame && frame.isConnected && frame.entry.version === queued.entry.version) batch.push({ entry: frame.entry, frame });
 	}
 	if (!batch.length) {
 		pumpPreviewQueue();
@@ -724,7 +733,12 @@
 	for (const { entry } of batch) state.previewResolving.add(entry.path);
 	state.previewActive = 1;
 	resolveGridPreviewBatch(batch).finally(() => {
-		for (const { entry } of batch) state.previewResolving.delete(entry.path);
+		for (const { entry } of batch) {
+			state.previewResolving.delete(entry.path);
+			const frame = connectedGridFrame(entry.path);
+			const known = state.previewStates.get(entry.path);
+			if (frame && known?.version && (known.version !== frame.entry.version || known.variant !== previewVariant(frame.getBoundingClientRect().width || 96))) queueGridPreview(frame.entry, frame);
+		}
 		state.previewActive = 0;
 		pumpPreviewQueue();
 	});
@@ -747,7 +761,7 @@
 			if (result.state === "ready" && result.capability) {
 				clearGridPreviewRetry(entry.path);
 				if (currentFrame.isConnected) downloads.push({ entry, frame: currentFrame, result });
-			} else if (result.state === "generating") {
+			} else if (result.state === "queued" || result.state === "generating") {
 				scheduleGridPreviewRetry(entry, currentFrame);
 			} else {
 				clearGridPreviewRetry(entry.path);
@@ -787,6 +801,8 @@
 			const artifactResponse = await fetch(result.capability.url, { method: result.capability.method || "GET", headers: result.capability.headers || {}, signal: controller.signal, credentials: "omit" });
 			const blob = await validatedPreviewBlob(artifactResponse, result.artifact);
 			if (controller.signal.aborted) return;
+			const visibleFrame = connectedGridFrame(entry.path);
+			if (visibleFrame && visibleFrame.entry.version !== entry.version) return;
 			const objectURL = URL.createObjectURL(blob);
 			const previous = state.previewObjectURLs.get(entry.path);
 			if (previous) URL.revokeObjectURL(previous);
@@ -832,19 +848,15 @@
   function scheduleGridPreviewRetry(entry, frame) {
     clearGridPreviewRetry(entry.path, false);
     const attempt = state.previewRetryAttempts.get(entry.path) || 0;
-    if (attempt >= maximumPreviewPolls) {
-      const failed = { state: "failed" };
-      state.previewStates.set(entry.path, failed);
-      if (frame && frame.isConnected) frame.dataset.previewState = failed.state;
-      state.previewRetryAttempts.delete(entry.path);
-      return;
-    }
-    state.previewRetryAttempts.set(entry.path, attempt + 1);
-    const delay = previewRetryDelays[Math.min(attempt, previewRetryDelays.length - 1)];
+    const queued = state.previewStates.get(entry.path)?.state === "queued";
+    // Durable worker leases and retry limits determine terminal failures.
+    // A healthy long-running job must not fail because the browser polled it.
+    state.previewRetryAttempts.set(entry.path, queued ? 0 : Math.min(attempt + 1, previewRetryDelays.length - 1));
+    const delay = queued ? 1000 : previewRetryDelays[Math.min(attempt, previewRetryDelays.length - 1)];
     const timer = window.setTimeout(() => {
       state.previewRetryTimers.delete(entry.path);
       const currentFrame = connectedGridFrame(entry.path);
-      if (!currentFrame || !currentFrame.isConnected || state.previewStates.get(entry.path)?.state !== "generating") return;
+      if (!currentFrame || !currentFrame.isConnected || !["queued", "generating"].includes(state.previewStates.get(entry.path)?.state)) return;
       queueGridPreview(entry, currentFrame);
     }, delay);
     state.previewRetryTimers.set(entry.path, timer);

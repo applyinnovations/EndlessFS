@@ -221,8 +221,18 @@
       return;
     }
     try {
-      const response = await api("/api/v1/previews/resolve", { method: "POST", body: { items: [{ path: entry.path, version: entry.version, variant }] }, signal: state.viewerController.signal });
-      await displayViewerResult(entry, response.items[0], state.viewerController.signal, variant);
+      const signal = state.viewerController.signal;
+      const items = [{ path: entry.path, version: entry.version, variant }];
+      const gridFrame = connectedGridFrame(entry.path);
+      const gridVariant = previewVariant(gridFrame ? gridFrame.getBoundingClientRect().width || 96 : 96);
+      if (previewEligible(entry) && gridVariant !== variant) items.push({ path: entry.path, version: entry.version, variant: gridVariant });
+      let response = await api("/api/v1/previews/resolve", { method: "POST", body: { items }, signal });
+      let attempt = 0;
+      while (["queued", "generating"].includes(response.items[0].state)) {
+        await wait(previewRetryDelays[Math.min(attempt++, previewRetryDelays.length - 1)], signal);
+        response = await api("/api/v1/previews/resolve", { method: "POST", body: { items }, signal });
+      }
+      await displayViewerResult(entry, response.items[0], signal, variant);
     } catch (error) {
       if (error.name !== "AbortError") {
         showActionErrorToast("Preview", error, "Generated preview is unavailable.");
@@ -245,6 +255,7 @@
       disabled: ["Generated previews are not configured.", "info"],
       ineligible: ["Automatic preview generation is disabled for this file.", "info"],
       missing: ["No preview has been generated.", "info"],
+      queued: ["Preview generation is queued.", "info"],
       generating: ["Preview generation continues.", "info"],
       unavailable: ["Preview unavailable. Original file unaffected.", "warning"],
       failed: ["Preview generation failed.", "error"],
@@ -254,7 +265,10 @@
   }
 
   async function displayViewerResult(entry, result, signal, variant) {
-    state.previewStates.set(entry.path, result);
+    // Viewer variants have their own blob cache. A larger ready preview must
+    // not overwrite the grid variant's pending state or object URL.
+    const gridFrame = connectedGridFrame(entry.path);
+    if (gridFrame) queueGridPreview(entry, gridFrame);
     const canGenerate = Boolean(state.config && state.config.previewConfigured && mediaCategory(entry) === "image");
     syncPreviewGenerationActions(canGenerate, result.state === "ready");
     if (result.state !== "ready" || !result.capability) {

@@ -25,7 +25,6 @@ import (
 
 const (
 	MaxResolveItems       = 64
-	maxAutomaticPerBatch  = 1
 	defaultHardMaxSize    = int64(128 << 20)
 	operationIndexShards  = 16
 	maxOperationsPerShard = 128
@@ -38,6 +37,7 @@ const (
 	StateUnsupported State = "unsupported"
 	StateIneligible  State = "ineligible"
 	StateMissing     State = "missing"
+	StateQueued      State = "queued"
 	StateGenerating  State = "generating"
 	StateReady       State = "ready"
 	StateFailed      State = "failed"
@@ -143,9 +143,10 @@ type Service struct {
 	state      state.AtomicStore
 	global     chan struct{}
 
-	mu       sync.Mutex
-	perUser  map[string]*userLimit
-	inflight map[string]*generationCall
+	mu            sync.Mutex
+	perUser       map[string]*userLimit
+	inflight      map[string]*generationCall
+	thumbnailWake chan struct{}
 }
 
 type operationRecord struct {
@@ -240,7 +241,7 @@ func NewService(options Options, source provider.Storage, store Store, generator
 	return &Service{
 		options: options, source: source, store: store, generators: append([]Generator(nil), generators...),
 		client: client, ids: ids, clock: clock, state: options.ApplicationState, global: make(chan struct{}, options.MaxConcurrency),
-		perUser: make(map[string]*userLimit), inflight: make(map[string]*generationCall),
+		perUser: make(map[string]*userLimit), inflight: make(map[string]*generationCall), thumbnailWake: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -319,26 +320,51 @@ func (s *Service) Resolve(ctx context.Context, owner domain.UserID, request Reso
 			known[selectionIndices[index]] = metadata
 		}
 	}
-	automaticRemaining := maxAutomaticPerBatch
+	queuedRequests := make([]thumbnailRequest, 0, len(request.Items))
+	queuedIndices := make([]int, 0, len(request.Items))
 	for index, item := range request.Items {
 		result, err := s.resolveItemWithEntry(ctx, scope, item, entries[index], known[index], true, false, false, false)
 		if err != nil {
 			return ResolveResponse{}, err
 		}
-		if result.State == StateMissing && s.options.Automatic && automaticRemaining > 0 {
-			// One bounded fallback per resolve preserves ready artifacts created
-			// before this disposable catalog or reused through a directory move.
-			result, err = s.resolveItemWithEntry(ctx, scope, item, entries[index], nil, false, true, false, false)
+		if result.State == StateMissing {
+			// Catalogs are disposable: recover valid artifacts before admitting
+			// work, including manual-only previews and directory moves.
+			result, err = s.resolveItemWithEntry(ctx, scope, item, entries[index], nil, false, false, false, false)
 			if err != nil {
 				return ResolveResponse{}, err
 			}
-			if result.State != StateIneligible {
-				automaticRemaining--
+			if result.State == StateMissing && s.options.Automatic {
+				entry := entries[index]
+				if reason := s.automaticIneligibility(entry); reason != "" {
+					result.State, result.Reason = StateIneligible, reason
+				} else {
+					binding := previewBinding(scope.UserID(), entry, item.Variant, s.generatorFor(entry.MediaType).RecipeID())
+					queuedRequests = append(queuedRequests, thumbnailRequest{binding: binding, item: item})
+					queuedIndices = append(queuedIndices, index)
+				}
 			}
 		}
 		response.Items = append(response.Items, result)
 	}
+	states, err := s.enqueueThumbnails(ctx, queuedRequests)
+	if err != nil {
+		return ResolveResponse{}, err
+	}
+	for i, index := range queuedIndices {
+		response.Items[index].State = states[i]
+	}
 	return response, nil
+}
+
+func (s *Service) automaticIneligibility(entry domain.Entry) string {
+	if s.options.MaxAge != nil && entry.ContentModifiedAt.Before(s.clock.Now().Add(-*s.options.MaxAge)) {
+		return "age"
+	}
+	if s.options.MaxSourceBytes != nil && entry.Size > *s.options.MaxSourceBytes {
+		return "size"
+	}
+	return ""
 }
 
 // resolveSourceEntries authorizes a resolve batch from one snapshot lookup per

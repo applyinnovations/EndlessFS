@@ -128,6 +128,17 @@ their packed successor. The same edge activates compact 10,000-item upload
 transactions; transient sealed provider leases and progress records remain
 excluded from authoritative checkpoints.
 
+The `012 -> 013` edge is feature-only and authenticates the complete frozen
+state closure before enabling `durable-thumbnail-queue-v1`. It preserves all
+existing file and application records. Thumbnail jobs, priority indexes and
+shared worker lanes use the existing state backend; no new service, credential
+or environment variable is required. Queued work survives replica replacement;
+expired leases recover automatically. Existing preview concurrency controls the
+shared background worker limit. Terminal failures retain their status for the
+existing operation-retention window before incremental cleanup. See the
+[media-preview specification](v1.1-media-preview-specification.md) for priority,
+retry and viewer/grid variant behavior.
+
 The `003 -> 004` graph walk persists authenticated transform and verification marks for each completed directory. Every mark is tied to the exact migration checkpoint, parent/root/manifest logical versions, parent entry, aggregates, and content summary. The process holds only the active ancestor stack; after restart, a valid completed mark skips that entire subtree. Several replicas may advance the same deterministic walk through CAS. Stale, forged, misplaced, corrupt, or contradictory marks fail closed and marks are removed only after the independent verification phase succeeds. Provider-ordered scope discovery retains one owner/area at a time. Transforming a historical page manifest retains at most that one legacy directory while deriving its differently ordered persistent indexes; current-index verification and CAS-winner reconciliation are page-bounded.
 
 Every edge is safe to retry after process loss and safe for several new replicas

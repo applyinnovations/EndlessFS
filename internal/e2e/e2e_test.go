@@ -2433,6 +2433,10 @@ func newHarnessWithStorage(t *testing.T, withPreviews, localFixture, portableSto
 		if serviceErr != nil {
 			t.Fatal(serviceErr)
 		}
+		workerCtx, stopWorkers := context.WithCancel(context.Background())
+		workersDone := make(chan struct{})
+		go func() { defer close(workersDone); previewService.Run(workerCtx) }()
+		t.Cleanup(func() { stopWorkers(); <-workersDone })
 		controlHandler = httpapi.NewCompleteApplicationWithPreview(cfg, "e2e", identityService, sessions, driveService, previewService, themeManager)
 	}
 	if controlWrap != nil {

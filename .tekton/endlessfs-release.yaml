@@ -60,6 +60,8 @@ spec:
   # PaC installation tokens expire after one hour. Keep the complete sequential
   # release path below that boundary so the clone token remains valid for the
   # final release and asset API calls.
+    - pipelineTaskName: publish-cache
+      serviceAccountName: nix-cache-publisher
   timeouts:
     pipeline: 55m0s
   params:
@@ -189,6 +191,21 @@ spec:
                   --generate-notes \
                   --title "$release_tag"
               fi
+    # Push and scheduled runs publish this run's store to the shared Nix cache.
+    finally:
+      - name: publish-cache
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: nix-cache-publish
+            - name: namespace
+              value: tekton-pipelines
+        workspaces:
+          - name: nix-store
+            workspace: nix-store
   workspaces:
     - name: source
       volumeClaimTemplate:
@@ -201,9 +218,17 @@ spec:
     - name: git-cache
       persistentVolumeClaim:
         claimName: git-repo-cache
+    # A private Nix store for this run, shared by its tasks and deleted with the
+    # PipelineRun; tools come from the shared Nix cache.
     - name: nix-store
-      persistentVolumeClaim:
-        claimName: nix-store
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: fast-local
+          resources:
+            requests:
+              storage: 60Gi
     - name: basic-auth
       secret:
         secretName: "{{ git_auth_secret }}"

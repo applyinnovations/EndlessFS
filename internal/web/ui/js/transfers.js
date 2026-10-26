@@ -2809,6 +2809,7 @@
       const details = document.createElement("details");
       details.className = "transfer-failure-details";
       details.open = state.expandedTransferFailures.get(transfer.id) ?? !sharedFailure;
+      details.dataset.renderedOpen = String(details.open);
       const disclosure = document.createElement("summary");
       disclosure.setAttribute("aria-label", `Failure details for ${label}`);
       const name = text("strong", label, "transfer-row-main");
@@ -3074,6 +3075,13 @@
     const focusID = focusedRow?.dataset.transferId || focusedRow?.dataset.transferGroupId;
     const focusLabel = focused?.getAttribute("aria-label");
     const focusAction = focused?.dataset.transferAction;
+    // A disclosure's toggle event is queued as a task, so a frame can rebuild
+    // the list before it arrives. Keep any change the user already made.
+    for (const details of list.querySelectorAll("[data-transfer-id] > details.transfer-failure-details")) {
+      const id = details.parentElement.dataset.transferId;
+      const recorded = state.expandedTransferFailures.get(id) ?? details.dataset.renderedOpen === "true";
+      if (details.open !== recorded) state.expandedTransferFailures.set(id, details.open);
+    }
     list.replaceChildren();
     list.dataset.itemCount = String(state.transferProjection.length);
     list.dataset.virtualStart = String(state.transferVirtualStart);

@@ -71,18 +71,24 @@ spec:
             limits:
               cpu: "12"
               memory: 24Gi
+    # Browser tests act against wall-clock deadlines. Go is capped at 8
+    # threads so compilation and the other packages cannot take the CPU the
+    # headless Chromium instances need while the e2e package runs.
     - pipelineTaskName: coverage
       podTemplate:
         automountServiceAccountToken: false
         hostUsers: false
+        env:
+          - name: GOMAXPROCS
+            value: "8"
       stepSpecs:
         - name: run
           computeResources:
             requests:
-              cpu: "4"
+              cpu: "8"
               memory: 8Gi
             limits:
-              cpu: "8"
+              cpu: "16"
               memory: 16Gi
   timeouts:
     pipeline: 60m0s

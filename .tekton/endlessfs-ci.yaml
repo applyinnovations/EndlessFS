@@ -224,8 +224,17 @@ spec:
           - name: nix-store
             workspace: nix-store
         params:
+          # The container root filesystem lives on the node's boot disk, which
+          # other CI pods share. Under their load its writes took seconds each,
+          # and the browser tests' fsync-heavy fixtures missed their deadlines
+          # while the pod sat idle. Keep the Go build cache, the coverage tree,
+          # Chromium profiles and test state on the fast-local source volume.
           - name: SCRIPT
-            value: nix run .#test-coverage
+            value: |
+              scratch="$PWD/.ci-scratch"
+              mkdir -p "$scratch/go-cache"
+              export TMPDIR="$scratch" GOCACHE="$scratch/go-cache"
+              nix run .#test-coverage
   workspaces:
     - name: source
       volumeClaimTemplate:

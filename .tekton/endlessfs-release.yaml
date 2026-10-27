@@ -17,6 +17,7 @@ spec:
   taskRunTemplate:
     serviceAccountName: tekton-build-sa
     podTemplate:
+      automountServiceAccountToken: false
       nodeSelector:
         storage.xlab.now/fast-local: "true"
       securityContext:
@@ -45,23 +46,23 @@ spec:
             limits:
               cpu: "12"
               memory: 24Gi
-    - pipelineTaskName: release
+    - pipelineTaskName: build
       podTemplate:
         hostUsers: false
       stepSpecs:
         - name: run
           computeResources:
             requests:
-              cpu: "6"
-              memory: 12Gi
+              cpu: "4"
+              memory: 8Gi
             limits:
               cpu: "12"
               memory: 24Gi
-  # PaC installation tokens expire after one hour. Keep the complete sequential
-  # release path below that boundary so the clone token remains valid for the
-  # final release and asset API calls.
     - pipelineTaskName: publish-cache
       serviceAccountName: nix-cache-publisher
+  # PaC installation tokens expire after one hour. Keep the complete release
+  # path below that boundary so the token remains valid for the final release
+  # and asset API calls.
   timeouts:
     pipeline: 55m0s
   params:
@@ -85,10 +86,10 @@ spec:
         type: string
     workspaces:
       - name: source
-      - name: git-cache
-      - name: nix-store
+      - name: artifacts
+      - name: nix-cache-export
       - name: basic-auth
-      - name: github-packages-auth
+      - name: ghcr-docker-config
     tasks:
       - name: clone
         taskRef:
@@ -97,15 +98,13 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: git-clone-cached
+              value: git-clone-v1
             - name: namespace
               value: tekton-pipelines
         timeout: 5m
         workspaces:
           - name: output
             workspace: source
-          - name: git-cache
-            workspace: git-cache
           - name: basic-auth
             workspace: basic-auth
         params:
@@ -115,8 +114,6 @@ spec:
             value: $(params.revision)
           - name: depth
             value: "0"
-          - name: cache-key
-            value: applyinnovations-endlessfs
 
       - name: verify
         runAfter: [clone]
@@ -126,15 +123,15 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-run-v2
+              value: nix-v1
             - name: namespace
               value: tekton-buildkit
         timeout: 35m
         workspaces:
           - name: source
             workspace: source
-          - name: nix-store
-            workspace: nix-store
+          - name: nix-cache-export
+            workspace: nix-cache-export
         params:
           - name: SCRIPT
             value: |
@@ -147,29 +144,28 @@ spec:
               nix run .#security-freshness
               nix flake check --print-build-logs --max-jobs 6 --cores 2
 
-      - name: release
-        runAfter: [verify]
-        retries: 2
+      # Builds the release assets and image beside verify, without
+      # credentials. Nothing is published until verify has passed.
+      - name: build
+        runAfter: [clone]
         taskRef:
           resolver: cluster
           params:
             - name: kind
               value: task
             - name: name
-              value: nix-run-github-v2
+              value: nix-v1
             - name: namespace
               value: tekton-buildkit
         timeout: 15m
         workspaces:
           - name: source
             workspace: source
-          - name: nix-store
-            workspace: nix-store
-          - name: github-packages-auth
-            workspace: github-packages-auth
+          - name: artifacts
+            workspace: artifacts
+          - name: nix-cache-export
+            workspace: nix-cache-export
         params:
-          - name: GITHUB_TOKEN_SECRET_NAME
-            value: $(params.git_auth_secret)
           - name: SCRIPT
             value: |
               release_tag="$(params.release_tag)"
@@ -177,21 +173,267 @@ spec:
                 echo "release checkout is not a vMAJOR.MINOR.PATCH tag" >&2
                 exit 2
               }
-              nix build .#release --out-link result-release --print-build-logs
-              nix run .#publish-container -- \
-                "ghcr.io/applyinnovations/endlessfs:$release_tag" \
-                "ghcr.io/applyinnovations/endlessfs:latest"
-              if nix develop --command gh release view "$release_tag" --repo "applyinnovations/EndlessFS" >/dev/null 2>&1; then
-                nix develop --command gh release upload "$release_tag" --repo "applyinnovations/EndlessFS" \
-                  result-release/* --clobber
-              else
-                nix develop --command gh release create "$release_tag" --repo "applyinnovations/EndlessFS" \
-                  result-release/* \
-                  --verify-tag \
-                  --generate-notes \
-                  --title "$release_tag"
-              fi
-    # Push and scheduled runs publish this run's store to the shared Nix cache.
+              nix build .#release --out-link "$TMPDIR/result-release" --print-build-logs
+              rm -rf "$CI_ARTIFACTS_PATH/release"
+              mkdir "$CI_ARTIFACTS_PATH/release"
+              cp -L "$TMPDIR"/result-release/* "$CI_ARTIFACTS_PATH/release/"
+              chmod -R a+rX "$CI_ARTIFACTS_PATH/release"
+          - name: IMAGE
+            value: .#container
+
+      - name: publish-image
+        runAfter: [verify, build]
+        retries: 2
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: oci-publish-v1
+            - name: namespace
+              value: tekton-pipelines
+        timeout: 10m
+        workspaces:
+          - name: artifacts
+            workspace: artifacts
+          - name: docker-config
+            workspace: ghcr-docker-config
+        params:
+          - name: IMAGE
+            value: ghcr.io/applyinnovations/endlessfs
+          - name: COMMIT_SHA
+            value: $(tasks.clone.results.COMMIT_SHA)
+          - name: ARCHIVE_SHA256
+            value: $(tasks.build.results.ARCHIVE_SHA256)
+          - name: EXTRA_TAGS
+            value: |
+              $(params.release_tag)
+              latest
+
+      # Creates the GitHub release, or updates its assets on a rerun. It holds
+      # the PaC App token, reads only the built assets and runs no repository
+      # code.
+      - name: github-release
+        runAfter: [publish-image]
+        retries: 2
+        timeout: 5m
+        workspaces:
+          - name: assets
+            workspace: artifacts
+            subPath: release
+        params:
+          - name: REPO_FULL_NAME
+            value: applyinnovations/EndlessFS
+          - name: TAG_NAME
+            value: $(params.release_tag)
+          - name: GITHUB_TOKEN_SECRET_NAME
+            value: $(params.git_auth_secret)
+        taskSpec:
+          params:
+            - name: REPO_FULL_NAME
+              type: string
+            - name: TAG_NAME
+              type: string
+            - name: GITHUB_TOKEN_SECRET_NAME
+              type: string
+          workspaces:
+            - name: assets
+              readOnly: true
+          results:
+            - name: RELEASE_URL
+              description: URL of the GitHub release.
+          volumes:
+            - name: work
+              emptyDir:
+                sizeLimit: 1Gi
+          steps:
+            # Pinned Go toolchain with only the standard library; it compiles
+            # the program below, never repository code.
+            - name: release
+              image: docker.io/library/golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 65532
+                runAsGroup: 65532
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+                seccompProfile:
+                  type: RuntimeDefault
+              computeResources:
+                requests:
+                  cpu: 500m
+                  memory: 512Mi
+                limits:
+                  cpu: "2"
+                  memory: 1Gi
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+              env:
+                - name: HOME
+                  value: /work
+                - name: GOCACHE
+                  value: /work/cache
+                - name: GOTMPDIR
+                  value: /work
+                - name: GOTOOLCHAIN
+                  value: local
+                - name: GOFLAGS
+                  value: -mod=mod
+                - name: CGO_ENABLED
+                  value: "0"
+                - name: GITHUB_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: $(params.GITHUB_TOKEN_SECRET_NAME)
+                      key: git-provider-token
+                - name: REPO_FULL_NAME
+                  value: $(params.REPO_FULL_NAME)
+                - name: TAG_NAME
+                  value: $(params.TAG_NAME)
+                - name: ASSETS
+                  value: $(workspaces.assets.path)
+                - name: RELEASE_URL_RESULT
+                  value: $(results.RELEASE_URL.path)
+              script: |
+                #!/bin/sh
+                set -eu
+                cat > /work/main.go <<'GO'
+                package main
+
+                import (
+                	"bytes"
+                	"encoding/json"
+                	"fmt"
+                	"io"
+                	"net/http"
+                	"net/url"
+                	"os"
+                	"path/filepath"
+                	"regexp"
+                	"sort"
+                	"strings"
+                	"time"
+                )
+
+                type asset struct {
+                	ID   int64  `json:"id"`
+                	Name string `json:"name"`
+                }
+
+                type release struct {
+                	HTMLURL   string  `json:"html_url"`
+                	UploadURL string  `json:"upload_url"`
+                	Assets    []asset `json:"assets"`
+                }
+
+                var client = &http.Client{Timeout: 3 * time.Minute}
+
+                func fail(format string, arguments ...any) {
+                	fmt.Fprintf(os.Stderr, format+"\n", arguments...)
+                	os.Exit(1)
+                }
+
+                // call returns false for a 404 when missingOK is set and fails on any other
+                // non-2xx status.
+                func call(method, target string, body io.Reader, length int64, contentType string, out any, missingOK bool) bool {
+                	request, err := http.NewRequest(method, target, body)
+                	if err != nil {
+                		fail("%s %s: %v", method, target, err)
+                	}
+                	request.Header.Set("Authorization", "Bearer "+os.Getenv("GITHUB_TOKEN"))
+                	request.Header.Set("Accept", "application/vnd.github+json")
+                	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+                	if contentType != "" {
+                		request.Header.Set("Content-Type", contentType)
+                		request.ContentLength = length
+                	}
+                	response, err := client.Do(request)
+                	if err != nil {
+                		fail("%s %s: %v", method, target, err)
+                	}
+                	defer response.Body.Close()
+                	payload, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+                	if missingOK && response.StatusCode == http.StatusNotFound {
+                		return false
+                	}
+                	if response.StatusCode < 200 || response.StatusCode > 299 {
+                		fail("%s %s: HTTP %d: %s", method, target, response.StatusCode, payload)
+                	}
+                	if out != nil {
+                		if err := json.Unmarshal(payload, out); err != nil {
+                			fail("%s %s: %v", method, target, err)
+                		}
+                	}
+                	return true
+                }
+
+                func main() {
+                	repository, tag, assets := os.Getenv("REPO_FULL_NAME"), os.Getenv("TAG_NAME"), os.Getenv("ASSETS")
+                	if !regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`).MatchString(tag) {
+                		fail("release tag is not a vMAJOR.MINOR.PATCH tag")
+                	}
+                	base := os.Getenv("GITHUB_API_URL")
+                	if base == "" {
+                		base = "https://api.github.com"
+                	}
+                	api := base + "/repos/" + repository
+                	// Like gh release create --verify-tag: never let the API create the tag.
+                	if !call(http.MethodGet, api+"/git/ref/tags/"+tag, nil, 0, "", nil, true) {
+                		fail("tag %s does not exist in %s", tag, repository)
+                	}
+                	var current release
+                	if !call(http.MethodGet, api+"/releases/tags/"+tag, nil, 0, "", &current, true) {
+                		request, _ := json.Marshal(map[string]any{"tag_name": tag, "name": tag, "generate_release_notes": true})
+                		call(http.MethodPost, api+"/releases", bytes.NewReader(request), int64(len(request)), "application/json", &current, false)
+                	}
+                	existing := map[string]int64{}
+                	for _, uploaded := range current.Assets {
+                		existing[uploaded.Name] = uploaded.ID
+                	}
+                	uploadURL, _, _ := strings.Cut(current.UploadURL, "{")
+                	entries, err := os.ReadDir(assets)
+                	if err != nil || len(entries) == 0 {
+                		fail("no release assets to upload: %v", err)
+                	}
+                	names := make([]string, 0, len(entries))
+                	for _, entry := range entries {
+                		if !entry.Type().IsRegular() {
+                			fail("release asset is not a regular file: %s", entry.Name())
+                		}
+                		names = append(names, entry.Name())
+                	}
+                	sort.Strings(names)
+                	for _, name := range names {
+                		// Like gh release upload --clobber.
+                		if id, found := existing[name]; found {
+                			call(http.MethodDelete, fmt.Sprintf("%s/releases/assets/%d", api, id), nil, 0, "", nil, false)
+                		}
+                		file, err := os.Open(filepath.Join(assets, name))
+                		if err != nil {
+                			fail("%v", err)
+                		}
+                		info, err := file.Stat()
+                		if err != nil {
+                			fail("%v", err)
+                		}
+                		call(http.MethodPost, uploadURL+"?name="+url.QueryEscape(name), file, info.Size(), "application/octet-stream", nil, false)
+                		file.Close()
+                		fmt.Println("uploaded", name)
+                	}
+                	if err := os.WriteFile(os.Getenv("RELEASE_URL_RESULT"), []byte(current.HTMLURL), 0o644); err != nil {
+                		fail("%v", err)
+                	}
+                	fmt.Println("release:", current.HTMLURL)
+                }
+                GO
+                cd /work
+                go run main.go
+    # Push runs publish what verify and build exported to the shared Nix cache.
     finally:
       - name: publish-cache
         taskRef:
@@ -200,12 +442,12 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-cache-publish
+              value: nix-cache-publish-v1
             - name: namespace
               value: tekton-pipelines
         workspaces:
-          - name: nix-store
-            workspace: nix-store
+          - name: nix-cache-export
+            workspace: nix-cache-export
   workspaces:
     - name: source
       volumeClaimTemplate:
@@ -215,23 +457,31 @@ spec:
           resources:
             requests:
               storage: 10Gi
-    - name: git-cache
-      persistentVolumeClaim:
-        claimName: git-repo-cache
-    # A private Nix store for this run, shared by its tasks and deleted with the
-    # PipelineRun; tools come from the shared Nix cache.
-    - name: nix-store
+    # Release assets and the image archive, handed from build to the publish
+    # Tasks without source or store.
+    - name: artifacts
       volumeClaimTemplate:
         spec:
-          accessModes:
-            - ReadWriteOnce
+          accessModes: [ReadWriteOnce]
           storageClassName: fast-local
           resources:
             requests:
-              storage: 60Gi
+              storage: 5Gi
+    # Store paths the Nix cache lacks, written by verify and build for
+    # publish-cache.
+    - name: nix-cache-export
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          storageClassName: fast-local
+          resources:
+            requests:
+              storage: 20Gi
     - name: basic-auth
       secret:
         secretName: "{{ git_auth_secret }}"
-    - name: github-packages-auth
+    # GHCR dockerconfigjson (write:packages only), mounted only by
+    # publish-image.
+    - name: ghcr-docker-config
       secret:
-        secretName: github-packages-credentials
+        secretName: github-packages-docker-config

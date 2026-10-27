@@ -17,6 +17,7 @@ spec:
   taskRunTemplate:
     serviceAccountName: tekton-build-sa
     podTemplate:
+      automountServiceAccountToken: false
       nodeSelector:
         storage.xlab.now/fast-local: "true"
       securityContext:
@@ -33,7 +34,7 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
-    - pipelineTaskName: publish
+    - pipelineTaskName: build
       podTemplate:
         hostUsers: false
       stepSpecs:
@@ -54,22 +55,18 @@ spec:
       value: "{{ repo_url }}"
     - name: revision
       value: "{{ revision }}"
-    - name: git_auth_secret
-      value: "{{ git_auth_secret }}"
   pipelineSpec:
     params:
       - name: repo_url
         type: string
       - name: revision
         type: string
-      - name: git_auth_secret
-        type: string
     workspaces:
       - name: source
-      - name: git-cache
-      - name: nix-store
+      - name: artifacts
+      - name: nix-cache-export
       - name: basic-auth
-      - name: github-packages-auth
+      - name: ghcr-docker-config
     tasks:
       - name: clone
         taskRef:
@@ -78,15 +75,13 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: git-clone-cached
+              value: git-clone-v1
             - name: namespace
               value: tekton-pipelines
         timeout: 10m
         workspaces:
           - name: output
             workspace: source
-          - name: git-cache
-            workspace: git-cache
           - name: basic-auth
             workspace: basic-auth
         params:
@@ -96,10 +91,9 @@ spec:
             value: $(params.revision)
           - name: depth
             value: "1"
-          - name: cache-key
-            value: applyinnovations-endlessfs
 
-      - name: publish
+      # Builds the image without credentials; publish pushes the archive.
+      - name: build
         runAfter: [clone]
         taskRef:
           resolver: cluster
@@ -107,25 +101,54 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-run-github-v2
+              value: nix-v1
             - name: namespace
               value: tekton-buildkit
-        timeout: 35m
+        timeout: 25m
         workspaces:
           - name: source
             workspace: source
-          - name: nix-store
-            workspace: nix-store
-          - name: github-packages-auth
-            workspace: github-packages-auth
+          - name: artifacts
+            workspace: artifacts
+          - name: nix-cache-export
+            workspace: nix-cache-export
         params:
-          - name: GITHUB_TOKEN_SECRET_NAME
-            value: $(params.git_auth_secret)
           - name: SCRIPT
             value: |
               nix run .#security-freshness
-              nix run .#publish-container -- "ghcr.io/applyinnovations/endlessfs:sha-$(tasks.clone.results.COMMIT_SHA)" "ghcr.io/applyinnovations/endlessfs:edge"
-    # Push and scheduled runs publish this run's store to the shared Nix cache.
+          - name: IMAGE
+            value: .#container
+
+      - name: publish
+        runAfter: [build]
+        retries: 2
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: oci-publish-v1
+            - name: namespace
+              value: tekton-pipelines
+        timeout: 10m
+        workspaces:
+          - name: artifacts
+            workspace: artifacts
+          - name: docker-config
+            workspace: ghcr-docker-config
+        params:
+          - name: IMAGE
+            value: ghcr.io/applyinnovations/endlessfs
+          - name: COMMIT_SHA
+            value: $(tasks.clone.results.COMMIT_SHA)
+          - name: ARCHIVE_SHA256
+            value: $(tasks.build.results.ARCHIVE_SHA256)
+          - name: EXTRA_TAGS
+            value: |
+              sha-$(tasks.clone.results.COMMIT_SHA)
+              edge
+    # Push runs publish what build exported to the shared Nix cache.
     finally:
       - name: publish-cache
         taskRef:
@@ -134,12 +157,12 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-cache-publish
+              value: nix-cache-publish-v1
             - name: namespace
               value: tekton-pipelines
         workspaces:
-          - name: nix-store
-            workspace: nix-store
+          - name: nix-cache-export
+            workspace: nix-cache-export
   workspaces:
     - name: source
       volumeClaimTemplate:
@@ -149,23 +172,28 @@ spec:
           resources:
             requests:
               storage: 10Gi
-    - name: git-cache
-      persistentVolumeClaim:
-        claimName: git-repo-cache
-    # A private Nix store for this run, shared by its tasks and deleted with the
-    # PipelineRun; tools come from the shared Nix cache.
-    - name: nix-store
+    # The image archive, handed from build to publish without source or store.
+    - name: artifacts
       volumeClaimTemplate:
         spec:
-          accessModes:
-            - ReadWriteOnce
+          accessModes: [ReadWriteOnce]
           storageClassName: fast-local
           resources:
             requests:
-              storage: 60Gi
+              storage: 5Gi
+    # Store paths the Nix cache lacks, written by build for publish-cache.
+    - name: nix-cache-export
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          storageClassName: fast-local
+          resources:
+            requests:
+              storage: 10Gi
     - name: basic-auth
       secret:
         secretName: "{{ git_auth_secret }}"
-    - name: github-packages-auth
+    # GHCR dockerconfigjson (write:packages only), mounted only by publish.
+    - name: ghcr-docker-config
       secret:
-        secretName: github-packages-credentials
+        secretName: github-packages-docker-config

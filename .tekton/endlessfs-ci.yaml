@@ -19,6 +19,7 @@ spec:
   taskRunTemplate:
     serviceAccountName: tekton-build-sa
     podTemplate:
+      automountServiceAccountToken: false
       nodeSelector:
         storage.xlab.now/fast-local: "true"
       securityContext:
@@ -47,18 +48,6 @@ spec:
             limits:
               cpu: "4"
               memory: 6Gi
-    - pipelineTaskName: prepare-cache
-      podTemplate:
-        hostUsers: false
-      stepSpecs:
-        - name: run
-          computeResources:
-            requests:
-              cpu: 250m
-              memory: 512Mi
-            limits:
-              cpu: "2"
-              memory: 2Gi
     - pipelineTaskName: nix-checks
       podTemplate:
         hostUsers: false
@@ -76,7 +65,6 @@ spec:
     # headless Chromium instances need while the e2e package runs.
     - pipelineTaskName: coverage
       podTemplate:
-        automountServiceAccountToken: false
         hostUsers: false
         env:
           - name: GOMAXPROCS
@@ -99,20 +87,15 @@ spec:
       value: "{{ repo_url }}"
     - name: revision
       value: "{{ revision }}"
-    - name: git_auth_secret
-      value: "{{ git_auth_secret }}"
   pipelineSpec:
     params:
       - name: repo_url
         type: string
       - name: revision
         type: string
-      - name: git_auth_secret
-        type: string
     workspaces:
       - name: source
-      - name: git-cache
-      - name: nix-store
+      - name: nix-cache-export
       - name: basic-auth
     tasks:
       - name: clone
@@ -122,15 +105,13 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: git-clone-cached
+              value: git-clone-v1
             - name: namespace
               value: tekton-pipelines
         timeout: 10m
         workspaces:
           - name: output
             workspace: source
-          - name: git-cache
-            workspace: git-cache
           - name: basic-auth
             workspace: basic-auth
         params:
@@ -140,10 +121,8 @@ spec:
             value: $(params.revision)
           - name: depth
             value: "1"
-          - name: cache-key
-            value: applyinnovations-endlessfs
 
-      - name: prepare-cache
+      - name: fast-checks
         runAfter: [clone]
         taskRef:
           resolver: cluster
@@ -151,36 +130,15 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-run-v2
+              value: nix-v1
             - name: namespace
               value: tekton-buildkit
         timeout: 15m
         workspaces:
           - name: source
             workspace: source
-          - name: nix-store
-            workspace: nix-store
-        params:
-          - name: SCRIPT
-            value: nix --version
-
-      - name: fast-checks
-        runAfter: [prepare-cache]
-        taskRef:
-          resolver: cluster
-          params:
-            - name: kind
-              value: task
-            - name: name
-              value: nix-run-v2
-            - name: namespace
-              value: tekton-buildkit
-        timeout: 15m
-        workspaces:
-          - name: source
-            workspace: source
-          - name: nix-store
-            workspace: nix-store
+          - name: nix-cache-export
+            workspace: nix-cache-export
         params:
           - name: SCRIPT
             value: |
@@ -195,15 +153,15 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-run-v2
+              value: nix-v1
             - name: namespace
               value: tekton-buildkit
         timeout: 45m
         workspaces:
           - name: source
             workspace: source
-          - name: nix-store
-            workspace: nix-store
+          - name: nix-cache-export
+            workspace: nix-cache-export
         params:
           - name: SCRIPT
             value: nix flake check --print-build-logs --max-jobs 6 --cores 2
@@ -216,19 +174,20 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-run-v2
+              value: nix-v1
             - name: namespace
               value: tekton-buildkit
         timeout: 45m
         workspaces:
           - name: source
             workspace: source
-          - name: nix-store
-            workspace: nix-store
+          - name: nix-cache-export
+            workspace: nix-cache-export
         params:
           - name: SCRIPT
             value: nix run .#test-coverage
-    # Push and scheduled runs publish this run's store to the shared Nix cache.
+    # Merge-queue pushes publish what the Nix Tasks exported to the shared
+    # Nix cache; pull-request runs export and publish nothing.
     finally:
       - name: publish-cache
         taskRef:
@@ -237,12 +196,12 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-cache-publish
+              value: nix-cache-publish-v1
             - name: namespace
               value: tekton-pipelines
         workspaces:
-          - name: nix-store
-            workspace: nix-store
+          - name: nix-cache-export
+            workspace: nix-cache-export
   workspaces:
     - name: source
       volumeClaimTemplate:
@@ -252,20 +211,16 @@ spec:
           resources:
             requests:
               storage: 10Gi
-    - name: git-cache
-      persistentVolumeClaim:
-        claimName: git-repo-cache
-    # A private Nix store for this run, shared by its tasks and deleted with the
-    # PipelineRun; tools come from the shared Nix cache.
-    - name: nix-store
+    # Store paths the Nix cache lacks, written by each nix-v1 Task (which has
+    # its own Nix store) on push runs, for publish-cache.
+    - name: nix-cache-export
       volumeClaimTemplate:
         spec:
-          accessModes:
-            - ReadWriteOnce
+          accessModes: [ReadWriteOnce]
           storageClassName: fast-local
           resources:
             requests:
-              storage: 60Gi
+              storage: 20Gi
     - name: basic-auth
       secret:
         secretName: "{{ git_auth_secret }}"

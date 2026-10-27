@@ -46,7 +46,7 @@ are separate Tasks that share only a per-run `artifacts` volume:
   defined inline: a standard-library Go program compiled by a pinned Go image,
   holding the PaC App token, reading only `artifacts/release`.
 
-`oci-publish-v1` reads the `github-packages-docker-config` dockerconfigjson
+`oci-publish-v1` reads the `ghcr-push-credentials` dockerconfigjson
 Secret (GHCR, classic PAT with only `write:packages`; GHCR rejects App tokens).
 The App token in the per-run PaC Secret is used for cloning and, in
 `github-release`, for release creation and asset upload; the App needs

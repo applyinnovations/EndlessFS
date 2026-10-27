@@ -318,6 +318,9 @@
         # shellcheck disable=SC2016
         check_image_publish .tekton/endlessfs-release.yaml publish-image "$(printf '%s\n' '$(params.release_tag)' latest)" build verify
         yq -e '.spec.pipelineSpec.tasks[] | select(.name == "publish-image") | .retries >= 2' .tekton/endlessfs-release.yaml >/dev/null
+        for pipeline in .tekton/endlessfs-container.yaml .tekton/endlessfs-release.yaml; do
+          yq -e '.spec.workspaces[] | select(.name == "ghcr-docker-config") | .secret.secretName == "ghcr-push-credentials"' "$pipeline" >/dev/null
+        done
 
         # The GitHub release Task holds the App token, so it reads only the
         # built assets and runs after the image is published.

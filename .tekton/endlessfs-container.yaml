@@ -196,4 +196,4 @@ spec:
     # GHCR dockerconfigjson (write:packages only), mounted only by publish.
     - name: ghcr-docker-config
       secret:
-        secretName: github-packages-docker-config
+        secretName: ghcr-push-credentials

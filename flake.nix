@@ -189,26 +189,6 @@
             || relative == "tools"
             || lib.hasPrefix "tools/" relative;
         };
-      containerTransportPolicyFor =
-        pkgs:
-        pkgs.writeText "endlessfs-container-transport-policy.json" ''
-          {
-            "default": [
-              {
-                "type": "reject"
-              }
-            ],
-            "transports": {
-              "docker-archive": {
-                "": [
-                  {
-                    "type": "insecureAcceptAnything"
-                  }
-                ]
-              }
-            }
-          }
-        '';
       dependencyPolicyCommand = moduleClosure: ''
         go run ./tools/vulndb check security/vulndb
 
@@ -250,15 +230,32 @@
           yq -e '.apiVersion == "tekton.dev/v1" and .kind == "PipelineRun"' "$pipeline" >/dev/null
           yq -e '.metadata.annotations."pipelinesascode.tekton.dev/target-namespace" == "tekton-buildkit"' "$pipeline" >/dev/null
           yq -e '.spec.taskRunTemplate.podTemplate.nodeSelector."storage.xlab.now/fast-local" == "true"' "$pipeline" >/dev/null
-          yq -e '.spec.taskRunTemplate.podTemplate.securityContext.fsGroup == 1000' "$pipeline" >/dev/null
-          # Each run gets a private Nix store; only the publish-cache finally
-          # task, under the nix-cache-publisher account, writes the shared cache.
-          yq -e '.spec.workspaces[] | select(.name == "nix-store") | .volumeClaimTemplate.spec.storageClassName == "fast-local"' "$pipeline" >/dev/null
-          yq -e '.spec.workspaces[] | select(.name == "nix-store") | has("persistentVolumeClaim") | not' "$pipeline" >/dev/null
-          yq -e '.spec.pipelineSpec.finally[] | select(.name == "publish-cache") | .taskRef.params[] | select(.name == "name") | .value == "nix-cache-publish"' "$pipeline" >/dev/null
-          yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "publish-cache") | .serviceAccountName == "nix-cache-publisher"' "$pipeline" >/dev/null
-          yq -e '.spec.workspaces[] | select(.name == "git-cache") | .persistentVolumeClaim.claimName == "git-repo-cache"' "$pipeline" >/dev/null
+          yq -e '.spec.taskRunTemplate.podTemplate.automountServiceAccountToken == false' "$pipeline" >/dev/null
           yq -e '.spec.workspaces[] | select(.name == "source") | .volumeClaimTemplate.spec.resources.requests.storage == "10Gi"' "$pipeline" >/dev/null
+          # Only the standard xlab v1 Tasks: no shared store, mirror or layer
+          # cache volumes, and no legacy Task that mixes credentials and source.
+          unexpected_tasks="$(yq -r '(.spec.pipelineSpec.tasks + .spec.pipelineSpec.finally)[] | select(has("taskRef")) | .taskRef.params[] | select(.name == "name") | .value' "$pipeline" \
+            | rg -vx 'git-clone-v1|nix-v1|oci-publish-v1|nix-cache-publish-v1' || true)"
+          if [ -n "$unexpected_tasks" ]; then
+            echo "$pipeline must use only the standard v1 Tasks, not: $unexpected_tasks" >&2
+            exit 1
+          fi
+          if yq -e '.spec.workspaces[] | select(has("persistentVolumeClaim"))' "$pipeline" >/dev/null 2>&1; then
+            echo "$pipeline must not bind a shared PersistentVolumeClaim" >&2
+            exit 1
+          fi
+          # Every sandboxed Nix Task runs in a pod user namespace and holds no
+          # credential workspace.
+          for task in $(yq -r '.spec.pipelineSpec.tasks[] | select(.taskRef.params[] | select(.name == "name" and .value == "nix-v1")) | .name' "$pipeline"); do
+            yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" "$pipeline" >/dev/null
+            yq -e ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | [.workspaces[].name] - [\"source\", \"artifacts\", \"nix-cache-export\"] | length == 0" "$pipeline" >/dev/null
+          done
+          # Only publish-cache, under the nix-cache-publisher account, writes
+          # the shared Nix cache.
+          yq -e '.spec.pipelineSpec.finally[] | select(.name == "publish-cache") | .taskRef.params[] | select(.name == "name") | .value == "nix-cache-publish-v1"' "$pipeline" >/dev/null
+          yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "publish-cache") | .serviceAccountName == "nix-cache-publisher"' "$pipeline" >/dev/null
+          # The registry credential reaches only oci-publish-v1.
+          yq -e '[.spec.pipelineSpec.tasks[] | select(.workspaces[]? | .workspace == "ghcr-docker-config") | .taskRef.params[] | select(.name == "name") | .value] | all_c(. == "oci-publish-v1")' "$pipeline" >/dev/null
           if rg -ni 'gke|drive\.endlessfs\.com|namespace-macos-fastlane|runs-on:[[:space:]]*macos' "$pipeline"; then
             echo "active CI must stay on xlab Linux compute: $pipeline" >&2
             exit 1
@@ -287,47 +284,61 @@
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[refs/tags/v*.*.*]"' .tekton/endlessfs-release.yaml >/dev/null
         yq -e '.spec.params[] | select(.name == "release_tag") | .value == "{{ git_tag }}"' .tekton/endlessfs-release.yaml >/dev/null
         for pipeline in $active_pipelines; do
-          advisory_script="$(yq -r '.spec.pipelineSpec.tasks[].params[] | select(.name == "SCRIPT") | .value' "$pipeline")"
+          advisory_script="$(yq -r '.spec.pipelineSpec.tasks[].params[]? | select(.name == "SCRIPT") | .value' "$pipeline")"
           if ! printf '%s\n' "$advisory_script" | rg -Fx 'nix run .#security-freshness' >/dev/null; then
             echo "$pipeline must run the upstream-advisory freshness check" >&2
             exit 1
           fi
         done
-        publisher_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "publish") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-container.yaml)"
-        go run ./tools/check-pipeline-publish "$publisher_script"
         release_verify_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "verify") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
         printf '%s\n' "$release_verify_script" | rg -F 'nix run .#test-migration -- "$release_tag"' >/dev/null
-        release_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "release") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
-        for command in view upload create; do
-          printf '%s\n' "$release_script" | rg -F "gh release $command \"\$release_tag\" --repo \"applyinnovations/EndlessFS\"" >/dev/null
+
+        # Images are built without credentials and pushed by oci-publish-v1
+        # only after the build (and, for releases, verification) succeeded.
+        check_image_publish() {
+          pipeline="$1"
+          task="$2"
+          tags="$3"
+          shift 3
+          yq -e '.spec.pipelineSpec.tasks[] | select(.name == "build") | .params[] | select(.name == "IMAGE") | .value == ".#container"' "$pipeline" >/dev/null
+          yq -e ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | (.params[] | select(.name == \"IMAGE\") | .value == \"ghcr.io/applyinnovations/endlessfs\")" "$pipeline" >/dev/null
+          yq -e ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | (.params[] | select(.name == \"ARCHIVE_SHA256\") | .value == \"\$(tasks.build.results.ARCHIVE_SHA256)\")" "$pipeline" >/dev/null
+          actual_tags="$(yq -r ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | .params[] | select(.name == \"EXTRA_TAGS\") | .value" "$pipeline" | sed '/^$/d')"
+          if [ "$actual_tags" != "$tags" ]; then
+            echo "$pipeline $task must publish exactly: $tags" >&2
+            exit 1
+          fi
+          for dependency in "$@"; do
+            yq -e ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | .runAfter[] | select(. == \"$dependency\")" "$pipeline" >/dev/null
+          done
+        }
+        # Tekton, not the shell, expands these tag expressions.
+        # shellcheck disable=SC2016
+        check_image_publish .tekton/endlessfs-container.yaml publish "$(printf '%s\n' 'sha-$(tasks.clone.results.COMMIT_SHA)' edge)" build
+        # shellcheck disable=SC2016
+        check_image_publish .tekton/endlessfs-release.yaml publish-image "$(printf '%s\n' '$(params.release_tag)' latest)" build verify
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "publish-image") | .retries >= 2' .tekton/endlessfs-release.yaml >/dev/null
+        for pipeline in .tekton/endlessfs-container.yaml .tekton/endlessfs-release.yaml; do
+          yq -e '.spec.workspaces[] | select(.name == "ghcr-docker-config") | .secret.secretName == "ghcr-push-credentials"' "$pipeline" >/dev/null
         done
 
-        for task in prepare-cache fast-checks nix-checks coverage; do
-          yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-ci.yaml >/dev/null
-        done
-        yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "coverage" and .podTemplate.automountServiceAccountToken == false)' .tekton/endlessfs-ci.yaml >/dev/null
-        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .taskRef.params[] | select(.name == "name" and .value == "nix-run-v2")' .tekton/endlessfs-ci.yaml >/dev/null
+        # The GitHub release Task holds the App token, so it reads only the
+        # built assets and runs after the image is published.
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "github-release") | .retries >= 2' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "github-release") | .runAfter | (length == 1 and .[0] == "publish-image")' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "github-release") | .workspaces | (length == 1 and .[0].name == "assets" and .[0].workspace == "artifacts" and .[0].subPath == "release")' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "github-release") | .taskSpec.steps[] | .image | test("@sha256:[0-9a-f]{64}$")' .tekton/endlessfs-release.yaml >/dev/null
+        if [ "$(rg -c 'secretKeyRef' .tekton/endlessfs-release.yaml)" != 1 ]; then
+          echo "only the GitHub release Task may read the App token" >&2
+          exit 1
+        fi
+        if rg -n 'ghcr-docker-config|github-packages|secretKeyRef' .tekton/endlessfs-ci.yaml; then
+          echo "pull-request and merge-queue CI must not receive publishing credentials" >&2
+          exit 1
+        fi
         yq -e '.spec.pipelineSpec.tasks[] | select(.name == "nix-checks") | .runAfter | (length == 1 and .[0] == "fast-checks")' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .runAfter[] | select(. == "fast-checks")' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .runAfter[] | select(. == "nix-checks")' .tekton/endlessfs-ci.yaml >/dev/null
-        yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "publish") | .podTemplate.hostUsers == false' .tekton/endlessfs-container.yaml >/dev/null
-        for task in verify release; do
-          yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-release.yaml >/dev/null
-        done
-        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release") | .retries >= 2' .tekton/endlessfs-release.yaml >/dev/null
-
-        check_packages_binding() {
-          pipeline="$1"
-          task="$2"
-          yq -e ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | .workspaces[] | select(.name == \"github-packages-auth\" and .workspace == \"github-packages-auth\")" "$pipeline" >/dev/null
-          yq -e '.spec.workspaces[] | select(.name == "github-packages-auth") | .secret.secretName == "github-packages-credentials"' "$pipeline" >/dev/null
-        }
-        check_packages_binding .tekton/endlessfs-container.yaml publish
-        check_packages_binding .tekton/endlessfs-release.yaml release
-        if rg -n 'github-packages-(auth|credentials)' .tekton/endlessfs-ci.yaml; then
-          echo "pull-request and merge-queue CI must not receive the GitHub Packages credential" >&2
-          exit 1
-        fi
 
         darwin_pipeline=.tekton/endlessfs-darwin-smoke.disabled.yaml
         test -f "$darwin_pipeline" || {
@@ -759,7 +770,6 @@
           go = goFor pkgs;
           packages = self.packages.${system};
           headlessBrowser = headlessBrowserFor pkgs;
-          containerTransportPolicy = containerTransportPolicyFor pkgs;
           coverageSource = coverageSourceFor pkgs;
           coverageText = ''
             export CGO_ENABLED=0
@@ -815,12 +825,20 @@
             pkgs.ripgrep
             pkgs.yq-go
           ];
+          # writeShellApplication only prepends runtimeInputs to the caller's
+          # PATH, so every app declares the basic tools its scripts use rather
+          # than relying on whatever the host (or CI image) happens to provide.
           mkTask = name: runtimeInputs: text: {
             type = "app";
             meta.description = name;
             program = "${
               pkgs.writeShellApplication {
-                inherit name runtimeInputs text;
+                inherit name text;
+                runtimeInputs = [
+                  pkgs.coreutils
+                  pkgs.gnused
+                ]
+                ++ runtimeInputs;
               }
             }/bin/${name}";
           };
@@ -1097,7 +1115,7 @@
             pkgs.gawk
             pkgs.gnugrep
             pkgs.jq
-          ] (dependencyPolicyCommand packages.default.goModules);
+          ] ("export CGO_ENABLED=0\n" + dependencyPolicyCommand packages.default.goModules);
 
           test-imports = mkTask "endlessfs-test-imports" [ pkgs.nix pkgs.git ] ''
             if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -1145,26 +1163,6 @@
             exec nix build .#container "$@"
           '';
 
-          publish-container =
-            mkTask "endlessfs-publish-container"
-              [
-                pkgs.coreutils
-                pkgs.skopeo
-              ]
-              ''
-                if [ "$#" -lt 1 ]; then
-                  echo "usage: nix run .#publish-container -- ghcr.io/owner/image:tag [...]" >&2
-                  exit 2
-                fi
-                if [ -z "''${GHCR_TOKEN:-}" ] || [ -z "''${GHCR_USER:-}" ]; then
-                  echo "GHCR_TOKEN and GHCR_USER are required" >&2
-                  exit 1
-                fi
-                printf '%s' "$GHCR_TOKEN" | skopeo login --username "$GHCR_USER" --password-stdin ghcr.io >/dev/null
-                for destination in "$@"; do
-                  skopeo --policy ${containerTransportPolicy} copy --all "docker-archive:${packages.container}" "docker://$destination"
-                done
-              '';
         }
       );
 
@@ -1213,12 +1211,7 @@
               || relative == ".github"
               || relative == ".github/workflows"
               || lib.hasPrefix ".github/workflows/" relative
-              || relative == ".github/dependabot.yml"
-              || relative == "go.mod"
-              || relative == "go.sum"
-              || relative == "tools"
-              || relative == "tools/check-pipeline-publish"
-              || lib.hasPrefix "tools/check-pipeline-publish/" relative;
+              || relative == ".github/dependabot.yml";
           };
           policySource = lib.cleanSourceWith {
             src = ./.;
@@ -1335,22 +1328,6 @@
           '' [ ];
           e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
           coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
-          publishContainerPolicy =
-            pkgs.runCommand "endlessfs-publish-container-policy"
-              {
-                nativeBuildInputs = [
-                  pkgs.jq
-                  pkgs.ripgrep
-                ];
-              }
-              ''
-                rg --fixed-strings --quiet -- 'skopeo --policy ' ${self.apps.${system}.publish-container.program}
-                jq -e '
-                  .default == [{"type": "reject"}]
-                  and .transports."docker-archive"."" == [{"type": "insecureAcceptAnything"}]
-                ' ${containerTransportPolicyFor pkgs} >/dev/null
-                touch "$out"
-              '';
           linuxCiAppPolicy =
             pkgs.runCommand "endlessfs-linux-ci-app-policy"
               {
@@ -1532,7 +1509,6 @@
           theme = testSuite;
           race = raceCheck;
           coverage = coverageCompile;
-          publish-container-policy = publishContainerPolicy;
           fuzz = fuzzCheck;
           offline = testSuite;
           security = securityCheck;

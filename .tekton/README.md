@@ -11,52 +11,49 @@ GKE cluster that hosts `drive.endlessfs.com`.
 | `endlessfs-release.yaml` | `vMAJOR.MINOR.PATCH` tag push | Re-verify, publish release OCI tags, create the GitHub release, and upload every Nix release artifact |
 | `endlessfs-darwin-smoke.disabled.yaml` | none | Deprecated, inert record for the retired Darwin smoke job |
 
-All active runs select `storage.xlab.now/fast-local=true`, use a 10 GiB per-run
-`fast-local` source volume, and reuse the shared Git mirror and 96 GiB v2 Nix
-store in `tekton-buildkit` on local NVMe. They run in xlab's isolated
-`tekton-buildkit` privileged/userns namespace because the ordinary
-`tekton-pipelines` namespace correctly enforces baseline Pod Security. Cache
-placement is also fail-closed at the cluster boundary: admission denies a Pod
-in either Tekton execution namespace when it mounts `nix-store`,
-`git-repo-cache`, or `oci-layer-cache` without selecting
-`storage.xlab.now/fast-local=true`. Sirius is currently the only node carrying
-that label. The full gate requests 6 CPU/12 GiB and may burst to 12 CPU/24 GiB;
-coverage requests
-4 CPU/8 GiB and may burst to
-8 CPU/16 GiB. These values leave enough capacity for xlab system workloads
-while allowing the parallel gate to use most of the otherwise-idle node.
-One small `prepare-cache` Task seeds an empty shared Nix PVC before verification
-begins, avoiding first-run seed races. Fast checks and the full Nix gate run in
-parallel; coverage follows them so Chromium gets predictable resources.
-Releases reuse the same caches and never create release-specific persistent
-storage.
+All active runs run in xlab's `tekton-buildkit` namespace on the standard v1
+Tasks only: `git-clone-v1` (exact revision, no mirror), `nix-v1` (every Nix
+job), `oci-publish-v1` (the only registry credential) and
+`nix-cache-publish-v1` (the only Nix cache pusher). Each `nix-v1` pod has its
+own Nix store and scratch, builds every derivation with `sandbox = true` and no
+fallback, is privileged only inside a pod user namespace
+(`taskRunSpecs[].podTemplate.hostUsers: false`, enforced by admission) and
+holds no credentials. Stores come from xlab's shared Nix cache; push runs
+(merge queue, `main`, tags) export the paths it lacks to a per-run
+`nix-cache-export` volume, and `publish-cache` in `finally`, running as
+`nix-cache-publisher`, pushes them. Runs bind only per-run `fast-local`
+volumes, so they select `storage.xlab.now/fast-local=true` (Sirius).
 
-Like Odysseus's BuildKit release path, each privileged Nix task is privileged
-only inside a Kubernetes-managed pod user namespace selected by its
-`taskRunSpecs[].podTemplate.hostUsers: false` override. The common pod template
-sets `fsGroup: 1000` for the persistent cache volumes. Cluster admission rejects
-either sandboxed Nix task when the user-namespace override is missing, and the
-task itself verifies that container UID 0 is not host UID 0 before executing.
+Pull-request CI runs the fast policy gate, then the full Nix gate, then
+coverage, so Chromium gets predictable resources. The full gate requests
+6 CPU/12 GiB and may burst to 12 CPU/24 GiB; coverage requests 8 CPU/8 GiB and
+may burst to 16 CPU/16 GiB.
 
 ## Authentication boundary
 
-Pipelines-as-Code creates a per-run Secret containing a short-lived xlab.now
-GitHub App installation token. The clone task mounts its generated Git
-configuration. `nix-run-github-v2` reads the same Secret's `git-provider-token`
-key and exposes it only for the publishing step as `GH_TOKEN`. The installation
-token is used for cloning, release creation, and release asset uploads.
+No pod that runs repository code holds a credential. Building and publishing
+are separate Tasks that share only a per-run `artifacts` volume:
 
-GitHub Container Registry rejected that general App installation token even
-with `packages: write`. Container and release publishing therefore bind the
-shared, SOPS-encrypted `github-packages-credentials` Secret through the Task's
-optional `github-packages-auth` workspace. The workspace is read-only and
-isolated to the trusted publishing step; pull-request and merge-queue CI never
-binds it. Its classic PAT has only `write:packages`. `GHCR_USER` and
-`GHCR_TOKEN` use that credential, while `GH_TOKEN` remains the short-lived App
-token for GitHub API operations.
+- `endlessfs-container`: `build` (`nix-v1`, `IMAGE=.#container`) runs the
+  advisory freshness check and exports `image.oci.tar`; `publish`
+  (`oci-publish-v1`) checks its `ARCHIVE_SHA256` and pushes the commit SHA,
+  `sha-<commit>` and `edge` tags.
+- `endlessfs-release`: `verify` and `build` (`nix-v1`) run side by side;
+  `build` copies the `.#release` assets to `artifacts/release` and exports the
+  image. After both pass, `publish-image` (`oci-publish-v1`) pushes the commit
+  SHA, `vX.Y.Z` and `latest` tags, then `github-release` creates the release
+  with generated notes (or, on a rerun, replaces its assets). That Task is
+  defined inline: a standard-library Go program compiled by a pinned Go image,
+  holding the PaC App token, reading only `artifacts/release`.
 
-The App needs `contents: write` and `packages: write`; those permissions do not
-grant repository administration. Applying `.github/rulesets/*.json` remains an
+`oci-publish-v1` reads the `ghcr-push-credentials` dockerconfigjson
+Secret (GHCR, classic PAT with only `write:packages`; GHCR rejects App tokens).
+The App token in the per-run PaC Secret is used for cloning and, in
+`github-release`, for release creation and asset upload; the App needs
+`contents: write`. Neither credential is bound in pull-request or merge-queue
+CI. `nix run .#pipeline-policy` enforces these boundaries.
+
+Applying `.github/rulesets/*.json` remains an
 explicit administrator action with a separate, short-lived Administration token
 through `nix run .#repository-policy -- apply`.
 
@@ -70,7 +67,7 @@ credential, cache, or runner, so ordinary PaC events cannot allocate a Mac.
 
 ## Cutover evidence
 
-The xlab cutover was proven on 2026-08-19 before GitHub Actions retirement:
+The xlab cutover (on the since-retired shared-store Tasks) was proven on 2026-08-19 before GitHub Actions retirement:
 
 - xlab-deployments PR 62 installed the optional, read-only package-auth
   workspace on `nix-run-github-v2` and the SOPS-managed

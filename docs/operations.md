@@ -387,9 +387,10 @@ Protected `vMAJOR.MINOR.PATCH` tags cause the PaC release workflow to repeat the
 full gate, push version and `latest` tags to GHCR, and attach the Nix-built
 evidence. The same short-lived xlab.now GitHub App installation token used to
 clone the tag performs release creation and asset upload. GHCR publishing uses
-a separate SOPS-encrypted classic PAT limited to `write:packages`, mounted only
-into the trusted publishing step after the general App installation token was
-rejected by the registry. The workflow never targets the production GKE
+a separate SOPS-encrypted classic PAT limited to `write:packages`, after the
+general App installation token was rejected by the registry. Both credentials
+are mounted only into publish Tasks that take built artifacts, never into a pod
+that runs repository code. The workflow never targets the production GKE
 cluster. GitHub Actions workflows are retired; build, test, publish, and release
 automation is owned by these PaC definitions. Applying branch/tag rules is a
 separate explicit administrator operation through

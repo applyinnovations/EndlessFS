@@ -90,6 +90,8 @@ spec:
             limits:
               cpu: "16"
               memory: 16Gi
+    - pipelineTaskName: publish-cache
+      serviceAccountName: nix-cache-publisher
   timeouts:
     pipeline: 60m0s
   params:
@@ -226,6 +228,21 @@ spec:
         params:
           - name: SCRIPT
             value: nix run .#test-coverage
+    # Push and scheduled runs publish this run's store to the shared Nix cache.
+    finally:
+      - name: publish-cache
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: nix-cache-publish
+            - name: namespace
+              value: tekton-pipelines
+        workspaces:
+          - name: nix-store
+            workspace: nix-store
   workspaces:
     - name: source
       volumeClaimTemplate:
@@ -238,9 +255,17 @@ spec:
     - name: git-cache
       persistentVolumeClaim:
         claimName: git-repo-cache
+    # A private Nix store for this run, shared by its tasks and deleted with the
+    # PipelineRun; tools come from the shared Nix cache.
     - name: nix-store
-      persistentVolumeClaim:
-        claimName: nix-store
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: fast-local
+          resources:
+            requests:
+              storage: 60Gi
     - name: basic-auth
       secret:
         secretName: "{{ git_auth_secret }}"

@@ -251,7 +251,12 @@
           yq -e '.metadata.annotations."pipelinesascode.tekton.dev/target-namespace" == "tekton-buildkit"' "$pipeline" >/dev/null
           yq -e '.spec.taskRunTemplate.podTemplate.nodeSelector."storage.xlab.now/fast-local" == "true"' "$pipeline" >/dev/null
           yq -e '.spec.taskRunTemplate.podTemplate.securityContext.fsGroup == 1000' "$pipeline" >/dev/null
-          yq -e '.spec.workspaces[] | select(.name == "nix-store") | .persistentVolumeClaim.claimName == "nix-store"' "$pipeline" >/dev/null
+          # Each run gets a private Nix store; only the publish-cache finally
+          # task, under the nix-cache-publisher account, writes the shared cache.
+          yq -e '.spec.workspaces[] | select(.name == "nix-store") | .volumeClaimTemplate.spec.storageClassName == "fast-local"' "$pipeline" >/dev/null
+          yq -e '.spec.workspaces[] | select(.name == "nix-store") | has("persistentVolumeClaim") | not' "$pipeline" >/dev/null
+          yq -e '.spec.pipelineSpec.finally[] | select(.name == "publish-cache") | .taskRef.params[] | select(.name == "name") | .value == "nix-cache-publish"' "$pipeline" >/dev/null
+          yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "publish-cache") | .serviceAccountName == "nix-cache-publisher"' "$pipeline" >/dev/null
           yq -e '.spec.workspaces[] | select(.name == "git-cache") | .persistentVolumeClaim.claimName == "git-repo-cache"' "$pipeline" >/dev/null
           yq -e '.spec.workspaces[] | select(.name == "source") | .volumeClaimTemplate.spec.resources.requests.storage == "10Gi"' "$pipeline" >/dev/null
           if rg -ni 'gke|drive\.endlessfs\.com|namespace-macos-fastlane|runs-on:[[:space:]]*macos' "$pipeline"; then

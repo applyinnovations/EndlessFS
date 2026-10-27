@@ -825,12 +825,20 @@
             pkgs.ripgrep
             pkgs.yq-go
           ];
+          # writeShellApplication only prepends runtimeInputs to the caller's
+          # PATH, so every app declares the basic tools its scripts use rather
+          # than relying on whatever the host (or CI image) happens to provide.
           mkTask = name: runtimeInputs: text: {
             type = "app";
             meta.description = name;
             program = "${
               pkgs.writeShellApplication {
-                inherit name runtimeInputs text;
+                inherit name text;
+                runtimeInputs = [
+                  pkgs.coreutils
+                  pkgs.gnused
+                ]
+                ++ runtimeInputs;
               }
             }/bin/${name}";
           };
@@ -1107,7 +1115,7 @@
             pkgs.gawk
             pkgs.gnugrep
             pkgs.jq
-          ] (dependencyPolicyCommand packages.default.goModules);
+          ] ("export CGO_ENABLED=0\n" + dependencyPolicyCommand packages.default.goModules);
 
           test-imports = mkTask "endlessfs-test-imports" [ pkgs.nix pkgs.git ] ''
             if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then

@@ -31,11 +31,14 @@ parallel; coverage follows them so Chromium gets predictable resources.
 Releases reuse the same caches and never create release-specific persistent
 storage.
 
-Only push runs (the merge queue) publish to the shared Nix cache: the
-`publish-cache` finally task in `endlessfs-ci.yaml` runs only when
-`{{ event_type }}` is `push` or `incoming`, so pull-request and comment runs
-build and test but never write the cache. The flake's pipeline policy check
-requires that guard.
+Only code on `main` reaches the shared Nix cache: `endlessfs-container.yaml`
+(push to `main`) and `endlessfs-release.yaml` (version tags) publish it.
+`endlessfs-ci.yaml` has no `publish-cache` task, because its pull-request,
+comment and merge-queue runs (`gh-readonly-queue/main/*` pushes) build code that
+is not on `main` yet; a queue run whose checks fail never merges. The flake's
+pipeline policy check requires this, and the xlab admission policy
+`tekton-nix-cache-publish-trusted-events` denies cache publishing from
+merge-queue branches.
 
 Like Odysseus's BuildKit release path, each privileged Nix task is privileged
 only inside a Kubernetes-managed pod user namespace selected by its

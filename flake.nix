@@ -252,11 +252,14 @@
           yq -e '.spec.taskRunTemplate.podTemplate.nodeSelector."storage.xlab.now/fast-local" == "true"' "$pipeline" >/dev/null
           yq -e '.spec.taskRunTemplate.podTemplate.securityContext.fsGroup == 1000' "$pipeline" >/dev/null
           # Each run gets a private Nix store; only the publish-cache finally
-          # task, under the nix-cache-publisher account, writes the shared cache.
+          # task, under the nix-cache-publisher account, writes the shared cache
+          # (main pushes and releases only; endlessfs-ci never publishes).
           yq -e '.spec.workspaces[] | select(.name == "nix-store") | .volumeClaimTemplate.spec.storageClassName == "fast-local"' "$pipeline" >/dev/null
           yq -e '.spec.workspaces[] | select(.name == "nix-store") | has("persistentVolumeClaim") | not' "$pipeline" >/dev/null
-          yq -e '.spec.pipelineSpec.finally[] | select(.name == "publish-cache") | .taskRef.params[] | select(.name == "name") | .value == "nix-cache-publish"' "$pipeline" >/dev/null
-          yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "publish-cache") | .serviceAccountName == "nix-cache-publisher"' "$pipeline" >/dev/null
+          if [ "$pipeline" != .tekton/endlessfs-ci.yaml ]; then
+            yq -e '.spec.pipelineSpec.finally[] | select(.name == "publish-cache") | .taskRef.params[] | select(.name == "name") | .value == "nix-cache-publish"' "$pipeline" >/dev/null
+            yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "publish-cache") | .serviceAccountName == "nix-cache-publisher"' "$pipeline" >/dev/null
+          fi
           yq -e '.spec.workspaces[] | select(.name == "git-cache") | .persistentVolumeClaim.claimName == "git-repo-cache"' "$pipeline" >/dev/null
           yq -e '.spec.workspaces[] | select(.name == "source") | .volumeClaimTemplate.spec.resources.requests.storage == "10Gi"' "$pipeline" >/dev/null
           if rg -ni 'gke|drive\.endlessfs\.com|namespace-macos-fastlane|runs-on:[[:space:]]*macos' "$pipeline"; then
@@ -280,8 +283,10 @@
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-cel-expression" | contains("event == \"pull_request\" && target_branch == \"main\"")' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '(.metadata.annotations."pipelinesascode.tekton.dev/on-cel-expression" | contains("event == \"push\"")) and (.metadata.annotations."pipelinesascode.tekton.dev/on-cel-expression" | contains("target_branch.startsWith(\"refs/heads/gh-readonly-queue/main/\")"))' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '.metadata.annotations | has("pipelinesascode.tekton.dev/on-event") == false and has("pipelinesascode.tekton.dev/on-target-branch") == false' .tekton/endlessfs-ci.yaml >/dev/null
-        # Pull request and comment runs never publish to the shared Nix cache.
-        yq -e '[.spec.pipelineSpec.finally[] | select(.name == "publish-cache") | .when[] | select(.input == "{{ event_type }}" and .operator == "in") | (.values | sort | join(",")) == "incoming,push"] | (length == 1 and .[0])' .tekton/endlessfs-ci.yaml >/dev/null
+        # Pull-request, comment and merge-queue runs build code not yet on main,
+        # so endlessfs-ci never publishes to the shared Nix cache.
+        yq -e '[((.spec.pipelineSpec.tasks // [])[], (.spec.pipelineSpec.finally // [])[]) | select(.name == "publish-cache" or ((.taskRef.params // []) | any_c(.name == "name" and .value == "nix-cache-publish")))] | length == 0' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '[(.spec.taskRunSpecs // [])[] | select(.serviceAccountName == "nix-cache-publisher")] | length == 0' .tekton/endlessfs-ci.yaml >/dev/null
 
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-event" == "[push]"' .tekton/endlessfs-container.yaml >/dev/null
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[main]"' .tekton/endlessfs-container.yaml >/dev/null

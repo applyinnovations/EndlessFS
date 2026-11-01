@@ -90,8 +90,6 @@ spec:
             limits:
               cpu: "16"
               memory: 16Gi
-    - pipelineTaskName: publish-cache
-      serviceAccountName: nix-cache-publisher
   timeouts:
     pipeline: 60m0s
   params:
@@ -228,28 +226,10 @@ spec:
         params:
           - name: SCRIPT
             value: nix run .#test-coverage
-    # Push and scheduled runs publish this run's store to the shared Nix cache.
-    finally:
-      - name: publish-cache
-        # Only push and nightly (incoming) runs publish: a pull request or
-        # comment run builds unmerged code, so it must not write the shared
-        # cache (xlab-deployments policy tekton-nix-cache-publish-trusted-events).
-        when:
-          - input: "{{ event_type }}"
-            operator: in
-            values:
-              - push
-              - incoming
-        taskRef:
-          resolver: cluster
-          params:
-            - name: kind
-              value: task
-            - name: name
-              value: nix-cache-publish
-            - name: namespace
-              value: tekton-pipelines
-        workspaces:
+    # No cache publishing here: pull-request and merge-queue runs build code
+    # that is not on main yet. endlessfs-container.yaml (push to main) and
+    # endlessfs-release.yaml (tags) publish to the shared Nix cache.
+  workspaces:
           - name: nix-store
             workspace: nix-store
   workspaces:

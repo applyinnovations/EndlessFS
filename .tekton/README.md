@@ -31,6 +31,12 @@ parallel; coverage follows them so Chromium gets predictable resources.
 Releases reuse the same caches and never create release-specific persistent
 storage.
 
+Only push runs (the merge queue) publish to the shared Nix cache: the
+`publish-cache` finally task in `endlessfs-ci.yaml` runs only when
+`{{ event_type }}` is `push` or `incoming`, so pull-request and comment runs
+build and test but never write the cache. The flake's pipeline policy check
+requires that guard.
+
 Like Odysseus's BuildKit release path, each privileged Nix task is privileged
 only inside a Kubernetes-managed pod user namespace selected by its
 `taskRunSpecs[].podTemplate.hostUsers: false` override. The common pod template

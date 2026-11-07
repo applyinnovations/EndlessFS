@@ -11,6 +11,12 @@ GKE cluster that hosts `drive.endlessfs.com`.
 | `endlessfs-release.yaml` | `vMAJOR.MINOR.PATCH` tag push | Re-verify, publish release OCI tags, create the GitHub release, and upload every Nix release artifact |
 | `endlessfs-darwin-smoke.disabled.yaml` | none | Deprecated, inert record for the retired Darwin smoke job |
 
+Each active run keeps `metadata.generateName` (`test-`, `image-publish-`,
+`release-`), so GitHub shows the checks `tekton-xlab / test-`,
+`tekton-xlab / image-publish-`, and `tekton-xlab / release-`. Do not switch to
+`metadata.name`: PaC creates the run with that exact name, so the next run on
+the same repository collides with it and fails to start.
+
 All active runs select `storage.xlab.now/fast-local=true`, use a 10 GiB per-run
 `fast-local` source volume, and reuse the shared Git mirror and 96 GiB v2 Nix
 store in `tekton-buildkit` on local NVMe. They run in xlab's isolated
@@ -97,7 +103,7 @@ The xlab cutover was proven on 2026-08-19 before GitHub Actions retirement:
   Nix-store seeding, pull-request CI, or merge-queue CI.
 
 The checked-in ruleset requires the App-owned
-`tekton-xlab / endlessfs-ci-` context from GitHub App integration `949094`.
+`tekton-xlab / test-` context from GitHub App integration `949094`.
 `nix run .#pipeline-policy` rejects reintroduced GitHub Actions workflows or an
 Actions-only Dependabot configuration. The Darwin job remains retired and must
 not be restored.

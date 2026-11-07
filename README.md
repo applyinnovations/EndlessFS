@@ -253,7 +253,7 @@ Repository rules are external GitHub state, so checking in JSON does not activat
    checkout. Repeat only after intentionally changing the checked-in JSON.
 
 The policy requires pull requests, resolved review threads, squash-only linear
-history, the xlab App-owned `test` context, and a
+history, the xlab App-owned `tekton-xlab / test` context, and a
 one-at-a-time merge queue. Do not apply that context until the safe-cutover proof
 in `.tekton/README.md` is complete. While the repository has one maintainer it
 requires no separate approval; enable final-push and code-owner approval when a

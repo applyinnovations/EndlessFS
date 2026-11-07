@@ -268,18 +268,18 @@
           fi
         done
 
-        duplicate_generate_names="$({
+        duplicate_names="$({
           for pipeline in $active_pipelines; do
-            yq -r '.metadata.generateName' "$pipeline"
+            yq -r '.metadata.name' "$pipeline"
           done
         } | LC_ALL=C sort | uniq -d)"
-        if [ -n "$duplicate_generate_names" ]; then
-          echo "active PaC PipelineRuns must have unique metadata.generateName values:" >&2
-          printf '%s\n' "$duplicate_generate_names" >&2
+        if [ -n "$duplicate_names" ]; then
+          echo "active PaC PipelineRuns must have unique metadata.name values:" >&2
+          printf '%s\n' "$duplicate_names" >&2
           exit 1
         fi
 
-        yq -e '.metadata.generateName == "endlessfs-ci-"' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '.metadata.name == "test"' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-cel-expression" | contains("event == \"pull_request\" && target_branch == \"main\"")' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '(.metadata.annotations."pipelinesascode.tekton.dev/on-cel-expression" | contains("event == \"push\"")) and (.metadata.annotations."pipelinesascode.tekton.dev/on-cel-expression" | contains("target_branch.startsWith(\"refs/heads/gh-readonly-queue/main/\")"))' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '.metadata.annotations | has("pipelinesascode.tekton.dev/on-event") == false and has("pipelinesascode.tekton.dev/on-target-branch") == false' .tekton/endlessfs-ci.yaml >/dev/null

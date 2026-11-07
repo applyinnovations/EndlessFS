@@ -97,7 +97,7 @@ The xlab cutover was proven on 2026-08-19 before GitHub Actions retirement:
   Nix-store seeding, pull-request CI, or merge-queue CI.
 
 The checked-in ruleset requires the App-owned
-`tekton-xlab / endlessfs-ci-` context from GitHub App integration `949094`.
+`test` context from GitHub App integration `949094`.
 `nix run .#pipeline-policy` rejects reintroduced GitHub Actions workflows or an
 Actions-only Dependabot configuration. The Darwin job remains retired and must
 not be restored.

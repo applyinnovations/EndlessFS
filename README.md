@@ -222,11 +222,11 @@ repository's Nix interface for build and test logic. xlab is CI compute only:
 these pipelines neither target nor configure the GKE cluster that hosts
 `drive.endlessfs.com`.
 
-- `endlessfs-ci-` runs the fast policy check, authoritative Nix gate, and
+- `test` runs the fast policy check, authoritative Nix gate, and
   host-side Chromium coverage on pull requests and merge-queue refs.
-- `endlessfs-container-` publishes `sha-<commit>` and `edge` images after
+- `image-publish` publishes `sha-<commit>` and `edge` images after
   merge-queue-verified changes reach `main`.
-- `endlessfs-release-` re-verifies `v*.*.*` tags, publishes version and `latest`
+- `release` re-verifies `v*.*.*` tags, publishes version and `latest`
   images, and creates a GitHub release containing every Nix-built artifact.
 - The short-lived PaC GitHub App installation token used for cloning is reused
   for release creation and asset upload. GHCR rejected that general App token,
@@ -253,7 +253,7 @@ Repository rules are external GitHub state, so checking in JSON does not activat
    checkout. Repeat only after intentionally changing the checked-in JSON.
 
 The policy requires pull requests, resolved review threads, squash-only linear
-history, the xlab App-owned `tekton-xlab / endlessfs-ci-` context, and a
+history, the xlab App-owned `test` context, and a
 one-at-a-time merge queue. Do not apply that context until the safe-cutover proof
 in `.tekton/README.md` is complete. While the repository has one maintainer it
 requires no separate approval; enable final-push and code-owner approval when a

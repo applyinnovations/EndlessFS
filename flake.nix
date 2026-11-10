@@ -293,7 +293,9 @@
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-event" == "[push]"' .tekton/endlessfs-release.yaml >/dev/null
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[refs/tags/v*.*.*]"' .tekton/endlessfs-release.yaml >/dev/null
         yq -e '.spec.params[] | select(.name == "release_tag") | .value == "{{ git_tag }}"' .tekton/endlessfs-release.yaml >/dev/null
-        for pipeline in $active_pipelines; do
+        # The release pipeline runs the freshness check through release-verify
+        # (see the release-apps-policy check).
+        for pipeline in .tekton/endlessfs-ci.yaml .tekton/endlessfs-container.yaml; do
           advisory_script="$(yq -r '.spec.pipelineSpec.tasks[].params[] | select(.name == "SCRIPT") | .value' "$pipeline")"
           if ! printf '%s\n' "$advisory_script" | rg -Fx 'nix run .#security-freshness' >/dev/null; then
             echo "$pipeline must run the upstream-advisory freshness check" >&2
@@ -303,11 +305,25 @@
         publisher_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "publish") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-container.yaml)"
         go run ./tools/check-pipeline-publish "$publisher_script"
         release_verify_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "verify") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
-        printf '%s\n' "$release_verify_script" | rg -F 'nix run .#test-migration -- "$release_tag"' >/dev/null
-        release_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "release") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
-        for command in view upload create; do
-          printf '%s\n' "$release_script" | rg -F "gh release $command \"\$release_tag\" --repo \"applyinnovations/EndlessFS\"" >/dev/null
-        done
+        # shellcheck disable=SC2016 # $(params.release_tag) is Tekton's, not the shell's.
+        case "$release_verify_script" in
+          'nix run .#release-verify -- "$(params.release_tag)"'*) ;;
+          *)
+            echo "endlessfs-release verify must run nix run .#release-verify with the release tag" >&2
+            exit 1
+            ;;
+        esac
+        # The credential-holding release task runs publish-release from its own
+        # checkout of the verified commit, which no other task can write.
+        # shellcheck disable=SC2016 # Tekton expressions, not shell ones.
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release") | .params[] | select(.name == "SCRIPT") | .value == "nix run .#publish-release -- \"$(params.release_tag)\""' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release") | .runAfter | (length == 1 and .[0] == "release-clone")' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release") | .workspaces[] | select(.name == "source") | .workspace == "release-source"' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release-clone") | .taskRef.params[] | select(.name == "name") | .value == "git-clone-v1"' .tekton/endlessfs-release.yaml >/dev/null
+        # shellcheck disable=SC2016 # Tekton expressions, not shell ones.
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release-clone") | .params[] | select(.name == "expectedCommitSha") | .value == "$(tasks.clone.results.COMMIT_SHA)"' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release-clone") | .workspaces[] | select(.name == "output") | .workspace == "release-source"' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '[((.spec.pipelineSpec.tasks // [])[], (.spec.pipelineSpec.finally // [])[]) | select((.workspaces // []) | any_c(.workspace == "release-source")) | .name] | sort | join(",") == "release,release-clone"' .tekton/endlessfs-release.yaml >/dev/null
 
         for task in prepare-cache fast-checks nix-checks coverage; do
           yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-ci.yaml >/dev/null
@@ -810,6 +826,24 @@
             seed = packages.dependency-compile-cache;
             browser = headlessBrowser;
           };
+          # The release pipeline's decisions (tag shape, create or update the
+          # GitHub release). Standard library only, so it builds from its own
+          # file without the module closure.
+          releaseTool =
+            pkgs.runCommand "endlessfs-release-tool"
+              {
+                nativeBuildInputs = [ go ];
+                source = builtins.path {
+                  path = ./tools/release/main.go;
+                  name = "endlessfs-release-tool.go";
+                };
+              }
+              ''
+                export GOCACHE="$TMPDIR/go-cache" GOENV=off GOWORK=off GOTOOLCHAIN=local
+                export GO111MODULE=off GOPROXY=off CGO_ENABLED=0
+                mkdir -p "$out/bin"
+                go build -trimpath -o "$out/bin/endlessfs-release" "$source"
+              '';
           goTools = [
             go
             pkgs.libraw
@@ -1172,6 +1206,50 @@
                   skopeo --policy ${containerTransportPolicy} copy --all "docker-archive:${packages.container}" "docker://$destination"
                 done
               '';
+
+          # Release CI: Tekton calls these with the tag and nothing else.
+          release-verify =
+            mkTask "endlessfs-release-verify"
+              [
+                pkgs.nix
+                releaseTool
+              ]
+              ''
+                if [ "$#" -lt 1 ]; then
+                  echo "usage: nix run .#release-verify -- vMAJOR.MINOR.PATCH [nix flake check options]" >&2
+                  exit 2
+                fi
+                release_tag="$1"
+                shift
+                endlessfs-release check-tag "$release_tag"
+                ${self.apps.${system}.test-migration.program} "$release_tag"
+                ${self.apps.${system}.security-freshness.program}
+                nix flake check --print-build-logs "$@"
+              '';
+
+          # Holds GH_TOKEN and GHCR_TOKEN, so CI runs it from a checkout no
+          # earlier task has written to (release-source in endlessfs-release).
+          publish-release =
+            mkTask "endlessfs-publish-release"
+              [
+                pkgs.coreutils
+                pkgs.gh
+                pkgs.nix
+                releaseTool
+              ]
+              ''
+                if [ "$#" -ne 1 ]; then
+                  echo "usage: nix run .#publish-release -- vMAJOR.MINOR.PATCH" >&2
+                  exit 2
+                fi
+                release_tag="$1"
+                endlessfs-release check-tag "$release_tag"
+                release="$(nix build .#release --no-link --print-out-paths --print-build-logs)"
+                ${self.apps.${system}.publish-container.program} \
+                  "ghcr.io/applyinnovations/endlessfs:$release_tag" \
+                  "ghcr.io/applyinnovations/endlessfs:latest"
+                endlessfs-release publish "$release_tag" applyinnovations/EndlessFS "$release"
+              '';
         }
       );
 
@@ -1358,6 +1436,26 @@
                 ' ${containerTransportPolicyFor pkgs} >/dev/null
                 touch "$out"
               '';
+          # Release CI keeps its gates and its credential boundary inside these
+          # apps; prove they still call the reviewed programs.
+          releaseAppsPolicy =
+            pkgs.runCommand "endlessfs-release-apps-policy"
+              {
+                nativeBuildInputs = [ pkgs.ripgrep ];
+              }
+              ''
+                verify=${self.apps.${system}.release-verify.program}
+                publish=${self.apps.${system}.publish-release.program}
+                for program in ${self.apps.${system}.test-migration.program} ${
+                  self.apps.${system}.security-freshness.program
+                }; do
+                  rg --fixed-strings --quiet -- "$program" "$verify"
+                done
+                rg --fixed-strings --quiet -- 'nix flake check --print-build-logs' "$verify"
+                rg --fixed-strings --quiet -- ${self.apps.${system}.publish-container.program} "$publish"
+                rg --fixed-strings --quiet -- 'endlessfs-release publish "$release_tag" applyinnovations/EndlessFS' "$publish"
+                touch "$out"
+              '';
           linuxCiAppPolicy =
             pkgs.runCommand "endlessfs-linux-ci-app-policy"
               {
@@ -1540,6 +1638,7 @@
           race = raceCheck;
           coverage = coverageCompile;
           publish-container-policy = publishContainerPolicy;
+          release-apps-policy = releaseAppsPolicy;
           fuzz = fuzzCheck;
           offline = testSuite;
           security = securityCheck;

@@ -47,6 +47,22 @@ sets `fsGroup: 1000` for the persistent cache volumes. Cluster admission rejects
 either sandboxed Nix task when the user-namespace override is missing, and the
 task itself verifies that container UID 0 is not host UID 0 before executing.
 
+## Release path
+
+`endlessfs-release.yaml` only wires Tasks; the release logic is in the flake
+and runs the same locally:
+
+- `verify` runs `nix run .#release-verify -- "$release_tag"` (tag shape,
+  migration gate for that tag, advisory freshness, full flake check) in the
+  credential-free `nix-run-v2` Task.
+- `release-clone` checks the verified commit out again with `git-clone-v1`
+  into its own `release-source` workspace, and `release` runs
+  `nix run .#publish-release -- "$release_tag"` there. The credential-holding
+  step therefore never runs code from the `source` workspace that `verify`
+  could have changed. `tools/release` decides whether to create the GitHub
+  release or replace its assets, and only creates it when GitHub reports it
+  missing.
+
 ## Authentication boundary
 
 Pipelines-as-Code creates a per-run Secret containing a short-lived xlab.now

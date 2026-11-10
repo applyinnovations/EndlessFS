@@ -193,6 +193,8 @@ nix run .#security-freshness
 nix run .#dependency-check
 nix run .#container
 nix run .#provider-verify -- check CONFIG
+nix run .#release-verify -- vMAJOR.MINOR.PATCH
+nix run .#publish-release -- vMAJOR.MINOR.PATCH
 nix build .#container-images
 nix build .#release-images
 ```

@@ -85,6 +85,7 @@ spec:
         type: string
     workspaces:
       - name: source
+      - name: release-source
       - name: git-cache
       - name: nix-store
       - name: basic-auth
@@ -137,18 +138,42 @@ spec:
             workspace: nix-store
         params:
           - name: SCRIPT
-            value: |
-              release_tag="$(params.release_tag)"
-              printf '%s\n' "$release_tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
-                echo "release checkout is not a vMAJOR.MINOR.PATCH tag" >&2
-                exit 2
-              }
-              nix run .#test-migration -- "$release_tag"
-              nix run .#security-freshness
-              nix flake check --print-build-logs --max-jobs 6 --cores 2
+            value: nix run .#release-verify -- "$(params.release_tag)" --max-jobs 6 --cores 2
+
+      # The release task holds GH_TOKEN and the GitHub Packages credential, so
+      # it runs publish-release from its own checkout of the commit verify
+      # checked, never from the source workspace verify could have changed.
+      - name: release-clone
+        runAfter: [verify]
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: git-clone-v1
+            - name: namespace
+              value: tekton-pipelines
+        timeout: 5m
+        workspaces:
+          - name: output
+            workspace: release-source
+          - name: basic-auth
+            workspace: basic-auth
+        params:
+          - name: url
+            value: $(params.repo_url)
+          - name: revision
+            value: $(params.revision)
+          - name: expectedCommitSha
+            value: $(tasks.clone.results.COMMIT_SHA)
+          - name: depth
+            value: "1"
+          - name: objectFilter
+            value: none
 
       - name: release
-        runAfter: [verify]
+        runAfter: [release-clone]
         retries: 2
         taskRef:
           resolver: cluster
@@ -162,7 +187,7 @@ spec:
         timeout: 15m
         workspaces:
           - name: source
-            workspace: source
+            workspace: release-source
           - name: nix-store
             workspace: nix-store
           - name: github-packages-auth
@@ -171,26 +196,7 @@ spec:
           - name: GITHUB_TOKEN_SECRET_NAME
             value: $(params.git_auth_secret)
           - name: SCRIPT
-            value: |
-              release_tag="$(params.release_tag)"
-              printf '%s\n' "$release_tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
-                echo "release checkout is not a vMAJOR.MINOR.PATCH tag" >&2
-                exit 2
-              }
-              nix build .#release --out-link result-release --print-build-logs
-              nix run .#publish-container -- \
-                "ghcr.io/applyinnovations/endlessfs:$release_tag" \
-                "ghcr.io/applyinnovations/endlessfs:latest"
-              if nix develop --command gh release view "$release_tag" --repo "applyinnovations/EndlessFS" >/dev/null 2>&1; then
-                nix develop --command gh release upload "$release_tag" --repo "applyinnovations/EndlessFS" \
-                  result-release/* --clobber
-              else
-                nix develop --command gh release create "$release_tag" --repo "applyinnovations/EndlessFS" \
-                  result-release/* \
-                  --verify-tag \
-                  --generate-notes \
-                  --title "$release_tag"
-              fi
+            value: nix run .#publish-release -- "$(params.release_tag)"
     # Push and scheduled runs publish this run's store to the shared Nix cache.
     finally:
       - name: publish-cache
@@ -208,6 +214,14 @@ spec:
             workspace: nix-store
   workspaces:
     - name: source
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          storageClassName: fast-local
+          resources:
+            requests:
+              storage: 10Gi
+    - name: release-source
       volumeClaimTemplate:
         spec:
           accessModes: [ReadWriteOnce]

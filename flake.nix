@@ -484,14 +484,6 @@
 
           endlessfs = lib.makeOverridable mkEndlessFS { };
           dependencyCompileCache = dependencyCompileCacheFor pkgs endlessfs.goModules;
-          functionalCoverage = import ./tools/functionalcoverage/default.nix {
-            inherit pkgs go;
-            fullSource = self.outPath;
-            coverageSource = coverageSourceFor pkgs;
-            vendor = endlessfs.goModules;
-            seed = dependencyCompileCache;
-            browser = headlessBrowserFor pkgs;
-          };
 
           linuxArchitecture = if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "amd64";
           linuxSystem = if pkgs.stdenv.hostPlatform.isAarch64 then "aarch64-linux" else "x86_64-linux";
@@ -745,9 +737,6 @@
           container-images = container;
           release-images = release;
         }
-        // lib.optionalAttrs (system == "x86_64-linux") {
-          local-functional-coverage = functionalCoverage.producer;
-        }
       );
 
       apps = forAllSystems (
@@ -788,20 +777,6 @@
             fi
             gawk -f tools/coverage.awk "$profile"
           '';
-          legacyCoverage = pkgs.writeShellApplication {
-            name = "endlessfs-test-coverage-fresh";
-            runtimeInputs =
-              goTools ++ [ pkgs.gawk ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ];
-            text = coverageText;
-          };
-          functionalCoverage = import ./tools/functionalcoverage/default.nix {
-            inherit pkgs go;
-            fullSource = self.outPath;
-            inherit coverageSource;
-            vendor = packages.default.goModules;
-            seed = packages.dependency-compile-cache;
-            browser = headlessBrowser;
-          };
           goTools = [
             go
             pkgs.libraw
@@ -973,6 +948,20 @@
                 exec go test ./internal/e2e -run '^TestE2E' -count=1 "$@"
               '';
 
+          # The production-cardinality upload recovery qualification (10,604
+          # files, about six minutes). Releases run it; pull requests do not.
+          test-e2e-scale =
+            mkTask "endlessfs-test-e2e-scale"
+              (goTools ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
+              ''
+                export ENDLESSFS_RUN_E2E=1 ENDLESSFS_E2E_SCALE_QUALIFICATION=1
+                ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                  export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
+                  export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
+                ''}
+                exec go test ./internal/e2e -run '^TestE2ESmartRecoveryProductionCardinalityWarmTransfersOnlyRemainingFiles$' -count=1 "$@"
+              '';
+
           test-ui-benchmark =
             mkTask "endlessfs-test-ui-benchmark"
               (goTools ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
@@ -987,30 +976,9 @@
                 echo "UI benchmark evidence: $benchmark_output"
               '';
 
-          test-coverage =
-            mkTask "endlessfs-test-coverage"
-              (goTools ++ [ pkgs.gawk ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
-              (
-                (lib.optionalString (system == "x86_64-linux") ''
-                  if [ "''${ENDLESSFS_LOCAL_FUNCTIONAL_CACHE:-}" = 1 ]; then
-                    exec ${pkgs.nix}/bin/nix run --offline --no-write-lock-file \
-                      "path:${self.outPath}#apps.${system}.local-functional-coverage-consumer" -- "$@"
-                  fi
-                '')
-                + coverageText
-              );
-
-          local-functional-coverage-consumer =
-            if system == "x86_64-linux" then
-              {
-                type = "app";
-                program = "${functionalCoverage.consumer "${legacyCoverage}/bin/endlessfs-test-coverage-fresh"}/bin/endlessfs-local-functional-coverage-consumer";
-              }
-            else
-              {
-                type = "app";
-                program = "${legacyCoverage}/bin/endlessfs-test-coverage-fresh";
-              };
+          test-coverage = mkTask "endlessfs-test-coverage" (
+            goTools ++ [ pkgs.gawk ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ]
+          ) coverageText;
 
           test-race = mkTask "endlessfs-test-race" (goTools ++ [ pkgs.stdenv.cc ]) ''
             export CGO_ENABLED=1

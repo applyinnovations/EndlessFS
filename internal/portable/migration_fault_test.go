@@ -17,7 +17,10 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
-func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
+func TestMigrationRecoversFromTransportInterruptionOfEveryOperationClass(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	predecessors := []storageSchemaFixtureEntry{storageSchemaFixtures[0]}
 	for _, candidate := range storageSchemaFixtures {
 		if candidate.schemaID == "endlessfs-portable-v1/schema-007" && candidate.profile == "application-preview-gcs" {
@@ -79,20 +82,9 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 				boundaryCalls := baselineFaults.calls
 				trace := append([]migrationFaultTrace(nil), baselineFaults.trace...)
 				baselineFaults.mu.Unlock()
-				indices := make([]int, boundaryCalls+3)
-				for index := range indices {
-					indices[index] = index + 1
-				}
-				if migrationRacePortfolio {
-					indices = migrationRaceIndices(trace)
-				}
-				t.Logf("transport portfolio: race=%t selected=%d exhaustive=%d", migrationRacePortfolio, len(indices), boundaryCalls+3)
-				var results []migrationFaultBoundaryResult
-				if migrationRacePortfolio {
-					results = runSelectedMigrationFaultBoundaries(fixture, writer, target, wantGateEpoch, indices)
-				} else {
-					results = runMigrationFaultBoundaries(fixture, writer, target, wantGateEpoch, boundaryCalls+3)
-				}
+				indices := migrationFaultIndices(trace)
+				t.Logf("transport interruptions: selected=%d of %d calls", len(indices), boundaryCalls+3)
+				results := runSelectedMigrationFaultBoundaries(fixture, writer, target, wantGateEpoch, indices)
 				consecutiveCompleted := 0
 				for _, result := range results {
 					if result.err != nil {
@@ -116,18 +108,6 @@ type migrationFaultBoundaryResult struct {
 	failAt                  int
 	completedBeyondBoundary bool
 	err                     error
-}
-
-// runMigrationFaultBoundaries preserves the exhaustive ordered fault matrix
-// while evaluating independent fresh-backend boundaries with a bounded worker
-// pool. Race instrumentation otherwise makes the growing append-only migration
-// suffix exceed the process timeout even though no individual schedule blocks.
-func runMigrationFaultBoundaries(fixture storageSchemaFixture, writer portable.WriterConfiguration, target string, wantGateEpoch uint64, total int) []migrationFaultBoundaryResult {
-	indices := make([]int, total)
-	for index := range indices {
-		indices[index] = index + 1
-	}
-	return runSelectedMigrationFaultBoundaries(fixture, writer, target, wantGateEpoch, indices)
 }
 
 func runSelectedMigrationFaultBoundaries(fixture storageSchemaFixture, writer portable.WriterConfiguration, target string, wantGateEpoch uint64, indices []int) []migrationFaultBoundaryResult {

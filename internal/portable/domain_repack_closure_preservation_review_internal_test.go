@@ -435,6 +435,9 @@ func closurePreservationAssertRangeIDs(t *testing.T, fixture closurePreservation
 }
 
 func TestBoundedClosurePreservationLostLaterPUTExactRetryAndCollision(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	ctx := context.Background()
 	referenceBase := objectmemory.New()
 	referenceBackend := &reviewRepackFaultBackend{Backend: referenceBase}

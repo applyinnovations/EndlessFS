@@ -57,6 +57,9 @@ func publishNamespaceTestFile(t *testing.T, store *namespaceStore, scope domain.
 }
 
 func TestNamespaceStoreMoveTrashRestoreDoesNotVisitDescendantsOrFileProvider(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	ctx := context.Background()
 	ledger := providerbudget.NewLedger()
 	base := objectmemory.New()

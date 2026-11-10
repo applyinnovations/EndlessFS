@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"testing"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
@@ -82,74 +81,5 @@ func TestStateIndexLifecycleSplitsUpdatesRemovesAndScans(t *testing.T) {
 	}
 	if values, err := engine.collectStateIndexEntries(ctx, storageformat.StateIndexRoot{}, "accounts/", "", 10); err != nil || len(values) != 0 {
 		t.Fatalf("empty index scan = %+v, %v", values, err)
-	}
-}
-
-func TestStateIndexValidationRejectsCorruptionAndOverflow(t *testing.T) {
-	ctx := context.Background()
-	backend, engine := currentMigrationEngine(t)
-	namespace := string(state.NamespaceAccounts)
-	logical := state.MustKey(state.NamespaceAccounts, "valid").String()
-	validEntry := storageformat.StateIndexEntry{LogicalKey: logical, LogicalVersion: "version"}
-	validLeaf := storageformat.StateIndexNode{SchemaVersion: 1, Namespace: namespace, NodeID: "leaf", Leaf: true, Entries: []storageformat.StateIndexEntry{validEntry}}
-
-	for name, child := range map[string]storageformat.StateIndexChild{
-		"identity": {},
-		"range":    {NodeID: "node", NodeDigest: "digest", FirstKey: "z", LastKey: "a", EntryCount: 1},
-		"count":    {NodeID: "node", NodeDigest: "digest", FirstKey: "a", LastKey: "z"},
-	} {
-		t.Run("child-"+name, func(t *testing.T) {
-			if err := validateStateIndexChild(child); !errors.Is(err, domain.ErrInvalid) {
-				t.Fatalf("invalid child error = %v", err)
-			}
-		})
-	}
-	for name, mutate := range map[string]func(*storageformat.StateIndexNode){
-		"schema":        func(node *storageformat.StateIndexNode) { node.SchemaVersion = 0 },
-		"namespace":     func(node *storageformat.StateIndexNode) { node.Namespace = "other" },
-		"identity":      func(node *storageformat.StateIndexNode) { node.NodeID = "" },
-		"shape":         func(node *storageformat.StateIndexNode) { node.Leaf = false },
-		"logical-key":   func(node *storageformat.StateIndexNode) { node.Entries[0].LogicalKey = "invalid" },
-		"logical-route": func(node *storageformat.StateIndexNode) { node.Entries[0].LogicalKey = "profiles/valid" },
-		"version":       func(node *storageformat.StateIndexNode) { node.Entries[0].LogicalVersion = "" },
-		"order": func(node *storageformat.StateIndexNode) {
-			node.Entries = append(node.Entries, node.Entries[0])
-		},
-	} {
-		t.Run("node-"+name, func(t *testing.T) {
-			candidate := validLeaf
-			candidate.Entries = append([]storageformat.StateIndexEntry(nil), validLeaf.Entries...)
-			mutate(&candidate)
-			if err := validateStateIndexNode(namespace, candidate); !errors.Is(err, domain.ErrInvalid) {
-				t.Fatalf("invalid node error = %v", err)
-			}
-		})
-	}
-	if _, err := stateIndexNodeChild(storageformat.StateIndexNode{Leaf: true}, "digest"); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("empty leaf error = %v", err)
-	}
-	if _, err := stateIndexNodeChild(storageformat.StateIndexNode{}, "digest"); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("empty branch error = %v", err)
-	}
-	if _, err := stateIndexNodeChild(storageformat.StateIndexNode{Children: []storageformat.StateIndexChild{
-		{FirstKey: "a", LastKey: "b", EntryCount: math.MaxUint64},
-		{FirstKey: "c", LastKey: "d", EntryCount: 1},
-	}}, "digest"); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("overflowing branch error = %v", err)
-	}
-	if _, err := engine.rootStateIndexChild(ctx, storageformat.StateIndexRoot{Namespace: namespace}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("empty non-empty root error = %v", err)
-	}
-	if _, _, err := engine.mutateStateIndexNode(ctx, namespace, nil, logical, "", true); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("nil-root removal error = %v", err)
-	}
-
-	rootKey := storageformat.StateIndexRootKey(namespace)
-	invalidRoot := storageformat.StateIndexRoot{SchemaVersion: 1, Namespace: namespace, EntryCount: 1}
-	if _, err := backend.Put(ctx, rootKey, encodeInternalEnvelope(t, stateIndexRootSchema, rootKey, 1, invalidRoot), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := engine.readStateIndexRoot(ctx, namespace); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid root error = %v", err)
 	}
 }

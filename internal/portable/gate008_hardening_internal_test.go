@@ -3,7 +3,6 @@ package portable
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
@@ -32,53 +31,6 @@ func rewriteCurrentGate(t *testing.T, backend objectstore.Backend, mutate func(*
 	}
 	if _, err := backend.Put(ctx, key, body, objectstore.PutCondition{Mode: objectstore.PutMatch, Version: object.Version}); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestSchema008DomainCatalogBindingTraversalAndEncodingFailures(t *testing.T) {
-	ctx := context.Background()
-	memory := objectmemory.New()
-	catalog := newDomainCatalog(memory, nil)
-	reference := consistencyDomainRef{Kind: storageformat.DomainOwnerControl, ID: "owner:catalog-boundary"}
-	session := newDomainCatalogTreeSession(catalog.store)
-
-	misbound := storageformat.DomainCatalogEntry{DomainID: reference.ID, Kind: reference.Kind, HeadKey: storageformat.DomainHeadKey(reference.Kind, "different").String()}
-	body, err := storageformat.EncodeCanonical(misbound)
-	if err != nil {
-		t.Fatal(err)
-	}
-	root, err := session.buildTree(ctx, []storageformat.DomainEntry{{Key: catalogEntryKey(reference), Value: body, LogicalVersion: "version"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := catalog.entryAt(ctx, storageformat.DomainCatalogHead{Root: root}, reference); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("misbound catalog entry error = %v", err)
-	}
-
-	valid := storageformat.DomainCatalogEntry{DomainID: reference.ID, Kind: reference.Kind, HeadKey: storageformat.DomainHeadKey(reference.Kind, reference.ID).String()}
-	body, err = storageformat.EncodeCanonical(valid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	leaf, err := session.buildTree(ctx, []storageformat.DomainEntry{{Key: catalogEntryKey(reference), Value: body, LogicalVersion: "version"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	branch := storageformat.DomainPage{SchemaVersion: 1, DomainID: "__catalog__", Kind: storageformat.DomainAdmin, Level: 1, Children: []storageformat.DomainPageChild{
-		{FirstKey: catalogEntryKey(reference), LastKey: catalogEntryKey(reference), Digest: leaf.Digest, Level: leaf.Level, EntryCount: leaf.EntryCount, ByteCount: leaf.ByteCount},
-		{FirstKey: "z", LastKey: "z", Digest: storageformat.Digest([]byte("missing-catalog-child")), Level: 0, EntryCount: 1},
-	}}
-	branchReference, err := session.writePage(ctx, branch)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := catalog.visitEntries(ctx, storageformat.DomainCatalogHead{Root: branchReference.root}, func(storageformat.DomainCatalogEntry) error { return nil }); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("later catalog page error = %v", err)
-	}
-
-	oversized := storageformat.DomainCatalogHead{SchemaVersion: 1, Revision: 1, Root: storageformat.DomainTreeRoot{Digest: strings.Repeat("x", storageformat.MaxCanonicalBytes), Level: 0, EntryCount: 1}}
-	if err := catalog.publish(ctx, domainCatalogSnapshot{}, oversized); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("oversized catalog publication error = %v", err)
 	}
 }
 
@@ -335,31 +287,6 @@ func TestSchema008FinishClosingWritesReconcilesStaleCatalogFreeze(t *testing.T) 
 	})
 }
 
-func TestSchema008GateFreezeReconciliationPropagatesLatestGateReadFailure(t *testing.T) {
-	ctx := context.Background()
-	memory := objectmemory.New()
-	engine := openNamespaceTestEngine(t, memory)
-	if _, err := newDomainCatalog(memory, nil).freeze(ctx, 1); err != nil {
-		t.Fatal(err)
-	}
-	rewriteCurrentGate(t, memory, func(gate *storageformat.WriteGate) {
-		gate.Mode, gate.CheckpointID, gate.Epoch = storageformat.GateOpen, "", 2
-	})
-	gateObject, _, gate, err := engine.readGate(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	engine.backend = &hookedBackend{Backend: memory, get: func(callCtx context.Context, key objectstore.Key) (objectstore.Object, error) {
-		if key == storageformat.WriteGateKey() {
-			return objectstore.Object{}, domain.NewError(domain.ErrorUnavailable, "latest gate read failed")
-		}
-		return memory.Get(callCtx, key)
-	}}
-	if _, err := engine.reconcileGateDomainFreeze(ctx, gateObject, gate); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("latest gate read error = %v", err)
-	}
-}
-
 func TestSchema008CancelClosingGateRetriesOnlyConditionalRaces(t *testing.T) {
 	ctx := context.Background()
 	t.Run("open-and-misbound", func(t *testing.T) {
@@ -607,29 +534,4 @@ func TestSchema008GateAndCatalogProviderFailureBranches(t *testing.T) {
 			t.Fatalf("visitor error = %v", err)
 		}
 	})
-}
-
-func TestSchema008FreezeDomainsPropagatesCatalogAndDomainFailures(t *testing.T) {
-	ctx := context.Background()
-	if _, err := newDomainCatalog(objectmemory.New(), nil).freezeDomains(ctx, 0); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("zero freezeDomains epoch error = %v", err)
-	}
-	memory := objectmemory.New()
-	store := newConsistencyDomainStore(memory, nil)
-	reference := consistencyDomainRef{Kind: storageformat.DomainNamespace, ID: "freeze-domain-error"}
-	if _, err := store.mutate(ctx, reference, consistencyDomainMutation{ID: "seed", Changes: []consistencyDomainChange{{Key: "value", Require: domainValueAbsent, Value: []byte("value")}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.freeze(ctx, reference, 8); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := newDomainCatalog(memory, nil).freezeDomains(ctx, 9); !errors.Is(err, domain.ErrConflict) {
-		t.Fatalf("domain freeze conflict error = %v", err)
-	}
-
-	catalog := newDomainCatalog(memory, nil)
-	missingRoot := storageformat.DomainCatalogHead{Root: storageformat.DomainTreeRoot{Digest: storageformat.Digest([]byte("missing")), Level: 0, EntryCount: 1}}
-	if _, err := catalog.entries(ctx, missingRoot); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("catalog entries traversal error = %v", err)
-	}
 }

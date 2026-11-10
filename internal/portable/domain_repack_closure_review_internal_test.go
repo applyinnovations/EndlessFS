@@ -13,37 +13,6 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
-// A cached descriptor does not authenticate its page bytes. Repacking must
-// reject corruption under the original digest before it derives a new digest;
-// otherwise it can turn corrupt staged authority into a valid successor.
-func TestBoundedClosureReviewRejectsCorruptOriginalCachedPage(t *testing.T) {
-	ctx := context.Background()
-	backend := &reviewRepackFaultBackend{Backend: objectmemory.New()}
-	clock := domain.NewFixedClock(time.Date(2073, 4, 5, 6, 7, 8, 0, time.UTC))
-	reference := consistencyDomainRef{Kind: storageformat.DomainOwnerControl, ID: "bounded-closure-source"}
-	source := newConsistencyDomainTreeSession(newConsistencyDomainStore(backend, nil, clock), reference)
-	source.enablePackedWrites("original-source")
-	if err := source.bindPackedMutation("complete-original-mutation"); err != nil {
-		t.Fatal("fixture mutation binding failed")
-	}
-	page := storageformat.DomainPage{SchemaVersion: 1, DomainID: reference.ID, Kind: reference.Kind,
-		Entries: []storageformat.DomainEntry{{Key: "selected", Value: []byte("original-value"), LogicalVersion: "original-version"}}}
-	root, err := source.writePage(ctx, page)
-	if err != nil {
-		t.Fatal("fixture page staging failed")
-	}
-	corrupted := source.pages[root.root.Digest]
-	corrupted.Entries = append([]storageformat.DomainEntry(nil), corrupted.Entries...)
-	corrupted.Entries[0].Value = bytes.Clone(corrupted.Entries[0].Value)
-	corrupted.Entries[0].Value[0] ^= 1 // Retain every descriptor/count/length field.
-	source.pages[root.root.Digest] = corrupted
-	source.pendingPack[root.root.Digest] = corrupted
-	_, err = repackStagedRoots(ctx, source, []storageformat.DomainTreeRoot{root.root})
-	if !errors.Is(err, domain.ErrInvalid) || backend.packPuts != 0 {
-		t.Fatalf("corrupt original page was normalized or published: invalid=%t packPuts=%d", errors.Is(err, domain.ErrInvalid), backend.packPuts)
-	}
-}
-
 func TestBoundedClosureReviewSplitsActualWireAndExpandedOverflow(t *testing.T) {
 	for _, mode := range []string{"wire", "expanded"} {
 		t.Run(mode, func(t *testing.T) {

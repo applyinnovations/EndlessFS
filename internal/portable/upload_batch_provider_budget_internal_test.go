@@ -201,6 +201,9 @@ func uploadEmptyCapabilities(t *testing.T, client *http.Client, capabilities []d
 }
 
 func TestProviderBudgetUploadBatchSegmentedScaleLifecycle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	observer := telemetry.New(nil, nil)
 	ctx := telemetry.Context(context.Background(), observer)
 	fixture := newUploadBatchScaleFixture(t, 0x81726354, observer)
@@ -246,6 +249,9 @@ func TestProviderBudgetUploadBatchSegmentedScaleLifecycle(t *testing.T) {
 // Compare publication windows without changing the existing lifecycle ratchets.
 // Empty bodies isolate control-plane/provider economics, not throughput.
 func TestProviderBudgetIncrementalUploadPublicationComparison(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	ctx := telemetry.Context(context.Background(), telemetry.New(nil, nil))
 	economics, err := gcs.RegionalStandardFlatEconomics()
 	if err != nil {

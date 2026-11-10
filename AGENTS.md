@@ -341,6 +341,10 @@ commands, cache Nix outputs on local NVMe, and publish their results. Do not
 duplicate project test logic in YAML or install Go/Node tools directly. Do not
 add GitHub Actions workflows. The retired Darwin workflow must remain
 triggerless and must never reference or start Namespace Mac runners.
+Pipelines follow the xlab CI scripting standard
+([Repository pipelines](https://github.com/applyinnovations/deployments/blob/main/clusters/xlab/manifests/tekton/README.md#repository-pipelines)): YAML only wires
+Tasks and calls repository scripts (Bash for glue, Python for real logic),
+which run the same locally and have tests.
 
 `.github/rulesets/*.json` is the source of truth for branch/tag policy. Validate
 it with `nix run .#repository-policy -- check`. Applying it is an explicit

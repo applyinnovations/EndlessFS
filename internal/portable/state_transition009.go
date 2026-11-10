@@ -321,6 +321,11 @@ func (e *Engine) prepareTransitionParticipant009(ctx context.Context, plan stora
 		}
 		if snapshot.exists && snapshot.head.Registered {
 			if snapshot.head.Frozen {
+				if thawed, thawErr := store.thawStaleFreeze(ctx, reference, snapshot.head.FreezeEpoch); thawErr != nil {
+					return thawErr
+				} else if thawed {
+					continue
+				}
 				return domain.NewError(domain.ErrorPreconditionFailed, "consistency domain is frozen")
 			}
 			lock, _, found, err := transitionLockAtHead009(ctx, store, reference, snapshot.head)

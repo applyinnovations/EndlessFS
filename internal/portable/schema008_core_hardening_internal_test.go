@@ -110,7 +110,8 @@ func TestConsistencyDomainCurrentAuthorityDenialMatrix(t *testing.T) {
 	if _, err := store.mutate(ctx, valid, consistencyDomainMutation{ID: "seed", Changes: []consistencyDomainChange{{Key: "different", Require: domainValueAbsent, Value: []byte("two")}}}); !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("reused mutation identity error = %v", err)
 	}
-	if err := store.freeze(ctx, valid, 11); err != nil {
+	catalog := newDomainCatalog(store.backend, nil)
+	if _, err := catalog.freezeDomains(ctx, 11); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.freeze(ctx, valid, 11); err != nil {

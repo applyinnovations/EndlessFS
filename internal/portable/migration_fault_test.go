@@ -232,8 +232,10 @@ type migrationContentionBackend struct {
 
 type cancellingMigrationGateContentionBackend struct {
 	objectstore.Backend
-	cancel   context.CancelFunc
-	attempts int
+	key        objectstore.Key
+	bodyMarker []byte
+	cancel     context.CancelFunc
+	attempts   int
 }
 
 type disappearingMigrationObjectBackend struct {
@@ -318,12 +320,12 @@ func (backend *migrationContentionBackend) Put(ctx context.Context, key objectst
 }
 
 func (backend *cancellingMigrationGateContentionBackend) Put(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
-	if key == storageformat.WriteGateKey() && condition.Mode == objectstore.PutMatch {
+	if key == backend.key && condition.Mode == objectstore.PutMatch && bytes.Contains(body, backend.bodyMarker) {
 		backend.attempts++
-		if backend.attempts == 64 {
+		if backend.attempts == 4 {
 			backend.cancel()
 		}
-		return "", domain.NewError(domain.ErrorPreconditionFailed, "injected persistent migration gate contention")
+		return "", domain.NewError(domain.ErrorPreconditionFailed, "injected persistent migration contention")
 	}
 	return backend.Backend.Put(ctx, key, body, condition)
 }
@@ -403,27 +405,63 @@ func TestMigrationCASContentionConvergesOrFailsClosed(t *testing.T) {
 	}
 }
 
-func TestMigrationGatePersistentContentionHonorsContextCancellation(t *testing.T) {
-	fixture := loadStorageSchemaFixture(t, storageSchemaFixtures[1])
-	stateBackend := objectmemory.New()
-	fileBackend := objectmemory.New()
-	if err := stateBackend.Import(fixture.StateObjects); err != nil {
-		t.Fatal(err)
-	}
-	if err := fileBackend.Import(fixture.FileObjects); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	contended := &cancellingMigrationGateContentionBackend{Backend: stateBackend, cancel: cancel}
-	clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
-	options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 219, nil)
-	options.Backend = contended
-	options.Writer = currentWriterForSchemaFixture(t, fixture)
-	if _, err := portable.Open(ctx, options); !errors.Is(err, context.Canceled) {
-		t.Fatalf("persistently contended migration error = %v; want context cancellation", err)
-	}
-	if contended.attempts != 64 {
-		t.Fatalf("migration gate contention attempts = %d; want 64", contended.attempts)
+// Replicas that keep losing the gate or superblock CAS back off and retry; a
+// cancelled startup must stop them rather than retry forever. Every edge
+// closes the gate and activates the superblock, so each predecessor fixture
+// exercises the retry loop of its own migration kind.
+func TestMigrationPersistentContentionHonorsContextCancellation(t *testing.T) {
+	history := portable.StorageSchemaHistory()
+	seen := map[string]bool{history[len(history)-1].ID: true} // the current schema has nothing to migrate
+	for _, family := range storageSchemaFixtures {
+		if seen[family.schemaID] {
+			continue
+		}
+		seen[family.schemaID] = true
+		for _, contention := range []struct {
+			name   string
+			key    objectstore.Key
+			marker string
+		}{
+			{"gate", storageformat.WriteGateKey(), ""},
+			{"gate-close", storageformat.WriteGateKey(), `"mode":"closed"`},
+			{"superblock", storageformat.SuperblockKey(), ""},
+		} {
+			key := contention.key
+			t.Run(family.schemaID+"/"+contention.name, func(t *testing.T) {
+				t.Parallel()
+				fixture := loadStorageSchemaFixture(t, family)
+				stateBackend := objectmemory.New()
+				fileBackend := objectmemory.New()
+				if err := stateBackend.Import(fixture.StateObjects); err != nil {
+					t.Fatal(err)
+				}
+				if err := fileBackend.Import(fixture.FileObjects); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				contended := &cancellingMigrationGateContentionBackend{Backend: stateBackend, key: key, bodyMarker: []byte(contention.marker), cancel: cancel}
+				clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
+				options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 219, nil)
+				options.Backend = contended
+				options.Writer = currentWriterForSchemaFixture(t, fixture)
+				_, err := portable.Open(ctx, options)
+				if contended.attempts < 4 {
+					// This edge stops retrying this object before the budget,
+					// failing closed on its own; it must not succeed.
+					if err == nil {
+						t.Fatalf("migration succeeded although every %s CAS failed", key)
+					}
+					return
+				}
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("persistently contended migration error = %v; want context cancellation", err)
+				}
+				if contended.attempts != 4 {
+					t.Fatalf("contention attempts = %d; want 4", contended.attempts)
+				}
+			})
+		}
 	}
 }
 

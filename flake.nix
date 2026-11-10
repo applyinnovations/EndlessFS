@@ -254,7 +254,7 @@
           # Each run gets a private Nix store; only the publish-cache finally
           # task, under the nix-cache-publisher account, writes the shared cache
           # (main pushes and releases only; endlessfs-ci never publishes).
-          yq -e '.spec.workspaces[] | select(.name == "nix-store") | .volumeClaimTemplate.spec.storageClassName == "fast-local"' "$pipeline" >/dev/null
+          yq -e '.spec.workspaces[] | select(.name == "nix-store") | .volumeClaimTemplate.spec.storageClassName == "scratch-local"' "$pipeline" >/dev/null
           yq -e '.spec.workspaces[] | select(.name == "nix-store") | has("persistentVolumeClaim") | not' "$pipeline" >/dev/null
           if [ "$pipeline" != .tekton/endlessfs-ci.yaml ]; then
             yq -e '.spec.pipelineSpec.finally[] | select(.name == "publish-cache") | .taskRef.params[] | select(.name == "name") | .value == "nix-cache-publish"' "$pipeline" >/dev/null

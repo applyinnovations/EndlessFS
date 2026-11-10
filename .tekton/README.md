@@ -12,7 +12,7 @@ GKE cluster that hosts `drive.endlessfs.com`.
 | `endlessfs-darwin-smoke.disabled.yaml` | none | Deprecated, inert record for the retired Darwin smoke job |
 
 All active runs select `storage.xlab.now/fast-local=true`, use a 10 GiB per-run
-`fast-local` source volume, and reuse the shared Git mirror and 96 GiB v2 Nix
+`scratch-local` source volume, and reuse the shared Git mirror and 96 GiB v2 Nix
 store in `tekton-buildkit` on local NVMe. They run in xlab's isolated
 `tekton-buildkit` privileged/userns namespace because the ordinary
 `tekton-pipelines` namespace correctly enforces baseline Pod Security. Cache

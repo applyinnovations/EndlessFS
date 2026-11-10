@@ -112,6 +112,21 @@ func (e *Engine) finishClosingWrites(ctx context.Context, checkpointID string) e
 			if freezeErr == nil {
 				break
 			}
+			var frozen *domainFrozenAtEpochError
+			if errors.As(freezeErr, &frozen) && frozen.epoch < initialGate.Epoch {
+				// A lagging closer of an earlier, already reopened checkpoint
+				// can freeze a domain after that checkpoint thawed it. A gate
+				// closing at a later epoch cannot authorize the older freeze,
+				// so thawing it is safe and needed for progress; the catalog
+				// gets the same help in reconcileGateDomainFreeze.
+				if err := e.stateDomainStore().unfreeze(ctx, reference, frozen.epoch); err != nil && !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) {
+					return err
+				}
+				if attempts == 31 {
+					return domain.NewError(domain.ErrorUnavailable, "consistency-domain freeze remained contended")
+				}
+				continue
+			}
 			if !errors.Is(freezeErr, errTransitionPending009) {
 				return domain.WrapError(domain.KindOf(freezeErr), "freeze registered consistency domain "+entry.DomainID, freezeErr)
 			}

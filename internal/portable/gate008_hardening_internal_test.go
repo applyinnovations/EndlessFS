@@ -633,3 +633,55 @@ func TestSchema008FreezeDomainsPropagatesCatalogAndDomainFailures(t *testing.T) 
 		t.Fatalf("catalog entries traversal error = %v", err)
 	}
 }
+
+// A lagging closer of an earlier checkpoint can freeze a domain head after
+// that checkpoint thawed it. Seen with eight replicas migrating at once: every
+// later closer failed on the stale freeze and no replica could start.
+func TestSchema008FinishClosingWritesThawsStaleDomainFreeze(t *testing.T) {
+	ctx := context.Background()
+	memory := objectmemory.New()
+	engine := openNamespaceTestEngine(t, memory)
+	reference := consistencyDomainRef{Kind: storageformat.DomainCapability, ID: "lagging-freeze"}
+	store := newConsistencyDomainStore(memory, nil)
+	if _, err := store.mutate(ctx, reference, consistencyDomainMutation{ID: domainTestKey(0), Changes: []consistencyDomainChange{{Key: "value", Require: domainValueAbsent, Value: []byte("value")}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.freeze(ctx, reference, 9); err != nil {
+		t.Fatal(err)
+	}
+	rewriteCurrentGate(t, memory, func(gate *storageformat.WriteGate) {
+		gate.Mode, gate.CheckpointID, gate.Epoch = storageformat.GateClosing, "checkpoint", 10
+	})
+	if err := engine.finishClosingWrites(ctx, "checkpoint"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.loadHead(ctx, reference)
+	if err != nil || !snapshot.head.Frozen || snapshot.head.FreezeEpoch != 10 {
+		t.Fatalf("domain after closure = %+v, %v; want frozen at epoch 10", snapshot.head, err)
+	}
+
+}
+
+func TestSchema008FinishClosingWritesKeepsLaterDomainFreeze(t *testing.T) {
+	ctx := context.Background()
+	memory := objectmemory.New()
+	engine := openNamespaceTestEngine(t, memory)
+	reference := consistencyDomainRef{Kind: storageformat.DomainCapability, ID: "future-freeze"}
+	store := newConsistencyDomainStore(memory, nil)
+	if _, err := store.mutate(ctx, reference, consistencyDomainMutation{ID: domainTestKey(0), Changes: []consistencyDomainChange{{Key: "value", Require: domainValueAbsent, Value: []byte("value")}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.freeze(ctx, reference, 12); err != nil {
+		t.Fatal(err)
+	}
+	rewriteCurrentGate(t, memory, func(gate *storageformat.WriteGate) {
+		gate.Mode, gate.CheckpointID, gate.Epoch = storageformat.GateClosing, "checkpoint", 10
+	})
+	if err := engine.finishClosingWrites(ctx, "checkpoint"); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("later-epoch domain freeze error = %v; want conflict", err)
+	}
+	snapshot, err := store.loadHead(ctx, reference)
+	if err != nil || !snapshot.head.Frozen || snapshot.head.FreezeEpoch != 12 {
+		t.Fatalf("later freeze changed: %+v, %v", snapshot.head, err)
+	}
+}

@@ -208,3 +208,48 @@ func TestSchema008CheckpointOmitsUnreachablePagesAndBlobsFromInventory(t *testin
 		t.Fatal(err)
 	}
 }
+
+// A replica can walk a checkpoint's inventory after another replica has
+// published it and moved the write gate on; its walk then reads state that
+// is no longer closed and differs from the published page. That is a lost
+// race to report as a conflict so the replica resumes, while a differing
+// page under a gate that is still closed for the checkpoint stays corruption.
+func TestCheckpointInventoryPageConflictIsAConflictOnlyOnceTheGateMovedOn(t *testing.T) {
+	ctx := context.Background()
+	for _, test := range []struct {
+		name      string
+		gateMoves bool
+		want      error
+	}{
+		{name: "gate-moved-on", gateMoves: true, want: domain.ErrConflict},
+		{name: "gate-still-closed", gateMoves: false, want: domain.ErrPreconditionFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			memory := objectmemory.New()
+			engine := openNamespaceTestEngine(t, memory)
+			if err := engine.CloseWrites(ctx, "conflicting"); err != nil {
+				t.Fatal(err)
+			}
+			pageKey := storageformat.CheckpointInventoryPageKey("conflicting", 0)
+			if _, err := memory.Put(ctx, pageKey, []byte(`{"published":"by another replica"}`), objectstore.PutCondition{Mode: objectstore.PutCreateOnly}); err != nil {
+				t.Fatal(err)
+			}
+			engine.backend = &hookedBackend{Backend: memory, get: func(callCtx context.Context, key objectstore.Key) (objectstore.Object, error) {
+				if key == pageKey && test.gateMoves {
+					rewriteCurrentGate(t, memory, func(gate *storageformat.WriteGate) {
+						gate.Mode, gate.CheckpointID = storageformat.GateOpen, ""
+						gate.Epoch++
+					})
+				}
+				return memory.Get(callCtx, key)
+			}}
+			_, err := engine.createCheckpointWhileClosed(ctx, "conflicting")
+			if !errors.Is(err, test.want) {
+				t.Fatalf("inventory page conflict error = %v; want %v", err, test.want)
+			}
+			if test.want == domain.ErrPreconditionFailed && errors.Is(err, domain.ErrConflict) {
+				t.Fatalf("conflict under a still-closed gate was downgraded: %v", err)
+			}
+		})
+	}
+}

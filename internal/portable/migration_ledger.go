@@ -748,5 +748,14 @@ func (e *Engine) resolveMigrationRunError(ctx context.Context, migration storage
 	if err == nil && complete {
 		return nil
 	}
+	// A replica that lost a race sees conflicts on objects the winner has
+	// already moved on from. When the gate no longer belongs to this
+	// migration's checkpoint, re-read and resume from the current state.
+	if errors.Is(runErr, domain.ErrConflict) {
+		if _, _, gate, gateErr := e.readGate(ctx); gateErr == nil && gate.CheckpointID != migration.checkpointID {
+			var backoff contentionBackoff
+			return backoff.wait(ctx)
+		}
+	}
 	return runErr
 }

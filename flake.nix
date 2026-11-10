@@ -369,8 +369,36 @@
       # Race detection for every package. Scale and volume tests skip under
       # -short: the race detector multiplies their cost tenfold and they hold
       # no concurrency the other tests do not; the plain gate runs them.
+      # internal/portable runs its tests mostly serially, so its one compiled
+      # binary runs as four disjoint shards that together select every test.
       raceTestCommand = ''
-        go test -race -short -timeout=30m -count=1 ./...
+        packages=()
+        while IFS= read -r package; do
+          [[ "$package" == */internal/portable ]] || packages+=("$package")
+        done < <(go list ./...)
+        race_dir="$(mktemp -d)"
+        go test -race -c -o "$race_dir/portable.test" ./internal/portable
+        mapfile -t portable_tests < <(cd internal/portable && "$race_dir/portable.test" -test.list '.*' | grep '^Test')
+        pids=()
+        go test -race -short -timeout=30m -count=1 "''${packages[@]}" &
+        pids+=("$!")
+        for shard in 0 1 2 3; do
+          selected=()
+          for index in "''${!portable_tests[@]}"; do
+            if (( index % 4 == shard )); then
+              selected+=("''${portable_tests[$index]}")
+            fi
+          done
+          pattern="^($(IFS='|'; echo "''${selected[*]}"))\$"
+          (cd internal/portable && "$race_dir/portable.test" -test.short -test.count=1 -test.timeout=30m -test.run "$pattern") &
+          pids+=("$!")
+        done
+        status=0
+        for pid in "''${pids[@]}"; do
+          wait "$pid" || status=1
+        done
+        rm -rf "$race_dir"
+        test "$status" -eq 0
       '';
     in
     {

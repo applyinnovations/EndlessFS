@@ -299,10 +299,8 @@ func (e *Engine) runFeatureOnlyStorageMigration(ctx context.Context, transition 
 
 func (e *Engine) closeFeatureOnlyMigrationGate(ctx context.Context, transition storageMigration) (bool, error) {
 	var backoff contentionBackoff
+	// backoff.wait ends the loop once ctx is cancelled.
 	for {
-		if err := ctx.Err(); err != nil {
-			return false, domain.WrapError(domain.ErrorUnavailable, fmt.Sprintf("feature-only storage migration gate contention cancelled for %s", transition.id), err)
-		}
 		object, envelope, gate, err := e.readGate(ctx)
 		if err != nil {
 			return false, err
@@ -639,10 +637,8 @@ func (e *Engine) readStoredWriterSet(ctx context.Context) (objectstore.Object, s
 
 func (e *Engine) closeStorageMigrationGate(ctx context.Context, transition storageMigration, plan aggregateMigrationPlan) (bool, error) {
 	var backoff contentionBackoff
+	// backoff.wait ends the loop once ctx is cancelled.
 	for {
-		if err := ctx.Err(); err != nil {
-			return false, domain.WrapError(domain.ErrorUnavailable, fmt.Sprintf("storage-schema migration gate contention cancelled for %s", transition.id), err)
-		}
 		object, envelope, gate, err := e.readGate(ctx)
 		if err != nil {
 			return false, err

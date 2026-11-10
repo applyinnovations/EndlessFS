@@ -32,7 +32,7 @@ func (backoff *contentionBackoff) wait(ctx context.Context) error {
 		limit = min(contentionBackoffBase<<backoff.attempt, contentionBackoffCap)
 	}
 	backoff.attempt++
-	timer := time.NewTimer(rand.N(limit) + 1)
+	timer := time.NewTimer(rand.N(limit) + 1) // #nosec G404 -- jitter only spreads retry timing; no security decision depends on it.
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():

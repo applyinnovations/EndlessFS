@@ -69,11 +69,6 @@ type fakeGCS struct {
 	unavailable               bool
 }
 
-func newGCSServer(t *testing.T) *httptest.Server {
-	server, _ := newGCSServerWithFake(t)
-	return server
-}
-
 func newGCSServerWithFake(t *testing.T) (*httptest.Server, *fakeGCS) {
 	t.Helper()
 	fake := &fakeGCS{

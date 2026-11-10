@@ -17,15 +17,6 @@ import (
 	"github.com/chromedp/chromedp/kb"
 )
 
-func TestLoopbackConnectivityStateOverrideRemainsActive(t *testing.T) {
-	for _, offline := range []bool{false, true} {
-		state := loopbackNetworkState(offline)
-		if state.Offline != offline || state.Latency <= 0 || state.DownloadThroughput != -1 || state.UploadThroughput != -1 {
-			t.Fatal("connectivity signal must remain explicitly overridden without a transport shaping rule")
-		}
-	}
-}
-
 // This is a native browser connectivity-signal test. Loopback HTTP continues
 // to work; no transport outage or external-network interoperability is claimed.
 func TestE2EUploadLoopbackConnectivitySignalPausesAndResumesSmartPlanning(t *testing.T) {

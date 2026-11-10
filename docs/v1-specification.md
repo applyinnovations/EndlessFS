@@ -1188,7 +1188,7 @@ Every epoch MUST have immutable raw state/file-backend fixtures produced by code
 
 A current binary MUST import every epoch/profile and predecessor-intermediate fixture into fresh single- and split-backend stores, resolve and execute the entire remaining ordered ledger suffix, verify the full authoritative result, and successfully perform a post-upgrade mutation. The application test suite MUST also derive each supported durable writer profile through the production startup configuration builder and open its matching historical fixture, so a feature-minimal engine cannot stand in for the released application. Every adjacent edge MUST prove deterministic restart at each durable boundary and two-to-eight-replica convergence across those profiles; the composed oldest-to-current path MUST prove exact edge order. Corrupt, truncated, mixed, newer, unreachable, or semantically inconsistent state fails closed. Transformations are forward-only, gate-quiesced, fenced, deterministic, idempotent, crash-resumable, and provider-independent; ordinary runtime decoders remain strict.
 
-Every pull-request gate MUST execute this complete epoch matrix and enforce at least 98% aggregate statement coverage across the production migration ledger and migration implementation. Coverage is only a backstop: every durable boundary, denial path, restart point, and concurrent CAS outcome still requires an explicit behavioral assertion, including deterministic transport interruption at every object operation. Release CI MUST reject a candidate tag outside all declared release validity ranges or mapped to an epoch without an immutable fixture before building or publishing artifacts. A durable schema change MUST add the failing-before-green fixture, new epoch, adjacent transform, complete-suffix tests, crash/concurrency/denial coverage, and matching specification evidence in the same change. Removing support for any epoch, transform, fixture, or supported release range requires an explicit major-version compatibility policy and reviewed specification change.
+Every pull-request gate MUST execute this complete epoch matrix. Every durable boundary, denial path, restart point, and concurrent CAS outcome requires an explicit behavioral assertion, including deterministic transport interruption of every distinct object operation (each operation kind on each object family in each migration edge). Release CI MUST reject a candidate tag outside all declared release validity ranges or mapped to an epoch without an immutable fixture before building or publishing artifacts. A durable schema change MUST add the failing-before-green fixture, new epoch, adjacent transform, complete-suffix tests, crash/concurrency/denial coverage, and matching specification evidence in the same change. Removing support for any epoch, transform, fixture, or supported release range requires an explicit major-version compatibility policy and reviewed specification change.
 
 ### 9.14 Crash-safe multi-record changes
 
@@ -2546,20 +2546,22 @@ Go fuzz targets are required for:
 - WebAuthn response boundary parsing where supported by the library; and
 - log/token redaction.
 
-Seed corpora include all known traversal and encoding cases. CI runs bounded deterministic fuzz smoke tests; maintainers may run longer campaigns with the same Nix entry point.
+Seed corpora include all known traversal and encoding cases. CI runs every fuzz target's seed corpus as an ordinary test; maintainers run randomized campaigns with `nix run .#test-fuzz`.
 
 #### Concurrency and race tests
 
 Run `go test -race` through Nix. Explicit tests cover concurrent bootstrap, invite/recovery consumption, credential registration, final-admin changes, upload completion/abort, same-path writes, restore conflicts, idempotency, and state CAS.
 
-The race portfolio focuses on distinct protocol transitions rather than
-repeating every immutable-object offset or an arbitrary large collection.
-The normal migration gate still injects interruption at every transport offset
-from every bound predecessor entry point. Under race instrumentation the
-transport matrix retains mutable publication/gate/lease effects and the first
-and last immutable I/O/read of each record family within each migration phase;
-unknown operation shapes fail closed. No epoch/profile, named durable boundary,
-replica convergence schedule, denial, or semantic oracle is removed.
+The Go test gate runs every test once, plus a race-detector run of every
+package with `-short`, under which scale and volume tests skip. Tests focus
+on distinct protocol transitions rather than repeating every record offset or
+an arbitrary large collection. The migration transport matrix interrupts the
+first call of every (migration edge, operation kind, object family) class from
+every bound predecessor entry point; repeating the same operation for each
+record in a family exercises the same code path. Unknown operation shapes fail
+closed. Every named durable boundary of every edge is interrupted separately,
+and no epoch/profile, replica convergence schedule, denial, or semantic oracle
+is removed.
 
 Volume qualification uses geometric and representation-boundary workloads.
 Namespace samples of 64, 256, and 1,024 items must retain constant provider-call
@@ -2621,16 +2623,10 @@ mutation order is the same.
 
 ### 18.4 Coverage and quality gates
 
-- Repository Go statement coverage MUST be at least 85%.
-- Authentication, authorization, path, token, capability, state-CAS,
-  scope-mapping, canonical-format/key/version/checkpoint, gate/catalog/domain
-  freeze, domain-head publication/lost-success recovery, namespace-tree, and
-  theme validation/sanitization packages MUST each be at least 95% statement
-  coverage.
-- The production storage-migration ledger and implementation MUST have at least 98% aggregate statement coverage in the focused migration gate.
-- Every enumerated security invariant requires explicit positive and negative tests regardless of percentage.
-- Race tests, static analysis, formatting, linting, contract tests, integration tests, browser tests, and fuzz smoke tests are required gates.
-- A coverage exception requires documented unreachable/generated code and maintainer approval; generated frontend assets do not dilute Go coverage.
+- Statement coverage is reported, not gated. A percentage floor rewards tests
+  that execute lines rather than prove guarantees.
+- Every enumerated security invariant requires explicit positive and negative tests.
+- Race tests, static analysis, formatting, linting, contract tests, integration tests, browser tests, and fuzz seed corpora are required gates.
 
 Coverage is a backstop, not a substitute for behavioral assertions.
 

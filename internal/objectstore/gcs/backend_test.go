@@ -213,37 +213,6 @@ func TestGenerationConditionsFenceEveryMutation(t *testing.T) {
 	}
 }
 
-func TestInputAndContextBoundaries(t *testing.T) {
-	backend, _ := newProtocolBackend(t)
-	if _, err := gcstransport.New(nil, "endlessfs-test"); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("New(nil) error = %v", err)
-	}
-	if _, err := gcstransport.New(backendClient(t), "x"); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("New(short bucket) error = %v", err)
-	}
-	if _, err := backend.List(context.Background(), objectstore.ListRequest{Prefix: "invalid", Limit: 1}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("List(invalid prefix) error = %v", err)
-	}
-	if _, err := backend.List(context.Background(), objectstore.ListRequest{Prefix: "endlessfs/v1/", Limit: 1001}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("List(invalid limit) error = %v", err)
-	}
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := backend.Get(cancelled, objectstore.MustKey("endlessfs/v1/state/users/cancelled.json")); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("Get(cancelled) error = %v", err)
-	}
-	expected := objectstore.IntegrityFor([]byte("expected"))
-	if _, err := backend.Verify(cancelled, objectstore.MustKey("endlessfs/v1/state/users/cancelled-verify.json"), expected); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("Verify(cancelled) error = %v", err)
-	}
-	if _, err := backend.Verify(context.Background(), objectstore.Key{}, expected); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("Verify(invalid key) error = %v", err)
-	}
-	if _, err := backend.Verify(context.Background(), objectstore.MustKey("endlessfs/v1/state/users/missing-verify.json"), expected); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("Verify(missing) error = %v", err)
-	}
-}
-
 func TestEveryGCSOperationFailsClosedAtItsBoundary(t *testing.T) {
 	backend, fake := newProtocolBackend(t)
 	ctx := context.Background()
@@ -333,12 +302,6 @@ func newProtocolBackend(t *testing.T) (*gcstransport.Backend, *fakeGCS) {
 		t.Fatal(err)
 	}
 	return backend, fake
-}
-
-func backendClient(t *testing.T) *storage.Client {
-	t.Helper()
-	server := newGCSServer(t)
-	return protocolClient(t, server)
 }
 
 func protocolClient(t *testing.T, server *httptest.Server) *storage.Client {

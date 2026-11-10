@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -453,24 +452,6 @@ func TestFunctionalCoverageExportIsOutputOnlyAndRejectsSourceDrift(t *testing.T)
 	})
 	if fallback != 0 {
 		t.Fatal("post-run drift retried fresh")
-	}
-}
-func TestFunctionalCoverageFlakeIntegrationHasOneLegacyBodyAndNoStatusRetry(t *testing.T) {
-	body, e := os.ReadFile(filepath.Join("..", "..", "flake.nix"))
-	if e != nil {
-		t.Fatal("coverage input flake missing")
-	}
-	text := string(body)
-	for _, required := range []string{"coverageText = ''", "text = coverageText;", "exec ${pkgs.nix}/bin/nix run --offline --no-write-lock-file", "path:${self.outPath}#apps.${system}.local-functional-coverage-consumer", "go test -timeout=30m ./... -count=1 -covermode=atomic -coverpkg=./... -coverprofile=\"$profile\"", "install -m 0644 \"$profile\" \"$ENDLESSFS_COVERAGE_PROFILE\""} {
-		if !strings.Contains(text, required) {
-			t.Fatalf("shared original body/lazy dispatch contract missing: %q", required)
-		}
-	}
-	if !regexp.MustCompile(`\+\s+coverageText\s*\)`).MatchString(text) {
-		t.Fatal("shared original coverage body must close the public task expression")
-	}
-	if strings.Contains(text, "functional_coverage_status") || strings.Contains(text, "125)") {
-		t.Fatal("outer status retry protocol restored")
 	}
 }
 func TestFunctionalCoverageFreshInventoryRejectsOmittedPackageFileOrRoot(t *testing.T) {

@@ -17,6 +17,9 @@ import (
 )
 
 func TestUploadBatchLargeMetadataAdmission(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	finishPhase := startIterationPhase(t, iterationFixtureWait, [4]*providerbudget.Ledger{})
 	parallelCorrectiveHeavyFixture(t)
 	finishPhase(true)

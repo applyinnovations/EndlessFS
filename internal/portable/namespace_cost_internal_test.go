@@ -81,6 +81,9 @@ func (backend *namespaceCostBackend) costs() (gets, puts, copies, deletes int) {
 }
 
 func TestNamespaceFolderMoveCostDoesNotScaleWithDescendants(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	measure := func(t *testing.T, descendants int) (int, int, int, int) {
 		t.Helper()
 		ctx := context.Background()

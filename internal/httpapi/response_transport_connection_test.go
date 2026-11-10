@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -11,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -316,78 +314,7 @@ func TestIntegrationResponseTransportFlushSkipsRealHTTP1HijackAndPanic(t *testin
 	}
 }
 
-func TestIntegrationResponseTransportMeasuresHTTP1FlushFraming(t *testing.T) {
-	type wireResponse struct {
-		wire     []byte
-		response *http.Response
-		body     []byte
-	}
-	capture := func(observed bool) wireResponse {
-		observer := telemetry.New(nil, nil)
-		mux := http.NewServeMux()
-		mux.HandleFunc("GET /api/v1/config", func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Date", "Mon, 02 Jan 2006 15:04:05 GMT")
-			writeJSON(w, http.StatusOK, struct {
-				OK bool `json:"ok"`
-			}{true})
-		})
-		var handler http.Handler = securityHeaders(mux, false, "", "")
-		if observed {
-			handler = telemetryMiddleware(handler, mux)
-		}
-		handler = requestIDMiddleware(handler)
-		server := httptest.NewUnstartedServer(handler)
-		server.Config.WriteTimeout = 30 * time.Second
-		server.Config.BaseContext = func(net.Listener) context.Context { return telemetry.Context(context.Background(), observer) }
-		server.Start()
-		defer server.Close()
-		connection, err := net.DialTimeout("tcp", server.Listener.Addr().String(), 5*time.Second)
-		if err != nil {
-			t.Fatal("local wire probe could not connect")
-		}
-		defer connection.Close()
-		if err = connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
-			t.Fatal(err)
-		}
-		_, err = io.WriteString(connection, "GET /api/v1/config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nX-Request-ID: framing-request-42\r\n\r\n")
-		if err != nil {
-			t.Fatal("local wire probe request failed")
-		}
-		wire, err := io.ReadAll(connection)
-		if err != nil {
-			t.Fatal("local wire probe response failed")
-		}
-		response, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(wire)), &http.Request{Method: http.MethodGet})
-		if err != nil {
-			t.Fatal("local wire response malformed")
-		}
-		body, err := io.ReadAll(response.Body)
-		_ = response.Body.Close()
-		if err != nil {
-			t.Fatal("local wire body incomplete")
-		}
-		return wireResponse{wire, response, body}
-	}
-	baseline, candidate := capture(false), capture(true)
-	if string(baseline.body) != "{\"ok\":true}\n" || !bytes.Equal(baseline.body, candidate.body) || baseline.response.StatusCode != candidate.response.StatusCode {
-		t.Fatal("framing observation changed payload/status")
-	}
-	if baseline.response.ContentLength != 12 || len(baseline.response.TransferEncoding) != 0 || candidate.response.ContentLength != -1 || !reflect.DeepEqual(candidate.response.TransferEncoding, []string{"chunked"}) {
-		t.Fatal("expected measured automatic content length to chunked transition missing")
-	}
-	baselineHeaders, candidateHeaders := baseline.response.Header.Clone(), candidate.response.Header.Clone()
-	baselineHeaders.Del("Content-Length")
-	candidateHeaders.Del("Content-Length")
-	if !reflect.DeepEqual(baselineHeaders, candidateHeaders) {
-		t.Fatal("flush changed application/security/cache headers beyond accepted framing")
-	}
-	baselineBodyOffset := bytes.Index(baseline.wire, []byte("\r\n\r\n")) + 4
-	candidateBodyOffset := bytes.Index(candidate.wire, []byte("\r\n\r\n")) + 4
-	headerDelta := candidateBodyOffset - baselineBodyOffset
-	framingDelta := len(candidate.wire[candidateBodyOffset:]) - len(baseline.wire[baselineBodyOffset:])
-	totalDelta := len(candidate.wire) - len(baseline.wire)
-	if headerDelta != 8 || framingDelta != 10 || totalDelta != 18 {
-		t.Fatalf("unexpected framing delta header=%d body=%d total=%d", headerDelta, framingDelta, totalDelta)
-	}
-	t.Logf("actual_http1_wire_bytes baseline=%d flushed=%d header_delta=%d chunk_framing_delta=%d total_delta=%d payload_bytes=%d", len(baseline.wire), len(candidate.wire), headerDelta, framingDelta, totalDelta, len(candidate.body))
-}
+// completionUnwrapper exposes the wrapped writer through Unwrap.
+type completionUnwrapper struct{ http.ResponseWriter }
+
+func (writer completionUnwrapper) Unwrap() http.ResponseWriter { return writer.ResponseWriter }

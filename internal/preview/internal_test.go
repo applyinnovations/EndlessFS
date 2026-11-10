@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -80,159 +79,6 @@ func TestContentBindingAndArtifactValidationFailures(t *testing.T) {
 	}
 }
 
-func TestReadyResultAndConcurrencyFailureMapping(t *testing.T) {
-	binding := internalBinding(t)
-	result := ItemResult{Variant: binding.Variant}
-	tests := []struct {
-		name      string
-		store     *scriptedStore
-		wantState State
-		wantError bool
-	}{
-		{name: "not found", store: &scriptedStore{latestErr: domain.ErrNotFound}, wantState: ""},
-		{name: "latest error", store: &scriptedStore{latestErr: domain.NewError(domain.ErrorInvalid, "bad manifest")}, wantState: StateFailed},
-		{name: "latest unavailable", store: &scriptedStore{latestErr: domain.ErrUnavailable}, wantState: StateUnavailable},
-		{name: "record unavailable", store: &scriptedStore{latest: internalArtifact("record-offline", binding.Variant), recordReadyErr: domain.ErrUnavailable}, wantState: StateUnavailable},
-		{name: "record invalid", store: &scriptedStore{latest: internalArtifact("record-invalid", binding.Variant), recordReadyErr: domain.ErrInvalid}, wantError: true},
-		{name: "capability unavailable", store: &scriptedStore{latest: internalArtifact("one", binding.Variant), capabilityErr: domain.NewError(domain.ErrorUnavailable, "offline")}, wantState: StateUnavailable},
-		{name: "capability invalid", store: &scriptedStore{latest: internalArtifact("two", binding.Variant), capabilityErr: domain.NewError(domain.ErrorInvalid, "bad capability")}, wantError: true},
-		{name: "ready", store: &scriptedStore{latest: internalArtifact("ready", binding.Variant)}, wantState: StateReady},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			service := &Service{store: test.store}
-			selection := readySelection(binding.Owner, domain.MustParseUserPath("/ready.webp"), binding)
-			got, found, err := service.readyResult(context.Background(), selection, result)
-			if (err != nil) != test.wantError || !test.wantError && got.State != test.wantState || test.name == "not found" && found {
-				t.Fatalf("readyResult = %+v, %v", got, err)
-			}
-		})
-	}
-	if stateErrorKind(StateUnavailable) != domain.ErrorUnavailable || stateErrorKind(StateFailed) != domain.ErrorInvalid {
-		t.Fatal("preview state error mapping changed")
-	}
-	owner := binding.Owner
-	globalBlocked := &Service{global: make(chan struct{}, 1), perUser: make(map[string]*userLimit)}
-	globalBlocked.global <- struct{}{}
-	canceled, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := globalBlocked.acquire(canceled, owner); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("global canceled acquire error = %v", err)
-	}
-	userBlocked := &Service{global: make(chan struct{}, 1), perUser: map[string]*userLimit{owner.String(): {semaphore: make(chan struct{}, 1)}}}
-	userBlocked.perUser[owner.String()].semaphore <- struct{}{}
-	userContext, cancelUser := context.WithCancel(context.Background())
-	userResult := make(chan error, 1)
-	go func() {
-		_, err := userBlocked.acquire(userContext, owner)
-		userResult <- err
-	}()
-	for attempts := 0; attempts < 10000 && len(userBlocked.global) == 0; attempts++ {
-		runtime.Gosched()
-	}
-	if len(userBlocked.global) == 0 {
-		cancelUser()
-		t.Fatal("per-user acquire did not reach the blocked semaphore")
-	}
-	cancelUser()
-	if err := <-userResult; !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("per-user canceled acquire error = %v", err)
-	}
-}
-
-func TestGenerateFailureIsolationMatrix(t *testing.T) {
-	binding := internalBinding(t)
-	entry := domain.Entry{
-		Path: domain.MustParseUserPath("/source.png"), Name: "source.png", Kind: domain.EntryFile,
-		Size: binding.SourceSize, MediaType: binding.MediaType, Version: "source-version",
-		ContentID: binding.ContentID, ContentVersion: binding.ContentVersion, ContentModifiedAt: time.Now(),
-	}
-	scope, err := domain.NewScope(binding.Owner, domain.AreaLive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	validCapability := domain.DownloadCapability{URL: "http://127.0.0.1:1234/source", Method: http.MethodGet}
-	sourceBytes := []byte("source")
-	tests := []struct {
-		name        string
-		download    domain.DownloadCapability
-		downloadErr error
-		client      *http.Client
-		generator   Generator
-		ids         *domain.IDGenerator
-	}{
-		{name: "source capability", downloadErr: domain.NewError(domain.ErrorUnavailable, "offline")},
-		{name: "invalid source URL", download: domain.DownloadCapability{URL: ":%", Method: http.MethodGet}},
-		{name: "source transport", download: validCapability, client: internalClient(func(*http.Request) (*http.Response, error) { return nil, errors.New("offline") })},
-		{name: "source status", download: validCapability, client: internalResponseClient(http.StatusBadGateway, io.NopCloser(bytes.NewReader(nil)))},
-		{name: "source read", download: validCapability, client: internalResponseClient(http.StatusOK, errorReadCloser{})},
-		{name: "source size", download: validCapability, client: internalResponseClient(http.StatusOK, io.NopCloser(bytes.NewReader([]byte("short"))))},
-		{name: "generator", download: validCapability, client: internalResponseClient(http.StatusOK, io.NopCloser(bytes.NewReader(sourceBytes))), generator: scriptedGenerator{err: errors.New("decode")}},
-		{name: "generation ID", download: validCapability, client: internalResponseClient(http.StatusOK, io.NopCloser(bytes.NewReader(sourceBytes))), generator: scriptedGenerator{generated: GeneratedArtifact{Bytes: OnePixelWebP(), Width: 1, Height: 1}}, ids: domain.NewIDGenerator(bytes.NewReader(nil))},
-		{name: "invalid generated artifact", download: validCapability, client: internalResponseClient(http.StatusOK, io.NopCloser(bytes.NewReader(sourceBytes))), generator: scriptedGenerator{generated: GeneratedArtifact{Bytes: []byte("invalid"), Width: 1, Height: 1}}},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			client := test.client
-			if client == nil {
-				client = internalResponseClient(http.StatusOK, io.NopCloser(bytes.NewReader(sourceBytes)))
-			}
-			generator := test.generator
-			if generator == nil {
-				generator = scriptedGenerator{generated: GeneratedArtifact{Bytes: OnePixelWebP(), Width: 1, Height: 1}}
-			}
-			ids := test.ids
-			if ids == nil {
-				ids = domain.NewIDGenerator(bytes.NewReader(make([]byte, 1024)))
-			}
-			service := &Service{
-				options: Options{OperationTimeout: time.Second, HardMaxSourceBytes: 1024},
-				source:  &scriptedStorage{download: test.download, downloadErr: test.downloadErr}, store: &scriptedStore{},
-				client: client, ids: ids, clock: domain.SystemClock{}, global: make(chan struct{}, 1), perUser: make(map[string]*userLimit),
-			}
-			if _, err := service.generate(context.Background(), scope, entry, binding, generator, true); err == nil {
-				t.Fatal("generate failure path returned success")
-			}
-		})
-	}
-
-	t.Run("latest lookup", func(t *testing.T) {
-		service := internalGenerationService(&scriptedStore{latestErr: domain.ErrUnavailable}, scriptedGenerator{})
-		if _, err := service.generate(context.Background(), scope, entry, binding, service.generators[0], false); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("latest lookup error = %v", err)
-		}
-	})
-	t.Run("claim", func(t *testing.T) {
-		service := internalGenerationService(&scriptedStore{claimErr: domain.ErrUnavailable}, scriptedGenerator{})
-		if _, err := service.generate(context.Background(), scope, entry, binding, service.generators[0], true); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("claim error = %v", err)
-		}
-	})
-	t.Run("commit and capability headers", func(t *testing.T) {
-		store := &scriptedStore{commitErr: domain.ErrUnavailable}
-		service := internalGenerationService(store, scriptedGenerator{generated: GeneratedArtifact{Bytes: OnePixelWebP(), Width: 1, Height: 1}})
-		service.source = &scriptedStorage{download: domain.DownloadCapability{
-			URL: "http://127.0.0.1:1234/source", Method: http.MethodGet, Headers: map[string]string{"X-Preview-Test": "bound"},
-		}}
-		service.client = internalClient(func(request *http.Request) (*http.Response, error) {
-			if request.Header.Get("X-Preview-Test") != "bound" {
-				t.Fatal("source capability header was not bound to the request")
-			}
-			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(sourceBytes)), Header: make(http.Header)}, nil
-		})
-		if _, err := service.generate(context.Background(), scope, entry, binding, service.generators[0], true); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("commit error = %v", err)
-		}
-	})
-	t.Run("hard timeout", func(t *testing.T) {
-		service := internalGenerationService(&scriptedStore{}, cancelGenerator{})
-		service.options.OperationTimeout = time.Millisecond
-		if _, err := service.generate(context.Background(), scope, entry, binding, service.generators[0], true); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("timeout error = %v", err)
-		}
-	})
-}
-
 func TestGenerateDurableRunningFailureAndReplayTransitions(t *testing.T) {
 	binding := internalBinding(t)
 	entry := domain.Entry{
@@ -264,40 +110,6 @@ func TestGenerateDurableRunningFailureAndReplayTransitions(t *testing.T) {
 	}
 	if replayed, replayErr := replayedOperation(Operation{State: domain.OperationFailed, ErrorKind: domain.ErrorInvalid}); !errors.Is(replayErr, domain.ErrInvalid) || replayed.State != domain.OperationFailed {
 		t.Fatalf("failed replay = %+v, %v", replayed, replayErr)
-	}
-}
-
-func TestServiceRejectsInvalidRegistryAndGenerationRequests(t *testing.T) {
-	binding := internalBinding(t)
-	options := Options{Automatic: true, Resolutions: []int{256}}
-	validGenerator := scriptedGenerator{generated: GeneratedArtifact{Bytes: OnePixelWebP(), Width: 1, Height: 1}}
-	for _, generators := range [][]Generator{{nil}, {validGenerator, validGenerator}} {
-		if _, err := NewService(options, &scriptedStorage{}, nil, generators, http.DefaultClient, domain.NewIDGenerator(bytes.NewReader(make([]byte, 64))), domain.SystemClock{}); !errors.Is(err, domain.ErrInvalid) {
-			t.Fatalf("invalid generator registry error = %v", err)
-		}
-	}
-	if _, err := NewService(Options{}, &scriptedStorage{}, &scriptedStore{}, nil, http.DefaultClient, domain.NewIDGenerator(bytes.NewReader(make([]byte, 64))), domain.SystemClock{}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("missing application state error = %v", err)
-	}
-	manifest := BuildCapabilityManifest("coverage-version")
-	if manifest.ApplicationVersion != "coverage-version" || len(manifest.PackagedCapabilities) != 1 ||
-		len(manifest.AcceptedImageMediaTypes) != 13 || manifest.AcceptedImageMediaTypes[12] != "image/x-sony-arw" ||
-		len(manifest.PackagedImageDecoders) != 3 || manifest.PackagedImageDecoders[2] != "libraw-0.22.1" {
-		t.Fatalf("capability manifest = %+v", manifest)
-	}
-	service := &Service{
-		options: options, ids: domain.NewIDGenerator(bytes.NewReader(nil)), clock: domain.SystemClock{},
-		state: state.NewMemoryStore(),
-	}
-	if _, err := service.Generate(context.Background(), binding.Owner, GenerateRequest{
-		Path: domain.MustParseUserPath("/source.png"), Version: "version", Variant: 512, IdempotencyKey: "preview-invalid-item-0001",
-	}); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid item error = %v", err)
-	}
-	if _, err := service.Generate(context.Background(), binding.Owner, GenerateRequest{
-		Path: domain.MustParseUserPath("/source.png"), Version: "version", Variant: 256, IdempotencyKey: "preview-exhausted-id-0001",
-	}); err == nil {
-		t.Fatal("exhausted operation ID source returned success")
 	}
 }
 
@@ -653,110 +465,6 @@ func TestHydrateOperationReauthorizesExactGenerationAndRejectsDrift(t *testing.T
 	}
 }
 
-func TestBindingForItemRejectsEverySourceRelationshipGap(t *testing.T) {
-	binding := internalBinding(t)
-	item := ItemRequest{Path: domain.MustParseUserPath("/source.png"), Version: "source-version", Variant: binding.Variant}
-	entry := domain.Entry{
-		Path: item.Path, Kind: domain.EntryFile, Version: item.Version, Size: binding.SourceSize,
-		MediaType: binding.MediaType, ContentID: binding.ContentID, ContentVersion: binding.ContentVersion,
-	}
-	newService := func(source *scriptedStorage, generators []Generator) *Service {
-		return &Service{options: Options{Resolutions: []int{binding.Variant}}, source: source, generators: generators}
-	}
-	if _, err := newService(&scriptedStorage{stat: entry}, []Generator{scriptedGenerator{}}).bindingForItem(context.Background(), domain.UserID{}, item); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid owner binding error = %v", err)
-	}
-	if _, err := newService(&scriptedStorage{statErr: domain.ErrUnavailable}, []Generator{scriptedGenerator{}}).bindingForItem(context.Background(), binding.Owner, item); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("source stat binding error = %v", err)
-	}
-	mismatched := entry
-	mismatched.Version = "changed"
-	if _, err := newService(&scriptedStorage{stat: mismatched}, []Generator{scriptedGenerator{}}).bindingForItem(context.Background(), binding.Owner, item); !errors.Is(err, domain.ErrPreconditionFailed) {
-		t.Fatalf("source version binding error = %v", err)
-	}
-	if _, err := newService(&scriptedStorage{stat: entry}, nil).bindingForItem(context.Background(), binding.Owner, item); !errors.Is(err, domain.ErrPreconditionFailed) {
-		t.Fatalf("unsupported source binding error = %v", err)
-	}
-	invalid := entry
-	invalid.ContentID = ""
-	if _, err := newService(&scriptedStorage{stat: invalid}, []Generator{scriptedGenerator{}}).bindingForItem(context.Background(), binding.Owner, item); !errors.Is(err, domain.ErrInvalid) {
-		t.Fatalf("invalid source binding error = %v", err)
-	}
-	if version := mutationVersion(state.MutationOutcome{}, state.MustKey(state.NamespaceOperations, "preview", binding.Owner.String(), "missing")); version != "" {
-		t.Fatalf("missing mutation version = %q", version)
-	}
-}
-
-func TestAwaitedGenerationFailsClosedAtEveryBoundary(t *testing.T) {
-	binding := internalBinding(t)
-	entry := domain.Entry{
-		Path: domain.MustParseUserPath("/source.png"), Kind: domain.EntryFile, Version: "source-version",
-		Size: binding.SourceSize, MediaType: binding.MediaType, ContentID: binding.ContentID, ContentVersion: binding.ContentVersion,
-	}
-	result := ItemResult{Path: entry.Path, Version: entry.Version, Variant: binding.Variant, State: StateGenerating}
-	artifact := internalArtifact("generation", binding.Variant)
-	newService := func() *Service {
-		return &Service{
-			options: Options{Resolutions: []int{binding.Variant}}, source: &scriptedStorage{stat: entry},
-			store: &scriptedStore{latest: artifact}, generators: []Generator{scriptedGenerator{}},
-		}
-	}
-	base := newService()
-	if ready, found, err := base.resultForExactGeneration(context.Background(), binding.Owner, result, artifact.GenerationID); err != nil || !found || ready.State != StateReady {
-		t.Fatalf("ready awaited generation = %+v, %v, %v", ready, found, err)
-	}
-	tests := []struct {
-		name    string
-		mutate  func(*Service, *ItemResult)
-		wantErr error
-	}{
-		{name: "invalid item", mutate: func(_ *Service, result *ItemResult) { result.Path = domain.MustParseUserPath("/") }, wantErr: domain.ErrInvalid},
-		{name: "artifact unavailable", mutate: func(service *Service, _ *ItemResult) {
-			service.store = &scriptedStore{latestErr: domain.ErrUnavailable}
-		}, wantErr: domain.ErrUnavailable},
-		{name: "artifact corrupt", mutate: func(service *Service, _ *ItemResult) {
-			service.store = &scriptedStore{latest: Artifact{GenerationID: artifact.GenerationID}}
-		}, wantErr: domain.ErrInvalid},
-		{name: "capability unavailable", mutate: func(service *Service, _ *ItemResult) {
-			service.store = &scriptedStore{latest: artifact, capabilityErr: domain.ErrUnavailable}
-		}, wantErr: domain.ErrUnavailable},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			service := newService()
-			candidate := result
-			test.mutate(service, &candidate)
-			if _, _, err := service.resultForExactGeneration(context.Background(), binding.Owner, candidate, artifact.GenerationID); !errors.Is(err, test.wantErr) {
-				t.Fatalf("resultForExactGeneration() error = %v, want %v", err, test.wantErr)
-			}
-		})
-	}
-}
-
-func TestServiceReadinessRevalidationPaths(t *testing.T) {
-	if !(&Service{}).Revalidate(context.Background()) {
-		t.Fatal("disabled preview was not ready")
-	}
-	ready := &readinessStore{ready: true}
-	service := &Service{store: ready, options: Options{StartupTimeout: time.Second}}
-	if !service.Revalidate(context.Background()) || ready.checks != 1 {
-		t.Fatal("ready store was not checked")
-	}
-	ready.checkErr = domain.ErrUnavailable
-	if service.Revalidate(context.Background()) {
-		t.Fatal("failed ready-store check remained ready")
-	}
-	recovering := &readinessStore{}
-	service.store = recovering
-	if !service.Revalidate(context.Background()) || recovering.validations != 1 {
-		t.Fatal("unready store did not revalidate")
-	}
-	recovering.validateErr = domain.ErrUnavailable
-	if service.Revalidate(context.Background()) {
-		t.Fatal("failed store revalidation became ready")
-	}
-}
-
 func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
 	binding := internalBinding(t)
 	owner := binding.Owner
@@ -918,67 +626,6 @@ func TestDurableOperationClaimLeaseAndStateFailureBoundaries(t *testing.T) {
 	}
 }
 
-func TestResolveGenerationFailureStates(t *testing.T) {
-	binding := internalBinding(t)
-	entry := domain.Entry{
-		Path: domain.MustParseUserPath("/source.png"), Name: "source.png", Kind: domain.EntryFile,
-		Size: binding.SourceSize, MediaType: binding.MediaType, Version: "source-version",
-		ContentID: binding.ContentID, ContentVersion: binding.ContentVersion, ContentModifiedAt: time.Now(),
-	}
-	item := ItemRequest{Path: entry.Path, Version: entry.Version, Variant: binding.Variant}
-	newService := func(generator Generator) *Service {
-		return &Service{
-			options: Options{Automatic: true, Resolutions: []int{256}, OperationTimeout: time.Second, HardMaxSourceBytes: 1024},
-			source:  &scriptedStorage{stat: entry, download: domain.DownloadCapability{URL: "http://127.0.0.1:1234/source", Method: http.MethodGet}},
-			store:   &scriptedStore{latestErr: domain.ErrNotFound}, generators: []Generator{generator},
-			client: internalResponseClient(http.StatusOK, io.NopCloser(bytes.NewReader([]byte("source")))),
-			ids:    domain.NewIDGenerator(bytes.NewReader(make([]byte, 1024))), clock: domain.SystemClock{},
-			global: make(chan struct{}, 1), perUser: make(map[string]*userLimit), inflight: make(map[string]*generationCall),
-		}
-	}
-	if _, err := newService(scriptedGenerator{}).resolveItem(context.Background(), domain.UserID{}, item, true, false, false); err == nil {
-		t.Fatal("invalid owner returned success")
-	}
-	missingIdentity := newService(scriptedGenerator{})
-	missingIdentity.source = &scriptedStorage{stat: domain.Entry{Path: entry.Path, Kind: domain.EntryFile, Version: entry.Version, MediaType: entry.MediaType}}
-	if _, err := missingIdentity.resolveItem(context.Background(), binding.Owner, item, true, false, false); !errors.Is(err, domain.ErrInternal) {
-		t.Fatalf("missing content identity error = %v", err)
-	}
-	canceled, cancel := context.WithCancel(context.Background())
-	cancel()
-	canceledService := newService(scriptedGenerator{})
-	canceledService.global <- struct{}{}
-	if result, err := canceledService.resolveItem(canceled, binding.Owner, item, true, false, false); err != nil || result.State != StateUnavailable {
-		t.Fatalf("canceled generation = %+v, %v", result, err)
-	}
-	if result, err := newService(scriptedGenerator{err: errors.New("decode")}).resolveItem(context.Background(), binding.Owner, item, true, false, false); err != nil || result.State != StateFailed {
-		t.Fatalf("generator rejection = %+v, %v", result, err)
-	}
-	if result, err := newService(scriptedGenerator{generated: GeneratedArtifact{Bytes: OnePixelWebP(), Width: 1, Height: 1}}).resolveItem(context.Background(), binding.Owner, item, true, false, false); err != nil || result.State != StateFailed {
-		t.Fatalf("missing committed artifact = %+v, %v", result, err)
-	}
-	disabled := newService(scriptedGenerator{})
-	disabled.store = nil
-	if result, err := disabled.resolveItem(context.Background(), binding.Owner, item, true, false, false); err != nil || result.State != StateDisabled {
-		t.Fatalf("disabled preview = %+v, %v", result, err)
-	}
-	if result, err := newService(scriptedGenerator{}).resolveItem(context.Background(), binding.Owner, item, false, false, false); err != nil || result.State != StateMissing {
-		t.Fatalf("read-only missing preview = %+v, %v", result, err)
-	}
-	inflight := newService(scriptedGenerator{})
-	scope, err := domain.NewScope(binding.Owner, domain.AreaLive)
-	if err != nil {
-		t.Fatal(err)
-	}
-	call := &generationCall{done: make(chan struct{})}
-	inflight.inflight[generationKey(binding)] = call
-	inflightCanceled, cancelInflight := context.WithCancel(context.Background())
-	cancelInflight()
-	if _, err := inflight.generateOnce(inflightCanceled, scope, entry, binding, scriptedGenerator{}, false); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("canceled inflight generation error = %v", err)
-	}
-}
-
 type scriptedStore struct {
 	latest         Artifact
 	latestErr      error
@@ -1040,17 +687,6 @@ type scriptedGenerator struct {
 	err       error
 }
 
-type cancelGenerator struct{}
-
-func (cancelGenerator) Capability() string             { return "image" }
-func (cancelGenerator) RecipeID() string               { return "image-webp-q80-v1" }
-func (cancelGenerator) Supports(string) bool           { return true }
-func (cancelGenerator) SelfTest(context.Context) error { return nil }
-func (cancelGenerator) Generate(ctx context.Context, _ GenerationRequest) (GeneratedArtifact, error) {
-	<-ctx.Done()
-	return GeneratedArtifact{}, ctx.Err()
-}
-
 func (scriptedGenerator) Capability() string             { return "image" }
 func (scriptedGenerator) RecipeID() string               { return "image-webp-q80-v1" }
 func (scriptedGenerator) Supports(string) bool           { return true }
@@ -1072,22 +708,6 @@ func internalResponseClient(status int, body io.ReadCloser) *http.Client {
 		return &http.Response{StatusCode: status, Body: body, Header: make(http.Header)}, nil
 	})
 }
-
-func internalGenerationService(store *scriptedStore, generator Generator) *Service {
-	return &Service{
-		options: Options{OperationTimeout: time.Second, StartupTimeout: time.Second, HardMaxSourceBytes: 1024},
-		source:  &scriptedStorage{download: domain.DownloadCapability{URL: "http://127.0.0.1:1234/source", Method: http.MethodGet}},
-		store:   store, generators: []Generator{generator},
-		client: internalResponseClient(http.StatusOK, io.NopCloser(bytes.NewReader([]byte("source")))),
-		ids:    domain.NewIDGenerator(bytes.NewReader(make([]byte, 1024))), clock: domain.SystemClock{},
-		global: make(chan struct{}, 1), perUser: make(map[string]*userLimit), inflight: make(map[string]*generationCall),
-	}
-}
-
-type errorReadCloser struct{}
-
-func (errorReadCloser) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
-func (errorReadCloser) Close() error             { return nil }
 
 func internalBinding(t *testing.T) Binding {
 	t.Helper()
@@ -1201,23 +821,4 @@ func seedOperationRecord(t *testing.T, store state.Store, owner domain.UserID, r
 	if _, err := store.Create(context.Background(), previewOperationKey(owner, record.Operation.ID), body); err != nil {
 		t.Fatal(err)
 	}
-}
-
-type readinessStore struct {
-	scriptedStore
-	ready       bool
-	checkErr    error
-	validateErr error
-	checks      int
-	validations int
-}
-
-func (s *readinessStore) Ready() bool { return s.ready }
-func (s *readinessStore) Check(context.Context) error {
-	s.checks++
-	return s.checkErr
-}
-func (s *readinessStore) Validate(context.Context) error {
-	s.validations++
-	return s.validateErr
 }

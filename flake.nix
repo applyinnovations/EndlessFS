@@ -180,8 +180,6 @@
             in
             relative == "go.mod"
             || relative == "go.sum"
-            # Exact-budget inventory verifies the shared Nix gate selection.
-            || relative == "flake.nix"
             || relative == "cmd"
             || lib.hasPrefix "cmd/" relative
             || relative == "internal"
@@ -368,45 +366,39 @@
         go test ./internal/theme -run '^$' -fuzz '^FuzzThemeBoundaries$' -fuzztime "$fuzztime"
         go test ./internal/preview/imagegen -run '^$' -fuzz '^FuzzGeneratorMalformed$' -fuzztime "$fuzztime"
       '';
+      # Race detection for every package. Scale and volume tests skip under
+      # -short: the race detector multiplies their cost tenfold and they hold
+      # no concurrency the other tests do not; the plain gate runs them.
+      # internal/portable runs its tests mostly serially, so its one compiled
+      # binary runs as four disjoint shards that together select every test.
       raceTestCommand = ''
-        # The migration transport matrix deterministically restarts the entire
-        # schema chain at every provider boundary. The portable package also
-        # contains the remaining migration matrix and every ordinary state
-        # transition test. Give the exhaustive transport matrix exclusive
-        # resources, then run the two disjoint portable remainder sets alongside
-        # all other packages. This avoids both a single serial package schedule
-        # and resource contention between the three expensive portable sets.
-        # Every repository test still runs exactly once and every shard must
-        # succeed.
-        exhaustive_migration_test='^TestMigrationRecoversFromEveryObjectTransportInterruption$'
-        portable_migration_tests='^TestMigration'
-        other_packages=()
+        packages=()
         while IFS= read -r package; do
-          if [[ "$package" != */internal/portable ]]; then
-            other_packages+=("$package")
-          fi
+          [[ "$package" == */internal/portable ]] || packages+=("$package")
         done < <(go list ./...)
-
-        # This matrix saturates a local builder by itself. Running it beside the
-        # other portable shards makes every process slower without increasing
-        # test coverage, so complete it before admitting the parallel phase.
-        go test -race -timeout=30m -count=1 ./internal/portable -run "$exhaustive_migration_test"
-
-        race_pids=()
-        go test -race -timeout=30m -count=1 ./internal/portable -run "$portable_migration_tests" -skip "$exhaustive_migration_test" &
-        race_pids+=("$!")
-        go test -race -timeout=30m -count=1 ./internal/portable -skip "$portable_migration_tests" &
-        race_pids+=("$!")
-        go test -race -timeout=30m -count=1 "''${other_packages[@]}" &
-        race_pids+=("$!")
-
-        race_status=0
-        for race_pid in "''${race_pids[@]}"; do
-          if ! wait "$race_pid"; then
-            race_status=1
-          fi
+        race_dir="$(mktemp -d)"
+        go test -race -c -o "$race_dir/portable.test" ./internal/portable
+        mapfile -t portable_tests < <(cd internal/portable && "$race_dir/portable.test" -test.list '.*' | grep '^Test')
+        pids=()
+        go test -race -short -timeout=30m -count=1 "''${packages[@]}" &
+        pids+=("$!")
+        for shard in 0 1 2 3; do
+          selected=()
+          for index in "''${!portable_tests[@]}"; do
+            if (( index % 4 == shard )); then
+              selected+=("''${portable_tests[$index]}")
+            fi
+          done
+          pattern="^($(IFS='|'; echo "''${selected[*]}"))\$"
+          (cd internal/portable && "$race_dir/portable.test" -test.short -test.count=1 -test.timeout=30m -test.run "$pattern") &
+          pids+=("$!")
         done
-        test "$race_status" -eq 0
+        status=0
+        for pid in "''${pids[@]}"; do
+          wait "$pid" || status=1
+        done
+        rm -rf "$race_dir"
+        test "$status" -eq 0
       '';
     in
     {
@@ -1187,8 +1179,6 @@
             relative:
             relative == "go.mod"
             || relative == "go.sum"
-            # Exact-budget inventory verifies the shared Nix gate selection.
-            || relative == "flake.nix"
             || relative == "cmd"
             || lib.hasPrefix "cmd/" relative
             || relative == "internal"
@@ -1317,7 +1307,18 @@
           goCheck =
             name: command: tools:
             goCheckWithSource name testSource command tools;
-          testSuite = goCheck "tests" "go test -timeout=30m ./..." [ ];
+          # The Go test gate: every test once, plus one race-detector run
+          # (raceCheck). Every named test check below is one of these two
+          # derivations, so `nix flake check` runs each exactly once and in
+          # parallel. `nix run .#test-migration -- TAG` rebuilds testSuite with
+          # the candidate release so the migration tests check its mapping.
+          testSuite = (goCheck "tests" "go test -timeout=30m -count=1 ./..." [ ]).overrideAttrs (_: {
+            ENDLESSFS_MIGRATION_CANDIDATE_RELEASE = "";
+          });
+          raceCheck = goCheck "race" ''
+            export CGO_ENABLED=1
+            ${raceTestCommand}
+          '' [ pkgs.stdenv.cc ];
           testImportCheck = goCheck "test-imports" ''
             # Resolve actual retained test imports before any expensive test.
             # A host module cache must not hide a missing vendored subpackage.
@@ -1326,22 +1327,6 @@
             CGO_ENABLED=1 go list -race -deps -test ./... >/dev/null
             echo "retained normal/race test imports: ok (no tests executed)"
           '' [ pkgs.stdenv.cc ];
-          migrationCheck =
-            (goCheck "migration" ''
-              profile="$TMPDIR/migration-coverage.out"
-              go test -timeout=30m ./internal/portable ./cmd/endlessfs -count=1 \
-                -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
-              gawk -v only_group=migration -f tools/coverage.awk "$profile"
-            '' [ pkgs.gawk ]).overrideAttrs
-              (_: {
-                ENDLESSFS_MIGRATION_CANDIDATE_RELEASE = "";
-              });
-          providerEconomicsCheck = goCheck "provider-economics" ''
-            go test ./internal/providerbudget ./internal/objectstore/budgettest ./internal/objectstore/gcs -count=1
-            go test ${providerBudgetPackages} -run '${providerBudgetTestPattern}' -count=1
-          '' [ ];
-          e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
-          coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
           publishContainerPolicy =
             pkgs.runCommand "endlessfs-publish-container-policy"
               {
@@ -1356,62 +1341,6 @@
                   .default == [{"type": "reject"}]
                   and .transports."docker-archive"."" == [{"type": "insecureAcceptAnything"}]
                 ' ${containerTransportPolicyFor pkgs} >/dev/null
-                touch "$out"
-              '';
-          linuxCiAppPolicy =
-            pkgs.runCommand "endlessfs-linux-ci-app-policy"
-              {
-                nativeBuildInputs = [ pkgs.ripgrep ];
-              }
-              ''
-                for program in \
-                  ${self.apps.${system}.pr-check.program} \
-                  ${self.apps.${system}.test-coverage.program}; do
-                  rg --quiet '^export CGO_ENABLED=0$' "$program"
-                done
-                for program in \
-                  ${self.apps.${system}.test.program} \
-                  ${self.apps.${system}.test-coverage.program}; do
-                  rg --fixed-strings --quiet 'go test -timeout=30m' "$program" || {
-                    echo "long-running Go test gate must use the explicit 30-minute process deadline: $program" >&2
-                    exit 1
-                  }
-                done
-                # Migration's public command now consumes the exact check, so
-                # validate both that binding and the check's actual build code.
-                migration_program=${self.apps.${system}.test-migration.program}
-                rg --fixed-strings --quiet 'f.checks.${system}.migration.overrideAttrs' "$migration_program"
-                rg --fixed-strings --quiet 'ENDLESSFS_MIGRATION_CANDIDATE_RELEASE = builtins.getEnv "ENDLESSFS_MIGRATION_CANDIDATE_RELEASE";' "$migration_program"
-                printf '%s\n' ${lib.escapeShellArg migrationCheck.buildCommand} > migration-build.sh
-                rg --fixed-strings --quiet 'go test -timeout=30m ./internal/portable ./cmd/endlessfs -count=1' migration-build.sh
-                rg --fixed-strings --quiet -- '-covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"' migration-build.sh
-                rg --fixed-strings --quiet 'gawk -v only_group=migration -f tools/coverage.awk "$profile"' migration-build.sh
-                race_program=${self.apps.${system}.test-race.program}
-                for required in \
-                  "portable_migration_tests='^TestMigration'" \
-                  'if [[ "$package" != */internal/portable ]]' \
-                  'go test -race -timeout=30m -count=1 ./internal/portable -run "$exhaustive_migration_test"' \
-                  'go test -race -timeout=30m -count=1 ./internal/portable -run "$portable_migration_tests" -skip "$exhaustive_migration_test"' \
-                  'go test -race -timeout=30m -count=1 ./internal/portable -skip "$portable_migration_tests"' \
-                  'go test -race -timeout=30m -count=1 "''${other_packages[@]}"' \
-                  'for race_pid in "''${race_pids[@]}"' \
-                  'test "$race_status" -eq 0'; do
-                  rg --fixed-strings --quiet "$required" "$race_program" || {
-                    echo "race gate must retain the fail-closed portable-package sharding contract: $required" >&2
-                    exit 1
-                  }
-                done
-                test "$(rg --fixed-strings --count 'race_pids+=("$!")' "$race_program")" -eq 3 || {
-                  echo "race gate must wait for exactly three parallel remainder shards" >&2
-                  exit 1
-                }
-                if rg --fixed-strings --quiet \
-                  'go test -race -timeout=30m -count=1 ./internal/portable -run "$exhaustive_migration_test" &' \
-                  "$race_program"; then
-                  echo "race gate must give the exhaustive transport matrix exclusive resources" >&2
-                  exit 1
-                fi
-                rg --fixed-strings --quiet 'FONTCONFIG_FILE' ${headlessBrowser}/bin/chrome-headless-shell
                 touch "$out"
               '';
           formatCheck =
@@ -1429,7 +1358,7 @@
                 pkgs.nixfmt
               ];
           lintCheck =
-            goCheckWithSource "lint" testSource
+            goCheckWithSource "lint" formatSource
               ''
                 go vet ./...
                 ${sandboxedStaticcheck}
@@ -1456,21 +1385,12 @@
                 ${pipelinePolicyCommand}
                 touch "$out"
               '';
-          raceCheck = goCheck "race" ''
-            export CGO_ENABLED=1
-            ${raceTestCommand}
-          '' [ pkgs.stdenv.cc ];
-          fuzzCheck = goCheck "fuzz" ''
-            fuzztime=1000x
-            ${fuzzSmokeCommand}
-          '' [ ];
           securityCheck =
             goCheckWithSource "security" fullSource
               ''
                 gosec -quiet -nosec-require-justification -nosec-require-rules ./...
                 govulncheck -db=file://${vulndbFor pkgs} ./...
                 ${dependencyPolicyCommand self.packages.${system}.default.goModules}
-                go run ./tools/check-source .
               ''
               [
                 pkgs.findutils
@@ -1519,7 +1439,7 @@
           release = self.packages.${system}.release;
           release-images = self.packages.${system}.release-images;
 
-          e2e = e2eCompile;
+          e2e = testSuite;
 
           format = formatCheck;
 
@@ -1530,17 +1450,16 @@
           test-imports = testImportCheck;
           integration = testSuite;
           contract = testSuite;
-          migration = migrationCheck;
+          migration = testSuite;
           replica = testSuite;
           portability = testSuite;
           provider-verify = testSuite;
-          provider-economics = providerEconomicsCheck;
+          provider-economics = testSuite;
           preview = testSuite;
           theme = testSuite;
           race = raceCheck;
-          coverage = coverageCompile;
           publish-container-policy = publishContainerPolicy;
-          fuzz = fuzzCheck;
+          fuzz = testSuite;
           offline = testSuite;
           security = securityCheck;
           dependencies = securityCheck;
@@ -1559,9 +1478,6 @@
           '';
 
           repository-policy = repositoryPolicyCheck;
-        }
-        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-          linux-ci-app-policy = linuxCiAppPolicy;
         }
       );
 

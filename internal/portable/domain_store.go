@@ -333,6 +333,11 @@ func (store *consistencyDomainStore) mutatePrepared(ctx context.Context, referen
 			return consistencyDomainOutcome{}, domain.NewError(domain.ErrorConflict, "consistency-domain snapshot changed")
 		}
 		if snapshot.head.Frozen {
+			if thawed, thawErr := store.thawStaleFreeze(ctx, reference, snapshot.head.FreezeEpoch); thawErr != nil {
+				return consistencyDomainOutcome{}, thawErr
+			} else if thawed {
+				continue
+			}
 			return consistencyDomainOutcome{}, domain.NewError(domain.ErrorUnavailable, "consistency domain is frozen")
 		}
 		if lock, _, found, lockErr := transitionLockAtHeadWithSession009(ctx, store, reference, snapshot.head, preparedSession); lockErr != nil {
@@ -478,6 +483,11 @@ func (store *consistencyDomainStore) mutateMaterializedPrepared(ctx context.Cont
 		return consistencyDomainOutcome{}, domain.NewError(domain.ErrorConflict, "consistency-domain snapshot changed")
 	}
 	if snapshot.head.Frozen {
+		if thawed, thawErr := store.thawStaleFreeze(ctx, reference, snapshot.head.FreezeEpoch); thawErr != nil {
+			return consistencyDomainOutcome{}, thawErr
+		} else if thawed {
+			return consistencyDomainOutcome{}, domain.NewError(domain.ErrorConflict, "consistency-domain snapshot changed")
+		}
 		return consistencyDomainOutcome{}, domain.NewError(domain.ErrorUnavailable, "consistency domain is frozen")
 	}
 	if lock, _, found, lockErr := transitionLockAtHeadWithSession009(ctx, store, reference, snapshot.head, session); lockErr != nil {
@@ -1083,6 +1093,38 @@ func normalizeDomainChangeMap(values map[string]storageformat.DomainChange) []st
 	return changes
 }
 
+// thawStaleFreeze thaws a domain head frozen at epoch when the catalog is not
+// frozen at that epoch. Closure freezes the catalog before any domain and
+// thawing thaws every domain before the catalog, so such a freeze can only
+// come from a lagging closer that froze the domain after its checkpoint was
+// thawed; nothing authorizes it any more. It reports whether it thawed.
+func (store *consistencyDomainStore) thawStaleFreeze(ctx context.Context, reference consistencyDomainRef, epoch uint64) (bool, error) {
+	if epoch == 0 {
+		return false, nil
+	}
+	catalog, err := newDomainCatalog(store.backend, store.scheduler).load(ctx)
+	if err != nil {
+		return false, err
+	}
+	if catalog.head.FreezeEpoch == epoch {
+		return false, nil
+	}
+	if err := store.unfreeze(ctx, reference, epoch); err != nil && !errors.Is(err, domain.ErrConflict) && !errors.Is(err, domain.ErrPreconditionFailed) {
+		return false, err
+	}
+	return true, nil
+}
+
+// domainFrozenAtEpochError reports a domain head already frozen at another
+// epoch. It unwraps to a conflict.
+type domainFrozenAtEpochError struct {
+	epoch uint64
+	err   error
+}
+
+func (frozen *domainFrozenAtEpochError) Error() string { return frozen.err.Error() }
+func (frozen *domainFrozenAtEpochError) Unwrap() error { return frozen.err }
+
 func (store *consistencyDomainStore) freeze(ctx context.Context, reference consistencyDomainRef, epoch uint64) error {
 	if epoch == 0 {
 		return domain.NewError(domain.ErrorInvalid, "invalid consistency-domain freeze epoch")
@@ -1112,7 +1154,10 @@ func (store *consistencyDomainStore) freeze(ctx context.Context, reference consi
 			if snapshot.head.FreezeEpoch == epoch {
 				return nil
 			}
-			return domain.NewError(domain.ErrorConflict, "consistency domain is frozen at another epoch")
+			return &domainFrozenAtEpochError{
+				epoch: snapshot.head.FreezeEpoch,
+				err:   domain.NewError(domain.ErrorConflict, "consistency domain is frozen at another epoch"),
+			}
 		}
 		next := snapshot.head
 		next.Frozen, next.FreezeEpoch = true, epoch

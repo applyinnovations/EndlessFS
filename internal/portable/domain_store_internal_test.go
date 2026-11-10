@@ -436,7 +436,7 @@ func TestConsistencyDomainFrozenHeadDeniesMutationAndCompaction(t *testing.T) {
 	if _, err := store.mutate(ctx, reference, consistencyDomainMutation{ID: "seed", Changes: []consistencyDomainChange{{Key: "roles", Require: domainValueAbsent, Value: []byte("admin")}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.freeze(ctx, reference, 7); err != nil {
+	if _, err := newDomainCatalog(store.backend, nil).freezeDomains(ctx, 7); err != nil {
 		t.Fatal(err)
 	}
 	before, err := store.loadHead(ctx, reference)
@@ -619,4 +619,28 @@ func domainTestKey(index int) string {
 		index /= 10
 	}
 	return string(value)
+}
+
+// A lagging closer can freeze a domain head after its checkpoint thawed the
+// catalog and every domain. Seen with replicas migrating at once: the next
+// mutation of that domain failed for good. The catalog is frozen before any
+// domain, so a domain freeze the catalog does not hold is stale and thawed.
+func TestConsistencyDomainMutationThawsFreezeTheCatalogDoesNotHold(t *testing.T) {
+	ctx := context.Background()
+	backend := objectmemory.New()
+	store := newConsistencyDomainStore(backend, nil)
+	reference := consistencyDomainRef{Kind: storageformat.DomainAdmin, ID: "global"}
+	if _, err := store.mutate(ctx, reference, consistencyDomainMutation{ID: "seed", Changes: []consistencyDomainChange{{Key: "roles", Require: domainValueAbsent, Value: []byte("admin")}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.freeze(ctx, reference, 9); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.mutate(ctx, reference, consistencyDomainMutation{ID: "after-stale-freeze", Changes: []consistencyDomainChange{{Key: "roles", Require: domainValueAny, Value: []byte("other")}}}); err != nil {
+		t.Fatalf("mutation after stale freeze = %v", err)
+	}
+	snapshot, err := store.loadHead(ctx, reference)
+	if err != nil || snapshot.head.Frozen {
+		t.Fatalf("stale freeze kept: %+v, %v", snapshot.head, err)
+	}
 }

@@ -126,7 +126,7 @@ func TestMaterializedConsistencyDomainMutationFailureAndRecoveryMatrix(t *testin
 		t.Fatalf("invalid materialized mutation = %v", err)
 	}
 
-	if err := store.freeze(ctx, reference, 7); err != nil {
+	if _, err := newDomainCatalog(store.backend, nil).freezeDomains(ctx, 7); err != nil {
 		t.Fatal(err)
 	}
 	frozen := mutation

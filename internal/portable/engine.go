@@ -301,7 +301,13 @@ func (e *Engine) initialize(ctx context.Context) error {
 // freeze, while a closing or closed gate preserves its matching freeze. Every
 // other combination fails closed.
 func (e *Engine) reconcileGateDomainFreeze(ctx context.Context, gateObject objectstore.Object, gate storageformat.WriteGate) (storageformat.WriteGate, error) {
-	for range 16 {
+	var backoff contentionBackoff
+	for attempt := range 16 {
+		if attempt > 0 {
+			if err := backoff.wait(ctx); err != nil {
+				return storageformat.WriteGate{}, err
+			}
+		}
 		catalog, found, err := e.readDomainCatalogIfPresent(ctx)
 		if err != nil {
 			return storageformat.WriteGate{}, err

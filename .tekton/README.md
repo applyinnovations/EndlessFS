@@ -6,7 +6,7 @@ GKE cluster that hosts `drive.endlessfs.com`.
 
 | File | Trigger | Purpose |
 | --- | --- | --- |
-| `endlessfs-ci.yaml` | pull request to `main` or `gh-readonly-queue/main/*` push | Fast policy, full Nix gate, and Chromium coverage |
+| `endlessfs-ci.yaml` | pull request to `main` or `gh-readonly-queue/main/*` push | Nix checks, browser tests and advisory freshness, in parallel |
 | `endlessfs-container.yaml` | `main` push | Publish immutable commit and `edge` OCI tags |
 | `endlessfs-release.yaml` | `vMAJOR.MINOR.PATCH` tag push | Re-verify, publish release OCI tags, create the GitHub release, and upload every Nix release artifact |
 | `endlessfs-darwin-smoke.disabled.yaml` | none | Deprecated, inert record for the retired Darwin smoke job |
@@ -20,14 +20,13 @@ placement is also fail-closed at the cluster boundary: admission denies a Pod
 in either Tekton execution namespace when it mounts `nix-store`,
 `git-repo-cache`, or `oci-layer-cache` without selecting
 `storage.xlab.now/fast-local=true`. Sirius is currently the only node carrying
-that label. The full gate requests 6 CPU/12 GiB and may burst to 12 CPU/24 GiB;
-coverage requests
-4 CPU/8 GiB and may burst to
-8 CPU/16 GiB. These values leave enough capacity for xlab system workloads
-while allowing the parallel gate to use most of the otherwise-idle node.
-One small `prepare-cache` Task seeds an empty shared Nix PVC before verification
-begins, avoiding first-run seed races. Fast checks and the full Nix gate run in
-parallel; coverage follows them so Chromium gets predictable resources.
+that label. After the clone, three Tasks run in parallel, each with its own
+Nix store filled from the shared cache: `checks` (`nix flake check`, every
+static check plus the plain and race Go test runs; 6 CPU/12 GiB, bursting to
+12 CPU/24 GiB), `e2e` (`nix run .#test-e2e`, Chromium; 4 CPU/6 GiB, bursting
+to 8 CPU/12 GiB) and `security-freshness` (the online advisory scan).
+`nix run .#pr-check` is the local fast subset of `checks` and is not run
+again in CI.
 Releases reuse the same caches and never create release-specific persistent
 storage.
 

@@ -70,6 +70,9 @@ func TestDirectoryPreparationProviderBudgetSharesWholeFolderSnapshot(t *testing.
 }
 
 func TestUploadPlanningProviderBudgetTenThousandExistingAndPlanningItems(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	parallelCorrectiveHeavyFixture(t)
 	ctx := context.Background()
 	ledger := providerbudget.NewLedger()

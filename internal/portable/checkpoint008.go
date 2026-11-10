@@ -136,10 +136,6 @@ func (e *Engine) validateConsistencyDomainCheckpointClosure(ctx context.Context,
 	return nil
 }
 
-func (e *Engine) validateConsistencyDomainClosure(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead) error {
-	return e.validateConsistencyDomainClosureForSchema(ctx, reference, head, false)
-}
-
 func (e *Engine) validateConsistencyDomainClosureForSchema(ctx context.Context, reference consistencyDomainRef, head storageformat.DomainHead, schema009 bool) error {
 	session := newConsistencyDomainTreeSession(e.stateDomainStore(), reference)
 	rootNames := []string{"base", "outcomes", "outcome-expiry"}
@@ -376,10 +372,6 @@ func (e *Engine) validateNamespaceEntryClosure(ctx context.Context, session *con
 		return domain.NewError(domain.ErrorInvalid, "namespace checkpoint directory count mismatch")
 	}
 	return nil
-}
-
-func (e *Engine) validateNamespaceOutcomeClosure(ctx context.Context, session *consistencyDomainTreeSession, root storageformat.DomainTreeRoot) error {
-	return e.validateNamespaceOutcomeClosureForSchema(ctx, session, root, false)
 }
 
 func (e *Engine) validateNamespaceOutcomeClosureForSchema(ctx context.Context, session *consistencyDomainTreeSession, root storageformat.DomainTreeRoot, schema009 bool) error {

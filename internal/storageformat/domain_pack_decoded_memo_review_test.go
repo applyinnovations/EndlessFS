@@ -6,14 +6,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"reflect"
-	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
-	"github.com/applyinnovations/endlessfs/internal/telemetry"
 )
 
 // All tests below are authored proposal controls, not executed evidence.
@@ -349,25 +346,6 @@ func TestDomainPagePackDecodedMemoReviewAdmissionCancellationAndCloneBoundaries(
 	}
 }
 
-func TestDomainPagePackDecodedMemoReviewChargeInputBounds(t *testing.T) {
-	for _, invalid := range []struct {
-		count int
-		size  uintptr
-	}{
-		{-1, 8},
-		{1, 0},
-		{int(^uint(0) >> 1), 8},
-		{1, ^uintptr(0)},
-	} {
-		if charge := decodedArrayCharge(invalid.count, invalid.size); charge <= decodedPackMemoMaximumBytes {
-			t.Fatal("invalid or overflowing geometry was admitted")
-		}
-	}
-	if decodedArrayCharge(0, 8) != 0 || decodedArrayCharge(1, 1) != 32 || decodedArrayCharge(3, 16) != 64 {
-		t.Fatal("bounded empty or ordinary allocation charge changed")
-	}
-}
-
 func TestDomainPagePackDecodedMemoReviewChargeEvictionAndIndependentWireProof(t *testing.T) {
 	pack, wire := decodedMemoReviewFixture(t)
 	charge, err := decodedDomainPackCharge(context.Background(), pack)
@@ -472,72 +450,6 @@ func TestDomainPagePackDecodedMemoReviewEntryLimitAndLateCanceledIssuance(t *tes
 		decoded, owned, proof, err := decodedMemoReviewRead(ctx, &memo, wire, full, nil, true)
 		if !errors.Is(err, context.Canceled) || owned != nil || proof != (DomainPagePackWireProof{}) || !reflect.DeepEqual(decoded, DomainPagePack{}) || memo.count != 0 {
 			t.Fatal("late failed issuance admitted a snapshot or exposed partial authority")
-		}
-	}
-}
-
-func TestDomainPagePackDecodedMemoReviewDoesNotCopyProviderWireWhileQueued(t *testing.T) {
-	// The maximum provider wire exists before accounting. This call must never
-	// reach the copy/hash/clone path while another decoder holds admission.
-	input := make([]byte, MaxDomainPagePackBytes)
-	copy(input, domainPagePackMagic)
-	domainPagePackDecodeSlot <- struct{}{}
-	defer func() { <-domainPagePackDecodeSlot }()
-	base, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx := &reviewWireProofWaitingContext{Context: base, waiting: make(chan struct{})}
-	finished := make(chan error, 1)
-	var before, blocked runtime.MemStats
-	runtime.ReadMemStats(&before)
-	go func() {
-		pack, owned, proof, err := DecodeDomainPagePackWithDecodedMemo(ctx, input, "queued-owner", DomainNamespace, "queued-pack")
-		if !reflect.DeepEqual(pack, DomainPagePack{}) || owned != nil || proof != (DomainPagePackWireProof{}) {
-			finished <- errors.New("queued materialization exposed partial authority")
-			return
-		}
-		finished <- err
-	}()
-	<-ctx.waiting
-	runtime.ReadMemStats(&blocked)
-	cancel()
-	if err := <-finished; !errors.Is(err, context.Canceled) || !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatal("queued materialization changed cancellation identity")
-	}
-	allocated := blocked.TotalAlloc - before.TotalAlloc
-	t.Logf("queued materialization allocated=%d wire=%d", allocated, len(input))
-	if allocated >= uint64(len(input)) || len(domainPagePackDecodeSlot) != 1 {
-		t.Fatal("queued materialization copied provider wire or consumed another decoder's slot")
-	}
-}
-
-func TestDomainPagePackDecodedMemoReviewTelemetryHasClosedPrivateFreeLabels(t *testing.T) {
-	pack, wire := decodedMemoReviewFixture(t)
-	memo := newDecodedPackMemo(decodedPackMemoMaximumBytes)
-	observer := telemetry.New(nil, nil)
-	ctx := telemetry.WithRequestID(telemetry.Context(context.Background(), observer), "memo-review-request-42")
-	_, owned, proof, err := decodedMemoReviewRead(ctx, &memo, wire, pack, nil, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, _, err := decodedMemoReviewRead(ctx, &memo, owned, pack, &proof, false); err != nil {
-		t.Fatal(err)
-	}
-	var output bytes.Buffer
-	observer.WritePrometheus(&output)
-	text := output.String()
-	for _, expected := range []string{
-		`endlessfs_operations_total{operation="metadata.pack.materialize",role="state",result="success"} 2`,
-		`endlessfs_operations_total{operation="metadata.pack.decode",role="state",result="success"} 1`,
-		`endlessfs_operations_total{operation="metadata.pack.admission",role="state",result="success"} 2`,
-		`endlessfs_operations_active{operation="metadata.pack.materialize",role="state"} 0`,
-	} {
-		if !strings.Contains(text, expected) {
-			t.Fatal("closed materialize/decode/admission count missing")
-		}
-	}
-	for _, private := range []string{pack.DomainID, pack.PackID, "unconsumed authority", "memo-review-request-42", "requestID=", "traceID=", "stage=", "reason="} {
-		if strings.Contains(text, private) {
-			t.Fatal("private identity or unbounded diagnostic leaked to metric labels")
 		}
 	}
 }

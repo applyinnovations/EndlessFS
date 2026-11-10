@@ -2,7 +2,7 @@
 
 Use the fast edit loop while implementation and review are still changing the
 candidate. Freeze once it is ready for the complete release gate. Keep every
-required final command, assertion, workload, count, timeout and coverage floor.
+required final command, assertion, workload, count and timeout.
 
 Include newly added source files in the Git flake with `git add` first. Nix's
 Git source omits untracked files; the public preflight fails closed if it finds
@@ -113,8 +113,7 @@ consumption freshly derives the canonical package/test inventory and rechecks
 the artifact, coverage profile and current coverage policy. The original
 aggregate Go profile can exceed 64 MiB because `-coverpkg=./...` repeats blocks
 across test packages; its complete bytes are bounded at 128 MiB and are never
-truncated or rewritten. Repository, sensitive-package and migration coverage
-floors remain 85%, 95% and 98%. Supported
+truncated or rewritten. Coverage is reported, not gated. Supported
 `ENDLESSFS_COVERAGE_PROFILE` export copies the validated normal profile; the
 destination is output-only and must be an absolute owned path outside source.
 

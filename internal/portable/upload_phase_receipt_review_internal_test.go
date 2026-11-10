@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -243,79 +242,5 @@ func TestUploadPhaseReceiptReviewCheckpointPreservesCompactEmptyReceipts(t *test
 			t.Fatalf("phase identity lost full digest or context separation: phase=%s size=%d err=%v", phase, len(decoded), err)
 		}
 		seen[id] = true
-	}
-}
-
-func TestUploadPhaseReceiptReviewLegacyRecoveryEconomicsEvidence(t *testing.T) {
-	f := newUploadBatchScaleFixture(t, 0x93948046)
-	ctx := context.Background()
-	caps, err := f.engine.Files().CreateUploadBatch(ctx, f.scope, scaleUploadRequestsCount("lifecycle-economics", 100))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ids := make([]domain.UploadID, len(caps))
-	for index, cap := range caps {
-		ids[index] = cap.UploadID
-		if _, err := f.engine.Files().UploadStatus(ctx, f.scope, cap.UploadID); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.engine.Files().ResumeUpload(ctx, f.scope, cap.UploadID); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.engine.Files().UploadStatus(ctx, f.scope, cap.UploadID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	f.stateLedger.Reset()
-	if _, err := f.engine.Files().UploadLifecycle(ctx, f.scope, ids, true); err != nil {
-		t.Fatal(err)
-	}
-	for _, event := range f.stateLedger.Events() {
-		t.Logf("synthetic legacy recovery metadata kind=%s responseBytes=%d target=%s", event.Kind, event.ResponseBytes, event.Target)
-	}
-	store := f.engine.stateDomainStore()
-	reference := uploadDomainReference(f.scope.UserID())
-	head, err := store.loadHead(ctx, reference)
-	if err != nil {
-		t.Fatal(err)
-	}
-	object, err := f.engine.backend.Get(ctx, storageformat.DomainPagePackKey(reference.Kind, reference.ID, head.head.Base.PackID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	pack, err := storageformat.DecodeDomainPagePack(ctx, object.Body, reference.ID, reference.Kind, head.head.Base.PackID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, packed := range pack.Pages {
-		pageBody, err := storageformat.EncodeCanonical(packed.Page)
-		if err != nil {
-			t.Fatal(err)
-		}
-		families := make(map[string]int)
-		var values int
-		for _, entry := range packed.Page.Entries {
-			family := "outcome-or-expiry"
-			if strings.HasPrefix(entry.Key, "upload/") {
-				family = "upload"
-			} else if strings.HasPrefix(entry.Key, "upload-idempotency/") {
-				family = "idempotency"
-			}
-			families[family]++
-			values += len(entry.Value)
-		}
-		t.Logf("synthetic basepack census packPages=%d level=%d entries=%d children=%d canonicalBytes=%d valueBytes=%d families=%v", len(pack.Pages), packed.Page.Level, len(packed.Page.Entries), len(packed.Page.Children), len(pageBody), values, families)
-	}
-	reader := newConsistencyDomainTreeSession(store, reference)
-	entries, err := reader.collect(ctx, head.head.Outcomes, "", "", 200)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		var outcome storageformat.DomainOutcome
-		if err := decodeCanonicalValue(entry.Value, &outcome); err != nil {
-			t.Fatal(err)
-		}
-		t.Logf("synthetic retained phase idBytes=%d resultBytes=%d deltaCount=%d", len(entry.Key), len(outcome.Result), len(head.head.Deltas))
 	}
 }

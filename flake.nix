@@ -292,7 +292,16 @@
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[main]"' .tekton/endlessfs-container.yaml >/dev/null
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-event" == "[push]"' .tekton/endlessfs-release.yaml >/dev/null
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[refs/tags/v*.*.*]"' .tekton/endlessfs-release.yaml >/dev/null
-        yq -e '.spec.params[] | select(.name == "release_tag") | .value == "{{ git_tag }}"' .tekton/endlessfs-release.yaml >/dev/null
+        # The tag reaches release scripts only through the RELEASE_TAG variable;
+        # no script interpolates a parameter, result or PaC value as text.
+        for task in verify release; do
+          yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.env[] | select(.name == \"RELEASE_TAG\") | .value == \"{{ git_tag }}\"" .tekton/endlessfs-release.yaml >/dev/null
+        done
+        # shellcheck disable=SC2016 # Tekton and PaC syntax, not the shell's.
+        if yq -r '.spec.pipelineSpec.tasks[].params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml | rg -F -e '$(' -e '{{'; then
+          echo "endlessfs-release scripts must read the tag from RELEASE_TAG, not interpolate it" >&2
+          exit 1
+        fi
         # The release pipeline runs the freshness check through release-verify
         # (see the release-apps-policy check).
         for pipeline in .tekton/endlessfs-ci.yaml .tekton/endlessfs-container.yaml; do
@@ -305,9 +314,9 @@
         publisher_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "publish") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-container.yaml)"
         go run ./tools/check-pipeline-publish "$publisher_script"
         release_verify_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "verify") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
-        # shellcheck disable=SC2016 # $(params.release_tag) is Tekton's, not the shell's.
+        # shellcheck disable=SC2016 # Single quotes keep $RELEASE_TAG literal.
         case "$release_verify_script" in
-          'nix run .#release-verify -- "$(params.release_tag)"'*) ;;
+          'nix run .#release-verify -- "$RELEASE_TAG"'*) ;;
           *)
             echo "endlessfs-release verify must run nix run .#release-verify with the release tag" >&2
             exit 1
@@ -316,7 +325,7 @@
         # The credential-holding release task runs publish-release from its own
         # checkout of the verified commit, which no other task can write.
         # shellcheck disable=SC2016 # Tekton expressions, not shell ones.
-        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release") | .params[] | select(.name == "SCRIPT") | .value == "nix run .#publish-release -- \"$(params.release_tag)\""' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release") | .params[] | select(.name == "SCRIPT") | .value == "nix run .#publish-release -- \"$RELEASE_TAG\""' .tekton/endlessfs-release.yaml >/dev/null
         yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release") | .runAfter | (length == 1 and .[0] == "release-clone")' .tekton/endlessfs-release.yaml >/dev/null
         yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release") | .workspaces[] | select(.name == "source") | .workspace == "release-source"' .tekton/endlessfs-release.yaml >/dev/null
         yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release-clone") | .taskRef.params[] | select(.name == "name") | .value == "git-clone-v1"' .tekton/endlessfs-release.yaml >/dev/null

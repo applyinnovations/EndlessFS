@@ -36,6 +36,10 @@ spec:
     - pipelineTaskName: verify
       podTemplate:
         hostUsers: false
+        # The tag reaches scripts only as this variable, never as script text.
+        env:
+          - name: RELEASE_TAG
+            value: "{{ git_tag }}"
       stepSpecs:
         - name: run
           computeResources:
@@ -48,6 +52,10 @@ spec:
     - pipelineTaskName: release
       podTemplate:
         hostUsers: false
+        # The tag reaches scripts only as this variable, never as script text.
+        env:
+          - name: RELEASE_TAG
+            value: "{{ git_tag }}"
       stepSpecs:
         - name: run
           computeResources:
@@ -69,8 +77,6 @@ spec:
       value: "{{ repo_url }}"
     - name: revision
       value: "{{ revision }}"
-    - name: release_tag
-      value: "{{ git_tag }}"
     - name: git_auth_secret
       value: "{{ git_auth_secret }}"
   pipelineSpec:
@@ -78,8 +84,6 @@ spec:
       - name: repo_url
         type: string
       - name: revision
-        type: string
-      - name: release_tag
         type: string
       - name: git_auth_secret
         type: string
@@ -138,7 +142,7 @@ spec:
             workspace: nix-store
         params:
           - name: SCRIPT
-            value: nix run .#release-verify -- "$(params.release_tag)" --max-jobs 6 --cores 2
+            value: nix run .#release-verify -- "$RELEASE_TAG" --max-jobs 6 --cores 2
 
       # The release task holds GH_TOKEN and the GitHub Packages credential, so
       # it runs publish-release from its own checkout of the commit verify
@@ -196,7 +200,7 @@ spec:
           - name: GITHUB_TOKEN_SECRET_NAME
             value: $(params.git_auth_secret)
           - name: SCRIPT
-            value: nix run .#publish-release -- "$(params.release_tag)"
+            value: nix run .#publish-release -- "$RELEASE_TAG"
     # Push and scheduled runs publish this run's store to the shared Nix cache.
     finally:
       - name: publish-cache

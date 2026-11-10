@@ -52,12 +52,14 @@ task itself verifies that container UID 0 is not host UID 0 before executing.
 `endlessfs-release.yaml` only wires Tasks; the release logic is in the flake
 and runs the same locally:
 
-- `verify` runs `nix run .#release-verify -- "$release_tag"` (tag shape,
+- `verify` runs `nix run .#release-verify -- "$RELEASE_TAG"` (tag shape,
   migration gate for that tag, advisory freshness, full flake check) in the
-  credential-free `nix-run-v2` Task.
+  credential-free `nix-run-v2` Task. Both tasks get the tag only as the
+  `RELEASE_TAG` variable from their `taskRunSpecs` pod template, never as
+  script text, and the apps validate it before anything uses it.
 - `release-clone` checks the verified commit out again with `git-clone-v1`
   into its own `release-source` workspace, and `release` runs
-  `nix run .#publish-release -- "$release_tag"` there. The credential-holding
+  `nix run .#publish-release -- "$RELEASE_TAG"` there. The credential-holding
   step therefore never runs code from the `source` workspace that `verify`
   could have changed. `tools/release` decides whether to create the GitHub
   release or replace its assets, and only creates it when GitHub reports it

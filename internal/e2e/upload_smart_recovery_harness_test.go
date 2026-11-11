@@ -150,6 +150,8 @@ func newSmartRecoveryHarnessWithFileBackend(t *testing.T, controlWrap, dataWrap 
 	if dataWrap != nil {
 		dataHandler = dataWrap(dataHandler)
 	}
+	serverLog := newServerRequestLog(t)
+	controlHandler, dataHandler = serverLog.wrap("control", controlHandler), serverLog.wrap("data", dataHandler)
 	controlServer, dataServer := &http.Server{Handler: controlHandler}, &http.Server{Handler: dataHandler}
 	serveErrors := make(chan error, 2)
 	go func() { serveErrors <- controlServer.Serve(controlListener) }()

@@ -94,10 +94,10 @@ func runPreparingExpiredRecovery(t *testing.T, rejectStage int) {
 	if err := chromedp.Run(client.ctx, chromedp.Evaluate(seed, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(7)'`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(7)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Click("#open-transfers", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(client.ctx, clickNode("#open-transfers")); err != nil {
 		t.Fatal(err)
 	}
 	if rejectStage != 0 {
@@ -105,18 +105,18 @@ func runPreparingExpiredRecovery(t *testing.T, rejectStage int) {
 			t.Fatal(err)
 		}
 	}
-	if err := waitFor(client.ctx, `document.querySelector('#transfer-check-label').textContent==='Preparing 70%' && document.querySelector('#transfer-check-progress').getAttribute('aria-label')==='Upload preparation progress'`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('#transfer-check-label').textContent==='Preparing 70%' && document.querySelector('#transfer-check-progress').getAttribute('aria-label')==='Upload preparation progress'`, conditionBound); err != nil {
 		t.Fatalf("completed preparation credit missing: %v (%s)", err, browserStatus(client.ctx))
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Click(`button[aria-label="Reconnect upload source for Reconnect folder"]`, chromedp.ByQuery), chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(client.ctx, clickNode(`button[aria-label="Reconnect upload source for Reconnect folder"]`), chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('#transfer-list').textContent.includes('Recovering') && !document.querySelector('#transfer-list').textContent.includes('historical-reference')`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('#transfer-list').textContent.includes('Recovering') && !document.querySelector('#transfer-list').textContent.includes('historical-reference')`, conditionBound); err != nil {
 		t.Fatalf("reconnect lost preparation phase or retained stale error: %v (%s)", err, browserStatus(client.ctx))
 	}
 	select {
 	case <-started:
-	case <-time.After(5 * time.Second):
+	case <-time.After(conditionBound):
 		t.Fatal("recovery page was not dispatched")
 	}
 	if got := recoveryCalls.Load(); got != 1 {
@@ -129,7 +129,7 @@ func runPreparingExpiredRecovery(t *testing.T, rejectStage int) {
 	}
 	release()
 	if rejectStage != 0 {
-		if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent==='(3)'`, 5*time.Second); err != nil {
+		if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent==='(3)'`, conditionBound); err != nil {
 			t.Fatalf("retry admitted without durable identity: %v %s", err, browserStatus(client.ctx))
 		}
 		for _, request := range client.requestSnapshot() {
@@ -140,13 +140,13 @@ func runPreparingExpiredRecovery(t *testing.T, rejectStage int) {
 		if err := chromedp.Run(client.ctx, reloadLoopbackBrowser()); err != nil {
 			t.Fatal(err)
 		}
-		if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(10)' && document.querySelector('[data-transfer-count="complete"]').textContent==='(7)'`, 5*time.Second); err != nil {
+		if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(10)' && document.querySelector('[data-transfer-count="complete"]').textContent==='(7)'`, conditionBound); err != nil {
 			t.Fatalf("failed identity write lost existing ledger history: %v", err)
 		}
 		client.assertNoExternalRequests(t, h)
 		return
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(10)' && document.querySelector('#transfer-check-label').textContent==='Preparing 100%'`, 20*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(10)' && document.querySelector('#transfer-check-label').textContent==='Preparing 100%'`, conditionBound); err != nil {
 		t.Fatalf("expired source recovery did not finish: %v (%s)", err, browserStatus(client.ctx))
 	}
 	for _, request := range client.requestSnapshot() {

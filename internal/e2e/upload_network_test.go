@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/chromedp/chromedp"
@@ -39,13 +38,13 @@ func TestE2EUploadLoopbackConnectivitySignalPausesAndResumesSmartPlanning(t *tes
 	})
 	client := newSmartRecoveryBrowser(t)
 	bootstrapSmartRecovery(t, client, h.harness)
-	if err := waitFor(client.ctx, `navigator.onLine===true`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `navigator.onLine===true`, conditionBound); err != nil {
 		t.Fatal("loopback browser did not declare online connectivity")
 	}
 	if err := chromedp.Run(client.ctx, loopbackNetworkState(true), chromedp.Evaluate(`window.__loopbackOnlineEvents=0;window.addEventListener('online',()=>window.__loopbackOnlineEvents++);`, nil)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `navigator.onLine===false`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `navigator.onLine===false`, conditionBound); err != nil {
 		t.Fatal("native offline signal did not take effect")
 	}
 	root := filepath.Join(t.TempDir(), "network-folder")
@@ -59,13 +58,13 @@ func TestE2EUploadLoopbackConnectivitySignalPausesAndResumesSmartPlanning(t *tes
 	if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(client.ctx, chromedp.SetValue("#upload-strategy", "smart-merge", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(1)'&&document.querySelector('[data-transfer-count="complete"]').textContent==='(0)'`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(1)'&&document.querySelector('[data-transfer-count="complete"]').textContent==='(0)'`, conditionBound); err != nil {
 		t.Fatal("selected smart upload was not retained while offline")
 	}
 	for _, request := range client.requestSnapshot()[requestStart:] {
@@ -79,7 +78,7 @@ func TestE2EUploadLoopbackConnectivitySignalPausesAndResumesSmartPlanning(t *tes
 	if err := chromedp.Run(client.ctx, loopbackNetworkState(false)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `navigator.onLine===true&&window.__loopbackOnlineEvents===1&&document.querySelector('[data-transfer-count="complete"]').textContent==='(1)'`, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, `navigator.onLine===true&&window.__loopbackOnlineEvents===1&&document.querySelector('[data-transfer-count="complete"]').textContent==='(1)'`, conditionBound); err != nil {
 		t.Fatal("native online event did not resume smart planning and completion")
 	}
 	assertSmartRecoveryLedger(t, client, 1, 1)
@@ -103,7 +102,7 @@ func TestE2EUploadLoopbackConnectivitySignalPausesAndResumesSmartPlanning(t *tes
 		t.Fatal(err)
 	}
 	restored := fmt.Sprintf(`performance.timeOrigin>%.6f&&document.readyState==='complete'&&navigator.onLine===true&&document.querySelector('#loading-view').hidden&&!document.querySelector('#authenticated-view').hidden&&document.querySelector('#app').dataset.state==='authenticated'&&document.querySelector('[data-transfer-count="complete"]').textContent==='(1)'`, previousTimeOrigin)
-	if err := waitFor(client.ctx, restored, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, restored, conditionBound); err != nil {
 		t.Fatal("completed upload did not survive reload")
 	}
 	assertSmartRecoveryLedger(t, client, 1, 1)

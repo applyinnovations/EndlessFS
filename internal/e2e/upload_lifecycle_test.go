@@ -109,7 +109,7 @@ func TestE2EUploadAdmissionIgnoresReplyForReplacedAttempt(t *testing.T) {
 	if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", paths, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(client.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
@@ -117,10 +117,10 @@ func TestE2EUploadAdmissionIgnoresReplyForReplacedAttempt(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(10 * time.Second):
+	case <-time.After(conditionBound):
 		t.Fatal("admission was not dispatched")
 	}
-	if err := waitVisible(client.ctx, `button[aria-label^="Cancel folder upload"]`, 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, `button[aria-label^="Cancel folder upload"]`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector('button[aria-label^="Cancel folder upload"]').click()`, nil)); err != nil {
@@ -129,7 +129,7 @@ func TestE2EUploadAdmissionIgnoresReplyForReplacedAttempt(t *testing.T) {
 	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector('[data-transfer-count="all"]').click()`, nil)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, `button[aria-label^="Retry folder upload"]`, 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, `button[aria-label^="Retry folder upload"]`, conditionBound); err != nil {
 		var content string
 		_ = chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector("#transfer-panel").textContent`, &content))
 		t.Fatalf("retry missing: %v %s", err, content)
@@ -138,7 +138,7 @@ func TestE2EUploadAdmissionIgnoresReplyForReplacedAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	unblock()
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(3)'`, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(3)'`, conditionBound); err != nil {
 		t.Fatalf("replacement did not complete: %v %s", err, browserStatus(client.ctx))
 	}
 	mu.Lock()
@@ -232,13 +232,13 @@ func TestE2EUploadActionsRetryOnlyRejectedFinalizationWithoutResendingData(t *te
 	if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", paths, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(client.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(2)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(1)'`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(2)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(1)'`, conditionBound); err != nil {
 		t.Fatalf("rejected item poisoned valid siblings: %v %s", err, browserStatus(client.ctx))
 	}
 	before := client.requestSnapshot()
@@ -251,10 +251,10 @@ func TestE2EUploadActionsRetryOnlyRejectedFinalizationWithoutResendingData(t *te
 	if writes != 3 {
 		t.Fatalf("synthetic data transfers=%d,want3", writes)
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Click("#retry-failed-transfers", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(client.ctx, clickNode("#retry-failed-transfers")); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(3)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(3)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, conditionBound); err != nil {
 		t.Fatalf("selective finalization retry failed: %v %s", err, browserStatus(client.ctx))
 	}
 	afterWrites := 0
@@ -331,13 +331,13 @@ func TestE2EUploadRecoveryRejectsChangedReconnectedSourceBeforeData(t *testing.T
 	if err := chromedp.Run(client.ctx, chromedp.Evaluate(seed, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(1)'`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(1)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Click("#open-transfers", chromedp.ByQuery), chromedp.Click(`button[aria-label="Reconnect upload source for source.bin"]`, chromedp.ByQuery), chromedp.SetUploadFiles("#upload-input", []string{file}, chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(client.ctx, clickNode("#open-transfers"), clickNode(`button[aria-label="Reconnect upload source for source.bin"]`), chromedp.SetUploadFiles("#upload-input", []string{file}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('#transfer-list').textContent.includes('differs from the original')`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('#transfer-list').textContent.includes('differs from the original')`, conditionBound); err != nil {
 		t.Fatalf("changed bytes accepted despite identical name/size/mtime: %v %s", err, browserStatus(client.ctx))
 	}
 	if writes.Load() != 0 {
@@ -367,13 +367,13 @@ func TestE2EUploadRecoveryRequestBudgetAndBoundedRendering(t *testing.T) {
 	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`window.__endlessfsUploadWorkerPoolTest.seedRecovery(2638)`, nil)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.snapshot().states.failed===2638`, 20*time.Second); err != nil {
+	if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.snapshot().states.failed===2638`, conditionBound); err != nil {
 		t.Fatalf("recovery wave did not settle: %v (%s)", err, browserStatus(client.ctx))
 	}
 	if got := pages.Load(); got != 27 {
 		t.Fatalf("2638-item recovery requests=%d,want27", got)
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Click("#open-transfers", chromedp.ByQuery), chromedp.Click(`.transfer-group-row button[aria-expanded]`, chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(client.ctx, clickNode("#open-transfers"), clickNode(`.transfer-group-row button[aria-expanded]`)); err != nil {
 		t.Fatal(err)
 	}
 	var rows int
@@ -422,17 +422,17 @@ func TestE2EUploadRecoveryCancelledItemCannotBeResurrectedBySharedPage(t *testin
 	}, nil)
 	client := newTestBrowser(t)
 	bootstrapBrowser(t, client, h)
-	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`window.__endlessfsUploadWorkerPoolTest.seedRecovery(100)`, nil), chromedp.Click("#open-transfers", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`window.__endlessfsUploadWorkerPoolTest.seedRecovery(100)`, nil), clickNode("#open-transfers")); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.active()===100`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.active()===100`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Click(`.transfer-group-row button[aria-expanded]`, chromedp.ByQuery), chromedp.Click(`button[aria-label="Cancel upload probe-0.bin"]`, chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(client.ctx, clickNode(`.transfer-group-row button[aria-expanded]`), clickNode(`button[aria-label="Cancel upload probe-0.bin"]`)); err != nil {
 		t.Fatal(err)
 	}
 	release()
-	if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.snapshot().states.cancelled===1 && window.__endlessfsUploadWorkerPoolTest.snapshot().states.failed===99 && window.__endlessfsUploadWorkerPoolTest.active()===0`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.snapshot().states.cancelled===1 && window.__endlessfsUploadWorkerPoolTest.snapshot().states.failed===99 && window.__endlessfsUploadWorkerPoolTest.active()===0`, conditionBound); err != nil {
 		var status string
 		_ = chromedp.Run(client.ctx, chromedp.Evaluate(`JSON.stringify(window.__endlessfsUploadWorkerPoolTest.snapshot())`, &status))
 		t.Fatalf("stale recovery page resurrected cancelled task: %v %s", err, status)

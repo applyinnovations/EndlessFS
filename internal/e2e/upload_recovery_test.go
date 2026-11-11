@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/chromedp/chromedp"
 	"github.com/chromedp/chromedp/kb"
@@ -52,13 +51,13 @@ func TestE2ELostUploadResponseFinalizesEmptyAndChunkedObjectsOnce(t *testing.T) 
 	if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", paths, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(client.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(3)'`, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(3)'`, conditionBound); err != nil {
 		t.Fatalf("lost-response uploads did not complete: %v (%s), requests=%v", err, browserStatus(client.ctx), client.requestSnapshot())
 	}
 	if got := dataCalls.Load(); got != 4 {
@@ -112,13 +111,13 @@ func TestE2EAutomaticRetryResumesOriginalBatchSession(t *testing.T) {
 	if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", []string{path, small}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(client.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(2)'`, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(2)'`, conditionBound); err != nil {
 		t.Fatalf("resume failed: %v (%s)", err, browserStatus(client.ctx))
 	}
 	if calls.Load() != 6 {

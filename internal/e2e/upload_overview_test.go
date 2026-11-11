@@ -147,13 +147,13 @@ func testLostCompletionReplayOrder(t *testing.T, omitOrdinal bool) {
 	if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", paths, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(client.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.NewTimer(10 * time.Second)
+	deadline := time.NewTimer(conditionBound)
 	defer deadline.Stop()
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
@@ -212,7 +212,7 @@ func testLostCompletionReplayOrder(t *testing.T, omitOrdinal bool) {
 	if err := chromedp.Run(client.ctx, reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(2)' && document.querySelector('[data-transfer-count="failed"]').textContent === '(0)'`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(2)' && document.querySelector('[data-transfer-count="failed"]').textContent === '(0)'`, conditionBound); err != nil {
 		var rows string
 		_ = chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector('#transfer-list').textContent`, &rows))
 		t.Fatalf("ordered completion replay failed: %v; rows=%s", err, rows)

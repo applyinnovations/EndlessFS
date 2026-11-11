@@ -84,7 +84,7 @@ func testStoredSourceRestoreClearsObsoleteSourceRequired(t *testing.T, currentMe
 		const stored=await new Promise((resolve,reject)=>{const r=db.transaction('sources','readonly').objectStore('sources').get(ownerID+':'+id);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});db.close();
 		return stored?.handle instanceof FileSystemFileHandle&&await stored.handle.queryPermission({mode:'read'})==='granted'&&(await stored.handle.getFile()).size===4;
 	})()`, scope.UserID().String(), root+"/existing-00/nested", currentMessage, root, root, root+"/existing-00")
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(seed, &seeded, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || !seeded {
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(seed, &seeded, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || !seeded {
 		t.Fatalf("native permission-granted stored-source fixture unavailable: ready=%t err=%v", seeded, err)
 	}
 
@@ -93,16 +93,16 @@ func testStoredSourceRestoreClearsObsoleteSourceRequired(t *testing.T, currentMe
 	requestStart := len(client.requestSnapshot())
 	hold.Store(true)
 	var priorTimeOrigin float64
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(`performance.timeOrigin`, &priorTimeOrigin), reloadLoopbackBrowser()); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(`performance.timeOrigin`, &priorTimeOrigin), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
 	ready := fmt.Sprintf(`performance.timeOrigin>%.6f&&document.readyState==='complete'&&document.querySelector('#loading-view').hidden&&!document.querySelector('#authenticated-view').hidden&&document.querySelector('#auth-view').hidden&&document.querySelector('#app').dataset.state==='authenticated'`, priorTimeOrigin)
-	if err := waitFor(client.ctx, ready, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, ready, conditionBound); err != nil {
 		t.Fatalf("stored-source reload did not enter the authenticated workspace: %v", err)
 	}
 	select {
 	case <-started:
-	case <-time.After(15 * time.Second):
+	case <-time.After(conditionBound):
 		t.Fatal("native stored source did not automatically enter real smart size planning")
 	}
 	// This persisted-state check is deliberately before the held size response.
@@ -114,7 +114,7 @@ func testStoredSourceRestoreClearsObsoleteSourceRequired(t *testing.T, currentMe
 		t.Fatal("source bytes transferred before the held size decision")
 	}
 	unblock()
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(1)'&&document.querySelector('#transfer-check-label').textContent==='Preparing 100%'`, 30*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(1)'&&document.querySelector('#transfer-check-label').textContent==='Preparing 100%'`, conditionBound); err != nil {
 		t.Fatalf("restored source did not complete real smart upload: %v", err)
 	}
 	writes.assertExactly(t, 0, 1)
@@ -143,7 +143,7 @@ func assertStoredSourceRestoreHistory(t *testing.T, client *testBrowser) {
 		const history=item?.errorHistory||[];
 		if(item&&history.length<=3&&history.filter(h=>h.message==='Reference: stored-source-history.').length===1&&history.every(h=>String(h.message||'').length<=240&&String(h.code||'').length<=80))return true;
 		await new Promise(resolve=>setTimeout(resolve,10));}return false})()`
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(script, &valid, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || !valid {
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(script, &valid, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || !valid {
 		t.Fatalf("automatic stored-source restoration lost or duplicated useful bounded history: valid=%t err=%v", valid, err)
 	}
 }

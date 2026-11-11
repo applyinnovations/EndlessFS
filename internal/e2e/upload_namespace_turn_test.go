@@ -103,7 +103,7 @@ func TestE2EUploadAdmissionWaitsForNamespaceTurnWithoutBlockingData(t *testing.T
 	queueNamespaceTurnSource(t, client, paths[0], "smart-merge")
 	select {
 	case <-planStarted:
-	case <-time.After(5 * time.Second):
+	case <-time.After(conditionBound):
 		t.Fatal("real smart size request never reached its gate")
 	}
 	queueNamespaceTurnSource(t, client, paths[1], "keep-both")
@@ -114,14 +114,14 @@ func TestE2EUploadAdmissionWaitsForNamespaceTurnWithoutBlockingData(t *testing.T
 	releasePlan()
 	select {
 	case <-dataStarted:
-	case <-time.After(5 * time.Second):
+	case <-time.After(conditionBound):
 		t.Fatal("queued admission did not release fairly after planning")
 	}
 	// The first verified file must become durable even while another file's
 	// bytes are held. Keep the product's real 15-second completion age intact.
 	select {
 	case <-actionStarted:
-	case <-time.After(20 * time.Second):
+	case <-time.After(conditionBound):
 		t.Fatalf("held data indefinitely blocked an independently verified completion: %s", smartRecoveryDiagnostic(client))
 	}
 	queueNamespaceTurnSource(t, client, paths[2], "keep-both")
@@ -132,14 +132,14 @@ func TestE2EUploadAdmissionWaitsForNamespaceTurnWithoutBlockingData(t *testing.T
 	releaseData()
 	select {
 	case <-dataFinished:
-	case <-time.After(5 * time.Second):
+	case <-time.After(conditionBound):
 		t.Fatal("namespace turn blocked an already admitted data transfer")
 	}
 	if !completing.Load() || writes.snapshot()[1] != 1 {
 		t.Fatal("data independence was not proved while the actions request remained held")
 	}
 	releaseAction()
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(3)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(3)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, conditionBound); err != nil {
 		t.Fatalf("queued admission/completion did not settle: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	if admissions.Load() != 3 || overlaps.Load() != 0 {
@@ -215,7 +215,7 @@ func TestE2EQueuedUploadAdmissionPreservesCancellationAndReleasesTurn(t *testing
 			queueNamespaceTurnSource(t, client, paths[0], "smart-merge")
 			select {
 			case <-started:
-			case <-time.After(5 * time.Second):
+			case <-time.After(conditionBound):
 				t.Fatal("smart planning never held the namespace turn")
 			}
 			pending := paths[1:2]
@@ -226,7 +226,7 @@ func TestE2EQueuedUploadAdmissionPreservesCancellationAndReleasesTurn(t *testing
 			waitNamespaceTurnAdmissionIntent(t, client, "cancelled.bin", mode == "cancel-one")
 			if mode == "cancel-one" {
 				waitNamespaceTurnAdmissionIntent(t, client, "survivor.bin", true)
-				if err := runStage(client.ctx, 5*time.Second, chromedp.Click(`button[aria-label="Expand upload group 2 files"]`, chromedp.ByQuery)); err != nil {
+				if err := runStage(client.ctx, conditionBound, clickNode(`button[aria-label="Expand upload group 2 files"]`)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -234,22 +234,22 @@ func TestE2EQueuedUploadAdmissionPreservesCancellationAndReleasesTurn(t *testing
 				if err := closeTransferSheet(client.ctx); err != nil {
 					t.Fatal(err)
 				}
-				if err := runStage(client.ctx, 5*time.Second, chromedp.Click("#logout-button", chromedp.ByQuery)); err != nil {
+				if err := runStage(client.ctx, conditionBound, clickNode("#logout-button")); err != nil {
 					t.Fatal(err)
 				}
-				if err := waitVisible(client.ctx, "#auth-view", 5*time.Second); err != nil {
+				if err := waitVisible(client.ctx, "#auth-view", conditionBound); err != nil {
 					t.Fatal(err)
 				}
 				unblock()
-				if err := runStage(client.ctx, 5*time.Second, chromedp.Click("#signin-button", chromedp.ByQuery)); err != nil {
+				if err := runStage(client.ctx, conditionBound, clickNode("#signin-button")); err != nil {
 					t.Fatal(err)
 				}
-				if err := waitFor(client.ctx, `document.querySelector('#app').dataset.state==='authenticated' && document.querySelector('#auth-view').hidden && Boolean(document.querySelector('button[aria-label="Reconnect upload source for cancelled.bin"]'))`, 10*time.Second); err != nil {
+				if err := waitFor(client.ctx, `document.querySelector('#app').dataset.state==='authenticated' && document.querySelector('#auth-view').hidden && Boolean(document.querySelector('button[aria-label="Reconnect upload source for cancelled.bin"]'))`, conditionBound); err != nil {
 					t.Fatalf("login did not restore suspended source controls: %v %s", err, smartRecoveryDiagnostic(client))
 				}
 				queueNamespaceTurnSource(t, client, paths[2], "keep-both")
 			} else {
-				if err := runStage(client.ctx, 5*time.Second, chromedp.Click(`button[aria-label="Cancel upload cancelled.bin"]`, chromedp.ByQuery)); err != nil {
+				if err := runStage(client.ctx, conditionBound, clickNode(`button[aria-label="Cancel upload cancelled.bin"]`)); err != nil {
 					t.Fatal(err)
 				}
 				unblock()
@@ -258,7 +258,7 @@ func TestE2EQueuedUploadAdmissionPreservesCancellationAndReleasesTurn(t *testing
 			if mode == "cancel-one" {
 				wantComplete = 2
 			}
-			if err := waitFor(client.ctx, fmt.Sprintf(`document.querySelector('[data-transfer-count="complete"]').textContent==='(%d)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, wantComplete), 15*time.Second); err != nil {
+			if err := waitFor(client.ctx, fmt.Sprintf(`document.querySelector('[data-transfer-count="complete"]').textContent==='(%d)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, wantComplete), conditionBound); err != nil {
 				t.Fatalf("cancelled admission retained the turn or failed its sibling: %v %s", err, smartRecoveryDiagnostic(client))
 			}
 			mu.Lock()
@@ -304,13 +304,13 @@ func queueNamespaceTurnSources(t *testing.T, client *testBrowser, paths []string
 	if err := closeTransferSheet(client.ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := runStage(client.ctx, 5*time.Second, chromedp.SetUploadFiles("#upload-input", paths, chromedp.ByQuery)); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.SetUploadFiles("#upload-input", paths, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := runStage(client.ctx, 5*time.Second, chromedp.SetValue("#upload-strategy", strategy, chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.SetValue("#upload-strategy", strategy, chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -324,13 +324,13 @@ func waitNamespaceTurnAdmissionIntent(t *testing.T, client *testBrowser, name st
 		const records=await new Promise((resolve,reject)=>{const r=db.transaction('items','readonly').objectStore('items').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});db.close();
 		if(records.some(item=>item.name===%q&&(!item.groupID||%t)&&!item.relativeDirectory&&item.admissionProtocol==='independent'&&item.admissionIntent?.path==='/'&&item.admissionIntent.idempotencyKey===item.id)){window.__namespaceAdmissionReady=true;return;}
 		await new Promise(resolve=>setTimeout(resolve,20));}})().catch(error=>{window.__namespaceAdmissionError=String(error)});`, name, grouped)
-	if err := runStage(client.ctx, 5*time.Second, chromedp.Evaluate(script, nil)); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(script, nil)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `window.__namespaceAdmissionReady===true`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `window.__namespaceAdmissionReady===true`, conditionBound); err != nil {
 		t.Fatalf("root-file admission never durably reached its request boundary: %v %s", err, smartRecoveryDiagnostic(client))
 	}
-	if err := runStage(client.ctx, 5*time.Second, chromedp.Evaluate(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))`, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(`new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))`, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil {
 		t.Fatal(err)
 	}
 }

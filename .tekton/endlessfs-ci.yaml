@@ -81,8 +81,10 @@ spec:
             limits:
               cpu: "4"
               memory: 6Gi
+  # Tasks wait for CPU under the cluster CI quota (deployments #203), and that
+  # wait counts against the pipeline timeout.
   timeouts:
-    pipeline: 30m0s
+    pipeline: 45m0s
   params:
     - name: repo_url
       value: "{{ repo_url }}"

@@ -325,6 +325,9 @@ var storageSchemaFixtures = []storageSchemaFixtureEntry{
 var historicalReleases = []string{"v0.1.0", "v0.1.1", "v0.1.2", "v0.1.3", "v0.1.4", "v0.1.5", "v0.1.6", "v0.1.7", "v0.1.8", "v0.1.9", "v0.1.10", "v0.1.11", "v0.1.12", "v0.1.13", "v0.1.14", "v0.2.0", "v0.2.1", "v0.3.0", "v0.3.1", "v0.3.2", "v0.4.0", "v0.5.0", "v0.5.1", "v0.5.2", "v0.6.0"}
 
 func TestMigrationEveryRegisteredStorageSchemaOpensAndMutatesWithCurrentCode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	history := portable.StorageSchemaHistory()
 	fixtureSchemas := make(map[string]struct{}, len(storageSchemaFixtures))
 	for familyIndex, family := range storageSchemaFixtures {
@@ -971,6 +974,7 @@ func (backend *interruptingInventoryBackend) totalBodyReads() int {
 }
 
 func TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary(t *testing.T) {
+	t.Parallel()
 	boundaries := []string{
 		portable.StepMigrationAfterDetection,
 		portable.StepMigrationAfterGateClosed,
@@ -1000,6 +1004,7 @@ func TestMigrationEveryLedgerEdgeResumesAfterEveryDurableBoundary(t *testing.T) 
 		for familyIndex, family := range families {
 			for boundaryIndex, boundary := range edgeBoundaries {
 				t.Run(entry.MigrationID+"/"+family.profile+"/"+boundary, func(t *testing.T) {
+					t.Parallel()
 					fixture := loadStorageSchemaFixture(t, family)
 					stateBackend := objectmemory.New()
 					fileBackend := objectmemory.New()

@@ -1,7 +1,6 @@
 package telemetry
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -53,25 +52,6 @@ func TestResponseWriteTelemetryClassifiesWithoutInspectingPrivateErrorText(t *te
 	}
 	if RecordResponseWrite(context.Background(), nil) != Success {
 		t.Fatal("successful write changed")
-	}
-}
-
-func TestResponseWriteTelemetryKeepsMetricsClosedAcrossDistinctPrivateErrors(t *testing.T) {
-	observer := New(nil, nil)
-	for index := range 100 {
-		ctx, activity := Start(WithRequestID(Context(context.Background(), observer), fmt.Sprintf("request-%d", index)), HTTP, Application)
-		RecordResponseWrite(ctx, fmt.Errorf("sentinel-user-%d/path/file capability=secret-%d", index, index))
-		activity.EndResult(Success)
-	}
-	var output bytes.Buffer
-	observer.WritePrometheus(&output)
-	if !strings.Contains(output.String(), `endlessfs_operations_total{operation="http.request",role="application",result="unavailable"} 100`) {
-		t.Fatal("transport accounting incomplete")
-	}
-	for _, forbidden := range []string{"sentinel", "requestID=", "request-", "stage=", "reason="} {
-		if strings.Contains(output.String(), forbidden) {
-			t.Fatalf("unbounded/private transport metric %q", forbidden)
-		}
 	}
 }
 

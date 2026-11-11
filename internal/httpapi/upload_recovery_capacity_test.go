@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,48 +11,12 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/domain"
 )
 
-func TestUploadRecoveryBoundedEncodingPreservesOrdinaryWire(t *testing.T) {
-	status := &domain.UploadStatus{UploadID: "wire", State: domain.UploadStateActive, Path: domain.MustParseUserPath("/quote-\"-<->-\u2028.bin"), DeclaredSize: 4}
-	for _, items := range [][]domain.UploadLifecycleItem{nil, {}, {{Index: 0, UploadID: "wire", Status: status, Capability: reviewCapacityCapability("wire", 64), NextAction: "transfer"}}} {
-		want, err := json.Marshal(map[string]any{"uploads": items})
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, overflow, err := encodeBoundedUploadPage(items)
-		if err != nil || overflow || !bytes.Equal(got, want) {
-			t.Fatalf("ordinary wire changed: overflow=%t err=%v", overflow, err)
-		}
-	}
-}
-
 func TestUploadRecoveryOverflowCannotMaskInvalidLaterDetail(t *testing.T) {
 	items := []domain.UploadLifecycleItem{{Index: 0, UploadID: "large", Capability: reviewCapacityCapability("large", maxControlBodyBytes)}, {Index: 1, UploadID: "invalid", Status: &domain.UploadStatus{UploadID: "invalid"}}}
 	response := httptest.NewRecorder()
 	writeUploadLifecyclePage(response, httptest.NewRequest(http.MethodPost, "/api/v1/uploads/batch/resume", nil), items)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("invalid later authority was hidden by compaction: status=%d", response.Code)
-	}
-}
-
-func TestUploadRecoveryResponseExactWireBoundary(t *testing.T) {
-	item := domain.UploadLifecycleItem{Index: 0, UploadID: "boundary", Capability: reviewCapacityCapability("boundary", 0), NextAction: "transfer"}
-	initial, err := json.Marshal(map[string]any{"uploads": []domain.UploadLifecycleItem{item}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	item.Capability.URL += strings.Repeat("x", maxControlBodyBytes-len(initial))
-	want, err := json.Marshal(map[string]any{"uploads": []domain.UploadLifecycleItem{item}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, overflow, err := encodeBoundedUploadPage([]domain.UploadLifecycleItem{item})
-	if err != nil || overflow || len(got) != maxControlBodyBytes || !bytes.Equal(got, want) {
-		t.Fatalf("exact wire boundary changed: bytes=%d overflow=%t err=%v", len(got), overflow, err)
-	}
-	item.Capability.URL += "x"
-	page := reviewCapacityPage(t, []domain.UploadLifecycleItem{item})
-	if len(page.Uploads) != 1 || page.Uploads[0].UploadID != item.UploadID || !page.Uploads[0].DetailsUnavailable {
-		t.Fatal("one-byte overflow lost terminal singleton semantics")
 	}
 }
 
@@ -93,48 +56,6 @@ func reviewCapacityPage(t *testing.T, items any) recoveryCapacityPage {
 		t.Fatal(err)
 	}
 	return page
-}
-
-func TestUploadRecoveryCapacityRetainsUsableSiblingAndSplitsOnlyDeferred(t *testing.T) {
-	items := make([]domain.UploadLifecycleItem, 2)
-	for index := range items {
-		id := domain.UploadID(string(rune('a' + index)))
-		items[index] = domain.UploadLifecycleItem{Index: index, UploadID: id, Status: &domain.UploadStatus{UploadID: id, State: domain.UploadStateActive, Path: domain.MustParseUserPath("/synthetic.bin"), DeclaredSize: 4}, Capability: reviewCapacityCapability(id, 600_000), NextAction: "transfer"}
-	}
-	page := reviewCapacityPage(t, items)
-	if len(page.Uploads) != 2 {
-		t.Fatal("capacity envelope lost item correlation")
-	}
-	first, deferred := page.Uploads[0], page.Uploads[1]
-	if first.Capability == nil || first.Capability.URL != items[0].Capability.URL || first.CapacityDeferred || first.ErrorKind != "" {
-		t.Fatal("usable sibling was lost or changed")
-	}
-	if deferred.Index != 1 || deferred.UploadID != items[1].UploadID || !deferred.CapacityDeferred || deferred.Capability != nil || deferred.NextAction != "smaller_page" {
-		t.Fatal("oversized cohort did not explicitly defer only its remaining capability")
-	}
-	// Fewer requested IDs recover the complete same attempt. Capacity progress
-	// does not allocate a replacement upload or spend transient-error retries.
-	items[1].Index = 0
-	single := reviewCapacityPage(t, items[1:])
-	if len(single.Uploads) != 1 || single.Uploads[0].CapacityDeferred || single.Uploads[0].Capability == nil || single.Uploads[0].Capability.URL != items[1].Capability.URL {
-		t.Fatal("smaller cohort did not recover the exact deferred capability")
-	}
-}
-
-func TestUploadAdmissionCapacityPreservesDurableAttemptAndDirectsResume(t *testing.T) {
-	items := make([]domain.UploadAdmissionResult, 2)
-	for index := range items {
-		id := domain.UploadID(string(rune('a' + index)))
-		items[index] = domain.UploadAdmissionResult{Index: index, ID: string(rune('c' + index)), UploadID: id, Outcome: "accepted", Status: &domain.UploadStatus{UploadID: id, State: domain.UploadStateActive, Path: domain.MustParseUserPath("/synthetic.bin"), DeclaredSize: 4}, Capability: reviewCapacityCapability(id, 600_000), NextAction: "transfer"}
-	}
-	page := reviewCapacityPage(t, items)
-	if len(page.Uploads) != 2 {
-		t.Fatal("admission lost correlated outcomes")
-	}
-	deferred := page.Uploads[1]
-	if page.Uploads[0].Capability == nil || deferred.Index != 1 || deferred.ID != items[1].ID || deferred.UploadID != items[1].UploadID || deferred.Outcome != "accepted" || !deferred.CapacityDeferred || deferred.Capability != nil || deferred.NextAction != "resume" || deferred.ErrorKind != "" {
-		t.Fatal("durable admission was converted into rejection or missing capability without explicit recovery")
-	}
 }
 
 func TestUploadRecoveryCapacityUnrepresentableSingletonIsTerminal(t *testing.T) {

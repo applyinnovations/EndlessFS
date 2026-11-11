@@ -12,46 +12,41 @@ type migrationFaultTrace struct {
 	Phase, Operation string
 }
 
-// Preserve every mutating provider boundary and the first/last read of each
-// record family in each migration phase. The ordinary gate keeps every read.
-func migrationRaceIndices(trace []migrationFaultTrace) []int {
+// migrationFaultIndices selects the first provider call of every (migration
+// edge, operation, object family) class, plus three calls past the end.
+// Interrupting every individual call repeats the same code path for each
+// record in a family and made this matrix the slowest test in the repository;
+// one interruption per class keeps the crash-safety guarantee for each
+// distinct operation the migration performs.
+func migrationFaultIndices(trace []migrationFaultTrace) []int {
 	selected := make(map[int]bool)
-	first, last := make(map[string]int), make(map[string]int)
+	seen := make(map[string]bool)
 	for index, event := range trace {
 		phaseParts := strings.Split(event.Phase, ":")
-		if len(phaseParts) > 3 {
-			event.Phase = strings.Join(phaseParts[:3], ":")
+		// Group by migration edge; every step boundary within an edge is
+		// already interrupted by the ledger-edge durable-boundary test.
+		if len(phaseParts) > 2 {
+			event.Phase = strings.Join(phaseParts[:2], ":")
 		}
 		parts := strings.Fields(event.Operation)
 		if len(parts) == 0 {
 			panic("empty migration transport operation")
 		}
-		immutable := len(parts) > 1 && (strings.Contains(parts[1], "/pages/") || strings.Contains(parts[1], "/packs/") || strings.Contains(parts[1], "/nodes/") || strings.Contains(parts[1], "/manifests/") || strings.Contains(parts[1], "/state-versions/"))
-		switch {
-		case (parts[0] == "PUT" || parts[0] == "DELETE") && immutable:
-			key := event.Phase + "/" + parts[0] + "/" + migrationReadFamily(parts[1])
-			if _, found := first[key]; !found {
-				first[key] = index + 1
-			}
-			last[key] = index + 1
-		case parts[0] == "PUT" || parts[0] == "DELETE" || parts[0] == "COPY" || parts[0] == "ABORT-UPLOAD" || parts[0] == "BEGIN-UPLOAD" || parts[0] == "RESUME-UPLOAD" || parts[0] == "UPLOAD-PROGRESS" || parts[0] == "CREATE-DOWNLOAD":
-			selected[index+1] = true
-		case parts[0] == "GET" || parts[0] == "HEAD" || parts[0] == "LIST" || parts[0] == "OPEN" || parts[0] == "VERIFY":
-			family := event.Operation
-			if len(parts) > 1 {
-				family = migrationReadFamily(parts[1])
-			}
-			key := event.Phase + "/" + parts[0] + "/" + family
-			if _, found := first[key]; !found {
-				first[key] = index + 1
-			}
-			last[key] = index + 1
+		switch parts[0] {
+		case "PUT", "DELETE", "COPY", "ABORT-UPLOAD", "BEGIN-UPLOAD", "RESUME-UPLOAD", "UPLOAD-PROGRESS", "CREATE-DOWNLOAD",
+			"GET", "HEAD", "LIST", "OPEN", "VERIFY":
 		default:
 			panic("unclassified migration transport operation: " + event.Operation)
 		}
-	}
-	for key, start := range first {
-		selected[start], selected[last[key]] = true, true
+		family := event.Operation
+		if len(parts) > 1 {
+			family = migrationObjectFamily(parts[1])
+		}
+		key := event.Phase + "/" + parts[0] + "/" + family
+		if !seen[key] {
+			seen[key] = true
+			selected[index+1] = true
+		}
 	}
 	for beyond := 1; beyond <= 3; beyond++ {
 		selected[len(trace)+beyond] = true
@@ -64,7 +59,7 @@ func migrationRaceIndices(trace []migrationFaultTrace) []int {
 	return indices
 }
 
-func migrationReadFamily(key string) string {
+func migrationObjectFamily(key string) string {
 	if strings.HasPrefix(key, "endlessfs/v1/domains/") {
 		parts := strings.Split(strings.TrimPrefix(key, "endlessfs/v1/domains/"), "/")
 		if strings.HasSuffix(key, "/head.json") {
@@ -78,12 +73,17 @@ func migrationReadFamily(key string) string {
 	}
 	family := storageformat.ClassifyEconomicsTarget(key)
 	if family == "other" {
-		return "unclassified-exact-key/" + key
+		// Records under one unclassified prefix (for example GC marks) share
+		// a code path; keep top-level control objects distinct.
+		if index := strings.LastIndex(key, "/"); strings.Count(key, "/") > 2 {
+			return "unclassified/" + key[:index]
+		}
+		return "unclassified/" + key
 	}
 	return family
 }
 
-func TestMigrationRacePortfolioPreservesMutationAndReadClasses(t *testing.T) {
+func TestMigrationFaultIndicesCoverEveryOperationClass(t *testing.T) {
 	trace := []migrationFaultTrace{
 		{"first", "GET endlessfs/v1/domains/catalog/pages/a.json"},
 		{"first", "GET endlessfs/v1/domains/catalog/pages/b.json"},
@@ -93,8 +93,8 @@ func TestMigrationRacePortfolioPreservesMutationAndReadClasses(t *testing.T) {
 		{"next", "GET endlessfs/v1/domains/catalog/pages/d.json"},
 		{"next", "HEAD endlessfs/v1/fs/owner/blobs/blob"},
 	}
-	indices := migrationRaceIndices(trace)
-	want := []int{1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	indices := migrationFaultIndices(trace)
+	want := []int{1, 4, 5, 6, 7, 8, 9, 10, 11, 12}
 	if len(indices) != len(want) {
 		t.Fatalf("selected boundaries = %v; want %v", indices, want)
 	}

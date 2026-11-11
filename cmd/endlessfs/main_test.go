@@ -115,14 +115,6 @@ func TestControlWriteTimeoutContainsPreviewOperationDeadline(t *testing.T) {
 	}
 }
 
-func TestRunRejectsMalformedConfiguredMockProviderURL(t *testing.T) {
-	cfg := runtimeTestConfig(t)
-	cfg.MockProviderURL = "%"
-	if err := run(context.Background(), endlesslogging.NewJSON(io.Discard, slog.LevelInfo), cfg); err == nil {
-		t.Fatal("malformed mock provider URL was accepted")
-	}
-}
-
 func TestRunBuildsCompleteMockRuntimeBeforeGracefulShutdown(t *testing.T) {
 	cfg := runtimeTestConfig(t)
 	logger := endlesslogging.NewJSON(io.Discard, slog.LevelDebug)

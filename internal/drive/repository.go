@@ -4,7 +4,6 @@ package drive
 
 import (
 	"context"
-	"errors"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/model"
@@ -83,11 +82,4 @@ func listRecords[T any](ctx context.Context, store state.Store, prefix state.Pre
 		}
 		request.Cursor = page.NextCursor
 	}
-}
-
-func createOrMatch(err error) error {
-	if errors.Is(err, domain.ErrConflict) {
-		return nil
-	}
-	return err
 }

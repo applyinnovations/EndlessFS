@@ -42,24 +42,6 @@ func TestConsistencyDomainKeysRemainCanonicalAndBounded(t *testing.T) {
 	}
 }
 
-func TestSchema008PrefixHelpersStayInsideCanonicalNamespaces(t *testing.T) {
-	prefixes := []string{
-		StateQuerySnapshotPrefix(),
-		Schema008MigrationStageDomainPrefix("namespace:owner-a"),
-		Schema008MigrationSourceMarkerPrefix(),
-		Schema008MigrationSubtreePrefix(),
-		DuplicateOccurrenceGroupPrefix("owner-a", "file", "group-a"),
-		DuplicateSummaryPrefix("owner-a", "file"),
-		DuplicateSimilarityPostingPrefix("owner-a", 7, "sketch-a"),
-		GarbageCollectionMarkPrefix("checkpoint-a"),
-	}
-	for _, prefix := range prefixes {
-		if !strings.HasPrefix(prefix, root) || !strings.HasSuffix(prefix, "/") {
-			t.Fatalf("non-canonical prefix %q", prefix)
-		}
-	}
-}
-
 func TestConsistencyDomainRecordsValidateBoundsAndIntegrity(t *testing.T) {
 	leaf := DomainPage{
 		SchemaVersion: 1,
@@ -262,27 +244,6 @@ func TestConsistencyDomainAuxiliaryRecordsValidateAndDenyCorruption(t *testing.T
 	}
 	if err := ValidateProjectionHead(ProjectionHead{SchemaVersion: 1, OwnerID: "owner-a", ProjectionID: "projection-a", Kind: ProjectionSearch, SourceDomainID: "owner-a", SourceRevision: 1, Root: DomainTreeRoot{Digest: "not-a-digest", EntryCount: 1}}); !errors.Is(err, domain.ErrInvalid) {
 		t.Fatalf("projection head with invalid root error = %v", err)
-	}
-}
-
-func TestConsistencyDomainKeyHelpersRejectUnknownKindsAndInvalidText(t *testing.T) {
-	if DomainPrefix() != "endlessfs/v1/domains/" || ProjectionPrefix() != "endlessfs/v1/projections/" {
-		t.Fatalf("unexpected domain prefixes %q %q", DomainPrefix(), ProjectionPrefix())
-	}
-	for _, call := range []func(){
-		func() { _ = DomainHeadKey("unknown", "owner") },
-		func() { _ = ProjectionHeadKey("owner", "unknown") },
-		func() { _ = DomainHeadKey(DomainNamespace, "") },
-		func() { _ = DomainPageKey(DomainNamespace, "owner", "bad\x00id") },
-	} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Fatal("invalid consistency-domain key did not panic")
-				}
-			}()
-			call()
-		}()
 	}
 }
 

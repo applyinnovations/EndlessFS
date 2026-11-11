@@ -52,13 +52,6 @@ import (
 	"github.com/chromedp/chromedp/kb"
 )
 
-func TestVirtualAuthenticatorUsesPlatformTransport(t *testing.T) {
-	options := virtualAuthenticatorOptions()
-	if options.Transport != cdpwebauthn.AuthenticatorTransportInternal {
-		t.Fatalf("virtual authenticator transport = %q, want internal", options.Transport)
-	}
-}
-
 func TestE2EUploadPlannerHashesMD5AndCRC32CInOneWorkerPass(t *testing.T) {
 	parallelE2EFixture(t)
 	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {

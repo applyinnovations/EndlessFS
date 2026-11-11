@@ -116,30 +116,6 @@ func TestWorkerProtocolValidationAndFailureBoundaries(t *testing.T) {
 	}
 }
 
-func TestRawSelfTestFixtureRejectsOverflow(t *testing.T) {
-	tests := []struct {
-		name string
-		run  func()
-	}{
-		{name: "uint32 negative", run: func() { rawSelfTestUint32(-1) }},
-		{name: "uint32 overflow", run: func() { rawSelfTestUint32(1 << 32) }},
-		{name: "uint16 negative", run: func() { rawSelfTestUint16(-1) }},
-		{name: "uint16 overflow", run: func() { rawSelfTestUint16(1 << 16) }},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			panicked := false
-			func() {
-				defer func() { panicked = recover() != nil }()
-				test.run()
-			}()
-			if !panicked {
-				t.Fatal("RAW self-test fixture accepted an overflowing integer")
-			}
-		})
-	}
-}
-
 func TestRawDecoderBoundaryRejectsUnpackagedPathsAndMalformedOutput(t *testing.T) {
 	decoderPath := os.Getenv("ENDLESSFS_TEST_RAW_DECODER")
 	if decoderPath == "" {

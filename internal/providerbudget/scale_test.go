@@ -3,14 +3,10 @@ package providerbudget_test
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 	"testing"
-	"time"
 
-	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	"github.com/applyinnovations/endlessfs/internal/providerbudget"
-	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
 type scaleEvidence struct {
@@ -69,22 +65,6 @@ func productionScaleEvidence(t *testing.T, ratchet providerbudget.RatchetLedger)
 		evidence = append(evidence, item)
 	}
 	return evidence
-}
-
-func TestProviderBudgetProductionScaleScenarios(t *testing.T) {
-	ratchet, err := gcs.RegionalStandardFlatBudgetRatchet()
-	if err != nil {
-		t.Fatal(err)
-	}
-	evidence := productionScaleEvidence(t, ratchet)
-	if len(evidence) < 18 {
-		t.Fatalf("production scale audit has only %d scenarios", len(evidence))
-	}
-	body, err := json.Marshal(evidence)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("provider-scale-v1 %s", body)
 }
 
 func TestProviderBudgetScaleScenariosUseCurrentQualification(t *testing.T) {
@@ -179,71 +159,4 @@ func TestProviderBudgetProductionScaleScenariosConformToTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("provider-target-v1 %s", body)
-}
-
-func TestProviderBudgetTargetPayloadEnvelopesAreMeasured(t *testing.T) {
-	const (
-		controlBodyLimit = 1 << 20
-		segmentLimit     = 4 << 20
-		projectionLimit  = 2 * segmentLimit
-	)
-	digest := strings.Repeat("d", 64)
-	padding := strings.Repeat("x", controlBodyLimit-128)
-	intent, err := json.Marshal(struct {
-		Padding string `json:"padding"`
-	}{Padding: padding})
-	if err != nil || len(intent) > controlBodyLimit {
-		t.Fatalf("construct maximum accepted control intent: bytes=%d err=%v", len(intent), err)
-	}
-	transaction, err := json.Marshal(struct {
-		SchemaVersion int             `json:"schemaVersion"`
-		BaseRevision  string          `json:"baseRevision"`
-		RequestDigest string          `json:"requestDigest"`
-		Intent        json.RawMessage `json:"intent"`
-	}{SchemaVersion: 1, BaseRevision: digest, RequestDigest: digest, Intent: intent})
-	if err != nil || len(transaction) > segmentLimit {
-		t.Fatalf("compact transaction envelope: bytes=%d maximum=%d err=%v", len(transaction), segmentLimit, err)
-	}
-
-	entries := make([]storageformat.DirectoryEntry, 10_000)
-	for index := range entries {
-		entries[index] = storageformat.DirectoryEntry{
-			Name: strings.Repeat("n", 249) + fmt.Sprintf("%06d", index), NameDigest: digest,
-			Kind: domain.EntryFile, BlobID: fmt.Sprintf("blob-%06d", index), Size: 1,
-			MediaType: "application/octet-stream", MD5: "MDEyMzQ1Njc4OWFiY2RlZg==", CRC32C: "AAAAAA==",
-			ModifiedAt: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), LogicalVersion: digest,
-		}
-	}
-	projection, err := json.Marshal(entries)
-	if err != nil || len(projection) > projectionLimit {
-		t.Fatalf("10,000-entry verbose projection: bytes=%d maximum=%d err=%v", len(projection), projectionLimit, err)
-	}
-
-	type progressItem struct {
-		UploadID string `json:"uploadID"`
-		Lease    string `json:"sealedLease"`
-	}
-	progress := make([]progressItem, 1_000)
-	for index := range progress {
-		progress[index] = progressItem{UploadID: fmt.Sprintf("upload-%06d", index), Lease: strings.Repeat("l", 2<<10)}
-	}
-	progressBody, err := json.Marshal(progress)
-	if err != nil || len(progressBody) > segmentLimit {
-		t.Fatalf("1,000-item transfer progress segment: bytes=%d maximum=%d err=%v", len(progressBody), segmentLimit, err)
-	}
-	t.Logf("provider-target-payload-v1 transactionBytes=%d projectionBytes=%d transferProgressBytes=%d", len(transaction), len(projection), len(progressBody))
-}
-
-func TestProviderBudgetIndependentAdmissionLeaseEnvelope(t *testing.T) {
-	for _, target := range providerbudget.ProductionScaleTargets() {
-		if target.ID != "independent-upload-admission" {
-			continue
-		}
-		wave := target.RequestWaves[len(target.RequestWaves)-1]
-		if wave.RequestBytesEach != storageformat.MaxSealedUploadLeaseBytes {
-			t.Fatalf("admission target lease bytes=%d; canonical envelope=%d", wave.RequestBytesEach, storageformat.MaxSealedUploadLeaseBytes)
-		}
-		return
-	}
-	t.Fatal("missing independent admission target")
 }

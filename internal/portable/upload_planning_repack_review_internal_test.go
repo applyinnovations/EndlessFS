@@ -30,6 +30,9 @@ func reviewReadPlanningHead(t *testing.T, backend objectstore.Backend, key objec
 }
 
 func TestUploadPlanningRepackReviewLostResponsesCancellationAndNewerHead(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	t.Parallel()
 	releaseSeed := acquireCorrectiveHeavyFixture(t)
 	baseline := objectmemory.New()

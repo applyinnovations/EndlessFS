@@ -19,6 +19,9 @@ import (
 // conceal loss of the durable pack before its later independent inventory read.
 // It exercises the public create, verify and reopen operations.
 func TestCheckpointPublicMidOperationPackLossFailsClosed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	for _, operation := range []string{"verify", "open", "create"} {
 		for _, damage := range []string{"missing", "corrupt"} {
 			t.Run(operation+"/"+damage, func(t *testing.T) {

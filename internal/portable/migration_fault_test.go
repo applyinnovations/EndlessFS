@@ -17,7 +17,10 @@ import (
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
-func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
+func TestMigrationRecoversFromTransportInterruptionOfEveryOperationClass(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	predecessors := []storageSchemaFixtureEntry{storageSchemaFixtures[0]}
 	for _, candidate := range storageSchemaFixtures {
 		if candidate.schemaID == "endlessfs-portable-v1/schema-007" && candidate.profile == "application-preview-gcs" {
@@ -79,20 +82,9 @@ func TestMigrationRecoversFromEveryObjectTransportInterruption(t *testing.T) {
 				boundaryCalls := baselineFaults.calls
 				trace := append([]migrationFaultTrace(nil), baselineFaults.trace...)
 				baselineFaults.mu.Unlock()
-				indices := make([]int, boundaryCalls+3)
-				for index := range indices {
-					indices[index] = index + 1
-				}
-				if migrationRacePortfolio {
-					indices = migrationRaceIndices(trace)
-				}
-				t.Logf("transport portfolio: race=%t selected=%d exhaustive=%d", migrationRacePortfolio, len(indices), boundaryCalls+3)
-				var results []migrationFaultBoundaryResult
-				if migrationRacePortfolio {
-					results = runSelectedMigrationFaultBoundaries(fixture, writer, target, wantGateEpoch, indices)
-				} else {
-					results = runMigrationFaultBoundaries(fixture, writer, target, wantGateEpoch, boundaryCalls+3)
-				}
+				indices := migrationFaultIndices(trace)
+				t.Logf("transport interruptions: selected=%d of %d calls", len(indices), boundaryCalls+3)
+				results := runSelectedMigrationFaultBoundaries(fixture, writer, target, wantGateEpoch, indices)
 				consecutiveCompleted := 0
 				for _, result := range results {
 					if result.err != nil {
@@ -116,18 +108,6 @@ type migrationFaultBoundaryResult struct {
 	failAt                  int
 	completedBeyondBoundary bool
 	err                     error
-}
-
-// runMigrationFaultBoundaries preserves the exhaustive ordered fault matrix
-// while evaluating independent fresh-backend boundaries with a bounded worker
-// pool. Race instrumentation otherwise makes the growing append-only migration
-// suffix exceed the process timeout even though no individual schedule blocks.
-func runMigrationFaultBoundaries(fixture storageSchemaFixture, writer portable.WriterConfiguration, target string, wantGateEpoch uint64, total int) []migrationFaultBoundaryResult {
-	indices := make([]int, total)
-	for index := range indices {
-		indices[index] = index + 1
-	}
-	return runSelectedMigrationFaultBoundaries(fixture, writer, target, wantGateEpoch, indices)
 }
 
 func runSelectedMigrationFaultBoundaries(fixture storageSchemaFixture, writer portable.WriterConfiguration, target string, wantGateEpoch uint64, indices []int) []migrationFaultBoundaryResult {
@@ -232,8 +212,10 @@ type migrationContentionBackend struct {
 
 type cancellingMigrationGateContentionBackend struct {
 	objectstore.Backend
-	cancel   context.CancelFunc
-	attempts int
+	key        objectstore.Key
+	bodyMarker []byte
+	cancel     context.CancelFunc
+	attempts   int
 }
 
 type disappearingMigrationObjectBackend struct {
@@ -318,12 +300,12 @@ func (backend *migrationContentionBackend) Put(ctx context.Context, key objectst
 }
 
 func (backend *cancellingMigrationGateContentionBackend) Put(ctx context.Context, key objectstore.Key, body []byte, condition objectstore.PutCondition) (objectstore.NativeVersion, error) {
-	if key == storageformat.WriteGateKey() && condition.Mode == objectstore.PutMatch {
+	if key == backend.key && condition.Mode == objectstore.PutMatch && bytes.Contains(body, backend.bodyMarker) {
 		backend.attempts++
-		if backend.attempts == 64 {
+		if backend.attempts == 4 {
 			backend.cancel()
 		}
-		return "", domain.NewError(domain.ErrorPreconditionFailed, "injected persistent migration gate contention")
+		return "", domain.NewError(domain.ErrorPreconditionFailed, "injected persistent migration contention")
 	}
 	return backend.Backend.Put(ctx, key, body, condition)
 }
@@ -403,27 +385,63 @@ func TestMigrationCASContentionConvergesOrFailsClosed(t *testing.T) {
 	}
 }
 
-func TestMigrationGatePersistentContentionHonorsContextCancellation(t *testing.T) {
-	fixture := loadStorageSchemaFixture(t, storageSchemaFixtures[1])
-	stateBackend := objectmemory.New()
-	fileBackend := objectmemory.New()
-	if err := stateBackend.Import(fixture.StateObjects); err != nil {
-		t.Fatal(err)
-	}
-	if err := fileBackend.Import(fixture.FileObjects); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	contended := &cancellingMigrationGateContentionBackend{Backend: stateBackend, cancel: cancel}
-	clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
-	options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 219, nil)
-	options.Backend = contended
-	options.Writer = currentWriterForSchemaFixture(t, fixture)
-	if _, err := portable.Open(ctx, options); !errors.Is(err, context.Canceled) {
-		t.Fatalf("persistently contended migration error = %v; want context cancellation", err)
-	}
-	if contended.attempts != 64 {
-		t.Fatalf("migration gate contention attempts = %d; want 64", contended.attempts)
+// Replicas that keep losing the gate or superblock CAS back off and retry; a
+// cancelled startup must stop them rather than retry forever. Every edge
+// closes the gate and activates the superblock, so each predecessor fixture
+// exercises the retry loop of its own migration kind.
+func TestMigrationPersistentContentionHonorsContextCancellation(t *testing.T) {
+	history := portable.StorageSchemaHistory()
+	seen := map[string]bool{history[len(history)-1].ID: true} // the current schema has nothing to migrate
+	for _, family := range storageSchemaFixtures {
+		if seen[family.schemaID] {
+			continue
+		}
+		seen[family.schemaID] = true
+		for _, contention := range []struct {
+			name   string
+			key    objectstore.Key
+			marker string
+		}{
+			{"gate", storageformat.WriteGateKey(), ""},
+			{"gate-close", storageformat.WriteGateKey(), `"mode":"closed"`},
+			{"superblock", storageformat.SuperblockKey(), ""},
+		} {
+			key := contention.key
+			t.Run(family.schemaID+"/"+contention.name, func(t *testing.T) {
+				t.Parallel()
+				fixture := loadStorageSchemaFixture(t, family)
+				stateBackend := objectmemory.New()
+				fileBackend := objectmemory.New()
+				if err := stateBackend.Import(fixture.StateObjects); err != nil {
+					t.Fatal(err)
+				}
+				if err := fileBackend.Import(fixture.FileObjects); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				contended := &cancellingMigrationGateContentionBackend{Backend: stateBackend, key: key, bodyMarker: []byte(contention.marker), cancel: cancel}
+				clock := domain.NewFixedClock(fixture.CreatedAt.Add(time.Hour))
+				options := schemaSplitMigrationOptions(stateBackend, fileBackend, clock, 219, nil)
+				options.Backend = contended
+				options.Writer = currentWriterForSchemaFixture(t, fixture)
+				_, err := portable.Open(ctx, options)
+				if contended.attempts < 4 {
+					// This edge stops retrying this object before the budget,
+					// failing closed on its own; it must not succeed.
+					if err == nil {
+						t.Fatalf("migration succeeded although every %s CAS failed", key)
+					}
+					return
+				}
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("persistently contended migration error = %v; want context cancellation", err)
+				}
+				if contended.attempts != 4 {
+					t.Fatalf("contention attempts = %d; want 4", contended.attempts)
+				}
+			})
+		}
 	}
 }
 

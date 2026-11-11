@@ -289,8 +289,14 @@ func TestE2ESmartRecoveryResumesOnlyUnconfirmedBytesAfterRefreshLogin(t *testing
 // mirror 7,966 actual upload/verification/publication results. Every remaining
 // source is ambiguous by size but differs by content, forcing local hashing,
 // exact planning, admission, real provider data transfer and verified completion.
+//
+// Opt-in scale qualification (about six minutes): the recovery behaviour itself
+// is covered on every run by the smaller smart-recovery tests above.
 func TestE2ESmartRecoveryProductionCardinalityWarmTransfersOnlyRemainingFiles(t *testing.T) {
 	parallelE2EFixture(t)
+	if os.Getenv("ENDLESSFS_E2E_SCALE_QUALIFICATION") != "1" {
+		t.Skip("set ENDLESSFS_E2E_SCALE_QUALIFICATION=1 to run the production-cardinality qualification")
+	}
 	requireSmartRecoveryE2E(t)
 	testStarted := time.Now()
 	const total, completed, remaining = 10_604, 7_966, 2_638

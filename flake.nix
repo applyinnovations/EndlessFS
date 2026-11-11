@@ -180,8 +180,6 @@
             in
             relative == "go.mod"
             || relative == "go.sum"
-            # Exact-budget inventory verifies the shared Nix gate selection.
-            || relative == "flake.nix"
             || relative == "cmd"
             || lib.hasPrefix "cmd/" relative
             || relative == "internal"
@@ -189,26 +187,6 @@
             || relative == "tools"
             || lib.hasPrefix "tools/" relative;
         };
-      containerTransportPolicyFor =
-        pkgs:
-        pkgs.writeText "endlessfs-container-transport-policy.json" ''
-          {
-            "default": [
-              {
-                "type": "reject"
-              }
-            ],
-            "transports": {
-              "docker-archive": {
-                "": [
-                  {
-                    "type": "insecureAcceptAnything"
-                  }
-                ]
-              }
-            }
-          }
-        '';
       dependencyPolicyCommand = moduleClosure: ''
         go run ./tools/vulndb check security/vulndb
 
@@ -250,18 +228,36 @@
           yq -e '.apiVersion == "tekton.dev/v1" and .kind == "PipelineRun"' "$pipeline" >/dev/null
           yq -e '.metadata.annotations."pipelinesascode.tekton.dev/target-namespace" == "tekton-buildkit"' "$pipeline" >/dev/null
           yq -e '.spec.taskRunTemplate.podTemplate.nodeSelector."storage.xlab.now/fast-local" == "true"' "$pipeline" >/dev/null
-          yq -e '.spec.taskRunTemplate.podTemplate.securityContext.fsGroup == 1000' "$pipeline" >/dev/null
-          # Each run gets a private Nix store; only the publish-cache finally
-          # task, under the nix-cache-publisher account, writes the shared cache
-          # (main pushes and releases only; endlessfs-ci never publishes).
-          yq -e '.spec.workspaces[] | select(.name == "nix-store") | .volumeClaimTemplate.spec.storageClassName == "scratch-local"' "$pipeline" >/dev/null
-          yq -e '.spec.workspaces[] | select(.name == "nix-store") | has("persistentVolumeClaim") | not' "$pipeline" >/dev/null
+          yq -e '.spec.taskRunTemplate.podTemplate.automountServiceAccountToken == false' "$pipeline" >/dev/null
+          yq -e '.spec.workspaces[] | select(.name == "source") | .volumeClaimTemplate.spec.resources.requests.storage == "10Gi"' "$pipeline" >/dev/null
+          # Only the standard xlab v1 Tasks: no shared store, mirror or layer
+          # cache volumes, and no legacy Task that mixes credentials and source.
+          unexpected_tasks="$(yq -r '((.spec.pipelineSpec.tasks // []) + (.spec.pipelineSpec.finally // []))[] | select(has("taskRef")) | .taskRef.params[] | select(.name == "name") | .value' "$pipeline" \
+            | rg -vx 'git-clone-v1|nix-v1|oci-publish-v1|nix-cache-publish-v1' || true)"
+          if [ -n "$unexpected_tasks" ]; then
+            echo "$pipeline must use only the standard v1 Tasks, not: $unexpected_tasks" >&2
+            exit 1
+          fi
+          # Per-run volumes use scratch-local (hostpath), never a Longhorn class.
+          yq -e '[.spec.workspaces[] | select(has("volumeClaimTemplate")) | .volumeClaimTemplate.spec.storageClassName] | all_c(. == "scratch-local")' "$pipeline" >/dev/null
+          if yq -e '.spec.workspaces[] | select(has("persistentVolumeClaim"))' "$pipeline" >/dev/null 2>&1; then
+            echo "$pipeline must not bind a shared PersistentVolumeClaim" >&2
+            exit 1
+          fi
+          # Every sandboxed Nix Task runs in a pod user namespace and holds no
+          # credential workspace.
+          for task in $(yq -r '.spec.pipelineSpec.tasks[] | select(.taskRef.params[] | select(.name == "name" and .value == "nix-v1")) | .name' "$pipeline"); do
+            yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" "$pipeline" >/dev/null
+            yq -e ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | [.workspaces[].name] - [\"source\", \"artifacts\", \"nix-cache-export\"] | length == 0" "$pipeline" >/dev/null
+          done
+          # Only publish-cache, under the nix-cache-publisher account, writes
+          # the shared Nix cache (main pushes and releases; endlessfs-ci never).
           if [ "$pipeline" != .tekton/endlessfs-ci.yaml ]; then
-            yq -e '.spec.pipelineSpec.finally[] | select(.name == "publish-cache") | .taskRef.params[] | select(.name == "name") | .value == "nix-cache-publish"' "$pipeline" >/dev/null
+            yq -e '.spec.pipelineSpec.finally[] | select(.name == "publish-cache") | .taskRef.params[] | select(.name == "name") | .value == "nix-cache-publish-v1"' "$pipeline" >/dev/null
             yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "publish-cache") | .serviceAccountName == "nix-cache-publisher"' "$pipeline" >/dev/null
           fi
-          yq -e '.spec.workspaces[] | select(.name == "git-cache") | .persistentVolumeClaim.claimName == "git-repo-cache"' "$pipeline" >/dev/null
-          yq -e '.spec.workspaces[] | select(.name == "source") | .volumeClaimTemplate.spec.resources.requests.storage == "10Gi"' "$pipeline" >/dev/null
+          # The registry credential reaches only oci-publish-v1.
+          yq -e '[.spec.pipelineSpec.tasks[] | select(.workspaces[]? | .workspace == "ghcr-docker-config") | .taskRef.params[] | select(.name == "name") | .value] | all_c(. == "oci-publish-v1")' "$pipeline" >/dev/null
           if rg -ni 'gke|drive\.endlessfs\.com|namespace-macos-fastlane|runs-on:[[:space:]]*macos' "$pipeline"; then
             echo "active CI must stay on xlab Linux compute: $pipeline" >&2
             exit 1
@@ -285,8 +281,9 @@
         yq -e '.metadata.annotations | has("pipelinesascode.tekton.dev/on-event") == false and has("pipelinesascode.tekton.dev/on-target-branch") == false' .tekton/endlessfs-ci.yaml >/dev/null
         # Pull-request, comment and merge-queue runs build code not yet on main,
         # so endlessfs-ci never publishes to the shared Nix cache.
-        yq -e '[((.spec.pipelineSpec.tasks // [])[], (.spec.pipelineSpec.finally // [])[]) | select(.name == "publish-cache" or ((.taskRef.params // []) | any_c(.name == "name" and .value == "nix-cache-publish")))] | length == 0' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '[((.spec.pipelineSpec.tasks // [])[], (.spec.pipelineSpec.finally // [])[]) | select(.name == "publish-cache" or ((.taskRef.params // []) | any_c(.name == "name" and (.value | test("^nix-cache-publish")))))] | length == 0' .tekton/endlessfs-ci.yaml >/dev/null
         yq -e '[(.spec.taskRunSpecs // [])[] | select(.serviceAccountName == "nix-cache-publisher")] | length == 0' .tekton/endlessfs-ci.yaml >/dev/null
+        yq -e '[(.spec.workspaces // [])[] | select(.name == "nix-cache-export")] | length == 0' .tekton/endlessfs-ci.yaml >/dev/null
 
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-event" == "[push]"' .tekton/endlessfs-container.yaml >/dev/null
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[main]"' .tekton/endlessfs-container.yaml >/dev/null
@@ -294,45 +291,56 @@
         yq -e '.metadata.annotations."pipelinesascode.tekton.dev/on-target-branch" == "[refs/tags/v*.*.*]"' .tekton/endlessfs-release.yaml >/dev/null
         yq -e '.spec.params[] | select(.name == "release_tag") | .value == "{{ git_tag }}"' .tekton/endlessfs-release.yaml >/dev/null
         for pipeline in $active_pipelines; do
-          advisory_script="$(yq -r '.spec.pipelineSpec.tasks[].params[] | select(.name == "SCRIPT") | .value' "$pipeline")"
+          advisory_script="$(yq -r '.spec.pipelineSpec.tasks[].params[]? | select(.name == "SCRIPT") | .value' "$pipeline")"
           if ! printf '%s\n' "$advisory_script" | rg -Fx 'nix run .#security-freshness' >/dev/null; then
             echo "$pipeline must run the upstream-advisory freshness check" >&2
             exit 1
           fi
         done
-        publisher_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "publish") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-container.yaml)"
-        go run ./tools/check-pipeline-publish "$publisher_script"
         release_verify_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "verify") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
         printf '%s\n' "$release_verify_script" | rg -F 'nix run .#test-migration -- "$release_tag"' >/dev/null
-        release_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "release") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
-        for command in view upload create; do
-          printf '%s\n' "$release_script" | rg -F "gh release $command \"\$release_tag\" --repo \"applyinnovations/EndlessFS\"" >/dev/null
-        done
 
-        for task in prepare-cache fast-checks nix-checks coverage; do
-          yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-ci.yaml >/dev/null
-        done
-        yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "coverage" and .podTemplate.automountServiceAccountToken == false)' .tekton/endlessfs-ci.yaml >/dev/null
-        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .taskRef.params[] | select(.name == "name" and .value == "nix-run-v2")' .tekton/endlessfs-ci.yaml >/dev/null
-        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "nix-checks") | .runAfter | (length == 1 and .[0] == "fast-checks")' .tekton/endlessfs-ci.yaml >/dev/null
-        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .runAfter[] | select(. == "fast-checks")' .tekton/endlessfs-ci.yaml >/dev/null
-        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "coverage") | .runAfter[] | select(. == "nix-checks")' .tekton/endlessfs-ci.yaml >/dev/null
-        yq -e '.spec.taskRunSpecs[] | select(.pipelineTaskName == "publish") | .podTemplate.hostUsers == false' .tekton/endlessfs-container.yaml >/dev/null
-        for task in verify release; do
-          yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.hostUsers == false" .tekton/endlessfs-release.yaml >/dev/null
-        done
-        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "release") | .retries >= 2' .tekton/endlessfs-release.yaml >/dev/null
-
-        check_packages_binding() {
+        # Images are built without credentials and pushed by oci-publish-v1
+        # only after the build (and, for releases, verification) succeeded.
+        check_image_publish() {
           pipeline="$1"
           task="$2"
-          yq -e ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | .workspaces[] | select(.name == \"github-packages-auth\" and .workspace == \"github-packages-auth\")" "$pipeline" >/dev/null
-          yq -e '.spec.workspaces[] | select(.name == "github-packages-auth") | .secret.secretName == "github-packages-credentials"' "$pipeline" >/dev/null
+          tags="$3"
+          shift 3
+          yq -e '.spec.pipelineSpec.tasks[] | select(.name == "build") | .params[] | select(.name == "IMAGE") | .value == ".#container"' "$pipeline" >/dev/null
+          yq -e ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | (.params[] | select(.name == \"IMAGE\") | .value == \"ghcr.io/applyinnovations/endlessfs\")" "$pipeline" >/dev/null
+          yq -e ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | (.params[] | select(.name == \"ARCHIVE_SHA256\") | .value == \"\$(tasks.build.results.ARCHIVE_SHA256)\")" "$pipeline" >/dev/null
+          actual_tags="$(yq -r ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | .params[] | select(.name == \"EXTRA_TAGS\") | .value" "$pipeline" | sed '/^$/d')"
+          if [ "$actual_tags" != "$tags" ]; then
+            echo "$pipeline $task must publish exactly: $tags" >&2
+            exit 1
+          fi
+          for dependency in "$@"; do
+            yq -e ".spec.pipelineSpec.tasks[] | select(.name == \"$task\") | .runAfter[] | select(. == \"$dependency\")" "$pipeline" >/dev/null
+          done
         }
-        check_packages_binding .tekton/endlessfs-container.yaml publish
-        check_packages_binding .tekton/endlessfs-release.yaml release
-        if rg -n 'github-packages-(auth|credentials)' .tekton/endlessfs-ci.yaml; then
-          echo "pull-request and merge-queue CI must not receive the GitHub Packages credential" >&2
+        # Tekton, not the shell, expands these tag expressions.
+        # shellcheck disable=SC2016
+        check_image_publish .tekton/endlessfs-container.yaml publish "$(printf '%s\n' 'sha-$(tasks.clone.results.COMMIT_SHA)' edge)" build
+        # shellcheck disable=SC2016
+        check_image_publish .tekton/endlessfs-release.yaml publish-image "$(printf '%s\n' '$(params.release_tag)' latest)" build verify
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "publish-image") | .retries >= 2' .tekton/endlessfs-release.yaml >/dev/null
+        for pipeline in .tekton/endlessfs-container.yaml .tekton/endlessfs-release.yaml; do
+          yq -e '.spec.workspaces[] | select(.name == "ghcr-docker-config") | .secret.secretName == "ghcr-push-credentials"' "$pipeline" >/dev/null
+        done
+
+        # The GitHub release Task holds the App token, so it reads only the
+        # built assets and runs after the image is published.
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "github-release") | .retries >= 2' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "github-release") | .runAfter | (length == 1 and .[0] == "publish-image")' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "github-release") | .workspaces | (length == 1 and .[0].name == "assets" and .[0].workspace == "artifacts" and .[0].subPath == "release")' .tekton/endlessfs-release.yaml >/dev/null
+        yq -e '.spec.pipelineSpec.tasks[] | select(.name == "github-release") | .taskSpec.steps[] | .image | test("@sha256:[0-9a-f]{64}$")' .tekton/endlessfs-release.yaml >/dev/null
+        if [ "$(rg -c 'secretKeyRef' .tekton/endlessfs-release.yaml)" != 1 ]; then
+          echo "only the GitHub release Task may read the App token" >&2
+          exit 1
+        fi
+        if rg -n 'ghcr-docker-config|github-packages|secretKeyRef' .tekton/endlessfs-ci.yaml; then
+          echo "pull-request and merge-queue CI must not receive publishing credentials" >&2
           exit 1
         fi
 
@@ -368,45 +376,39 @@
         go test ./internal/theme -run '^$' -fuzz '^FuzzThemeBoundaries$' -fuzztime "$fuzztime"
         go test ./internal/preview/imagegen -run '^$' -fuzz '^FuzzGeneratorMalformed$' -fuzztime "$fuzztime"
       '';
+      # Race detection for every package. Scale and volume tests skip under
+      # -short: the race detector multiplies their cost tenfold and they hold
+      # no concurrency the other tests do not; the plain gate runs them.
+      # internal/portable runs its tests mostly serially, so its one compiled
+      # binary runs as four disjoint shards that together select every test.
       raceTestCommand = ''
-        # The migration transport matrix deterministically restarts the entire
-        # schema chain at every provider boundary. The portable package also
-        # contains the remaining migration matrix and every ordinary state
-        # transition test. Give the exhaustive transport matrix exclusive
-        # resources, then run the two disjoint portable remainder sets alongside
-        # all other packages. This avoids both a single serial package schedule
-        # and resource contention between the three expensive portable sets.
-        # Every repository test still runs exactly once and every shard must
-        # succeed.
-        exhaustive_migration_test='^TestMigrationRecoversFromEveryObjectTransportInterruption$'
-        portable_migration_tests='^TestMigration'
-        other_packages=()
+        packages=()
         while IFS= read -r package; do
-          if [[ "$package" != */internal/portable ]]; then
-            other_packages+=("$package")
-          fi
+          [[ "$package" == */internal/portable ]] || packages+=("$package")
         done < <(go list ./...)
-
-        # This matrix saturates a local builder by itself. Running it beside the
-        # other portable shards makes every process slower without increasing
-        # test coverage, so complete it before admitting the parallel phase.
-        go test -race -timeout=30m -count=1 ./internal/portable -run "$exhaustive_migration_test"
-
-        race_pids=()
-        go test -race -timeout=30m -count=1 ./internal/portable -run "$portable_migration_tests" -skip "$exhaustive_migration_test" &
-        race_pids+=("$!")
-        go test -race -timeout=30m -count=1 ./internal/portable -skip "$portable_migration_tests" &
-        race_pids+=("$!")
-        go test -race -timeout=30m -count=1 "''${other_packages[@]}" &
-        race_pids+=("$!")
-
-        race_status=0
-        for race_pid in "''${race_pids[@]}"; do
-          if ! wait "$race_pid"; then
-            race_status=1
-          fi
+        race_dir="$(mktemp -d)"
+        go test -race -c -o "$race_dir/portable.test" ./internal/portable
+        mapfile -t portable_tests < <(cd internal/portable && "$race_dir/portable.test" -test.list '.*' | grep '^Test')
+        pids=()
+        go test -race -short -timeout=30m -count=1 "''${packages[@]}" &
+        pids+=("$!")
+        for shard in 0 1 2 3; do
+          selected=()
+          for index in "''${!portable_tests[@]}"; do
+            if (( index % 4 == shard )); then
+              selected+=("''${portable_tests[$index]}")
+            fi
+          done
+          pattern="^($(IFS='|'; echo "''${selected[*]}"))\$"
+          (cd internal/portable && "$race_dir/portable.test" -test.short -test.count=1 -test.timeout=30m -test.run "$pattern") &
+          pids+=("$!")
         done
-        test "$race_status" -eq 0
+        status=0
+        for pid in "''${pids[@]}"; do
+          wait "$pid" || status=1
+        done
+        rm -rf "$race_dir"
+        test "$status" -eq 0
       '';
     in
     {
@@ -766,7 +768,6 @@
           go = goFor pkgs;
           packages = self.packages.${system};
           headlessBrowser = headlessBrowserFor pkgs;
-          containerTransportPolicy = containerTransportPolicyFor pkgs;
           coverageSource = coverageSourceFor pkgs;
           coverageText = ''
             export CGO_ENABLED=0
@@ -822,12 +823,20 @@
             pkgs.ripgrep
             pkgs.yq-go
           ];
+          # writeShellApplication only prepends runtimeInputs to the caller's
+          # PATH, so every app declares the basic tools its scripts use rather
+          # than relying on whatever the host (or CI image) happens to provide.
           mkTask = name: runtimeInputs: text: {
             type = "app";
             meta.description = name;
             program = "${
               pkgs.writeShellApplication {
-                inherit name runtimeInputs text;
+                inherit name text;
+                runtimeInputs = [
+                  pkgs.coreutils
+                  pkgs.gnused
+                ]
+                ++ runtimeInputs;
               }
             }/bin/${name}";
           };
@@ -973,6 +982,9 @@
             mkTask "endlessfs-test-e2e"
               (goTools ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
               ''
+                # Like the other Go tasks: CI pods have no C compiler, and the
+                # browser tests need no cgo.
+                export CGO_ENABLED=0
                 export ENDLESSFS_RUN_E2E=1
                 ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
@@ -985,6 +997,9 @@
             mkTask "endlessfs-test-ui-benchmark"
               (goTools ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
               ''
+                # Like the other Go tasks: CI pods have no C compiler, and the
+                # browser tests need no cgo.
+                export CGO_ENABLED=0
                 export ENDLESSFS_RUN_E2E=1
                 ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
@@ -1104,7 +1119,7 @@
             pkgs.gawk
             pkgs.gnugrep
             pkgs.jq
-          ] (dependencyPolicyCommand packages.default.goModules);
+          ] ("export CGO_ENABLED=0\n" + dependencyPolicyCommand packages.default.goModules);
 
           test-imports = mkTask "endlessfs-test-imports" [ pkgs.nix pkgs.git ] ''
             if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -1152,26 +1167,6 @@
             exec nix build .#container "$@"
           '';
 
-          publish-container =
-            mkTask "endlessfs-publish-container"
-              [
-                pkgs.coreutils
-                pkgs.skopeo
-              ]
-              ''
-                if [ "$#" -lt 1 ]; then
-                  echo "usage: nix run .#publish-container -- ghcr.io/owner/image:tag [...]" >&2
-                  exit 2
-                fi
-                if [ -z "''${GHCR_TOKEN:-}" ] || [ -z "''${GHCR_USER:-}" ]; then
-                  echo "GHCR_TOKEN and GHCR_USER are required" >&2
-                  exit 1
-                fi
-                printf '%s' "$GHCR_TOKEN" | skopeo login --username "$GHCR_USER" --password-stdin ghcr.io >/dev/null
-                for destination in "$@"; do
-                  skopeo --policy ${containerTransportPolicy} copy --all "docker-archive:${packages.container}" "docker://$destination"
-                done
-              '';
         }
       );
 
@@ -1187,8 +1182,6 @@
             relative:
             relative == "go.mod"
             || relative == "go.sum"
-            # Exact-budget inventory verifies the shared Nix gate selection.
-            || relative == "flake.nix"
             || relative == "cmd"
             || lib.hasPrefix "cmd/" relative
             || relative == "internal"
@@ -1220,12 +1213,7 @@
               || relative == ".github"
               || relative == ".github/workflows"
               || lib.hasPrefix ".github/workflows/" relative
-              || relative == ".github/dependabot.yml"
-              || relative == "go.mod"
-              || relative == "go.sum"
-              || relative == "tools"
-              || relative == "tools/check-pipeline-publish"
-              || lib.hasPrefix "tools/check-pipeline-publish/" relative;
+              || relative == ".github/dependabot.yml";
           };
           policySource = lib.cleanSourceWith {
             src = ./.;
@@ -1317,7 +1305,18 @@
           goCheck =
             name: command: tools:
             goCheckWithSource name testSource command tools;
-          testSuite = goCheck "tests" "go test -timeout=30m ./..." [ ];
+          # The Go test gate: every test once, plus one race-detector run
+          # (raceCheck). Every named test check below is one of these two
+          # derivations, so `nix flake check` runs each exactly once and in
+          # parallel. `nix run .#test-migration -- TAG` rebuilds testSuite with
+          # the candidate release so the migration tests check its mapping.
+          testSuite = (goCheck "tests" "go test -timeout=30m -count=1 ./..." [ ]).overrideAttrs (_: {
+            ENDLESSFS_MIGRATION_CANDIDATE_RELEASE = "";
+          });
+          raceCheck = goCheck "race" ''
+            export CGO_ENABLED=1
+            ${raceTestCommand}
+          '' [ pkgs.stdenv.cc ];
           testImportCheck = goCheck "test-imports" ''
             # Resolve actual retained test imports before any expensive test.
             # A host module cache must not hide a missing vendored subpackage.
@@ -1326,94 +1325,6 @@
             CGO_ENABLED=1 go list -race -deps -test ./... >/dev/null
             echo "retained normal/race test imports: ok (no tests executed)"
           '' [ pkgs.stdenv.cc ];
-          migrationCheck =
-            (goCheck "migration" ''
-              profile="$TMPDIR/migration-coverage.out"
-              go test -timeout=30m ./internal/portable ./cmd/endlessfs -count=1 \
-                -covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"
-              gawk -v only_group=migration -f tools/coverage.awk "$profile"
-            '' [ pkgs.gawk ]).overrideAttrs
-              (_: {
-                ENDLESSFS_MIGRATION_CANDIDATE_RELEASE = "";
-              });
-          providerEconomicsCheck = goCheck "provider-economics" ''
-            go test ./internal/providerbudget ./internal/objectstore/budgettest ./internal/objectstore/gcs -count=1
-            go test ${providerBudgetPackages} -run '${providerBudgetTestPattern}' -count=1
-          '' [ ];
-          e2eCompile = goCheck "e2e-compile" "go test ./internal/e2e -run '^TestE2E'" [ ];
-          coverageCompile = goCheck "coverage-compile" "go test ./... -run '^$' -coverpkg=./..." [ ];
-          publishContainerPolicy =
-            pkgs.runCommand "endlessfs-publish-container-policy"
-              {
-                nativeBuildInputs = [
-                  pkgs.jq
-                  pkgs.ripgrep
-                ];
-              }
-              ''
-                rg --fixed-strings --quiet -- 'skopeo --policy ' ${self.apps.${system}.publish-container.program}
-                jq -e '
-                  .default == [{"type": "reject"}]
-                  and .transports."docker-archive"."" == [{"type": "insecureAcceptAnything"}]
-                ' ${containerTransportPolicyFor pkgs} >/dev/null
-                touch "$out"
-              '';
-          linuxCiAppPolicy =
-            pkgs.runCommand "endlessfs-linux-ci-app-policy"
-              {
-                nativeBuildInputs = [ pkgs.ripgrep ];
-              }
-              ''
-                for program in \
-                  ${self.apps.${system}.pr-check.program} \
-                  ${self.apps.${system}.test-coverage.program}; do
-                  rg --quiet '^export CGO_ENABLED=0$' "$program"
-                done
-                for program in \
-                  ${self.apps.${system}.test.program} \
-                  ${self.apps.${system}.test-coverage.program}; do
-                  rg --fixed-strings --quiet 'go test -timeout=30m' "$program" || {
-                    echo "long-running Go test gate must use the explicit 30-minute process deadline: $program" >&2
-                    exit 1
-                  }
-                done
-                # Migration's public command now consumes the exact check, so
-                # validate both that binding and the check's actual build code.
-                migration_program=${self.apps.${system}.test-migration.program}
-                rg --fixed-strings --quiet 'f.checks.${system}.migration.overrideAttrs' "$migration_program"
-                rg --fixed-strings --quiet 'ENDLESSFS_MIGRATION_CANDIDATE_RELEASE = builtins.getEnv "ENDLESSFS_MIGRATION_CANDIDATE_RELEASE";' "$migration_program"
-                printf '%s\n' ${lib.escapeShellArg migrationCheck.buildCommand} > migration-build.sh
-                rg --fixed-strings --quiet 'go test -timeout=30m ./internal/portable ./cmd/endlessfs -count=1' migration-build.sh
-                rg --fixed-strings --quiet -- '-covermode=atomic -coverpkg=./internal/portable -coverprofile="$profile"' migration-build.sh
-                rg --fixed-strings --quiet 'gawk -v only_group=migration -f tools/coverage.awk "$profile"' migration-build.sh
-                race_program=${self.apps.${system}.test-race.program}
-                for required in \
-                  "portable_migration_tests='^TestMigration'" \
-                  'if [[ "$package" != */internal/portable ]]' \
-                  'go test -race -timeout=30m -count=1 ./internal/portable -run "$exhaustive_migration_test"' \
-                  'go test -race -timeout=30m -count=1 ./internal/portable -run "$portable_migration_tests" -skip "$exhaustive_migration_test"' \
-                  'go test -race -timeout=30m -count=1 ./internal/portable -skip "$portable_migration_tests"' \
-                  'go test -race -timeout=30m -count=1 "''${other_packages[@]}"' \
-                  'for race_pid in "''${race_pids[@]}"' \
-                  'test "$race_status" -eq 0'; do
-                  rg --fixed-strings --quiet "$required" "$race_program" || {
-                    echo "race gate must retain the fail-closed portable-package sharding contract: $required" >&2
-                    exit 1
-                  }
-                done
-                test "$(rg --fixed-strings --count 'race_pids+=("$!")' "$race_program")" -eq 3 || {
-                  echo "race gate must wait for exactly three parallel remainder shards" >&2
-                  exit 1
-                }
-                if rg --fixed-strings --quiet \
-                  'go test -race -timeout=30m -count=1 ./internal/portable -run "$exhaustive_migration_test" &' \
-                  "$race_program"; then
-                  echo "race gate must give the exhaustive transport matrix exclusive resources" >&2
-                  exit 1
-                fi
-                rg --fixed-strings --quiet 'FONTCONFIG_FILE' ${headlessBrowser}/bin/chrome-headless-shell
-                touch "$out"
-              '';
           formatCheck =
             goCheckWithSource "format" formatSource
               ''
@@ -1429,7 +1340,7 @@
                 pkgs.nixfmt
               ];
           lintCheck =
-            goCheckWithSource "lint" testSource
+            goCheckWithSource "lint" formatSource
               ''
                 go vet ./...
                 ${sandboxedStaticcheck}
@@ -1456,21 +1367,12 @@
                 ${pipelinePolicyCommand}
                 touch "$out"
               '';
-          raceCheck = goCheck "race" ''
-            export CGO_ENABLED=1
-            ${raceTestCommand}
-          '' [ pkgs.stdenv.cc ];
-          fuzzCheck = goCheck "fuzz" ''
-            fuzztime=1000x
-            ${fuzzSmokeCommand}
-          '' [ ];
           securityCheck =
             goCheckWithSource "security" fullSource
               ''
                 gosec -quiet -nosec-require-justification -nosec-require-rules ./...
                 govulncheck -db=file://${vulndbFor pkgs} ./...
                 ${dependencyPolicyCommand self.packages.${system}.default.goModules}
-                go run ./tools/check-source .
               ''
               [
                 pkgs.findutils
@@ -1519,7 +1421,7 @@
           release = self.packages.${system}.release;
           release-images = self.packages.${system}.release-images;
 
-          e2e = e2eCompile;
+          e2e = testSuite;
 
           format = formatCheck;
 
@@ -1530,17 +1432,15 @@
           test-imports = testImportCheck;
           integration = testSuite;
           contract = testSuite;
-          migration = migrationCheck;
+          migration = testSuite;
           replica = testSuite;
           portability = testSuite;
           provider-verify = testSuite;
-          provider-economics = providerEconomicsCheck;
+          provider-economics = testSuite;
           preview = testSuite;
           theme = testSuite;
           race = raceCheck;
-          coverage = coverageCompile;
-          publish-container-policy = publishContainerPolicy;
-          fuzz = fuzzCheck;
+          fuzz = testSuite;
           offline = testSuite;
           security = securityCheck;
           dependencies = securityCheck;
@@ -1559,9 +1459,6 @@
           '';
 
           repository-policy = repositoryPolicyCheck;
-        }
-        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-          linux-ci-app-policy = linuxCiAppPolicy;
         }
       );
 

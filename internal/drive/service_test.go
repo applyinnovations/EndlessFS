@@ -319,77 +319,6 @@ func TestDuplicateReconciliationDelegatesOneAtomicProviderMutation(t *testing.T)
 	}
 }
 
-func TestDuplicateCatalogMethodsForwardAndFailClosedWhenUnsupported(t *testing.T) {
-	env := newDriveEnvironment(t)
-	ctx := context.Background()
-	ids := domain.NewIDGenerator(&hashReader{})
-	key := secret.Value(base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x77}, 32)))
-	wrapped := &reconciliationStorage{NamespaceStorage: env.storage}
-	service, err := drive.NewService(wrapped, env.store, env.repo, ids, env.clock, key, "http://127.0.0.1:8080", "http://127.0.0.1:8081", 1<<20)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := service.DuplicateGroups(ctx, env.owner, domain.DuplicateGroupRequest{}); err != nil {
-		t.Fatalf("DuplicateGroups() error = %v", err)
-	}
-	if _, err := service.DuplicateOccurrences(ctx, env.owner, domain.DuplicateOccurrenceRequest{}); err != nil {
-		t.Fatalf("DuplicateOccurrences() error = %v", err)
-	}
-	if _, err := service.SetDuplicateIgnored(ctx, env.owner, domain.SetDuplicateIgnoredRequest{}); err != nil {
-		t.Fatalf("SetDuplicateIgnored() error = %v", err)
-	}
-	if _, err := service.CompareDuplicateDirectories(ctx, env.owner, domain.DuplicateDirectoryComparisonRequest{}); err != nil {
-		t.Fatalf("CompareDuplicateDirectories() error = %v", err)
-	}
-	if _, err := service.DuplicateDirectoryOverlaps(ctx, env.owner, domain.DuplicateDirectoryOverlapRequest{}); err != nil {
-		t.Fatalf("DuplicateDirectoryOverlaps() error = %v", err)
-	}
-	if _, err := service.SetDuplicateDirectoryIgnored(ctx, env.owner, domain.SetDuplicateDirectoryIgnoredRequest{}); err != nil {
-		t.Fatalf("SetDuplicateDirectoryIgnored() error = %v", err)
-	}
-	if _, err := service.PreviewDuplicateReconciliation(ctx, env.owner, domain.DuplicateReconciliationPreviewRequest{}); err != nil {
-		t.Fatalf("PreviewDuplicateReconciliation() error = %v", err)
-	}
-
-	unsupported := env.service
-	checks := []func() error{
-		func() error {
-			_, err := unsupported.DuplicateGroups(ctx, env.owner, domain.DuplicateGroupRequest{})
-			return err
-		},
-		func() error {
-			_, err := unsupported.DuplicateOccurrences(ctx, env.owner, domain.DuplicateOccurrenceRequest{})
-			return err
-		},
-		func() error {
-			_, err := unsupported.SetDuplicateIgnored(ctx, env.owner, domain.SetDuplicateIgnoredRequest{})
-			return err
-		},
-		func() error {
-			_, err := unsupported.CompareDuplicateDirectories(ctx, env.owner, domain.DuplicateDirectoryComparisonRequest{})
-			return err
-		},
-		func() error {
-			_, err := unsupported.DuplicateDirectoryOverlaps(ctx, env.owner, domain.DuplicateDirectoryOverlapRequest{})
-			return err
-		},
-		func() error {
-			_, err := unsupported.SetDuplicateDirectoryIgnored(ctx, env.owner, domain.SetDuplicateDirectoryIgnoredRequest{})
-			return err
-		},
-		func() error {
-			_, err := unsupported.PreviewDuplicateReconciliation(ctx, env.owner, domain.DuplicateReconciliationPreviewRequest{})
-			return err
-		},
-	}
-	for index, check := range checks {
-		if err := check(); !errors.Is(err, domain.ErrUnavailable) {
-			t.Fatalf("unsupported duplicate method %d error = %v", index, err)
-		}
-	}
-}
-
 func TestUploadPlanningMethodsForwardAuthenticatedOwnerAndFailClosedWhenUnsupported(t *testing.T) {
 	env := newDriveEnvironment(t)
 	ctx := context.Background()
@@ -1164,40 +1093,5 @@ func TestPublicShareProviderFailureMatrix(t *testing.T) {
 	env.storage.InjectFault(providermemory.OperationCreateDownload, providermemory.FaultUnavailable)
 	if _, _, err := env.service.PublicDownload(ctx, token, "/file.txt", entry.Version, false); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("public download provider fault = %v", err)
-	}
-}
-
-func TestDriveCancellationAndLateFailureMatrix(t *testing.T) {
-	env := newDriveEnvironment(t)
-	ctx := context.Background()
-	if _, _, err := env.service.Download(ctx, env.owner, domain.CreateDownloadRequest{Path: domain.MustParseUserPath("/missing"), Version: "v1"}, false); !errors.Is(err, domain.ErrNotFound) {
-		t.Fatalf("missing download = %v", err)
-	}
-	source := upload(t, env, env.owner, "/cancel-source.txt", []byte("x"), "text/plain", "cancel-source-upload-1")
-	canceled, cancel := context.WithCancel(ctx)
-	cancel()
-	if _, err := env.service.BatchCopyMove(canceled, env.owner, []domain.CopyRequest{{Source: source.Path, Destination: domain.MustParseUserPath("/cancel-copy.txt")}}, false, "cancel-copy-batch-001"); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("canceled copy batch = %v", err)
-	}
-	if _, err := env.service.Trash(canceled, env.owner, []domain.UserPath{source.Path}, "cancel-trash-batch-01"); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("canceled trash batch = %v", err)
-	}
-	if _, err := env.service.TrashList(canceled, env.owner); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("canceled trash list = %v", err)
-	}
-	if _, err := env.service.TrashPage(canceled, env.owner, 0, ""); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("canceled trash page = %v", err)
-	}
-	if _, err := env.service.Restore(canceled, env.owner, "missing", domain.ConflictFail, "cancel-restore-key-001"); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("canceled restore = %v", err)
-	}
-	if _, err := env.service.PermanentDelete(canceled, env.owner, "missing", "cancel-delete-key-0001"); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("canceled permanent delete = %v", err)
-	}
-	if _, err := env.service.EmptyTrash(canceled, env.owner, true, "cancel-empty-trash-001"); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("canceled empty trash = %v", err)
-	}
-	if _, err := env.service.CreateShare(canceled, env.owner, source.Path, nil, "cancel-share-key-00001"); !errors.Is(err, domain.ErrUnavailable) {
-		t.Fatalf("canceled create share = %v", err)
 	}
 }

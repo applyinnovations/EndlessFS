@@ -115,7 +115,7 @@ The v1 spec defines the following interface. Implemented commands are usable now
 | `nix run .#test-portability` | Run canonical-format, checkpoint, raw-copy/reopen, and continued-mutation tests. |
 | `nix run .#provider-verify -- check CONFIG` | Strictly read and verify a closed checkpoint on configured single- or split-backend memory fixtures/GCS buckets. |
 | `nix run .#test-preview` | Run focused preview policy, generator, store-contract, and HTTP tests. |
-| `nix run .#test-e2e` | Run Go-controlled Chromium passkey and core Drive workflows. Nix supplies Chromium on Linux. Set `ENDLESSFS_E2E_SCALE_QUALIFICATION=1` to add the six-minute production-cardinality upload recovery qualification. |
+| `nix run .#test-e2e` | Run Go-controlled Chromium passkey and core Drive workflows. Nix supplies Chromium on Linux. The six-minute production-cardinality upload recovery qualification runs separately as `nix run .#test-e2e-scale` before each release. |
 | `nix run .#test-ui-benchmark` | Run the versioned Chromium UI scale benchmark and write JSON-line evidence to `ui-benchmark-v1.json` (override with `ENDLESSFS_UI_BENCHMARK_OUTPUT`). |
 | `nix run .#test-coverage` | Run the complete suite, browser tests included, and report repository, security-boundary, and migration statement coverage. Coverage is not a gate. |
 | `nix run .#test-race` | Run the suite with Go's race detector and `-short` (scale tests skip; the plain suite runs them). This is the `race` flake check. |

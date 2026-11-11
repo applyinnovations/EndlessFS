@@ -24,11 +24,12 @@ holds no credentials. Stores come from xlab's shared Nix cache; push runs
 `nix-cache-publisher`, pushes them. Runs bind only per-run `fast-local`
 volumes, so they select `storage.xlab.now/fast-local=true` (Sirius).
 
-Pull-request and merge-queue CI clones, then runs three `nix-v1` Tasks in
-parallel: `checks` (`nix flake check`: every static check plus the plain and
+Pull-request and merge-queue CI clones, then runs `nix-v1` Tasks: `checks` (`nix flake check`: every static check plus the plain and
 race Go test runs; 6 CPU/12 GiB, bursting to 12 CPU/24 GiB), `e2e`
-(`nix run .#test-e2e`, Chromium; 4 CPU/6 GiB, bursting to 8 CPU/12 GiB) and
-`security-freshness` (the online advisory scan). `nix run .#pr-check` is the
+(`nix run .#test-e2e`, Chromium; 8 CPU/8 GiB, bursting to 16 CPU/16 GiB, as the old coverage task had) and
+`security-freshness` (the online advisory scan). `checks` and
+`security-freshness` run in parallel; `e2e` follows `checks`, because the browser
+tests act against wall-clock deadlines and starved beside the Go test runs. `nix run .#pr-check` is the
 local fast subset of `checks` and is not run again in CI.
 
 Only code on `main` reaches the shared Nix cache: `endlessfs-container.yaml`

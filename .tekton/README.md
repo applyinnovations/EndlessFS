@@ -21,8 +21,10 @@ fallback, is privileged only inside a pod user namespace
 holds no credentials. Stores come from xlab's shared Nix cache; push runs
 (merge queue, `main`, tags) export the paths it lacks to a per-run
 `nix-cache-export` volume, and `publish-cache` in `finally`, running as
-`nix-cache-publisher`, pushes them. Runs bind only per-run `fast-local`
-volumes, so they select `storage.xlab.now/fast-local=true` (Sirius).
+`nix-cache-publisher`, pushes them. Runs bind only per-run `scratch-local`
+(hostpath) volumes, never Longhorn: a one-replica Longhorn volume faults with
+`Input/output error` when sirius's disk stalls past the engine timeout. They
+select `storage.xlab.now/fast-local=true` (Sirius).
 
 Pull-request and merge-queue CI clones, then runs `nix-v1` Tasks: `checks` (`nix flake check`: every static check plus the plain and
 race Go test runs; 6 CPU/12 GiB, bursting to 12 CPU/24 GiB), `e2e`

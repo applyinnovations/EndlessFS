@@ -34,9 +34,15 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
+    # The tag reaches the release steps only as RELEASE_TAG, never as script
+    # text: Tekton pastes $(params...) into a script before the shell parses
+    # it, so a crafted tag name could run shell.
     - pipelineTaskName: verify
       podTemplate:
         hostUsers: false
+        env:
+          - name: RELEASE_TAG
+            value: "{{ git_tag }}"
       stepSpecs:
         - name: run
           computeResources:
@@ -49,6 +55,9 @@ spec:
     - pipelineTaskName: build
       podTemplate:
         hostUsers: false
+        env:
+          - name: RELEASE_TAG
+            value: "{{ git_tag }}"
       stepSpecs:
         - name: run
           computeResources:
@@ -135,12 +144,8 @@ spec:
         params:
           - name: SCRIPT
             value: |
-              release_tag="$(params.release_tag)"
-              printf '%s\n' "$release_tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
-                echo "release checkout is not a vMAJOR.MINOR.PATCH tag" >&2
-                exit 2
-              }
-              nix run .#test-migration -- "$release_tag"
+              nix run .#release-check-tag
+              nix run .#test-migration -- "$RELEASE_TAG"
               nix run .#security-freshness
               nix flake check --print-build-logs --max-jobs 6 --cores 2
 
@@ -167,17 +172,7 @@ spec:
             workspace: nix-cache-export
         params:
           - name: SCRIPT
-            value: |
-              release_tag="$(params.release_tag)"
-              printf '%s\n' "$release_tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
-                echo "release checkout is not a vMAJOR.MINOR.PATCH tag" >&2
-                exit 2
-              }
-              nix build .#release --out-link "$TMPDIR/result-release" --print-build-logs
-              rm -rf "$CI_ARTIFACTS_PATH/release"
-              mkdir "$CI_ARTIFACTS_PATH/release"
-              cp -L "$TMPDIR"/result-release/* "$CI_ARTIFACTS_PATH/release/"
-              chmod -R a+rX "$CI_ARTIFACTS_PATH/release"
+            value: nix run .#release-assets
           - name: IMAGE
             value: .#container
 

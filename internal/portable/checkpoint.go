@@ -116,6 +116,15 @@ func (e *Engine) createCheckpointWhileClosed(ctx context.Context, checkpointID s
 	}
 	summary, err := e.prepareCheckpointInventoryMetadata(ctx, checkpointID, gate.Epoch, schema008, schema009)
 	if err != nil {
+		if errors.Is(err, errCheckpointInventoryPageConflict) {
+			// Another replica already published this page from a walk of the
+			// closed state. If the gate has since moved on, this walk read a
+			// state that is no longer closed: the checkpoint belongs to the
+			// replica that finished it, not a corruption.
+			if _, _, current, gateErr := e.readGate(ctx); gateErr == nil && (current.Mode != storageformat.GateClosed || current.Epoch != gate.Epoch || current.CheckpointID != checkpointID) {
+				return storageformat.Checkpoint{}, domain.WrapError(domain.ErrorConflict, "write gate moved on during checkpoint inventory", err)
+			}
+		}
 		return storageformat.Checkpoint{}, err
 	}
 	checkpoint := storageformat.Checkpoint{
@@ -259,6 +268,10 @@ func (e *Engine) readCheckpoint(ctx context.Context, checkpointID string) (stora
 	return checkpoint, nil
 }
 
+// errCheckpointInventoryPageConflict reports an inventory page that another
+// writer published with different content.
+var errCheckpointInventoryPageConflict = domain.NewError(domain.ErrorPreconditionFailed, "checkpoint inventory page conflict")
+
 type checkpointInventorySummary struct {
 	pageCount       uint64
 	stateObjects    uint64
@@ -305,7 +318,7 @@ func (e *Engine) prepareCheckpointInventoryMetadata(ctx context.Context, checkpo
 			}
 			existing, readErr := e.backend.Get(ctx, key)
 			if readErr != nil || !reflect.DeepEqual(existing.Body, body) {
-				return domain.NewError(domain.ErrorPreconditionFailed, "checkpoint inventory page conflict")
+				return errCheckpointInventoryPageConflict
 			}
 		}
 		previousDigest = storageformat.Digest(body)

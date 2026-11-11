@@ -384,17 +384,53 @@ func queueEmptyDirectoryPreparation(t *testing.T, client *testBrowser) {
 	}
 	ctx, cancel := context.WithTimeout(client.ctx, conditionBound)
 	defer cancel()
-	var point struct{ X, Y float64 }
-	if err := chromedp.Run(ctx, chromedp.Evaluate(`(()=>{const box=document.querySelector('#drop-target').getBoundingClientRect();return {X:box.x+box.width/2,Y:box.y+Math.min(box.height/2,40)}})()`, &point), chromedp.ActionFunc(func(ctx context.Context) error {
-		data := &input.DragData{Items: []*input.DragDataItem{}, Files: []string{root}, DragOperationsMask: 1}
-		for _, event := range []input.DispatchDragEventType{input.DragEnter, input.DragOver, input.Drop} {
-			if err := input.DispatchDragEvent(event, point.X, point.Y, data).Do(ctx); err != nil {
-				return err
+	// A held preparation's retry reopens the transfer sheet, which covers the
+	// drop target; a drop there reaches no handler. Drop only once the target
+	// is the element under the pointer, and again if the drop missed it.
+	data := &input.DragData{Items: []*input.DragDataItem{}, Files: []string{root}, DragOperationsMask: 1}
+	for {
+		if err := closeTransferSheet(ctx); err != nil {
+			t.Fatalf("close transfer sheet before folder drop: %v", err)
+		}
+		var point struct {
+			X, Y  float64
+			Ready bool
+		}
+		if err := chromedp.Run(ctx, chromedp.Evaluate(`(()=>{
+			const target=document.querySelector('#drop-target');
+			const box=target.getBoundingClientRect();
+			const X=box.x+box.width/2, Y=box.y+Math.min(box.height/2,40);
+			const hit=document.elementFromPoint(X,Y);
+			window.__folderDropReached=false;
+			target.addEventListener('drop',()=>{window.__folderDropReached=true;},{capture:true,once:true});
+			return {X,Y,Ready:!document.querySelector('#action-dialog').open && Boolean(hit) && target.contains(hit)};
+		})()`, &point)); err != nil {
+			t.Fatalf("locate folder drop target: %v", err)
+		}
+		if point.Ready {
+			if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+				for _, event := range []input.DispatchDragEventType{input.DragEnter, input.DragOver, input.Drop} {
+					if err := input.DispatchDragEvent(event, point.X, point.Y, data).Do(ctx); err != nil {
+						return err
+					}
+				}
+				return nil
+			})); err != nil {
+				t.Fatalf("drop folder: %v", err)
+			}
+			var reached bool
+			if err := chromedp.Run(ctx, chromedp.Evaluate(`window.__folderDropReached`, &reached)); err != nil {
+				t.Fatalf("observe folder drop: %v", err)
+			}
+			if reached {
+				break
 			}
 		}
-		return nil
-	})); err != nil {
-		t.Fatal(err)
+		select {
+		case <-ctx.Done():
+			t.Fatalf("folder drop target never became reachable: %v (%s)", ctx.Err(), browserStatus(client.ctx))
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
 	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)

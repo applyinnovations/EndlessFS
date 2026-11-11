@@ -39,6 +39,9 @@
     uploadRefreshInFlight: false,
     transferLedger: null,
     transferLedgerOwner: "",
+    // Set while logout persists the suspended transfers; no upload control
+    // work may start in that window, although the session is still valid.
+    signingOut: false,
     transferLedgerWarningShown: false,
     transferPersistQueue: new Map(),
     transferPersistTimer: 0,
@@ -620,6 +623,11 @@
   }
 
   async function logout() {
+    state.signingOut = true;
+    try { await signOut(); } finally { state.signingOut = false; }
+  }
+
+  async function signOut() {
     const suspendedTransfers = state.transfers.filter((transfer) => !["complete", "cancelled"].includes(transfer.state));
     for (const transfer of suspendedTransfers) {
       transfer.suspendedByLogout = true;

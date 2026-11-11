@@ -979,7 +979,7 @@
 
   function ensureDirectory(path, owner = state.user?.userID, signal = null) {
     const key = `${owner}:${path}`;
-    if (owner !== state.user?.userID || signal?.aborted) return Promise.reject(new DOMException("Upload preparation changed", "AbortError"));
+    if (owner !== state.user?.userID || signal?.aborted || state.signingOut) return Promise.reject(new DOMException("Upload preparation changed", "AbortError"));
     let entry = directoryPreparationEntries.get(key);
     if (!entry || entry.page?.controller.signal.aborted) {
       let resolve, reject;
@@ -1039,7 +1039,7 @@
         await directoryPreparationWait(Promise.allSettled(dependencies), controller.signal);
         let response;
         for (let failures = 0; ; failures++) {
-          if (controller.signal.aborted) throw new DOMException("Folder preparation cancelled", "AbortError");
+          if (controller.signal.aborted || state.signingOut) throw new DOMException("Folder preparation cancelled", "AbortError");
           if (page.some((entry) => entry.owner !== state.user?.userID)) throw new DOMException("Upload owner changed", "AbortError");
           while (directoryPreparationActive.size >= 4) await directoryPreparationWait(Promise.race(directoryPreparationActive), controller.signal);
           slot = new Promise((resolve) => { release = resolve; });
@@ -1047,6 +1047,7 @@
           let retryError;
           try {
             if (page.some((entry) => entry.owner !== state.user?.userID)) throw new DOMException("Upload owner changed", "AbortError");
+            if (state.signingOut) throw new DOMException("Folder preparation cancelled", "AbortError");
             response = await api("/api/v1/directories/prepare", { method: "POST", signal: controller.signal, body: { paths: page.map((entry) => entry.path) } });
             break;
           } catch (error) {
@@ -1107,7 +1108,9 @@
     group.directoryPreparationController = controller;
     uploadActionControllers.add(controller);
     return withUploadNamespaceTurn(() => {
-      if (controller.signal.aborted || group.cancelled || owner !== state.user?.userID || state.transferGroups.get(group.id) !== group) return;
+      // Logout aborts every preparation it can see, then waits for the
+      // ledger; a turn granted in that wait must not start a new one.
+      if (controller.signal.aborted || state.signingOut || group.cancelled || owner !== state.user?.userID || state.transferGroups.get(group.id) !== group) return;
       return prepareTransferGroupDirectories(group, controller);
     }).finally(() => {
       uploadActionControllers.delete(controller);

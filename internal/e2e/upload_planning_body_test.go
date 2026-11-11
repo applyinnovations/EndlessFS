@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 	"github.com/chromedp/chromedp"
@@ -65,13 +64,13 @@ func TestE2ESmartMergePartitionsUTF8RequestsWithinControlBodyLimit(t *testing.T)
 	if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", []string{file}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(client.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(1)'`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(1)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := closeTransferSheet(client.ctx); err != nil {
@@ -105,13 +104,13 @@ func TestE2ESmartMergePartitionsUTF8RequestsWithinControlBodyLimit(t *testing.T)
 	if geometry.UTF8 <= 1<<20 || geometry.UTF16 >= 1<<20 {
 		t.Fatalf("fixture lost UTF-8-only body overflow: %+v", geometry)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(client.ctx, chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(501)' || document.querySelector('[data-transfer-count="failed"]').textContent !== '(0)'`, 45*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(501)' || document.querySelector('[data-transfer-count="failed"]').textContent !== '(0)'`, conditionBound); err != nil {
 		var panel string
 		_ = chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector('#transfer-panel').textContent`, &panel))
 		mu.Lock()

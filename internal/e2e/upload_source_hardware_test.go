@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
@@ -106,7 +105,7 @@ func TestE2EUploadSourceHardwareQualification(t *testing.T) {
 			if err := chromedp.Run(client.ctx, navigateLoopbackBrowser(h.origin), chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
 				t.Fatal(err)
 			}
-			if err := waitFor(client.ctx, `typeof window.__endlessfsUploadSourceTest === 'object'`, 5*time.Second); err != nil {
+			if err := waitFor(client.ctx, `typeof window.__endlessfsUploadSourceTest === 'object'`, conditionBound); err != nil {
 				t.Fatal(err)
 			}
 			if err := chromedp.Run(client.ctx, chromedp.Evaluate(fmt.Sprintf(`window.__endlessfsUploadSourceTest.setBufferChunks(%d); const source = document.createElement('input'); source.type = 'file'; source.multiple = true; source.id = 'source-qualification-input'; document.body.append(source)`, mode), nil), chromedp.SetUploadFiles("#source-qualification-input", paths, chromedp.ByQuery)); err != nil {

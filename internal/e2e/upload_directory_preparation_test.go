@@ -113,7 +113,7 @@ func TestE2EUploadDirectoryPreparationPagesOverlapIndependentSiblings(t *testing
 	queueDirectoryPreparationSources(t, client, root)
 	select {
 	case <-parentArrived:
-	case <-time.After(5 * time.Second):
+	case <-time.After(conditionBound):
 		t.Fatal("parent directory page never arrived")
 	}
 	// Hold the only root page: all other pages need this ancestor. This
@@ -129,13 +129,13 @@ func TestE2EUploadDirectoryPreparationPagesOverlapIndependentSiblings(t *testing
 	for range 4 {
 		select {
 		case <-arrived:
-		case <-time.After(5 * time.Second):
+		case <-time.After(conditionBound):
 			unblock()
 			t.Fatalf("independent sibling pages serialized: requests=%d peak=%d", calls.Load(), peak.Load())
 		}
 	}
 	unblock()
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(450)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, 45*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(450)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, conditionBound); err != nil {
 		t.Fatalf("paginated directory preparation did not complete actual uploads: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	mu.Lock()
@@ -220,14 +220,14 @@ func TestE2EUploadDirectoryPreparationReplaysOneBoundedPage(t *testing.T) {
 			if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
 				t.Fatal(err)
 			}
-			if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+			if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 				t.Fatal(err)
 			}
 			if err := chromedp.Run(client.ctx, chromedp.SetValue("#upload-strategy", "smart-merge", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 				t.Fatal(err)
 			}
 			if mode == "exhausted-route-gap" {
-				if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent==='(6)' && document.querySelector('[data-transfer-count="complete"]').textContent==='(0)'`, 15*time.Second); err != nil {
+				if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent==='(6)' && document.querySelector('[data-transfer-count="complete"]').textContent==='(0)'`, conditionBound); err != nil {
 					t.Fatalf("directory retry did not stop at its bound: %v %s", err, smartRecoveryDiagnostic(client))
 				}
 				if calls.Load() != 8 || len(writes.snapshot()) != 0 || countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/admit") != 0 {
@@ -237,7 +237,7 @@ func TestE2EUploadDirectoryPreparationReplaysOneBoundedPage(t *testing.T) {
 				client.assertNoExternalRequests(t, h.harness)
 				return
 			}
-			if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(6)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, 15*time.Second); err != nil {
+			if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(6)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, conditionBound); err != nil {
 				t.Fatalf("directory page retry did not preserve upload success: %v %s", err, smartRecoveryDiagnostic(client))
 			}
 			if calls.Load() != 2 {
@@ -305,11 +305,11 @@ func TestE2EUploadDirectoryPreparationCancellationReleasesNamespaceQueue(t *test
 			queueDirectoryPreparationSources(t, client, createSmartRecoverySources(t, "held-folder", 1))
 			select {
 			case <-arrived:
-			case <-time.After(5 * time.Second):
+			case <-time.After(conditionBound):
 				t.Fatal("directory cancellation fixture was never reached")
 			}
 			if mode != "inflight-logout" {
-				if err := waitFor(client.ctx, `performance.getEntriesByType('resource').some(item=>item.name.endsWith('/api/v1/directories/prepare'))`, 5*time.Second); err != nil {
+				if err := waitFor(client.ctx, `performance.getEntriesByType('resource').some(item=>item.name.endsWith('/api/v1/directories/prepare'))`, conditionBound); err != nil {
 					t.Fatalf("directory failure was not consumed before cancellation: %v", err)
 				}
 			}
@@ -320,31 +320,31 @@ func TestE2EUploadDirectoryPreparationCancellationReleasesNamespaceQueue(t *test
 				queueEmptyDirectoryPreparation(t, client)
 			}
 			if mode == "backoff-cancel" {
-				if err := chromedp.Run(client.ctx, chromedp.Click(`button[aria-label="Cancel folder upload held-folder"]`, chromedp.ByQuery)); err != nil {
+				if err := chromedp.Run(client.ctx, clickNode(`button[aria-label="Cancel folder upload held-folder"]`)); err != nil {
 					t.Fatal(err)
 				}
-				if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="current"]').textContent==='(0)' && document.querySelector('[data-transfer-count="all"]').textContent==='(1)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, 5*time.Second); err != nil {
+				if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="current"]').textContent==='(0)' && document.querySelector('[data-transfer-count="all"]').textContent==='(1)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, conditionBound); err != nil {
 					t.Fatal(err)
 				}
 			} else {
 				if err := closeTransferSheet(client.ctx); err != nil {
 					t.Fatal(err)
 				}
-				if err := chromedp.Run(client.ctx, chromedp.Click("#logout-button", chromedp.ByQuery)); err != nil {
+				if err := chromedp.Run(client.ctx, clickNode("#logout-button")); err != nil {
 					t.Fatal(err)
 				}
-				if err := waitVisible(client.ctx, "#auth-view", 5*time.Second); err != nil {
+				if err := waitVisible(client.ctx, "#auth-view", conditionBound); err != nil {
 					t.Fatal(err)
 				}
-				if err := chromedp.Run(client.ctx, chromedp.Click("#signin-button", chromedp.ByQuery)); err != nil {
+				if err := chromedp.Run(client.ctx, clickNode("#signin-button")); err != nil {
 					t.Fatal(err)
 				}
-				if err := waitVisible(client.ctx, "#drive-view", 10*time.Second); err != nil {
+				if err := waitVisible(client.ctx, "#drive-view", conditionBound); err != nil {
 					t.Fatal(err)
 				}
 			}
 			queueDirectoryPreparationSources(t, client, createSmartRecoverySources(t, "next-folder", 1))
-			if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(1)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, 10*time.Second); err != nil {
+			if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(1)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(0)'`, conditionBound); err != nil {
 				t.Fatalf("cancelled preparation retained the namespace queue: %v %s", err, smartRecoveryDiagnostic(client))
 			}
 			if heldCalls.Load() != 1 {
@@ -363,12 +363,12 @@ func TestE2EUploadDirectoryPreparationCancellationReleasesNamespaceQueue(t *test
 
 func queueDirectoryPreparationSources(t *testing.T, client *testBrowser, root string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(client.ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, conditionBound)
 	defer cancel()
 	if err := chromedp.Run(ctx, chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(ctx, chromedp.SetValue("#upload-strategy", "smart-merge", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
@@ -382,7 +382,7 @@ func queueEmptyDirectoryPreparation(t *testing.T, client *testBrowser) {
 	if err := os.Mkdir(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(client.ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, conditionBound)
 	defer cancel()
 	var point struct{ X, Y float64 }
 	if err := chromedp.Run(ctx, chromedp.Evaluate(`(()=>{const box=document.querySelector('#drop-target').getBoundingClientRect();return {X:box.x+box.width/2,Y:box.y+Math.min(box.height/2,40)}})()`, &point), chromedp.ActionFunc(func(ctx context.Context) error {
@@ -396,13 +396,13 @@ func queueEmptyDirectoryPreparation(t *testing.T, client *testBrowser) {
 	})); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(ctx, chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `Boolean(document.querySelector('button[aria-label="Cancel folder upload queued-empty"]'))`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `Boolean(document.querySelector('button[aria-label="Cancel folder upload queued-empty"]'))`, conditionBound); err != nil {
 		t.Fatalf("empty folder did not queue behind active preparation: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 }

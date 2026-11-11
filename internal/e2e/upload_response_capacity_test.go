@@ -11,7 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/objectstore"
 	"github.com/chromedp/cdproto/runtime"
@@ -122,18 +121,18 @@ func qualifyUploadResponseCapacity(t *testing.T, padding int, requireZeroDetail 
 	client := newSmartRecoveryBrowser(t)
 	bootstrapSmartRecovery(t, client, h.harness)
 	root := createSmartRecoverySources(t, "capacity-folder", 8)
-	if err := runStage(client.ctx, 10*time.Second, chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := runStage(client.ctx, 10*time.Second, chromedp.SetValue("#upload-strategy", "smart-merge", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.SetValue("#upload-strategy", "smart-merge", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
 	finished := make(chan error, 1)
 	go func() {
-		finished <- waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(8)'`, 30*time.Second)
+		finished <- waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(8)'`, conditionBound)
 	}()
 	select {
 	case <-repeatedAdmission:

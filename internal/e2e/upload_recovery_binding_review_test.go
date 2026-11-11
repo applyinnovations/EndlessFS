@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/chromedp/chromedp"
 )
@@ -110,7 +109,7 @@ func TestE2EUploadRecoveryRejectsMisboundNestedIDsBeforeProgressOrData(t *testin
 				if err := chromedp.Run(client.ctx, chromedp.Evaluate(seed, nil)); err != nil {
 					t.Fatal(err)
 				}
-				if err := waitFor(client.ctx, `(()=>{const s=window.__endlessfsUploadWorkerPoolTest.snapshot();return s.active===0&&(s.states.complete===1||s.states['retry-wait']===1)})()`, 10*time.Second); err != nil {
+				if err := waitFor(client.ctx, `(()=>{const s=window.__endlessfsUploadWorkerPoolTest.snapshot();return s.active===0&&(s.states.complete===1||s.states['retry-wait']===1)})()`, conditionBound); err != nil {
 					t.Fatalf("binding fixture did not settle: %v (%s)", err, browserStatus(client.ctx))
 				}
 				var snapshot struct {
@@ -121,16 +120,16 @@ func TestE2EUploadRecoveryRejectsMisboundNestedIDsBeforeProgressOrData(t *testin
 					t.Fatal(err)
 				}
 				if !valid && snapshot.States["retry-wait"] == 1 {
-					if err := chromedp.Run(client.ctx, chromedp.Click("#open-transfers", chromedp.ByQuery)); err != nil {
+					if err := chromedp.Run(client.ctx, clickNode("#open-transfers")); err != nil {
 						t.Fatal(err)
 					}
-					if err := waitVisible(client.ctx, `button[aria-label="Cancel folder upload Recovery probe"]`, 5*time.Second); err != nil {
+					if err := waitVisible(client.ctx, `button[aria-label="Cancel folder upload Recovery probe"]`, conditionBound); err != nil {
 						t.Fatal(err)
 					}
-					if err := chromedp.Run(client.ctx, chromedp.Click(`button[aria-label="Cancel folder upload Recovery probe"]`, chromedp.ByQuery)); err != nil {
+					if err := chromedp.Run(client.ctx, clickNode(`button[aria-label="Cancel folder upload Recovery probe"]`)); err != nil {
 						t.Fatal(err)
 					}
-					if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.snapshot().states.cancelled===1`, 5*time.Second); err != nil {
+					if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.snapshot().states.cancelled===1`, conditionBound); err != nil {
 						t.Fatal(err)
 					}
 				}

@@ -101,18 +101,18 @@ func runSmartRecoveryPartialUpload(t *testing.T, projection string) {
 	h.stateLedger.Reset()
 	h.fileLedger.Reset()
 	requestStart := len(client.requestSnapshot())
-	if err := runStage(client.ctx, 10*time.Second, chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := runStage(client.ctx, 10*time.Second,
+	if err := runStage(client.ctx, conditionBound,
 		chromedp.SetValue("#upload-strategy", "smart-merge", chromedp.ByQuery),
 		chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(7)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(3)'`, 30*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(7)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(3)'`, conditionBound); err != nil {
 		t.Fatalf("partial smart upload did not preserve seven valid siblings: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	if denied.Load() != 3 {
@@ -128,11 +128,11 @@ func runSmartRecoveryPartialUpload(t *testing.T, projection string) {
 		t.Fatal(err)
 	}
 	refreshAndLoginSmartRecovery(t, client, 10)
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(7)' && document.querySelector('[data-transfer-count="all"]').textContent==='(10)'`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(7)' && document.querySelector('[data-transfer-count="all"]').textContent==='(10)'`, conditionBound); err != nil {
 		t.Fatalf("partial completion did not survive refresh/login: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	reconnectSmartRecovery(t, client, root)
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(10)' && document.querySelector('#transfer-check-label').textContent==='Preparing 100%'`, 30*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(10)' && document.querySelector('#transfer-check-label').textContent==='Preparing 100%'`, conditionBound); err != nil {
 		t.Fatalf("smart reconnect did not transfer and complete remaining files: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	writes.assertExactly(t, 0, 10)
@@ -223,22 +223,22 @@ func TestE2ESmartRecoveryResumesOnlyUnconfirmedBytesAfterRefreshLogin(t *testing
 	h.stateLedger.Reset()
 	h.fileLedger.Reset()
 	requestStart := len(client.requestSnapshot())
-	if err := runStage(client.ctx, 10*time.Second, chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := runStage(client.ctx, 10*time.Second, chromedp.SetValue("#upload-strategy", "smart-merge", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.SetValue("#upload-strategy", "smart-merge", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case <-stored:
-	case <-time.After(15 * time.Second):
+	case <-time.After(conditionBound):
 		t.Fatalf("first real provider chunk was never stored: %s", smartRecoveryDiagnostic(client))
 	}
 	var uploadID string
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(`(async()=>{for(let attempt=0;attempt<500;attempt++){const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('endlessfs-transfer-ledger-v1');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});const tx=db.transaction('items','readonly');const items=await new Promise((resolve,reject)=>{const r=tx.objectStore('items').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});db.close();if(items.length===1&&items[0].uploadID)return items[0].uploadID;await new Promise(resolve=>setTimeout(resolve,10));}return ''})()`, &uploadID, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || uploadID == "" {
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(`(async()=>{for(let attempt=0;attempt<500;attempt++){const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('endlessfs-transfer-ledger-v1');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});const tx=db.transaction('items','readonly');const items=await new Promise((resolve,reject)=>{const r=tx.objectStore('items').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});db.close();if(items.length===1&&items[0].uploadID)return items[0].uploadID;await new Promise(resolve=>setTimeout(resolve,10));}return ''})()`, &uploadID, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || uploadID == "" {
 		t.Fatalf("active admission identity was not durable: id-present=%t err=%v", uploadID != "", err)
 	}
 	status, err := h.engines[1].Files().UploadStatus(context.Background(), scope, domain.UploadID(uploadID))
@@ -251,7 +251,7 @@ func TestE2ESmartRecoveryResumesOnlyUnconfirmedBytesAfterRefreshLogin(t *testing
 	refreshAndLoginSmartRecovery(t, client, 1)
 	unblock()
 	reconnectSmartRecovery(t, client, root)
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(1)' && document.querySelector('#transfer-check-label').textContent==='Preparing 100%'`, 20*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(1)' && document.querySelector('#transfer-check-label').textContent==='Preparing 100%'`, conditionBound); err != nil {
 		t.Fatalf("confirmed-offset resume did not complete: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	assertSmartRecoveryLedger(t, client, 1, 1)
@@ -406,15 +406,15 @@ func TestE2ESmartRecoveryProductionCardinalityWarmTransfersOnlyRemainingFiles(t 
 	h.stateLedger.Reset()
 	h.fileLedger.Reset()
 	refreshAndLoginSmartRecovery(t, client, total)
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(7966)' && document.querySelector('[data-transfer-count="all"]').textContent==='(10604)'`, 20*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(7966)' && document.querySelector('[data-transfer-count="all"]').textContent==='(10604)'`, conditionBound); err != nil {
 		t.Fatalf("scale ledger restoration failed: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	openSmartRecoverySheet(t, client)
-	if err := waitFor(client.ctx, `document.querySelector('#transfer-check-label').textContent==='Preparing 75%'`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('#transfer-check-label').textContent==='Preparing 75%'`, conditionBound); err != nil {
 		t.Fatalf("completed preparation share was not retained: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	expandSmartRecoveryScaleHistory(t, client)
-	if err := runStage(client.ctx, 5*time.Second, chromedp.Evaluate(`(()=>{
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(`(()=>{
 		const label=document.querySelector('#transfer-check-label'),list=document.querySelector('#transfer-list');
 		window.__smartRecoveryProgress={minimum:75,maximum:75,intermediate:false,maxRendered:0};
 		const sample=()=>{const value=Number(label.textContent.match(/Preparing (\d+)%/)?.[1]);const proof=window.__smartRecoveryProgress;
@@ -435,10 +435,10 @@ func TestE2ESmartRecoveryProductionCardinalityWarmTransfersOnlyRemainingFiles(t 
 	select {
 	case <-started:
 		t.Logf("real smart scale recovery started after size-route capture: remaining=%d initial-size-body-bytes=%d", remaining, initialSizeBytes.Load())
-	case <-time.After(15 * time.Second):
+	case <-time.After(conditionBound):
 		t.Fatalf("real smart size route never started: %s", smartRecoveryDiagnostic(client))
 	}
-	if err := waitFor(client.ctx, `document.querySelector('#transfer-check-label').textContent==='Preparing 75%' && !document.querySelector('#transfer-list').textContent.includes('historical-reference')`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('#transfer-check-label').textContent==='Preparing 75%' && !document.querySelector('#transfer-list').textContent.includes('historical-reference')`, conditionBound); err != nil {
 		t.Fatalf("reconnect reset completed share or retained irrelevant attempt error: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	assertSmartRecoveryReconnectedErrors(t, client, total, completed)
@@ -527,14 +527,14 @@ func TestE2ESmartRecoveryProductionCardinalityWarmTransfersOnlyRemainingFiles(t 
 		t.Fatalf("initial real smart size request did not fit the preserved body bound: bytes=%d", initialSizeBytes.Load())
 	}
 	var rendered int
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(`document.querySelectorAll('#transfer-list .transfer-row').length`, &rendered)); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(`document.querySelectorAll('#transfer-list .transfer-row').length`, &rendered)); err != nil {
 		t.Fatal(err)
 	}
 	if rendered > 72 {
 		t.Fatalf("rendered transfer rows=%d, want<=72", rendered)
 	}
 	var progress smartRecoveryProgressEvidence
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(`window.__smartRecoveryProgress`, &progress)); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(`window.__smartRecoveryProgress`, &progress)); err != nil {
 		t.Fatal(err)
 	}
 	if progress.Minimum < 75 || progress.Maximum != 100 || !progress.Intermediate || progress.MaxRendered > 72 || progress.MaxRendered < 2 {
@@ -754,6 +754,7 @@ func newSmartRecoveryBrowser(t *testing.T) *testBrowser {
 	ctx = context.WithValue(ctx, smartRecoveryAuthenticationLogKey{}, authenticationLog)
 	client := &testBrowser{ctx: ctx}
 	t.Cleanup(func() { _ = chromedp.Cancel(ctx); cancelTimeout(); cancelBrowser(); cancelAllocator() })
+	client.logOnFailure(t)
 	chromedp.ListenTarget(ctx, func(event any) {
 		if request, ok := event.(*network.EventRequestWillBeSent); ok {
 			parsed, err := url.Parse(request.Request.URL)
@@ -786,23 +787,19 @@ func newSmartRecoveryBrowser(t *testing.T) *testBrowser {
 
 func bootstrapSmartRecovery(t *testing.T, client *testBrowser, h harness) {
 	t.Helper()
-	parent := client.ctx
-	bounded, cancel := context.WithTimeout(parent, 30*time.Second)
-	client.ctx = bounded
-	defer func() { client.ctx = parent; cancel() }()
 	bootstrapBrowser(t, client, h)
 }
 
 func openSmartRecoverySheet(t *testing.T, client *testBrowser) {
 	t.Helper()
-	if err := waitFor(client.ctx, `(()=>{const panel=document.querySelector('#transfer-panel');if(panel.hidden){document.querySelector('#open-transfers').click();return false;}return true;})()`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `(()=>{const panel=document.querySelector('#transfer-panel');if(panel.hidden){document.querySelector('#open-transfers').click();return false;}return true;})()`, conditionBound); err != nil {
 		t.Fatalf("restored transfer sheet did not open: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 }
 
 func expandSmartRecoveryScaleHistory(t *testing.T, client *testBrowser) {
 	t.Helper()
-	if err := waitFor(client.ctx, `(()=>{const panel=document.querySelector('#transfer-panel');if(panel.hidden){document.querySelector('#open-transfers').click();return false;}const all=document.querySelector('[data-transfer-count="all"]').closest('[role="tab"]');if(all.getAttribute('aria-selected')!=='true'){all.click();return false;}const expand=document.querySelector('button[aria-label="Expand upload group scale-folder"]');if(expand){expand.click();return false;}return Boolean(document.querySelector('button[aria-label="Collapse upload group scale-folder"]'))&&Number(document.querySelector('#transfer-list').dataset.itemCount)>=10604&&document.querySelectorAll('#transfer-list .transfer-row').length>1;})()`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `(()=>{const panel=document.querySelector('#transfer-panel');if(panel.hidden){document.querySelector('#open-transfers').click();return false;}const all=document.querySelector('[data-transfer-count="all"]').closest('[role="tab"]');if(all.getAttribute('aria-selected')!=='true'){all.click();return false;}const expand=document.querySelector('button[aria-label="Expand upload group scale-folder"]');if(expand){expand.click();return false;}return Boolean(document.querySelector('button[aria-label="Collapse upload group scale-folder"]'))&&Number(document.querySelector('#transfer-list').dataset.itemCount)>=10604&&document.querySelectorAll('#transfer-list .transfer-row').length>1;})()`, conditionBound); err != nil {
 		t.Fatalf("full scale history did not visibly expand: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 }
@@ -812,29 +809,29 @@ func refreshAndLoginSmartRecovery(t *testing.T, client *testBrowser, total int) 
 	authenticationLog := client.ctx.Value(smartRecoveryAuthenticationLogKey{}).(*smartRecoveryAuthenticationLog)
 	authenticationStart := authenticationLog.position()
 	var previousTimeOrigin float64
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(`performance.timeOrigin`, &previousTimeOrigin), reloadLoopbackBrowser()); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(`performance.timeOrigin`, &previousTimeOrigin), reloadLoopbackBrowser()); err != nil {
 		t.Fatalf("refresh command failed: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	refreshed := fmt.Sprintf(`performance.timeOrigin>%.6f&&document.readyState==='complete'&&document.querySelector('#loading-view').hidden&&!document.querySelector('#authenticated-view').hidden&&document.querySelector('#auth-view').hidden&&document.querySelector('#app').dataset.state==='authenticated'`, previousTimeOrigin)
-	if err := waitFor(client.ctx, refreshed, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, refreshed, conditionBound); err != nil {
 		t.Fatalf("workspace did not become visible after refresh: %v %s", err, smartRecoveryDiagnostic(client))
 	}
-	if err := waitFor(client.ctx, fmt.Sprintf(`Number(document.querySelector('[data-transfer-count="all"]').textContent.replace(/[^0-9]/g,''))===%d && Boolean(document.querySelector('button[aria-label^="Reconnect upload source for"]'))`, total), 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, fmt.Sprintf(`Number(document.querySelector('[data-transfer-count="all"]').textContent.replace(/[^0-9]/g,''))===%d && Boolean(document.querySelector('button[aria-label^="Reconnect upload source for"]'))`, total), conditionBound); err != nil {
 		t.Fatalf("transfer source controls did not restore after refresh: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	if err := closeTransferSheet(client.ctx); err != nil {
 		t.Fatalf("restored transfer sheet could not close: %v %s", err, smartRecoveryDiagnostic(client))
 	}
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Click("#logout-button", chromedp.ByQuery)); err != nil {
+	if err := runStage(client.ctx, conditionBound, clickNode("#logout-button")); err != nil {
 		t.Fatalf("logout button could not activate: %v %s", err, smartRecoveryDiagnostic(client))
 	}
-	if err := waitVisible(client.ctx, "#auth-view", 10*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#auth-view", conditionBound); err != nil {
 		t.Fatalf("authentication view did not appear after logout: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	t.Logf("smart-recovery-auth stage=ready-to-sign-in state=%s routes=%v", smartRecoveryAuthenticationDiagnostic(client), authenticationLog.snapshot(authenticationStart))
-	if err := runStage(client.ctx, 10*time.Second,
+	if err := runStage(client.ctx, conditionBound,
 		chromedp.Evaluate(`window.__smartRecoverySourceBeforeLogin=document.querySelector('button[aria-label^="Reconnect upload source for"]')`, nil),
-		chromedp.Click("#signin-button", chromedp.ByQuery)); err != nil {
+		clickNode("#signin-button")); err != nil {
 		t.Fatalf("sign-in button could not activate: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	t.Logf("smart-recovery-auth stage=activation-returned state=%s routes=%v", smartRecoveryAuthenticationDiagnostic(client), authenticationLog.snapshot(authenticationStart))
@@ -842,7 +839,7 @@ func refreshAndLoginSmartRecovery(t *testing.T, client *testBrowser, total int) 
 	// authenticated shell during logout. Require a completed application entry
 	// and a fresh ledger render, rather than accepting their stale inner state.
 	ready := fmt.Sprintf(`(()=>{const source=document.querySelector('button[aria-label^="Reconnect upload source for"]'),previous=window.__smartRecoverySourceBeforeLogin;return document.querySelector('#loading-view').hidden&&!document.querySelector('#authenticated-view').hidden&&document.querySelector('#auth-view').hidden&&document.querySelector('#app').dataset.state==='authenticated'&&!document.querySelector('#signin-button').disabled&&Boolean(source)&&source!==previous&&(!previous||!previous.isConnected)&&Number(document.querySelector('[data-transfer-count="all"]').textContent.replace(/[^0-9]/g,''))===%d;})()`, total)
-	if err := waitFor(client.ctx, ready, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, ready, conditionBound); err != nil {
 		t.Fatalf("actual passkey login after logout failed: %v %s auth=%s routes=%v", err, browserStatus(client.ctx), smartRecoveryAuthenticationDiagnostic(client), authenticationLog.snapshot(authenticationStart))
 	}
 	routes := authenticationLog.snapshot(authenticationStart)
@@ -903,7 +900,7 @@ func waitSmartRecoveryNetworkIdle(t *testing.T, client *testBrowser) {
 	// window before cutting phases or invoking independent engine oracles, so
 	// their requests cannot be counted while their provider work is omitted.
 	log := client.ctx.Value(smartRecoveryAuthenticationLogKey{}).(*smartRecoveryAuthenticationLog)
-	ctx, cancel := context.WithTimeout(client.ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(client.ctx, conditionBound)
 	defer cancel()
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
@@ -971,14 +968,14 @@ func reconnectSmartRecovery(t *testing.T, client *testBrowser, root string) {
 	// Ledger restoration can finish after the workspace becomes interactive;
 	// its final render closes the sheet. Wait for the source action to exist,
 	// then open the completed projection before activating the real control.
-	if err := waitFor(client.ctx, `Boolean(document.querySelector('button[aria-label^="Reconnect upload source for"]'))`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `Boolean(document.querySelector('button[aria-label^="Reconnect upload source for"]'))`, conditionBound); err != nil {
 		t.Fatalf("reconnect action missing: %v %s", err, smartRecoveryDiagnostic(client))
 	}
 	openSmartRecoverySheet(t, client)
-	if err := waitVisible(client.ctx, `button[aria-label^="Reconnect upload source for"]`, 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, `button[aria-label^="Reconnect upload source for"]`, conditionBound); err != nil {
 		t.Fatalf("restored reconnect action was not visible: %v %s", err, smartRecoveryDiagnostic(client))
 	}
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Click(`button[aria-label^="Reconnect upload source for"]`, chromedp.ByQuery), chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
+	if err := runStage(client.ctx, conditionBound, clickNode(`button[aria-label^="Reconnect upload source for"]`), chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1117,7 +1114,7 @@ func seedSmartRecoveryLedger(t *testing.T, client *testBrowser, owner domain.Use
 		tx.objectStore('items').put({key:ownerID+':'+id,ownerID,id,groupID:'smart-scale-group',name,relativePath:relativeDirectory+'/'+name,relativeDirectory,directory:'/'+relativeDirectory,baseDirectory:'/',size:4,mediaType:'application/octet-stream',state:i<%d?'complete':'needs-source',confirmed:i<%d?4:0,uploadID:'',strategy:'smart-merge',planPhase:i<%d?'done':'size-pending',createdAt:i+1,error:i<%d?'':'Reconnect the source to continue.'});}
 		tx.objectStore('groups').put({key:ownerID+':smart-scale-group',ownerID,id:'smart-scale-group',name:root,transferIDs:ids,directories:[...dirs],baseDirectory:'/',totalSize:%d*4,state:'queued',discoveryDone:true,strategy:'smart-merge',createdAt:1,error:'Reference: historical-reference.'});
 		await new Promise((resolve,reject)=>{tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)});db.close();return true;})()`, owner.String(), root, total, completed, completed, completed, completed, total)
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(script, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil {
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(script, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1212,7 +1209,7 @@ func assertSmartRecoveryLedger(t *testing.T, client *testBrowser, total, complet
 	t.Helper()
 	var valid bool
 	script := fmt.Sprintf(`(async()=>{for(let attempt=0;attempt<500;attempt++){const db=await new Promise((resolve,reject)=>{const r=indexedDB.open('endlessfs-transfer-ledger-v1');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});const tx=db.transaction('items','readonly');const items=await new Promise((resolve,reject)=>{const r=tx.objectStore('items').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});db.close();if(items.length===%d&&items.filter(x=>x.state==='complete').length===%d)return true;await new Promise(resolve=>setTimeout(resolve,10));}return false})()`, total, complete)
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(script, &valid, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || !valid {
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(script, &valid, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || !valid {
 		t.Fatalf("durable ledger total=%d complete=%d: valid=%t err=%v", total, complete, valid, err)
 	}
 }
@@ -1239,7 +1236,7 @@ func assertSmartRecoveryReconnectedErrors(t *testing.T, client *testBrowser, tot
 		proof.valid=proof.items===%d&&proof.complete===%d&&proof.sourceRequired===0&&proof.obsoleteReconnect===0&&proof.unboundedHistory===0;
 		if(proof.valid)return proof;
 		await new Promise(resolve=>setTimeout(resolve,10));}return proof})()`, total, completed)
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(script, &proof, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || !proof.Valid {
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(script, &proof, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || !proof.Valid {
 		t.Fatalf("reconnected items retained obsolete source errors or unbounded history: closed-counts=%+v err=%v", proof, err)
 	}
 }
@@ -1254,7 +1251,7 @@ func assertSmartRecoveryErrorHistory(t *testing.T, client *testBrowser) {
 		const group=groups.find(x=>x.id==='smart-scale-group'),history=group?.errorHistory||[];
 		if(group&&!group.error&&history.length<=3&&history.filter(x=>x.message==='Reference: historical-reference.').length===1&&history.every(x=>String(x.message||'').length<=240&&String(x.code||'').length<=80))return true;
 		await new Promise(resolve=>setTimeout(resolve,10));}return false})()`
-	if err := runStage(client.ctx, 10*time.Second, chromedp.Evaluate(script, &valid, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || !valid {
+	if err := runStage(client.ctx, conditionBound, chromedp.Evaluate(script, &valid, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) })); err != nil || !valid {
 		t.Fatalf("obsolete group error was not cleared with exactly one bounded historical reference retained: valid=%t err=%v", valid, err)
 	}
 }

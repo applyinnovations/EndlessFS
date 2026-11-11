@@ -72,19 +72,19 @@ func TestE2EUploadIndependentAdmissionRetriesOnlyFailedItem(t *testing.T) {
 	if err := chromedp.Run(c.ctx, chromedp.SetUploadFiles("#upload-input", paths, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(c.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(c.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(c.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(2)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(1)'`, 10*time.Second); err != nil {
+	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(2)' && document.querySelector('[data-transfer-count="failed"]').textContent==='(1)'`, conditionBound); err != nil {
 		t.Fatalf("independent admission was not used or sibling failed: calls=%d %v %s", calls.Load(), err, browserStatus(c.ctx))
 	}
-	if err := chromedp.Run(c.ctx, chromedp.Click("#retry-failed-transfers", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(c.ctx, clickNode("#retry-failed-transfers")); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(3)'`, 10*time.Second); err != nil {
+	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(3)'`, conditionBound); err != nil {
 		t.Fatalf("failed-item retry: %v %s", err, browserStatus(c.ctx))
 	}
 	mu.Lock()
@@ -171,7 +171,7 @@ func TestE2EUploadIndependentAdmissionReloadsAfterLostReply(t *testing.T) {
 	if err := chromedp.Run(c.ctx, chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(c.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(c.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(c.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
@@ -179,26 +179,26 @@ func TestE2EUploadIndependentAdmissionReloadsAfterLostReply(t *testing.T) {
 	}
 	select {
 	case <-started:
-	case <-time.After(10 * time.Second):
+	case <-time.After(conditionBound):
 		t.Fatal("independent admission was not dispatched")
 	}
 	if err := chromedp.Run(c.ctx, reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(3)'`, 10*time.Second); err != nil {
+	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(3)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(c.ctx, chromedp.Click("#open-transfers", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(c.ctx, clickNode("#open-transfers")); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(c.ctx, `button[aria-label^="Reconnect upload source for"]`, 5*time.Second); err != nil {
+	if err := waitVisible(c.ctx, `button[aria-label^="Reconnect upload source for"]`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(c.ctx, chromedp.Click(`button[aria-label^="Reconnect upload source for"]`, chromedp.ByQuery), chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(c.ctx, clickNode(`button[aria-label^="Reconnect upload source for"]`), chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
 	unblock()
-	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(3)'`, 15*time.Second); err != nil {
+	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(3)'`, conditionBound); err != nil {
 		t.Fatalf("reload/reconnect: %v %s", err, browserStatus(c.ctx))
 	}
 	mu.Lock()
@@ -282,13 +282,13 @@ func runAdmissionTransientReply(t *testing.T, status, count int) {
 	if err := chromedp.Run(c.ctx, chromedp.SetUploadFiles("#upload-input", paths, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(c.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(c.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(c.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(c.ctx, fmt.Sprintf(`document.querySelector('[data-transfer-count="complete"]').textContent==='(%d)'`, count), 15*time.Second); err != nil {
+	if err := waitFor(c.ctx, fmt.Sprintf(`document.querySelector('[data-transfer-count="complete"]').textContent==='(%d)'`, count), conditionBound); err != nil {
 		t.Fatalf("route rollout gap became permanent failure: %v %s", err, browserStatus(c.ctx))
 	}
 	mu.Lock()
@@ -361,13 +361,13 @@ func TestE2EUploadIndependentAdmissionMultiplePagesPreserveEveryItem(t *testing.
 	if err := chromedp.Run(c.ctx, chromedp.SetUploadFiles("#upload-input", paths, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(c.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(c.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(c.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(201)'`, 20*time.Second); err != nil {
+	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(201)'`, conditionBound); err != nil {
 		t.Fatalf("multi-page upload failed: %v %s", err, browserStatus(c.ctx))
 	}
 	mu.Lock()
@@ -432,10 +432,10 @@ func TestE2EUploadLegacyAdmissionLedgerRetainsExactEnvelope(t *testing.T) {
 	if err := chromedp.Run(c.ctx, chromedp.Evaluate(seed, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(2)'`, 10*time.Second); err != nil {
+	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="all"]').textContent==='(2)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(c.ctx, chromedp.Click("#open-transfers", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(c.ctx, clickNode("#open-transfers")); err != nil {
 		t.Fatal(err)
 	}
 	root := filepath.Join(t.TempDir(), "legacy-admission")
@@ -447,10 +447,10 @@ func TestE2EUploadLegacyAdmissionLedgerRetainsExactEnvelope(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := chromedp.Run(c.ctx, chromedp.Click(`button[aria-label="Reconnect upload source for Legacy admission"]`, chromedp.ByQuery), chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(c.ctx, clickNode(`button[aria-label="Reconnect upload source for Legacy admission"]`), chromedp.SetUploadFiles("#folder-input", []string{root}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(2)'`, 15*time.Second); err != nil {
+	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(2)'`, conditionBound); err != nil {
 		t.Fatalf("historical admission replay: %v %s", err, browserStatus(c.ctx))
 	}
 	if legacy.Load() != 1 || independent.Load() != 0 {
@@ -515,7 +515,7 @@ func TestE2EUploadIndependentAdmissionExplicitReplanRenewsOnlyRejectedAttempt(t 
 		if err := chromedp.Run(c.ctx, chromedp.SetUploadFiles("#upload-input", []string{path}, chromedp.ByQuery)); err != nil {
 			t.Fatal(err)
 		}
-		if err := waitVisible(c.ctx, "#action-dialog", 5*time.Second); err != nil {
+		if err := waitVisible(c.ctx, "#action-dialog", conditionBound); err != nil {
 			t.Fatal(err)
 		}
 		if err := chromedp.Run(c.ctx, chromedp.SetValue("#upload-strategy", strategy, chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
@@ -523,7 +523,7 @@ func TestE2EUploadIndependentAdmissionExplicitReplanRenewsOnlyRejectedAttempt(t 
 		}
 	}
 	upload("abc", "keep-both")
-	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(1)'`, 10*time.Second); err != nil {
+	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(1)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := closeTransferSheet(c.ctx); err != nil {
@@ -573,13 +573,13 @@ func TestE2EUploadIndependentAdmissionExplicitReplanRenewsOnlyRejectedAttempt(t 
 
 	reject.Store(true)
 	upload("xyz", "replace-changed")
-	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent==='(1)'`, 10*time.Second); err != nil {
+	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent==='(1)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(c.ctx, chromedp.Click("#retry-failed-transfers", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(c.ctx, clickNode("#retry-failed-transfers")); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(2)'`, 10*time.Second); err != nil {
+	if err := waitFor(c.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent==='(2)'`, conditionBound); err != nil {
 		t.Fatalf("explicit replan: %v %s", err, browserStatus(c.ctx))
 	}
 	mu.Lock()

@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/chromedp/chromedp"
 )
@@ -25,7 +24,7 @@ func TestE2EUploadSourceBufferBudgetAndCancellation(t *testing.T) {
 			t.Cleanup(gate.releaseAll)
 			client := newTestBrowser(t)
 			bootstrapBrowser(t, client, h)
-			if err := waitFor(client.ctx, `typeof window.__endlessfsUploadSourceTest === 'object'`, 5*time.Second); err != nil {
+			if err := waitFor(client.ctx, `typeof window.__endlessfsUploadSourceTest === 'object'`, conditionBound); err != nil {
 				t.Fatalf("source pipeline fixture missing: %v", err)
 			}
 			if err := chromedp.Run(client.ctx, chromedp.Evaluate(fmt.Sprintf(`window.__endlessfsUploadSourceTest.setBufferChunks(%d)`, chunks), nil)); err != nil {
@@ -43,17 +42,17 @@ func TestE2EUploadSourceBufferBudgetAndCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 			condition := fmt.Sprintf(`(() => { const s = window.__endlessfsUploadSourceTest.snapshot(); return s.usedBytes === %d && s.waiting > 0 && window.__endlessfsUploadWorkerPoolTest.active() === 8; })()`, chunks*(8<<20))
-			if err := waitFor(client.ctx, condition, 15*time.Second); err != nil {
+			if err := waitFor(client.ctx, condition, conditionBound); err != nil {
 				t.Fatalf("source budget did not bound large bodies: %v (%s)", err, browserStatus(client.ctx))
 			}
 			var bounded bool
 			if err := chromedp.Run(client.ctx, chromedp.Evaluate(fmt.Sprintf(`(() => { const s = window.__endlessfsUploadSourceTest.snapshot(); return s.peakBytes <= %d && s.peakReaders === 1; })()`, chunks*(8<<20)), &bounded)); err != nil || !bounded {
 				t.Fatalf("source memory/read bounds: %v, bounded=%v", err, bounded)
 			}
-			if err := chromedp.Run(client.ctx, chromedp.Click(`[aria-label="Cancel folder upload 8 files"]`, chromedp.ByQuery)); err != nil {
+			if err := chromedp.Run(client.ctx, clickNode(`[aria-label="Cancel folder upload 8 files"]`)); err != nil {
 				t.Fatal(err)
 			}
-			if err := waitFor(client.ctx, `(() => { const s = window.__endlessfsUploadSourceTest.snapshot(); return s.usedBytes === 0 && s.waiting === 0 && s.readers === 0 && window.__endlessfsUploadWorkerPoolTest.active() === 0; })()`, 15*time.Second); err != nil {
+			if err := waitFor(client.ctx, `(() => { const s = window.__endlessfsUploadSourceTest.snapshot(); return s.usedBytes === 0 && s.waiting === 0 && s.readers === 0 && window.__endlessfsUploadWorkerPoolTest.active() === 0; })()`, conditionBound); err != nil {
 				t.Fatalf("cancelled source work retained memory or reader slots: %v", err)
 			}
 			gate.releaseAll()
@@ -95,7 +94,7 @@ func TestE2EUploadStalledSourceDoesNotBlockVerifiedFiles(t *testing.T) {
 	if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", []string{large, small}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `window.__endlessfsUploadSourceTest.snapshot().finalizing === 1 && window.__endlessfsUploadWorkerPoolTest.active() === 1`, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, `window.__endlessfsUploadSourceTest.snapshot().finalizing === 1 && window.__endlessfsUploadWorkerPoolTest.active() === 1`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/actions"); got != 0 {
@@ -104,14 +103,14 @@ func TestE2EUploadStalledSourceDoesNotBlockVerifiedFiles(t *testing.T) {
 	if err := chromedp.Run(client.ctx, chromedp.Evaluate(`window.__endlessfsUploadSourceTest.advanceMeasurement(16000)`, nil)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.snapshot().groups.some(group => group.files === 2 && group.complete === 1) && document.querySelector('#file-rows').textContent.includes('verified-small.txt')`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.snapshot().groups.some(group => group.files === 2 && group.complete === 1) && document.querySelector('#file-rows').textContent.includes('verified-small.txt')`, conditionBound); err != nil {
 		t.Fatalf("held source prevented verified-file publication: %v (%s)", err, browserStatus(client.ctx))
 	}
-	if err := waitFor(client.ctx, `document.querySelector('#header-transfer-speed').textContent === '—/s'`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('#header-transfer-speed').textContent === '—/s'`, conditionBound); err != nil {
 		t.Fatalf("unacknowledged work retained a fictitious speed: %v", err)
 	}
 	release()
-	if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.snapshot().groups.some(group => group.files === 2 && group.complete === 2)`, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, `window.__endlessfsUploadWorkerPoolTest.snapshot().groups.some(group => group.files === 2 && group.complete === 2)`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if got := countExactRequest(client.requestSnapshot(), "POST /api/v1/uploads/batch/actions"); got != 2 {
@@ -150,7 +149,7 @@ func TestE2EUploadSourceReadFailureReleasesBudgetAndRequestsReconnection(t *test
 	if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", paths, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `(() => { const s = window.__endlessfsUploadSourceTest.snapshot(); const p = window.__endlessfsUploadWorkerPoolTest.snapshot(); return s.usedBytes === 0 && s.waiting === 0 && s.readers === 0 && p.states['needs-source'] === 1 && p.groups.some(group => group.files === 2 && group.complete === 1); })()`, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, `(() => { const s = window.__endlessfsUploadSourceTest.snapshot(); const p = window.__endlessfsUploadWorkerPoolTest.snapshot(); return s.usedBytes === 0 && s.waiting === 0 && s.readers === 0 && p.states['needs-source'] === 1 && p.groups.some(group => group.files === 2 && group.complete === 1); })()`, conditionBound); err != nil {
 		t.Fatalf("source failure leaked resources or prevented independent completion: %v (%s)", err, browserStatus(client.ctx))
 	}
 }

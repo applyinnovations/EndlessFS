@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
@@ -49,7 +48,7 @@ func TestE2EProductionFolderDropRetainsSourcesAcrossUploadOptions(t *testing.T) 
 	})); err != nil {
 		t.Fatalf("trusted folder drop: %v", err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatalf("production upload options: %v (%s)", err, browserStatus(client.ctx))
 	}
 	if err := chromedp.Run(client.ctx,
@@ -58,13 +57,13 @@ func TestE2EProductionFolderDropRetainsSourcesAcrossUploadOptions(t *testing.T) 
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector("[data-transfer-count='complete']")?.textContent === "(2)"`, 15*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector("[data-transfer-count='complete']")?.textContent === "(2)"`, conditionBound); err != nil {
 		t.Fatalf("folder drop lost its sources after options: %v (%s) requests=%v", err, browserStatus(client.ctx), client.requestSnapshot())
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Click("[data-tab-value='all']", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(client.ctx, clickNode("[data-tab-value='all']")); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector(".transfer-group-row.complete")?.textContent.includes("2 of 2 files")`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector(".transfer-group-row.complete")?.textContent.includes("2 of 2 files")`, conditionBound); err != nil {
 		t.Fatalf("completed folder did not preserve group structure: %v", err)
 	}
 	client.assertNoExternalRequests(t, harness)

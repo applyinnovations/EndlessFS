@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
 
@@ -62,7 +61,7 @@ func TestE2EClearFailedUploadsCleansSessionsAndPreservesCompletedFiles(t *testin
 		if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", paths, chromedp.ByQuery)); err != nil {
 			t.Fatal(err)
 		}
-		if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+		if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 			t.Fatal(err)
 		}
 		if err := chromedp.Run(client.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
@@ -71,7 +70,7 @@ func TestE2EClearFailedUploadsCleansSessionsAndPreservesCompletedFiles(t *testin
 	}
 	wait := func(expression string) {
 		t.Helper()
-		if err := waitFor(client.ctx, expression, 10*time.Second); err != nil {
+		if err := waitFor(client.ctx, expression, conditionBound); err != nil {
 			var diagnostic string
 			_ = chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector('#transfer-panel').textContent`, &diagnostic))
 			t.Fatalf("%s: %v (%s) panel=%s requests=%v", expression, err, browserStatus(client.ctx), diagnostic, client.requestSnapshot())
@@ -79,7 +78,7 @@ func TestE2EClearFailedUploadsCleansSessionsAndPreservesCompletedFiles(t *testin
 	}
 	click := func(selector string) {
 		t.Helper()
-		if err := chromedp.Run(client.ctx, chromedp.Click(selector, chromedp.ByQuery)); err != nil {
+		if err := chromedp.Run(client.ctx, clickNode(selector)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -169,31 +168,31 @@ func TestE2EClearFailedHistoryPreservesMixedGroupsAndOtherOwners(t *testing.T) {
 	if err := chromedp.Run(client.ctx, chromedp.Evaluate(script, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(4)' && document.querySelector('[data-transfer-count="failed"]').textContent === '(2)'`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(4)' && document.querySelector('[data-transfer-count="failed"]').textContent === '(2)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Click("#open-transfers", chromedp.ByQuery), chromedp.Click(`[data-tab-value="all"]`, chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(client.ctx, clickNode("#open-transfers"), clickNode(`[data-tab-value="all"]`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[aria-label="Reconnect upload source for standalone-failed.bin"]') !== null`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[aria-label="Reconnect upload source for standalone-failed.bin"]') !== null`, conditionBound); err != nil {
 		t.Fatalf("persisted failures lost their source-reconnection action: %v", err)
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Click(`[aria-label="Clear failed uploads in folder Mixed folder"]`, chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(client.ctx, clickNode(`[aria-label="Clear failed uploads in folder Mixed folder"]`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(3)' && document.querySelector('.transfer-group-row').textContent.includes('1 of 2 files')`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(3)' && document.querySelector('.transfer-group-row').textContent.includes('1 of 2 files')`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Click("#clear-failed-transfers", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(client.ctx, clickNode("#clear-failed-transfers")); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(2)'`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(2)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(client.ctx, reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(2)' && document.querySelector('[data-transfer-count="failed"]').textContent === '(0)' && document.querySelector('[data-transfer-count="current"]').textContent === '(1)'`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(2)' && document.querySelector('[data-transfer-count="failed"]').textContent === '(0)' && document.querySelector('[data-transfer-count="current"]').textContent === '(1)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	var preserved bool
@@ -243,19 +242,19 @@ func TestE2EClearFailedUploadAfterLostCompletionPreservesPublishedFile(t *testin
 	if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", []string{path}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(client.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent === '(1)'`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent === '(1)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Click("#clear-failed-transfers", chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(client.ctx, clickNode("#clear-failed-transfers")); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(0)'`, 5*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="all"]').textContent === '(0)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	accounts, err := harness.repository.Accounts(context.Background())
@@ -316,13 +315,13 @@ func TestE2ERetryFailedFinalizationAfterReloadDoesNotRequireSource(t *testing.T)
 	if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", []string{path}, chromedp.ByQuery)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
+	if err := waitVisible(client.ctx, "#action-dialog", conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if err := chromedp.Run(client.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent === '(1)'`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent === '(1)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	// Model reload after acknowledgement of the failed ledger state. Admission
@@ -341,16 +340,16 @@ func TestE2ERetryFailedFinalizationAfterReloadDoesNotRequireSource(t *testing.T)
 	})()`, nil, func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }), reloadLoopbackBrowser()); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent === '(1)' && document.querySelector('[aria-label="Retry upload retry-finalization.txt"]') !== null`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="failed"]').textContent === '(1)' && document.querySelector('[aria-label="Retry upload retry-finalization.txt"]') !== null`, conditionBound); err != nil {
 		t.Fatalf("failed finalization lost explicit retry: %v", err)
 	}
 	if completions.Load() != 1 {
 		t.Fatalf("terminal failure retried automatically on reload: %d", completions.Load())
 	}
-	if err := chromedp.Run(client.ctx, chromedp.Click("#open-transfers", chromedp.ByQuery), chromedp.Click(`[aria-label="Retry upload retry-finalization.txt"]`, chromedp.ByQuery)); err != nil {
+	if err := chromedp.Run(client.ctx, clickNode("#open-transfers"), clickNode(`[aria-label="Retry upload retry-finalization.txt"]`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(1)'`, 10*time.Second); err != nil {
+	if err := waitFor(client.ctx, `document.querySelector('[data-transfer-count="complete"]').textContent === '(1)'`, conditionBound); err != nil {
 		t.Fatal(err)
 	}
 	if completions.Load() != 2 {

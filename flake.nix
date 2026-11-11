@@ -988,7 +988,22 @@
                   export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
                   export ENDLESSFS_CHROMIUM_NO_SANDBOX=1
                 ''}
-                exec go test ./internal/e2e -run '^TestE2E' -count=1 "$@"
+                # Browser profiles and fixture files live under TMPDIR, and
+                # Chromium syncs its profile databases on every IndexedDB
+                # commit. On CI, /tmp is a volume on a disk shared with Nix
+                # builds, where one sync write can take hundreds of
+                # milliseconds and stalls the browser with CPU to spare. Keep
+                # the test's files in memory when /dev/shm is available; the
+                # compiler's scratch stays where it was.
+                if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+                  export GOTMPDIR="''${GOTMPDIR:-''${TMPDIR:-/tmp}}"
+                  TMPDIR="$(mktemp -d /dev/shm/endlessfs-e2e.XXXXXX)"
+                  export TMPDIR
+                  trap 'rm -rf "$TMPDIR"' EXIT
+                fi
+                # Each wait is bounded on its own; this only stops a run whose
+                # waits all keep succeeding slowly.
+                go test ./internal/e2e -run '^TestE2E' -count=1 -timeout=20m "$@"
               '';
 
           test-ui-benchmark =

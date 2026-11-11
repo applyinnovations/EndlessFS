@@ -204,6 +204,16 @@
         done < "$dependency_inventory"
         echo "dependency policy: $(wc -l < "$dependency_inventory" | tr -d ' ') locked modules with licenses"
       '';
+      # The release pipeline passes the tag only as the RELEASE_TAG
+      # environment variable, never as script text; every release step
+      # checks it before using it.
+      releaseTagCheck = ''
+        release_tag="''${RELEASE_TAG:-}"
+        if ! [[ "$release_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+          echo "RELEASE_TAG is not a vMAJOR.MINOR.PATCH tag" >&2
+          exit 2
+        fi
+      '';
       pipelinePolicyCommand = ''
         active_pipelines="
           .tekton/endlessfs-ci.yaml
@@ -296,7 +306,22 @@
           fi
         done
         release_verify_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "verify") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
-        printf '%s\n' "$release_verify_script" | rg -F 'nix run .#test-migration -- "$release_tag"' >/dev/null
+        printf '%s\n' "$release_verify_script" | rg -Fx 'nix run .#release-check-tag' >/dev/null
+        printf '%s\n' "$release_verify_script" | rg -F 'nix run .#test-migration -- "$RELEASE_TAG"' >/dev/null
+        release_build_script="$(yq -r '.spec.pipelineSpec.tasks[] | select(.name == "build") | .params[] | select(.name == "SCRIPT") | .value' .tekton/endlessfs-release.yaml)"
+        printf '%s\n' "$release_build_script" | rg -Fx 'nix run .#release-assets' >/dev/null
+        for task in verify build; do
+          yq -e ".spec.taskRunSpecs[] | select(.pipelineTaskName == \"$task\") | .podTemplate.env[] | select(.name == \"RELEASE_TAG\") | .value == \"{{ git_tag }}\"" .tekton/endlessfs-release.yaml >/dev/null
+        done
+        # Tekton and PaC paste $(params...), $(tasks...) and {{ ... }} into
+        # script text before the shell parses it, so a crafted tag or branch
+        # name could run shell. Scripts get such values only as environment.
+        for pipeline in $active_pipelines; do
+          if yq -r '.spec.pipelineSpec.tasks[].params[]? | select(.name == "SCRIPT") | .value' "$pipeline" | rg -n -e '\$\((params|tasks|context)\.' -e '\{\{'; then
+            echo "$pipeline substitutes a value into SCRIPT text; pass it as an environment variable" >&2
+            exit 1
+          fi
+        done
 
         # Images are built without credentials and pushed by oci-publish-v1
         # only after the build (and, for releases, verification) succeeded.
@@ -1092,6 +1117,23 @@
                 nix build '.#checks.${system}.container-policy' --no-link --print-build-logs
               '';
 
+          release-check-tag = mkTask "endlessfs-release-check-tag" [ ] releaseTagCheck;
+
+          # Builds the release assets into the image-export workspace that
+          # the release pipeline's build task passes as CI_ARTIFACTS_PATH.
+          release-assets = mkTask "endlessfs-release-assets" [ pkgs.nix pkgs.coreutils ] (
+            releaseTagCheck
+            + ''
+              artifacts="''${CI_ARTIFACTS_PATH:?CI_ARTIFACTS_PATH must name the artifacts workspace}"
+              result="$(mktemp -d "''${TMPDIR:-/tmp}/endlessfs-release.XXXXXX")/result"
+              nix build .#release --out-link "$result" --print-build-logs
+              rm -rf "$artifacts/release"
+              mkdir "$artifacts/release"
+              cp -L "$result"/* "$artifacts/release/"
+              chmod -R a+rX "$artifacts/release"
+            ''
+          );
+
           security-freshness =
             mkTask "endlessfs-security-freshness"
               (
@@ -1407,6 +1449,22 @@
                 sha256sum --check SHA256SUMS
                 touch "$out"
               '';
+          # The tag guard is what keeps a crafted tag out of the release
+          # steps, so check it rejects anything that is not vMAJOR.MINOR.PATCH.
+          releaseTagCheckTest = pkgs.runCommand "endlessfs-release-tag-check" { } ''
+            check=${self.apps.${system}.release-check-tag.program}
+            for tag in v0.0.0 v1.2.3 v10.20.30; do
+              RELEASE_TAG="$tag" "$check" || { echo "rejected valid tag $tag" >&2; exit 1; }
+            done
+            for tag in "" v1.2 1.2.3 v01.2.3 v1.2.3-rc1 'v1.2.3;id' 'v1.2.3$(id)' "v1.2.3
+            v1.2.4" ' v1.2.3'; do
+              if RELEASE_TAG="$tag" "$check" 2>/dev/null; then
+                echo "accepted invalid tag: $tag" >&2
+                exit 1
+              fi
+            done
+            touch "$out"
+          '';
           repositoryPolicyCheck =
             goCheckWithSource "repository-policy" policySource "go run ./tools/repository-policy check"
               [ ];
@@ -1457,6 +1515,7 @@
           '';
 
           repository-policy = repositoryPolicyCheck;
+          release-tag-check = releaseTagCheckTest;
         }
       );
 

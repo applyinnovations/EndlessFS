@@ -50,8 +50,13 @@ are separate Tasks that share only a per-run `artifacts` volume:
   (`oci-publish-v1`) checks its `ARCHIVE_SHA256` and pushes the commit SHA,
   `sha-<commit>` and `edge` tags.
 - `endlessfs-release`: `verify` and `build` (`nix-v1`) run side by side;
-  `build` copies the `.#release` assets to `artifacts/release` and exports the
-  image. After both pass, `publish-image` (`oci-publish-v1`) pushes the commit
+  `build` copies the `.#release` assets to `artifacts/release`
+  (`nix run .#release-assets`) and exports the image. Both get the tag only as
+  the `RELEASE_TAG` environment variable and check it first
+  (`nix run .#release-check-tag`): Tekton pastes `$(params...)` into script
+  text before the shell parses it, so a crafted tag could otherwise run shell.
+  The pipeline policy rejects `$(params...)`, `$(tasks...)`, `$(context...)`
+  and `{{ ... }}` in any `SCRIPT`. After both pass, `publish-image` (`oci-publish-v1`) pushes the commit
   SHA, `vX.Y.Z` and `latest` tags, then `github-release` creates the release
   with generated notes (or, on a rerun, replaces its assets). That Task is
   defined inline: a standard-library Go program compiled by a pinned Go image,

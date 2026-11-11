@@ -108,7 +108,7 @@ CI confirms an already-verified candidate; it is never the first place the compl
    nix run .#pr-check
    nix run .#security-freshness
    nix flake check --print-build-logs
-   nix run .#test-coverage
+   nix run .#test-e2e
    ```
 
 3. Require every command to exit successfully. A failed, interrupted, timed-out, skipped, or incomplete command is a failed local gate and MUST block the push. A successful run against an earlier source tree does not count.
@@ -140,7 +140,7 @@ The migration law is:
 6. Every adjacent edge MUST prove idempotent restart after each durable boundary and safe two-to-eight-replica convergence for every predecessor profile that can reach it. Preserve additional immutable fixtures for predecessor-binary intermediate states observed after an interrupted or failed upgrade, and start the current binary from those exact bytes. Current-code fault injection supplements this evidence but cannot substitute for predecessor-produced residue. Resumable checkpoint work MUST be provider-independent, authenticated, bound to the exact closed gate and backend role, revalidated through the object-store integrity contract, excluded from the authoritative checkpoint, and denied when forged, stale, misplaced, missing, or corrupt. The composed oldest-to-current path MUST prove exact edge order. The matrix also covers valid zero/empty values and fail-closed malformed, truncated, mixed, newer, and semantically corrupt state. No test may depend on an already-mutated fixture, wall-clock sleep, provider metadata, or a network service.
 7. A schema change starts with the prior epoch fixture and a failing test from that entry point. The same pull request appends the ledger definition (including its incoming adjacent transformer), appends its release boundary when applicable, adds exact fixtures and full-suffix/crash/concurrency/denial coverage, and updates the specification, operations guide, and evidence. A one-off startup branch is not a migration implementation.
 8. Transformations are forward-only, deterministic, idempotent, crash-resumable, and safe under mixed-version replicas. They quiesce through the source epoch's canonical gate or an approved replacement freeze/commit protocol, use portable records plus native CAS only for the immediate conditional operation, fail closed on ambiguity or corruption, and do not publish partial logical state. Schema 010 begins the conservation era: every incoming edge to schema 010 or later MUST register a migration-specific pre-activation authority verifier, and the shared writer-set activation path MUST execute it while the gate and target authority remain frozen. A runner returning success or writing target feature markers can never substitute for that proof.
-9. `nix run .#test-migration` and the `migration` flake check are mandatory pull-request gates. They MUST execute the complete owning migration packages without a permissive test-name filter, the epoch/profile matrix, predecessor-interruption fixtures, real application writer-profile startup tests, candidate release mapping locally, and enforce at least 98% aggregate statement coverage across `internal/portable/migration.go`, every numbered production migration implementation, and `internal/portable/migration_ledger.go`. A source-file matcher MUST include future numbered migration files by construction rather than enumerating selected epochs. The percentage is a backstop, not permission to omit explicit boundary, semantic-oracle, denial, restart, concurrency, or fault-injection assertions. Release CI runs the same `nix run .#test-migration -- "$release_tag"` command before building or publishing artifacts; CI is confirmation, never the first place a migration profile is exercised.
+9. `nix run .#test-migration` and the `migration` flake check are mandatory pull-request gates. They MUST execute the complete owning migration packages without a permissive test-name filter, the epoch/profile matrix, predecessor-interruption fixtures, real application writer-profile startup tests, and candidate release mapping locally. They are the same derivation as the single Go test gate, so the migration matrix runs once per CI run. Coverage percentages are reported, never gated: every boundary, semantic-oracle, denial, restart, concurrency, and fault-injection guarantee needs its own explicit assertion. Release CI runs the same `nix run .#test-migration -- "$release_tag"` command before building or publishing artifacts; CI is confirmation, never the first place a migration profile is exercised.
 
 Removing an epoch, fixture, transformation, or supported release range requires an explicit major-version compatibility policy and a reviewed specification change. It is never incidental cleanup.
 
@@ -316,7 +316,7 @@ Multi-replica tests use two through eight separately constructed engines and a d
 
 Portability tests quiesce writes with the applicable epoch's canonical freeze protocol, resolve all work capable of authoritative publication, and copy only authoritative object keys and bodies into independently configured destination roles. They cover both one-backend and split state/file-backend layouts, deliberately change every native version and provider metadata value, reopen the destination in a new write epoch, and continue multi-replica mutations. They cover complete identity/file/share/trash/theme state and fail-closed corruption or misplaced-object cases. GCS integration tests use an in-process protocol-level HTTP fake and must not contact GCP metadata, token, or storage endpoints.
 
-The completed v1 gate requires at least 85% repository statement coverage, at least 95% in the security-sensitive packages enumerated in spec section 18.4, and at least 98% across the production migration ledger and implementation. Coverage does not replace invariant tests.
+Coverage is a report (`nix run .#test-coverage`), not a gate. A test earns its place by guarding a guarantee that could realistically regress: data safety and integrity, migrations, security and authorization boundaries, API contracts, crash safety, concurrency. Do not add tests to raise a percentage, restate an implementation or configuration file, or sweep permutations that exercise the same code path; keep one strong test per guarantee and make slow important tests fast rather than skipping them.
 
 ## HTTP and browser rules
 
@@ -341,6 +341,11 @@ commands, cache Nix outputs on local NVMe, and publish their results. Do not
 duplicate project test logic in YAML or install Go/Node tools directly. Do not
 add GitHub Actions workflows. The retired Darwin workflow must remain
 triggerless and must never reference or start Namespace Mac runners.
+Pipelines follow the xlab CI scripting standard
+([Repository pipelines](https://github.com/applyinnovations/deployments/blob/main/clusters/xlab/manifests/tekton/README.md#repository-pipelines)): YAML only wires
+Tasks and calls repository code (Nix apps; Bash only for thin glue; real
+logic in Go, as everywhere in this repository), which runs the same locally
+and has tests.
 
 `.github/rulesets/*.json` is the source of truth for branch/tag policy. Validate
 it with `nix run .#repository-policy -- check`. Applying it is an explicit

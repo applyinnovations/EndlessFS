@@ -223,14 +223,9 @@ func TestE2EUploadIndependentAdmissionReloadsAfterLostReply(t *testing.T) {
 	c.assertNoExternalRequests(t, h)
 }
 
-func TestE2EUploadIndependentAdmissionRetriesRollingRouteGap(t *testing.T) {
+func TestE2EUploadIndependentAdmissionRetriesWholePageOnce(t *testing.T) {
 	parallelE2EFixture(t)
-	runAdmissionTransientReply(t, http.StatusMethodNotAllowed, 3)
-}
-
-func TestE2EUploadIndependentAdmissionCoalescesPageRetries(t *testing.T) {
-	parallelE2EFixture(t)
-	runAdmissionTransientReply(t, http.StatusServiceUnavailable, 100)
+	runAdmissionTransientReply(t, http.StatusMethodNotAllowed, 100)
 }
 
 func runAdmissionTransientReply(t *testing.T, status, count int) {

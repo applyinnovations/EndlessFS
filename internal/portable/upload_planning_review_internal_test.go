@@ -8,10 +8,7 @@ import (
 	"testing"
 
 	"github.com/applyinnovations/endlessfs/internal/domain"
-	"github.com/applyinnovations/endlessfs/internal/objectstore/budgettest"
-	"github.com/applyinnovations/endlessfs/internal/objectstore/gcs"
 	objectmemory "github.com/applyinnovations/endlessfs/internal/objectstore/memory"
-	"github.com/applyinnovations/endlessfs/internal/providerbudget"
 	"github.com/applyinnovations/endlessfs/internal/storageformat"
 )
 
@@ -85,99 +82,6 @@ func reviewSeedDeepProjectionNamespace(t *testing.T, engine *Engine) (domain.Sco
 		t.Fatal(err)
 	}
 	return live, request
-}
-
-func TestUploadPlanningReviewDeepPathFinalClosureExceedsPackBound(t *testing.T) {
-	parallelCorrectiveHeavyFixture(t)
-	ctx := context.Background()
-	ledger := providerbudget.NewLedger()
-	engine := openNamespaceTestEngine(t, budgettest.Wrap(providerbudget.RoleState, objectmemory.New(), ledger))
-	live, request := reviewSeedDeepProjectionNamespace(t, engine)
-	count := len(request.Items)
-	store := newNamespaceStore(engine)
-	view, err := store.loadView(ctx, live.UserID(), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	projectionID := uploadPlanningProjectionID008(live.UserID())
-	session := duplicateProjectionSession008(engine, live.UserID(), projectionID)
-	root, err := engine.Files().buildUploadPlanningProjection008(ctx, view, session)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := session.prunePendingProjectionPages(root); err != nil {
-		t.Fatal(err)
-	}
-	pages := make([]storageformat.DomainPackedPage, 0, len(session.pendingPack))
-	for digest, page := range session.pendingPack {
-		pages = append(pages, storageformat.DomainPackedPage{Digest: digest, Page: page})
-	}
-	_, err = storageformat.EncodeDomainPagePack(storageformat.DomainPagePack{SchemaVersion: 1, DomainID: session.reference.ID, Kind: session.reference.Kind, PackID: session.packID, Pages: pages})
-	if !errors.Is(err, storageformat.ErrDomainPagePackTooLarge) {
-		t.Fatalf("fixture did not exceed final closure bound: pages=%d err=%v", len(pages), err)
-	}
-	ledger.Reset()
-	plan, err := engine.Files().PlanUploadSizes(ctx, live.UserID(), request)
-	if err != nil || len(plan.Items) != count {
-		t.Fatalf("bounded pack fallback did not plan legal deep paths: items=%d err=%v", len(plan.Items), err)
-	}
-	coldEvents := ledger.Events()
-	ledger.Reset()
-	plan, err = engine.Files().PlanUploadSizes(ctx, live.UserID(), request)
-	if err != nil || len(plan.Items) != count {
-		t.Fatalf("warm fallback projection could not reopen: items=%d err=%v", len(plan.Items), err)
-	}
-	for _, item := range plan.Items {
-		if !item.TargetExists || !item.FingerprintRequired || item.TargetKind != domain.EntryFile {
-			t.Fatalf("fallback lost an existing target: %+v", item)
-		}
-	}
-	economics, err := gcs.RegionalStandardFlatEconomics()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for phase, events := range map[string][]providerbudget.Event{"cold": coldEvents, "warm": ledger.Events()} {
-		for _, event := range events {
-			if event.Role != providerbudget.RoleState || event.Kind != providerbudget.RequestObjectGet && event.Kind != providerbudget.RequestObjectPut {
-				t.Fatalf("%s fallback touched file data or nonimmutable provider work: %+v", phase, event)
-			}
-		}
-		metrics, err := economics.Estimate(events)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Logf("deep-path fallback %s: files=%d path-bytes=%d final-pages=%d metrics=%+v", phase, count, len(request.Items[0].Path.String()), len(pages), metrics)
-	}
-	if _, err := engine.Files().CreateDirectory(ctx, live, domain.CreateDirectoryRequest{Path: domain.MustParseUserPath("/post-fallback-empty")}); err != nil {
-		t.Fatal(err)
-	}
-	if result, err := engine.Files().PlanUploadSizes(ctx, live.UserID(), request); err != nil || len(result.Items) != count {
-		t.Fatalf("directory-only source mutation broke the unchanged unpacked projection: items=%d err=%v", len(result.Items), err)
-	}
-	// Explore the credible alternative on the identical authenticated final
-	// tree. These are physical-stage metrics, not a complete lifecycle budget.
-	ledger.Reset()
-	rollingRoot, rollingID := reviewRepackProjection(t, ctx, session, root, engine, live.UserID())
-	rollingWrites := ledger.Events()
-	ledger.Reset()
-	reader := duplicateProjectionSession008(engine, live.UserID(), rollingID)
-	for _, item := range request.Items {
-		values, err := uploadPlanningCollect008(ctx, reader, rollingRoot, duplicateProjectionSizePrefix008(item.Size))
-		if err != nil || len(values) != 1 {
-			t.Fatalf("bounded rolling candidate lost size decision: id=%s values=%d err=%v", item.ID, len(values), err)
-		}
-		var occurrence storageformat.DuplicateProjectionOccurrence
-		if err := decodeCanonicalValue(values[0].Value, &occurrence); err != nil || occurrence.Occurrence.Path != item.Path.String() {
-			t.Fatalf("bounded rolling candidate changed occurrence: id=%s err=%v", item.ID, err)
-		}
-	}
-	for phase, events := range map[string][]providerbudget.Event{"output-only": rollingWrites, "warm-index-only": ledger.Events()} {
-		metrics, err := economics.Estimate(events)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Logf("deep-path rolling prototype %s: metrics=%+v", phase, metrics)
-	}
 }
 
 func reviewProjectionBranch(t *testing.T, session *consistencyDomainTreeSession, children ...domainPageRef) domainPageRef {

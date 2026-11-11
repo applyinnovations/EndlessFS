@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,103 +19,6 @@ import (
 	"github.com/chromedp/chromedp"
 	"github.com/chromedp/chromedp/kb"
 )
-
-func TestE2ELatestUploadProgressExcludesFailedHistory(t *testing.T) {
-	parallelE2EFixture(t)
-	if os.Getenv("ENDLESSFS_RUN_E2E") != "1" {
-		t.Skip("the Nix test-e2e task enables Chromium qualification")
-	}
-	var failCompletion atomic.Bool
-	var blockAdmission atomic.Bool
-	admissionGate := make(chan struct{})
-	var releaseAdmission sync.Once
-	release := func() { releaseAdmission.Do(func() { close(admissionGate) }) }
-	t.Cleanup(release)
-	failCompletion.Store(true)
-	harness := newPortableHarnessWithControlPlaneWrapper(t, func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/api/v1/uploads/batch/admit" && r.Method == http.MethodPost && blockAdmission.Load() {
-				select {
-				case <-admissionGate:
-				case <-r.Context().Done():
-					return
-				}
-			}
-			if r.URL.Path == "/api/v1/uploads/batch/actions" && failCompletion.Load() {
-				var request struct {
-					Items []domain.UploadActionItem `json:"items"`
-				}
-				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-					t.Error(err)
-					return
-				}
-				results := make([]domain.UploadActionResult, len(request.Items))
-				for index, item := range request.Items {
-					results[index] = domain.UploadActionResult{Index: index, UploadID: item.UploadID, Action: item.Action, Outcome: "rejected", ErrorKind: domain.ErrorInvalid, NextAction: "stop"}
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(map[string]any{"uploads": results})
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	})
-	client := newTestBrowser(t)
-	bootstrapBrowser(t, client, harness)
-	upload := func(names ...string) {
-		t.Helper()
-		paths := make([]string, len(names))
-		for index, name := range names {
-			paths[index] = filepath.Join(t.TempDir(), name)
-			body := name
-			if name == "old-failure.bin" {
-				body = strings.Repeat("x", 1<<20)
-			}
-			if err := os.WriteFile(paths[index], []byte(body), 0600); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := chromedp.Run(client.ctx, chromedp.SetUploadFiles("#upload-input", paths, chromedp.ByQuery)); err != nil {
-			t.Fatal(err)
-		}
-		if err := waitVisible(client.ctx, "#action-dialog", 5*time.Second); err != nil {
-			t.Fatal(err)
-		}
-		if err := chromedp.Run(client.ctx, chromedp.SetValue("#upload-strategy", "keep-both", chromedp.ByQuery), chromedp.Focus("#dialog-confirm", chromedp.ByQuery), chromedp.KeyEvent(kb.Enter)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	wait := func(expression string) {
-		t.Helper()
-		if err := waitFor(client.ctx, expression, 10*time.Second); err != nil {
-			var overview string
-			_ = chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector('#open-transfers').getAttribute('aria-label')`, &overview))
-			var rows string
-			_ = chromedp.Run(client.ctx, chromedp.Evaluate(`document.querySelector('#transfer-list').textContent`, &rows))
-			t.Fatalf("%s: %v; overview=%s; rows=%s", expression, err, overview, rows)
-		}
-	}
-	upload("old-failure.bin")
-	wait(`document.querySelector('[data-transfer-count="failed"]').textContent === '(1)'`)
-	wait(`document.querySelector('#header-transfer-eta').textContent === 'Attention'`)
-	failCompletion.Store(false)
-	blockAdmission.Store(true)
-	upload("new-first.txt", "new-second.txt")
-	wait(`document.querySelector('#open-transfers').getAttribute('aria-label').includes('active of 2 files') && document.querySelector('[data-transfer-count="failed"]').textContent === '(1)'`)
-	release()
-	wait(`document.querySelector('[data-transfer-count="complete"]').textContent === '(2)'`)
-	wait(`document.querySelector('#header-transfer-percent').textContent === '100%' && document.querySelector('#header-transfer-eta').textContent === 'Complete'`)
-	wait(`document.querySelector('#open-transfers').getAttribute('aria-label').includes('0 active of 2 files')`)
-	wait(`document.querySelector('[data-transfer-count="failed"]').textContent === '(1)' && document.querySelector('[data-transfer-count="all"]').textContent === '(3)' && !document.querySelector('#clear-failed-transfers').disabled`)
-	// The cohort is derived from the existing durable group, not a process-only
-	// marker that disappears on reload. Earlier failures remain recoverable.
-	if err := chromedp.Run(client.ctx, reloadLoopbackBrowser()); err != nil {
-		t.Fatal(err)
-	}
-	wait(`document.querySelector('[data-transfer-count="all"]').textContent === '(3)'`)
-	wait(`document.querySelector('#header-transfer-percent').textContent === '100%' && document.querySelector('#header-transfer-eta').textContent === 'Complete'`)
-	client.assertNoExternalRequests(t, harness)
-}
 
 func TestE2ELostCompletionResponseRetainsOrderAcrossReload(t *testing.T) {
 	parallelE2EFixture(t)

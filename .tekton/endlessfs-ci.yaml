@@ -19,6 +19,7 @@ spec:
   taskRunTemplate:
     serviceAccountName: tekton-build-sa
     podTemplate:
+      automountServiceAccountToken: false
       nodeSelector:
         storage.xlab.now/fast-local: "true"
       securityContext:
@@ -35,31 +36,8 @@ spec:
             limits:
               cpu: "2"
               memory: 2Gi
-    - pipelineTaskName: fast-checks
-      podTemplate:
-        hostUsers: false
-      stepSpecs:
-        - name: run
-          computeResources:
-            requests:
-              cpu: "1"
-              memory: 2Gi
-            limits:
-              cpu: "4"
-              memory: 6Gi
-    - pipelineTaskName: prepare-cache
-      podTemplate:
-        hostUsers: false
-      stepSpecs:
-        - name: run
-          computeResources:
-            requests:
-              cpu: 250m
-              memory: 512Mi
-            limits:
-              cpu: "2"
-              memory: 2Gi
-    - pipelineTaskName: nix-checks
+    # Every check, including the plain and race Go test runs.
+    - pipelineTaskName: checks
       podTemplate:
         hostUsers: false
       stepSpecs:
@@ -71,12 +49,10 @@ spec:
             limits:
               cpu: "12"
               memory: 24Gi
-    # Browser tests act against wall-clock deadlines. Go is capped at 8
-    # threads so compilation and the other packages cannot take the CPU the
-    # headless Chromium instances need while the e2e package runs.
-    - pipelineTaskName: coverage
+    # Browser tests act against wall-clock deadlines; Go is capped at 8
+    # threads so it cannot take the CPU the headless Chromium instances need.
+    - pipelineTaskName: e2e
       podTemplate:
-        automountServiceAccountToken: false
         hostUsers: false
         env:
           - name: GOMAXPROCS
@@ -84,33 +60,48 @@ spec:
       stepSpecs:
         - name: run
           computeResources:
+            # The request is what reliably schedules on sirius beside other CI
+            # (90th percentile of requested CPU over a day: 17.8 of 32); the
+            # limit lets the browser tests burst when the node is free.
             requests:
-              cpu: "8"
-              memory: 8Gi
+              cpu: "4"
+              memory: 6Gi
             limits:
               cpu: "16"
               memory: 16Gi
+    - pipelineTaskName: security-freshness
+      podTemplate:
+        hostUsers: false
+      stepSpecs:
+        - name: run
+          computeResources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 6Gi
+  # Tasks wait for CPU under the cluster CI quota (deployments #203), and that
+  # wait counts against the pipeline timeout.
   timeouts:
-    pipeline: 60m0s
+    pipeline: 45m0s
   params:
     - name: repo_url
       value: "{{ repo_url }}"
     - name: revision
       value: "{{ revision }}"
-    - name: git_auth_secret
-      value: "{{ git_auth_secret }}"
+  # checks and security-freshness run in parallel after the clone, then e2e; each
+  # nix-v1 pod has its own Nix store filled from the shared cache. No
+  # nix-cache-export volume and no publish-cache: pull-request and merge-queue
+  # runs build code that is not on main yet.
   pipelineSpec:
     params:
       - name: repo_url
         type: string
       - name: revision
         type: string
-      - name: git_auth_secret
-        type: string
     workspaces:
       - name: source
-      - name: git-cache
-      - name: nix-store
       - name: basic-auth
     tasks:
       - name: clone
@@ -120,15 +111,13 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: git-clone-cached
+              value: git-clone-v1
             - name: namespace
               value: tekton-pipelines
         timeout: 10m
         workspaces:
           - name: output
             workspace: source
-          - name: git-cache
-            workspace: git-cache
           - name: basic-auth
             workspace: basic-auth
         params:
@@ -138,10 +127,8 @@ spec:
             value: $(params.revision)
           - name: depth
             value: "1"
-          - name: cache-key
-            value: applyinnovations-endlessfs
 
-      - name: prepare-cache
+      - name: checks
         runAfter: [clone]
         taskRef:
           resolver: cluster
@@ -149,89 +136,57 @@ spec:
             - name: kind
               value: task
             - name: name
-              value: nix-run-v2
+              value: nix-v1
             - name: namespace
               value: tekton-buildkit
-        timeout: 15m
+        timeout: 25m
         workspaces:
           - name: source
             workspace: source
-          - name: nix-store
-            workspace: nix-store
-        params:
-          - name: SCRIPT
-            value: nix --version
-
-      - name: fast-checks
-        runAfter: [prepare-cache]
-        taskRef:
-          resolver: cluster
-          params:
-            - name: kind
-              value: task
-            - name: name
-              value: nix-run-v2
-            - name: namespace
-              value: tekton-buildkit
-        timeout: 15m
-        workspaces:
-          - name: source
-            workspace: source
-          - name: nix-store
-            workspace: nix-store
-        params:
-          - name: SCRIPT
-            value: |
-              nix run .#pr-check
-              nix run .#security-freshness
-
-      - name: nix-checks
-        runAfter: [fast-checks]
-        taskRef:
-          resolver: cluster
-          params:
-            - name: kind
-              value: task
-            - name: name
-              value: nix-run-v2
-            - name: namespace
-              value: tekton-buildkit
-        timeout: 45m
-        workspaces:
-          - name: source
-            workspace: source
-          - name: nix-store
-            workspace: nix-store
         params:
           - name: SCRIPT
             value: nix flake check --print-build-logs --max-jobs 6 --cores 2
 
-      - name: coverage
-        runAfter: [fast-checks, nix-checks]
+      # The browser tests act against wall-clock deadlines; running them
+      # beside the checks' Go test runs starved Chromium of CPU, so they
+      # follow the checks, as the old coverage task did.
+      - name: e2e
+        runAfter: [checks]
         taskRef:
           resolver: cluster
           params:
             - name: kind
               value: task
             - name: name
-              value: nix-run-v2
+              value: nix-v1
             - name: namespace
               value: tekton-buildkit
-        timeout: 45m
+        timeout: 25m
         workspaces:
           - name: source
             workspace: source
-          - name: nix-store
-            workspace: nix-store
         params:
           - name: SCRIPT
-            value: nix run .#test-coverage
-    # No cache publishing here: pull-request and merge-queue runs build code
-    # that is not on main yet. endlessfs-container.yaml (push to main) and
-    # endlessfs-release.yaml (tags) publish to the shared Nix cache.
-  workspaces:
-          - name: nix-store
-            workspace: nix-store
+            value: nix run .#test-e2e
+
+      - name: security-freshness
+        runAfter: [clone]
+        taskRef:
+          resolver: cluster
+          params:
+            - name: kind
+              value: task
+            - name: name
+              value: nix-v1
+            - name: namespace
+              value: tekton-buildkit
+        timeout: 15m
+        workspaces:
+          - name: source
+            workspace: source
+        params:
+          - name: SCRIPT
+            value: nix run .#security-freshness
   workspaces:
     - name: source
       volumeClaimTemplate:
@@ -241,20 +196,6 @@ spec:
           resources:
             requests:
               storage: 10Gi
-    - name: git-cache
-      persistentVolumeClaim:
-        claimName: git-repo-cache
-    # A private Nix store for this run, shared by its tasks and deleted with the
-    # PipelineRun; tools come from the shared Nix cache.
-    - name: nix-store
-      volumeClaimTemplate:
-        spec:
-          accessModes:
-            - ReadWriteOnce
-          storageClassName: fast-local
-          resources:
-            requests:
-              storage: 60Gi
     - name: basic-auth
       secret:
         secretName: "{{ git_auth_secret }}"

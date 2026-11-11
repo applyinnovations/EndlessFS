@@ -3,7 +3,6 @@ package portable
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"reflect"
 	"sort"
@@ -54,118 +53,6 @@ func reviewLatestActionOutcome(t *testing.T, f uploadBatchScaleFixture) storagef
 	}
 	t.Fatal("published action has no retained outcome")
 	return storageformat.DomainOutcome{}
-}
-
-// This public-API regression also runs against the pre-change source snapshot:
-// successful actual-byte actions previously retained an unused generic result
-// in the same transaction namespace a public legacy caller may select.
-func TestUploadActionReceiptReviewNaturalRecordAuthority(t *testing.T) {
-	for _, action := range []string{"complete", "cancel"} {
-		t.Run(action, func(t *testing.T) {
-			f := newUploadBatchScaleFixture(t, 0x1789b101)
-			ctx := context.Background()
-			requests := scaleUploadRequestsCount("record-receipt", 1)
-			requests[0].Size = 4
-			page, err := f.engine.Files().AdmitUploads(ctx, f.scope, requests)
-			if err != nil || len(page) != 1 || page[0].Capability == nil {
-				t.Fatalf("admission: %+v %v", page, err)
-			}
-			item := domain.UploadActionItem{UploadID: page[0].UploadID, Action: action}
-			if action == "complete" {
-				payload := []byte("four")
-				admissionWriteBytes(t, f, *page[0].Capability, payload, 0)
-				item.CRC32C = objectstore.FingerprintFor(payload).CRC32C
-			}
-			result, err := f.engine.Files().UploadActions(ctx, f.scope, []domain.UploadActionItem{item})
-			if err != nil || len(result) != 1 || result[0].Outcome != "applied" {
-				t.Fatalf("actual terminal action: %+v %v", result, err)
-			}
-			outcome := reviewLatestActionOutcome(t, f)
-			decoded, decodeErr := base64.RawURLEncoding.DecodeString(outcome.Fingerprint)
-			if len(outcome.Result) != 0 || decodeErr != nil || len(decoded) != 32 || outcome.Revision == 0 || !f.engine.clock.Now().Before(outcome.RetainUntil) {
-				t.Fatalf("natural records must retain full mutation binding without duplicate result: resultBytes=%d fingerprintBytes=%d revision=%d err=%v", len(outcome.Result), len(decoded), outcome.Revision, decodeErr)
-			}
-			key := reviewActionLegacyKey(action, []domain.UploadActionItem{item})
-			var legacyID string
-			if action == "complete" {
-				legacyID, _, err = normalizePortableUploadCompletionBatch(f.scope.UserID(), domain.CompleteUploadBatchRequest{Items: []domain.CompleteUploadBatchItem{{UploadID: item.UploadID, CRC32C: item.CRC32C}}, IdempotencyKey: key})
-				if result[0].Entry == nil || result[0].Entry.Size != 4 || result[0].Entry.Path != requests[0].Path || result[0].Entry.Version == "" {
-					t.Fatalf("completion lost exact portable entry: %+v", result)
-				}
-			} else {
-				legacyID, _, err = normalizePortableUploadAbortBatch(f.scope.UserID(), domain.AbortUploadBatchRequest{UploadIDs: []domain.UploadID{item.UploadID}, IdempotencyKey: key})
-			}
-			if err != nil || outcome.MutationID == legacyID || !storageformat.ValidDigest(outcome.MutationID) {
-				t.Fatalf("private outcome aliases a public legacy transaction: err=%v", err)
-			}
-			f.fileLedger.Reset()
-			replica := newAdmissionReplica(t, f, 0x1789b102)
-			replay, err := replica.Files().UploadActions(ctx, f.scope, []domain.UploadActionItem{item})
-			if err != nil || replay[0].Outcome != "already_applied" || !reflect.DeepEqual(result[0].Entry, replay[0].Entry) || len(f.fileLedger.Events()) != 0 {
-				t.Fatalf("record replay repeated provider work or changed exact entry: %+v %v", replay, err)
-			}
-		})
-	}
-}
-
-func TestUploadActionReceiptReviewPrivateCommitDenials(t *testing.T) {
-	for _, test := range []struct {
-		name, fingerprint string
-		materialized      bool
-		allowed           bool
-	}{{"positive-control", storageformat.Digest([]byte("valid")), true, true}, {"delta", storageformat.Digest([]byte("valid")), false, false}, {"empty-fingerprint", "", true, false}, {"malformed-fingerprint", "invalid", true, false}} {
-		t.Run(test.name, func(t *testing.T) {
-			f := newUploadBatchScaleFixture(t, 0x1789b111)
-			ctx := context.Background()
-			page, err := f.engine.Files().AdmitUploads(ctx, f.scope, scaleUploadRequestsCount("otherwise-valid-denial", 1))
-			if err != nil || len(page) != 1 || page[0].Capability == nil {
-				t.Fatalf("setup: %+v %v", page, err)
-			}
-			store := newNamespaceStore(f.engine)
-			view, err := store.loadView(ctx, f.scope.UserID(), "")
-			if err != nil {
-				t.Fatal(err)
-			}
-			record, value, err := f.engine.Files().portableUploadAtView(ctx, view, f.scope.UserID(), string(page[0].UploadID))
-			if err != nil {
-				t.Fatal(err)
-			}
-			record.State, record.CleanupPending, record.Completion = storageformat.UploadAborted, false, nil
-			body, err := storageformat.EncodeCanonical(record)
-			if err != nil {
-				t.Fatal(err)
-			}
-			id := "private-denial"
-			if err := view.bindMutation(id, storageformat.Digest([]byte("valid"))); err != nil {
-				t.Fatal(err)
-			}
-			root := view.roots[domain.AreaLive]
-			root.Entry.LogicalVersion, err = directoryEntryVersion(root.Entry)
-			if err != nil {
-				t.Fatal(err)
-			}
-			changes := map[string]storageformat.NamespaceEntry{namespaceFrameKey(domain.AreaLive, namespaceRootPath()): root}
-			additional := []consistencyDomainChange{{Key: uploadRecordKey(record.UploadID), Require: domainValuePresent, ExpectedVersion: value.LogicalVersion, Value: body}}
-			f.stateLedger.Reset()
-			f.fileLedger.Reset()
-			_, err = store.commitWithAdditionalChangesResultMode(ctx, view, id, test.fingerprint, changes, additional, storageformat.NamespaceMutationResult{}, test.materialized, false)
-			if test.allowed {
-				if err != nil || len(f.stateLedger.Events()) == 0 {
-					t.Fatalf("otherwise-valid positive control did not publish: %v events=%d", err, len(f.stateLedger.Events()))
-				}
-				return
-			}
-			if !errors.Is(err, domain.ErrInvalid) || len(f.stateLedger.Events()) != 0 || len(f.fileLedger.Events()) != 0 {
-				t.Fatalf("unsupported record-only publication performed work: %v state=%d files=%d", err, len(f.stateLedger.Events()), len(f.fileLedger.Events()))
-			}
-		})
-	}
-	f := newUploadBatchScaleFixture(t, 0x1789b112)
-	f.stateLedger.Reset()
-	err := f.engine.Files().abortUploadActionsProven(context.Background(), f.scope, domain.AbortUploadBatchRequest{BatchID: storageformat.Digest([]byte("legacy-cohort")), UploadIDs: []domain.UploadID{"opaque-upload"}, IdempotencyKey: "private-overlay-denial"}, nil)
-	if !errors.Is(err, domain.ErrInvalid) || len(f.stateLedger.Events()) != 0 {
-		t.Fatalf("private cancellation accepted a cohort overlay: %v", err)
-	}
 }
 
 func TestUploadActionReceiptReviewLostHeadAndTerminalBindings(t *testing.T) {

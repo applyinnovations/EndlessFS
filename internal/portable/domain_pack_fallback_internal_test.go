@@ -15,6 +15,9 @@ import (
 )
 
 func TestMaterializedPackWireFallbackPreservesPublicationBoundaries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	// Independent canonical values fit their page bounds but their noise exceeds
 	// the compressed pack bound. The upload regression covers expanded overflow.
 	mutation := consistencyDomainMutation{ID: "large-wire-mutation", Result: []byte("committed")}

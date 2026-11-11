@@ -17,6 +17,9 @@ import (
 )
 
 func TestUploadPlanningProviderBudgetColdProductionRecoveryScale(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	parallelCorrectiveHeavyFixture(t)
 	ctx := telemetry.Context(context.Background(), telemetry.New(nil, nil))
 	ledger := providerbudget.NewLedger()
@@ -36,6 +39,9 @@ func TestUploadPlanningProviderBudgetColdProductionRecoveryScale(t *testing.T) {
 }
 
 func TestUploadPlanningColdLongMetadataRecoveryScale(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	parallelCorrectiveHeavyFixture(t)
 	ctx := context.Background()
 	engine := openNamespaceTestEngine(t, objectmemory.New())
@@ -72,6 +78,9 @@ func TestUploadPlanningColdLongMetadataRecoveryScale(t *testing.T) {
 }
 
 func TestUploadPlanningRebuiltProjectionDoesNotAliasPriorPack(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scale test: the plain gate runs it; -race -short skips it")
+	}
 	parallelCorrectiveHeavyFixture(t)
 	ctx := context.Background()
 	backend := objectmemory.New()

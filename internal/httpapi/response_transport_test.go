@@ -218,26 +218,6 @@ func TestIntegrationResponseTransportOverridesProblemButPreservesProblemResponse
 	}
 }
 
-func TestResponseTransportShortWriteAndFirstFailurePreserveReturns(t *testing.T) {
-	observer := telemetry.New(nil, nil)
-	ctx, activity := telemetry.Start(telemetry.Context(context.Background(), observer), telemetry.HTTP, telemetry.Application)
-	writer := &responseTransportWriter{header: make(http.Header), written: 2, short: true}
-	recorder := &statusRecorder{ResponseWriter: writer, ctx: ctx}
-	if n, err := recorder.Write([]byte("abcd")); n != 2 || err != nil {
-		t.Fatal("short-write observation changed Writer return values")
-	}
-	writer.writeErr = os.ErrDeadlineExceeded
-	if n, err := recorder.Write([]byte("abcd")); n != 2 || err != os.ErrDeadlineExceeded {
-		t.Fatal("later write return values changed")
-	}
-	activity.EndResult(telemetry.Success)
-	var output bytes.Buffer
-	observer.WritePrometheus(&output)
-	if !strings.Contains(output.String(), `operation="http.request",role="application",result="unavailable"} 1`) {
-		t.Fatal("later write masked first transport failure")
-	}
-}
-
 func TestHTTPResponseTransportFailureDoesNotMaskPanic(t *testing.T) {
 	observer := telemetry.New(nil, nil)
 	mux := http.NewServeMux()

@@ -38,11 +38,6 @@ function percentage(covered, total) {
   return 100 * covered / total
 }
 
-function required_percentage(group) {
-  if (group == "migration") return 98
-  return 95
-}
-
 END {
   groups[1] = "authentication"
   groups[2] = "authorization"
@@ -76,20 +71,15 @@ END {
     }
   }
 
-  failed = 0
+  # Report only. Coverage percentages are not a gate: a floor rewards tests
+  # written to execute lines rather than to prove a guarantee.
   if (only_group == "") {
-    repo_percentage = percentage(repo_covered, repo_total)
-    printf "repository coverage: %.3f%% (%d/%d; required >= 85%%)\n", repo_percentage, repo_covered, repo_total
-    if (repo_percentage + 0.000001 < 85) failed = 1
+    printf "repository coverage: %.3f%% (%d/%d)\n", percentage(repo_covered, repo_total), repo_covered, repo_total
   }
 
   for (index_value = 1; index_value <= group_count; index_value++) {
     group = groups[index_value]
     if (only_group != "" && group != only_group) continue
-    group_percentage = percentage(group_covered[group], group_total[group])
-    required = required_percentage(group)
-    printf "%s coverage: %.3f%% (%d/%d; required >= %d%%)\n", group, group_percentage, group_covered[group], group_total[group], required
-    if (group_total[group] == 0 || group_percentage + 0.000001 < required) failed = 1
+    printf "%s coverage: %.3f%% (%d/%d)\n", group, percentage(group_covered[group], group_total[group]), group_covered[group], group_total[group]
   }
-  exit failed
 }

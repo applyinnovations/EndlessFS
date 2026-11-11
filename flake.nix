@@ -980,6 +980,9 @@
             mkTask "endlessfs-test-e2e"
               (goTools ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
               ''
+                # Like the other Go tasks: CI pods have no C compiler, and the
+                # browser tests need no cgo.
+                export CGO_ENABLED=0
                 export ENDLESSFS_RUN_E2E=1
                 ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
@@ -992,6 +995,9 @@
             mkTask "endlessfs-test-ui-benchmark"
               (goTools ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
               ''
+                # Like the other Go tasks: CI pods have no C compiler, and the
+                # browser tests need no cgo.
+                export CGO_ENABLED=0
                 export ENDLESSFS_RUN_E2E=1
                 ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell

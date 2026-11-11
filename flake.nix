@@ -954,7 +954,7 @@
             mkTask "endlessfs-test-e2e-scale"
               (goTools ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ headlessBrowser ])
               ''
-                export ENDLESSFS_RUN_E2E=1 ENDLESSFS_E2E_SCALE_QUALIFICATION=1
+                export CGO_ENABLED=0 ENDLESSFS_RUN_E2E=1 ENDLESSFS_E2E_SCALE_QUALIFICATION=1
                 ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   export ENDLESSFS_CHROMIUM=${headlessBrowser}/bin/chrome-headless-shell
                   export ENDLESSFS_CHROMIUM_NO_SANDBOX=1

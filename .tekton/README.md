@@ -28,7 +28,7 @@ select `storage.xlab.now/fast-local=true` (Sirius).
 
 Pull-request and merge-queue CI clones, then runs `nix-v1` Tasks: `checks` (`nix flake check`: every static check plus the plain and
 race Go test runs; 6 CPU/12 GiB, bursting to 12 CPU/24 GiB), `e2e`
-(`nix run .#test-e2e`, Chromium; 8 CPU/8 GiB, bursting to 16 CPU/16 GiB, as the old coverage task had) and
+(`nix run .#test-e2e`, Chromium; 4 CPU/6 GiB, which schedules beside other CI on sirius, bursting to 16 CPU/16 GiB) and
 `security-freshness` (the online advisory scan). `checks` and
 `security-freshness` run in parallel; `e2e` follows `checks`, because the browser
 tests act against wall-clock deadlines and starved beside the Go test runs. `nix run .#pr-check` is the

@@ -60,9 +60,12 @@ spec:
       stepSpecs:
         - name: run
           computeResources:
+            # The request is what reliably schedules on sirius beside other CI
+            # (90th percentile of requested CPU over a day: 17.8 of 32); the
+            # limit lets the browser tests burst when the node is free.
             requests:
-              cpu: "8"
-              memory: 8Gi
+              cpu: "4"
+              memory: 6Gi
             limits:
               cpu: "16"
               memory: 16Gi

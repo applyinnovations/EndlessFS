@@ -85,7 +85,7 @@ spec:
       value: "{{ repo_url }}"
     - name: revision
       value: "{{ revision }}"
-  # The three checks are independent and run in parallel after the clone; each
+  # checks and security-freshness run in parallel after the clone, then e2e; each
   # nix-v1 pod has its own Nix store filled from the shared cache. No
   # nix-cache-export volume and no publish-cache: pull-request and merge-queue
   # runs build code that is not on main yet.
@@ -142,8 +142,11 @@ spec:
           - name: SCRIPT
             value: nix flake check --print-build-logs --max-jobs 6 --cores 2
 
+      # The browser tests act against wall-clock deadlines; running them
+      # beside the checks' Go test runs starved Chromium of CPU, so they
+      # follow the checks, as the old coverage task did.
       - name: e2e
-        runAfter: [clone]
+        runAfter: [checks]
         taskRef:
           resolver: cluster
           params:

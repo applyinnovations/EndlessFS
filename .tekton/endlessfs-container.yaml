@@ -39,10 +39,11 @@ spec:
         hostUsers: false
       stepSpecs:
         - name: run
+          # Peak over 14 days to 22 Nov 2026: RSS 3.3 GiB, working set 3.5 GiB.
           computeResources:
             requests:
               cpu: "6"
-              memory: 12Gi
+              memory: 4Gi
             limits:
               cpu: "12"
               memory: 24Gi
@@ -54,13 +55,26 @@ spec:
         hostUsers: false
       stepSpecs:
         - name: run
+          # Peak over 14 days to 22 Nov 2026: RSS 1.2 GiB, working set 1.6 GiB.
           computeResources:
             requests:
               cpu: "2"
-              memory: 4Gi
+              memory: 2Gi
             limits:
               cpu: "8"
               memory: 12Gi
+    # oci-publish-v1 defaults to 512Mi/3Gi; peak over 14 days to 22 Nov 2026:
+    # RSS 2.9 GiB, working set 3.1 GiB.
+    - pipelineTaskName: publish
+      stepSpecs:
+        - name: publish
+          computeResources:
+            requests:
+              cpu: 100m
+              memory: 3Gi
+            limits:
+              cpu: "1"
+              memory: 4Gi
     - pipelineTaskName: publish-cache
       serviceAccountName: nix-cache-publisher
   timeouts:
